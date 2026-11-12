@@ -6,16 +6,30 @@
  *  - PRO2-P4  the loss budget is patchable (delete+recreate silently forgave the burn)
  *  - PRO2-P9  refunded / abandoned orders do not burn the budget forever
  *  - PRO2-P21 a NaN amount is refused (`NaN <= 0` is false, so it used to be pushed)
+ *
+ * Sabotage witnesses (w74, re-witnessed w102 after #5469; promotionsService.ts unless noted): ignoring the promotion's
+ * currency reds P1 case 1; requiring a currency on every promotion reds the PERCENTAGE
+ * case; accepting any currency code reds the intake case; patches that skip `budget`
+ * red both P4 cases, and dropping the patch-time cap guard reds the strip case; counting
+ * refunded orders reds the refund case; zeroing the burn reds refund, paid and M2;
+ * releasing a pending cart's hold early reds M2; dropping `bogo` from the scope guard
+ * reds M3 (bogo), keying the guard on `patch.scope` reds M3 (re-enable); `amount <= 0`
+ * (NaN passes) reds P21; quantizing with round2 at the final step reds M1.
+ * DOUBLE GUARD (recorded): JPY quantization of a per-unit `product_discount` happens in
+ * `capUnitsToQuantityBudget` AND again at the final `quantizeMoney`, so either alone is
+ * an equivalent mutant for the PERCENTAGE case — its witness is breaking
+ * `quantizeMoney` itself (commerceService.ts), which reds it and M1 together.
  */
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import { initHostExtPersistence } from '../../../host/hostExtPersistence.js';
 import { openStorage } from '../../../storage/index.js';
 import {
-  createProduct, createOrder, markAsPaid, refundOrder, __resetCommerce, type Product,
+  createProduct, createOrder, getOrder, markAsPaid, refundOrder, __resetCommerce, type Order, type Product,
 } from '../../commerce/commerceService.js';
 import {
-  createPromotion, updatePromotion, applyPromotions, applyPromotionsUngated, promotionUsage, __resetPromotions,
+  createPromotion, updatePromotion, getPromotion, applyPromotions, applyPromotionsUngated, promotionUsage, __resetPromotions,
 } from '../promotionsService.js';
+import { DurableCollection } from '../../../host/hostExtPersistence.js';
 import { registerToggleDefault } from '../../../host/featureToggles/registry.js';
 import { setOrderDiscountHook } from '../../commerce/promotionSeam.js';
 
@@ -59,6 +73,7 @@ describe('PRO2-P1 — a promotion only spends its own currency', () => {
       items: [{ productId: 'p1', unitPrice: 60, quantity: 1 }],
     });
     expect(r.discount).toBe(10);
+    expect(r.appliedPromotions.map((a) => a.amount)).toEqual([10]);
   });
 
   it('a pure PERCENTAGE promotion stays currency-free (it is not an amount)', async () => {
@@ -96,6 +111,8 @@ describe('PRO2-P4 — the loss budget can be changed', () => {
     const patched = await updatePromotion(T, ORG, promo.promotionId, { budget: { maxDiscount: 200 } });
     expect(patched?.budget?.maxDiscount).toBe(200);
     expect(patched?.promotionId).toBe(promo.promotionId); // same id ⇒ same burn history
+    // Persisted, not just returned: a fresh read sees the new cap on the SAME row.
+    expect((await getPromotion(T, ORG, promo.promotionId))?.budget).toEqual({ maxDiscount: 200 });
   });
 
   it('a loss-leader cannot be stripped of its cap by a patch', async () => {
@@ -116,10 +133,11 @@ describe('PRO2-P9 — what actually burns the budget', () => {
     });
     const o = await createOrder({ tenantId: T, orgId: ORG, createdBy: 'u', lines: [{ productId: p.productId, quantity: 1 }] });
     await markAsPaid(T, ORG, o.orderId, 'demo:pi_1', {});
-    expect((await promotionUsage(T, ORG)).get(promo.promotionId)?.amount).toBeGreaterThan(0);
+    expect((await promotionUsage(T, ORG)).get(promo.promotionId)?.amount).toBe(50);
 
     // The discount went back with the payment; the cap never got it back.
-    await refundOrder(T, ORG, o.orderId, { actor: 'u' });
+    const refunded = await refundOrder(T, ORG, o.orderId, { actor: 'u' });
+    expect(refunded?.status).toBe('refunded'); // the setup write landed
     expect((await promotionUsage(T, ORG)).get(promo.promotionId)?.amount ?? 0).toBe(0);
   });
 
@@ -141,13 +159,24 @@ describe('review fold-ins — the four fixes the review proved were untested', (
     // with no `currency` — so computing it for EVERY order reddened the suite and, in
     // production, threw into `createOrder`'s catch: a silent full-price charge.
     const p = await mk('Leader', 100);
-    await createPromotion({
+    const promo = await createPromotion({
       tenantId: T, orgId: ORG, createdBy: 'u', name: 'Leader', type: 'loss_leader',
       reward: { kind: 'percentage', value: 50 }, scope: { all: true }, budget: { maxDiscount: 500 }, currency: 'USD',
     });
     const o = await createOrder({ tenantId: T, orgId: ORG, createdBy: 'u', lines: [{ productId: p.productId, quantity: 1 }] });
     await markAsPaid(T, ORG, o.orderId, 'demo:pi_b1', {});
-    await expect(promotionUsage(T, ORG)).resolves.toBeInstanceOf(Map);
+    // Make the row the title names: the same stored order, with its `currency` removed. A
+    // second handle on the commerce order collection writes the same storage key; typed
+    // `Omit<Order, 'currency'>`, so no cast is needed to express the legacy row.
+    const paid = await getOrder(T, ORG, o.orderId);
+    expect(paid?.status).toBe('paid');
+    const { currency: _dropped, ...legacyRow } = paid!;
+    expect(_dropped).toBe('USD');
+    await new DurableCollection<Omit<Order, 'currency'>>('commerce:order', (r) => r.orderId, undefined, (r) => r.tenantId).put(legacyRow);
+    expect((await getOrder(T, ORG, o.orderId))?.currency).toBeUndefined(); // the legacy row is what is stored now
+
+    const usage = await promotionUsage(T, ORG); // must not throw
+    expect(usage.get(promo.promotionId)?.amount).toBe(50); // …and the row is still counted
   });
 
   it('M1: a JPY cart_threshold snapshot is a whole yen (the two types the first fix missed)', async () => {
@@ -161,8 +190,8 @@ describe('review fold-ins — the four fixes the review proved were untested', (
     });
     // ¥333.3 cannot exist, and commerce re-quantizes the TOTAL to ¥333 — so the
     // snapshot that feeds the loss-budget ledger disagreed with the charge.
-    expect(Number.isInteger(r.discount)).toBe(true);
-    expect(r.appliedPromotions.every((a) => Number.isInteger(a.amount))).toBe(true);
+    expect(r.discount).toBe(333); // ¥3,333 × 10% = ¥333.3 → ¥333
+    expect(r.appliedPromotions.map((a) => a.amount)).toEqual([333]);
   });
 
   it('M2: a pending cart holds its budget until its OWN reservation deadline', async () => {
@@ -211,6 +240,7 @@ describe('PRO2-P21 — a NaN amount is refused', () => {
     });
     // `NaN <= 0` is FALSE, so the row used to be pushed and the tool reported
     // `{"amount": null}` with no error.
-    expect(r.appliedPromotions.every((a) => Number.isFinite(a.amount))).toBe(true);
+    expect(r.appliedPromotions).toEqual([]); // `every` on [] would pass vacuously — assert the list
+    expect(r.discount).toBe(0);
   });
 });

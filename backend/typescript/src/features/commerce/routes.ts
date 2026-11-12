@@ -23,7 +23,7 @@ import { checkEntitlement } from '../../host/entitlementSeam.js';
 import { checkOwnerPublicAccess } from '../../host/publicLapse.js';
 import { createLogger } from '../../observability/logger.js';
 import {
-  listProducts, getProduct, createProduct, updateProduct, deleteProduct,
+  listProducts, getProduct, createProduct, updateProduct, deleteProduct, isPubliclyListed,
   listOrders, getOrder, createOrder, markAsPaid, refundOrder, cancelOrder, updateFulfillment,
   listCoupons, createCoupon, getCart, setCartItem, clearCart, checkoutCart,
   listStockMovements, commerceSummary, partialRefundOrder, listOrderRefunds, orderChargeTotal,
@@ -126,7 +126,7 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
     try {
       const ctx = await authz(req, 'workspace:write');
       const b = (req.body ?? {}) as Record<string, unknown>;
-      const p = await createProduct({ tenantId: ctx.tenantId, orgId: ctx.orgId, createdBy: ctx.user.userId, type: b.type, name: requireString(b.name, 'name'), description: b.description, price: b.price, currency: b.currency, imageAssetTokens: b.imageAssetTokens, downloadAssetTokens: b.downloadAssetTokens, inventory: b.inventory, lowStockThreshold: b.lowStockThreshold, variants: b.variants, categories: b.categories, tags: b.tags, attributes: b.attributes, weightGrams: b.weightGrams, dims: b.dims, customFields: b.customFields, cost: b.cost, kind: b.kind, components: b.components, subscription: b.subscription });
+      const p = await createProduct({ tenantId: ctx.tenantId, orgId: ctx.orgId, createdBy: ctx.user.userId, type: b.type, name: requireString(b.name, 'name'), description: b.description, price: b.price, currency: b.currency, imageAssetTokens: b.imageAssetTokens, downloadAssetTokens: b.downloadAssetTokens, inventory: b.inventory, lowStockThreshold: b.lowStockThreshold, variants: b.variants, categories: b.categories, tags: b.tags, attributes: b.attributes, weightGrams: b.weightGrams, dims: b.dims, customFields: b.customFields, cost: b.cost, kind: b.kind, components: b.components, subscription: b.subscription, unlisted: b.unlisted });
       res.status(201).json(p);
     } catch (err) { next(err); }
   });
@@ -158,6 +158,7 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
       if ('components' in b) patch.components = b.components;
       if ('subscription' in b) patch.subscription = b.subscription;
       if (typeof b.active === 'boolean') patch.active = b.active;
+      if ('unlisted' in b) patch.unlisted = b.unlisted; // ADR 1098 — validated closed-world in updateProduct
       const p = await updateProduct(ctx.tenantId, ctx.orgId, req.params.productId, patch, { actor: ctx.user.userId });
       if (!p) throw new OpenwopError('not_found', 'Product not found.', 404, { productId: req.params.productId });
       res.json(p);
@@ -515,8 +516,8 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
         ...(optionalString(req.query.tag) ? { tag: optionalString(req.query.tag)! } : {}),
       });
       const fieldDefs = await listProductFieldDefs(tenantId, req.params.orgId); // fetch ONCE for label resolution
-      // Only active products, and never expose internal/inventory operational fields.
-      const store = all.filter((p) => p.active).map((p) => { const cf = publicCustomFields(fieldDefs, p.customFields); return { productId: p.productId, type: p.type, name: p.name, description: p.description, price: p.price, currency: p.currency, imageAssetTokens: p.imageAssetTokens, variants: p.variants, categories: p.categories ?? [], tags: p.tags ?? [], ...(p.attributes?.length ? { attributes: p.attributes } : {}), ...(cf.length ? { customFields: cf } : {}) }; });
+      // Only active, listed products (ADR 1098), and never expose internal/inventory operational fields.
+      const store = all.filter(isPubliclyListed).map((p) => { const cf = publicCustomFields(fieldDefs, p.customFields); return { productId: p.productId, type: p.type, name: p.name, description: p.description, price: p.price, currency: p.currency, imageAssetTokens: p.imageAssetTokens, variants: p.variants, categories: p.categories ?? [], tags: p.tags ?? [], ...(p.attributes?.length ? { attributes: p.attributes } : {}), ...(cf.length ? { customFields: cf } : {}) }; });
       // grade-ux I9: the merchant's own name so the storefront has an identity
       // (the org display name is not sensitive — it's the public store's brand).
       res.json({ products: store, store: { name: org.name } });
@@ -528,7 +529,7 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
     try {
       const org = await publicStoreOrg(req.params.orgId);
       const p = await getProduct(org.tenantId, req.params.orgId, req.params.productId);
-      if (!p || !p.active) throw new OpenwopError('not_found', 'Product not found.', 404, {});
+      if (!p || !isPubliclyListed(p)) throw new OpenwopError('not_found', 'Product not found.', 404, {});
       const cf = publicCustomFields(await listProductFieldDefs(org.tenantId, req.params.orgId), p.customFields);
       res.json({ product: { productId: p.productId, type: p.type, name: p.name, description: p.description, price: p.price, currency: p.currency, imageAssetTokens: p.imageAssetTokens, variants: p.variants, categories: p.categories ?? [], tags: p.tags ?? [], ...(p.attributes?.length ? { attributes: p.attributes } : {}), ...(cf.length ? { customFields: cf } : {}) } });
     } catch (err) { next(err); }

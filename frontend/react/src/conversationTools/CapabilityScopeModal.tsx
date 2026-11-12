@@ -4,7 +4,9 @@
  * heavier panel is fetched on first open — the EmbeddedChatPanel lazy precedent).
  *
  * Shows (1) PENDING per-tool approvals with Approve/Deny — the high-value operator
- * surface (each names a real tool the agent tried) — and (2) a scope editor: mode
+ * surface (each names a real tool the agent tried; an expired channel ask shows no
+ * decision buttons, CHAN-F17), (2) the approvals already given, each with Revoke
+ * (CHAN-F17), and (3) a scope editor: mode
  * (agent-default ↔ restricted) + the enabled / disabled / requires-approval lists.
  * Backend is authority (owner-gated); never-widen is enforced server-side, so the
  * editor is a plain narrowing control.
@@ -15,11 +17,12 @@ import { Button } from '../ui/Button.js';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal } from '../ui/Modal.js';
+import { Notice } from '../ui/Notice.js';
 import { toast } from '../ui/toast.js';
 import { CheckIcon, XIcon, PlusIcon } from '../ui/icons/index.js';
 import {
-  getCapabilityScope, setCapabilityScope, resolveToolApproval, ApprovalConflictError,
-  type CapabilityScope, type CapabilityScopeView, type ScopeMode, type ToolApproval,
+  getCapabilityScope, setCapabilityScope, resolveToolApproval, revokeToolApproval, isExpiredApproval, ApprovalConflictError,
+  type ApprovalGrain, type CapabilityScope, type CapabilityScopeView, type ScopeMode, type ToolApproval,
 } from './capabilityScopeClient.js';
 
 type ListKey = 'enabled' | 'disabled' | 'requireApproval';
@@ -59,12 +62,29 @@ export default function CapabilityScopePanel({ sessionId, onClose, onContinue, o
 
   // ADR 0834 D6 — the decision names the version the user saw (`requestedAt`); a request
   // that moved since (the agent asked again with new arguments) is refused and re-shown.
-  const decide = async (a: ToolApproval, decision: 'approved' | 'denied'): Promise<void> => {
+  // FW2-D1 — `call` approves exactly the request shown, once; `conversation` the tool
+  // for the rest of the conversation (offered in-app only, and only when every argument
+  // was shown).
+  const decide = async (a: ToolApproval, decision: 'approved' | 'denied', grain: ApprovalGrain = 'call'): Promise<void> => {
     if (deciding) return;
     setDeciding(true);
     try {
-      await resolveToolApproval(sessionId, a.toolName, decision, a.requestedAt);
+      await resolveToolApproval(sessionId, a.toolName, decision, a.requestedAt, decision === 'approved' ? grain : undefined);
       if (decision === 'approved') setApprovedOne(true);
+      onChanged?.();
+      await load();
+    } catch (e) {
+      if (e instanceof ApprovalConflictError) { toast.error(t('approvalChanged')); await load(); }
+      else toast.error(e instanceof Error ? e.message : t('decisionFailed', { defaultValue: 'Failed to record your decision.' }));
+    } finally { setDeciding(false); }
+  };
+  // CHAN-F17 — withdraw an approval; the agent's next call of the tool is asked about again.
+  const revoke = async (a: ToolApproval): Promise<void> => {
+    if (deciding || !a.resolvedAt) return;
+    setDeciding(true);
+    try {
+      await revokeToolApproval(sessionId, a.toolName, a.resolvedAt);
+      toast.success(t('revoked', { tool: a.toolName }));
       onChanged?.();
       await load();
     } catch (e) {
@@ -98,6 +118,7 @@ export default function CapabilityScopePanel({ sessionId, onClose, onContinue, o
     setLists((p) => ({ ...p, [key]: p[key].filter((x) => x !== tool) }));
 
   const pending = (view?.approvals ?? []).filter((a) => a.status === 'pending');
+  const approved = (view?.approvals ?? []).filter((a) => a.status === 'approved');
   const listLabel = (key: ListKey): string => (key === 'enabled' ? t('list_enabled') : key === 'disabled' ? t('list_disabled') : t('list_requireApproval'));
 
   return (
@@ -113,16 +134,22 @@ export default function CapabilityScopePanel({ sessionId, onClose, onContinue, o
           : (
             <>
               <p className="muted u-fs-12">{mayApprove ? t('grainNote') : t('notOwnerNote')}</p>
+              {mayApprove && pending.some((a) => a.lane === 'channel') && <p className="muted u-fs-12">{t('grainNoteChannel')}</p>}
               <ul className="u-list-none u-p-0 u-flex u-flex-col u-gap-2">
                 {pending.map((a) => (
                   <li key={a.toolName} className="u-flex u-flex-col u-gap-1">
                     <div className="u-flex u-items-center u-justify-between u-gap-2">
                       <code className="u-fs-12">{a.toolName}</code>
-                      {mayApprove && (
+                      {mayApprove && !isExpiredApproval(a) && (
                         <span className="u-flex u-gap-1">
                           <Button variant="primary" className="u-fs-11" disabled={deciding} onClick={() => void decide(a, 'approved')} aria-label={t('approveAria', { tool: a.toolName })}>
                             <CheckIcon size={12} /> {t('approve')}
                           </Button>
+                          {a.lane !== 'channel' && !a.inputTruncated && (
+                            <Button variant="secondary" className="u-fs-11" disabled={deciding} onClick={() => void decide(a, 'approved', 'conversation')} aria-label={t('allowConversationAria', { tool: a.toolName })}>
+                              {t('allowConversation')}
+                            </Button>
+                          )}
                           <Button variant="secondary" className="u-fs-11" disabled={deciding} onClick={() => void decide(a, 'denied')} aria-label={t('denyAria', { tool: a.toolName })}>
                             {t('deny')}
                           </Button>
@@ -133,6 +160,8 @@ export default function CapabilityScopePanel({ sessionId, onClose, onContinue, o
                     {a.requestedInput
                       ? <pre className="ct-requested-input u-fs-11 u-m-0" tabIndex={0} aria-label={`${t('requestedWith')} ${a.toolName}`}>{a.requestedInput}</pre>
                       : <span className="u-fs-11 muted">{t('noArguments')}</span>}
+                    {a.inputTruncated && <Notice variant="warning">{t('inputHidden')}</Notice>}
+                    {isExpiredApproval(a) && <p className="muted u-fs-11 u-m-0">{t('expiredNote')}</p>}
                   </li>
                 ))}
               </ul>
@@ -146,6 +175,28 @@ export default function CapabilityScopePanel({ sessionId, onClose, onContinue, o
           </div>
         )}
       </section>
+
+      {/* CHAN-F17 — approvals already given, each revocable */}
+      {approved.length > 0 && (
+        <section aria-labelledby="ct-granted-h" className="u-mt-3">
+          <h3 id="ct-granted-h" className="u-fs-13">{t('grantedHeading')}</h3>
+          <ul className="u-list-none u-p-0 u-flex u-flex-col u-gap-1">
+            {approved.map((a) => (
+              <li key={a.toolName} className="u-flex u-items-center u-justify-between u-gap-2">
+                <span className="u-flex u-flex-col">
+                  <code className="u-fs-12">{a.toolName}</code>
+                  <span className="muted u-fs-11">{isExpiredApproval(a) ? t('grantedExpired') : a.grain === 'call' ? t('grantedOnce') : t('grantedConversation')}</span>
+                </span>
+                {mayApprove && a.resolvedAt && (
+                  <Button variant="secondary" className="u-fs-11" disabled={deciding} onClick={() => void revoke(a)} aria-label={t('revokeAria', { tool: a.toolName })}>
+                    {t('revoke')}
+                  </Button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       {/* Scope editor */}
       <section aria-labelledby="ct-scope-h" className="u-mt-3">

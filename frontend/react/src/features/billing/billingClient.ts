@@ -29,7 +29,9 @@ export interface AiCreditMeter {
   topFeatures: Array<{ featureId: string; label?: string; usedCredits: number; chargedCredits: number; calls: number }>;
   otherCredits: number;
 }
-export interface CheckoutSession { sessionId: string; url: string; mode: 'live' | 'demo' }
+/** `trialDays` — present only when the session the server created carries a trial
+ *  (ADR 0820 §7). The trial entry (ADR 1097) refuses to redirect without it. */
+export interface CheckoutSession { sessionId: string; url: string; mode: 'live' | 'demo'; trialDays?: number }
 
 const root = `${config.baseUrl}/host/openwop-app/billing`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
@@ -77,8 +79,8 @@ export async function openPortal(): Promise<{ url: string; mode: string }> {
  *  from the bundleId). Billing owns the money route, so the store calls it here.
  *  ADR 0820 §7 — `cadence` picks the monthly (default) or yearly price; the client
  *  still never names a price. */
-export async function buyBundle(bundleId: string, cadence: 'month' | 'year' = 'month'): Promise<{ url: string; mode: 'live' | 'demo' }> {
-  return asJson<{ url: string; mode: 'live' | 'demo' }>(await fetch(
+export async function buyBundle(bundleId: string, cadence: 'month' | 'year' = 'month'): Promise<CheckoutSession> {
+  return asJson<CheckoutSession>(await fetch(
     `${root}/bundles/${encodeURIComponent(bundleId)}/checkout`,
     fetchOpts({ method: 'POST', headers: jsonHeaders(), body: cadence === 'month' ? '{}' : JSON.stringify({ cadence }) }),
   ), 'bundle checkout');
@@ -90,6 +92,22 @@ export async function buyPlan(plan: 'pro' | 'team' | 'enterprise', cadence: 'mon
   return asJson<CheckoutSession>(await fetch(`${root}/checkout`, fetchOpts({
     method: 'POST', headers: jsonHeaders(), body: JSON.stringify(cadence === 'month' ? { plan } : { plan, cadence }),
   })), 'plan checkout');
+}
+/** ADR 1097 — what a checkout of one plan tier or bundle would give the active
+ *  workspace, read before any session exists (`GET …/billing/trial-offer`). Same
+ *  gates as checkout: 404 = billing off, 403 = not allowed to buy here (or an
+ *  anonymous session), 400 = not a plan/bundle. `checkout` is `demo` when no
+ *  Stripe key is configured, so no real session would open. */
+export type TrialOfferStatus = 'available' | 'not_for_sale' | 'already_subscribed' | 'included_in_plan' | 'no_trial' | 'trial_used';
+export interface TrialOffer {
+  target: string; cadence: 'month' | 'year'; status: TrialOfferStatus; checkout: 'live' | 'demo';
+  trialDays?: number; cardRequired?: boolean; label?: string;
+}
+export type TrialTarget = { plan: 'pro' | 'team' | 'enterprise' } | { bundleId: string };
+export async function getTrialOffer(target: TrialTarget, cadence: 'month' | 'year' = 'month'): Promise<TrialOffer> {
+  const q = new URLSearchParams('plan' in target ? { plan: target.plan } : { bundle: target.bundleId });
+  if (cadence !== 'month') q.set('cadence', cadence);
+  return asJson<TrialOffer>(await fetch(`${root}/trial-offer?${q.toString()}`, fetchOpts({ headers: authedHeaders() })), 'trial offer');
 }
 /** ADR 0821 D7 — one AI-credit pack as the store lists it. `packKey` is OPAQUE
  *  (never a Stripe price id); `priceDisplay.price` is the operator's display copy,

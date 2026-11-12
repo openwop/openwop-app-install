@@ -74,7 +74,10 @@ export interface KnowledgeResultChunk {
    *  consumer MUST fence it (never inject as agent-trusted). Absent ⇒ trusted. */
   contentTrust?: 'trusted' | 'untrusted';
 }
-export interface KnowledgeSource { sourceId: string; assetId: string; title: string; headingPath: string[]; pageNumber: number | null }
+/** `url` (ADR 1057 D4) — optional and additive: an openable page for this source when
+ *  its indexer recorded one (the public `/docs/<slug>` of a docs page). Absent for
+ *  every other source and for the demo corpus. */
+export interface KnowledgeSource { sourceId: string; assetId: string; title: string; headingPath: string[]; pageNumber: number | null; url?: string }
 export interface KnowledgeResult { chunks: KnowledgeResultChunk[]; sources: KnowledgeSource[]; latencyMs: number; hasResults: boolean }
 
 export interface KnowledgeSurface {

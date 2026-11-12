@@ -13,6 +13,7 @@
  * Composition awareness: the firewall evaluates the next tool against the tools already used
  * THIS session (read-drive + send-email ⇒ deny/approve), so we track a per-session seen-set.
  */
+import { randomUUID } from 'node:crypto';
 import { createAgentToolProvider, createScopedAgentToolProvider } from '../../../host/agentToolProvider.js';
 import { toModelToolResult } from '../../../host/toModelToolResult.js';
 import { resolveAgentToolPermissionSet } from '../../../host/agentProfileService.js';
@@ -23,7 +24,7 @@ import { sanitizeToolName } from '../../../providers/dispatchProviderTools.js';
 import { buildLaneFirewall } from '../../../host/laneFirewall.js';
 import { resolveConversationToolGate } from '../../../host/conversationToolScope.js';
 import { toolAuthorityHolds } from '../../../host/conversationVisibility.js';
-import { listToolApprovals, approvedToolSets, recordToolApprovalRequested } from '../../conversation-tools/approvalLedger.js';
+import { listToolApprovals, recordToolApprovalRequested, makeApprovalGrant, deleteSpentCallApprovals, scopeFoldRows, type ApprovalGrant } from '../../conversation-tools/approvalLedger.js';
 import type { RealtimeToolDecl } from './types.js';
 import { createLogger } from '../../../observability/logger.js';
 import { ASK_USER_TOOL } from '../../../host/clarificationLift.js';
@@ -119,7 +120,7 @@ export type ToolCallOutcome =
 
 /** Best-effort: a ledger write never breaks the voice turn. */
 async function recordHeld(tenantId: string, conversationId: string, toolName: string, origin: 'baseline' | 'policy', args: Record<string, unknown>): Promise<void> {
-  try { await recordToolApprovalRequested(tenantId, conversationId, toolName, { origin, input: args }); }
+  try { await recordToolApprovalRequested(tenantId, conversationId, toolName, { origin, input: args, lane: 'app' }); }
   catch (err) { log.warn('voice_held_tool_record_failed', { toolName, error: err instanceof Error ? err.message : String(err) }); }
 }
 
@@ -180,27 +181,30 @@ export async function executeRealtimeToolCall(input: {
   //     a tool the owner disabled (or held, or put out of mandate with an intent
   //     ledger) stayed callable here. The ledger's decisions fold only for the owner's
   //     own session — the owner approved the tool for their actions, not a participant's.
-  let approvedTools: Set<string> | undefined;
-  let approvedBaselineTools: Set<string> | undefined;
+  // ADR 0834 FW2-D1 — the ledger's approvals answer per CALL through one grant (a `call`
+  // approval covers only these exact arguments, once); the scope fold takes only denials
+  // and tool-wide approvals (`scopeFoldRows`). Voice is an in-app lane.
+  let ledgerGrant: ApprovalGrant | undefined;
+  const callKey = `voice:${input.sessionId}:${randomUUID()}`;
   if (input.conversationId) {
     const approvals = await listToolApprovals(input.tenantId, input.conversationId);
     const gate = await resolveConversationToolGate({
-      tenantId: input.tenantId, conversationKey: input.conversationId, ceiling: allowlist, approvals,
+      tenantId: input.tenantId, conversationKey: input.conversationId, ceiling: allowlist, approvals: scopeFoldRows(approvals, false),
       foldApprovalsOnlyFor: input.actingUserId ?? '',
     });
+    if (toolAuthorityHolds(input.actingUserId, gate.ownerUserId)) {
+      ledgerGrant = makeApprovalGrant(approvals, { singleUse: false, requireDigest: false });
+    }
     if (gate.scope && !gate.scope.enabled.includes(name)) {
       return { status: 'denied', reason: `Tool "${name}" is not enabled for this conversation.` };
     }
-    if (gate.scope?.requireApproval.includes(name)) {
+    if (gate.scope?.requireApproval.includes(name) && !ledgerGrant?.check(name, 'baseline', input.args, callKey)) {
       await recordHeld(input.tenantId, input.conversationId, name, 'policy', input.args);
       return { status: 'requires_approval', reason: JSON.stringify({ error: 'approval_required', message: 'this conversation requires approval for this tool — ask the user to approve it from the chat' }) };
     }
-    // FW2-CD-6 — the ONE authority predicate (`toolAuthorityHolds`). The opener's id here
-    // is the durable user; if it ever differs from the owner's stamp key the fold is
-    // skipped (fail-safe: the owner is asked again), never widened.
-    if (toolAuthorityHolds(input.actingUserId, gate.ownerUserId)) {
-      ({ approvedTools, approvedBaselineTools } = approvedToolSets(approvals));
-    }
+    // FW2-CD-6 — the ONE authority predicate (`toolAuthorityHolds`) above. The opener's id
+    // here is the durable user; if it ever differs from the owner's stamp key no approval
+    // is usable (fail-safe: the owner is asked again), never widened.
   }
   // 2) Capability firewall (composition-aware) + the safe-mode baseline, built by the
   //    ONE lane factory (ADR 0834 D1). Evaluated on the CANONICAL id, so rules + the
@@ -211,15 +215,16 @@ export async function executeRealtimeToolCall(input: {
   //    `userApproved`. ADR 0834 D2: that one-shot card is client-asserted, so it answers
   //    only the user's own safe-mode ask (`baseline`) — never a tenant/platform/enforce
   //    ask, which needs a ledger approval from the conversation's owner.
-  if (input.userApproved) (approvedBaselineTools ??= new Set()).add(name);
+  const grant = {
+    check: (tool: string, origin: 'baseline' | 'policy' | undefined, args: Record<string, unknown> | undefined, key: string): boolean =>
+      (input.userApproved === true && tool === name && origin !== 'policy') || Boolean(ledgerGrant?.check(tool, origin, args, key)),
+  };
   const { hook: fw } = await buildLaneFirewall({
-    tenantId: input.tenantId, lane: 'voice',
-    ...(approvedTools ? { approvedTools } : {}),
-    ...(approvedBaselineTools ? { approvedBaselineTools } : {}),
+    tenantId: input.tenantId, lane: 'voice', grant,
     resource: input.conversationId ?? `voice:${input.sessionId}`,
     dedupeKey: input.sessionId,
   });
-  const verdict = fw.evaluate([...seen(input.sessionId)], name);
+  const verdict = fw.evaluate([...seen(input.sessionId)], name, input.args, callKey);
   if (verdict.decision === 'deny') return { status: 'denied', reason: verdict.reason ?? 'Blocked by the capability firewall.' };
   if (verdict.decision === 'require-approval') {
     // ADR 0834 D6 — a held voice call lands in the conversation's ledger, so the owner
@@ -252,6 +257,8 @@ export async function executeRealtimeToolCall(input: {
   });
   const out = await executeTool({ name, input: input.args });
   seen(input.sessionId).add(name);
+  // FW2-D1 — a one-call approval this call used is spent.
+  if (ledgerGrant) await deleteSpentCallApprovals(ledgerGrant.spent()).catch(() => undefined);
   // RFC 0137 §F1 — this result goes to a realtime MODEL, and this path does NOT
   // go through `runChatToolLoop`, so it needs the fence explicitly. Applied
   // before the stringify so the fence wraps the text the model reads.

@@ -22,6 +22,8 @@
  * (`8fw2g3-egi-derive`), destination-sync's classifier row removed (`-egi-classrow`),
  * the class gate removed (`-egi-classgate`), bypass no longer downgrading
  * (`-egi-bypass`), and http.fetch dropped from the name set (`-egi-nameset`).
+ * CHAN-F16 (2026-11-10): R5 now pins http.fetch's exact class; witnessed red with the row
+ * removed and with the row widened to the `openwop:core.openwop.http` prefix.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -77,12 +79,19 @@ describe('ADR 0724 §D0 — the class gate\'s REAL population, pinned after a fu
   it('R4: the ADR 0610 D5 witness name is NOT a registered tool id (that witness proved the hook contract on a synthetic name, not production)', () => {
     expect(ids).not.toContain(SYNTHETIC_EGRESS);
   });
-  it('R5: the one real off-host egress agent tool IS registered, IS in the NAME set, and is (still) UNCLASSIFIED — pins the prefix mismatch the capability-firewall feature owns', () => {
+  it('R5: the one real off-host fetch agent tool IS registered, IS in the NAME set, and is classified `safe-fetch` by its EXACT id (CHAN-F16)', () => {
     expect(ids).toContain(HTTP_FETCH);
     expect(SENSITIVE_APPROVAL_TOOLS.has(HTTP_FETCH)).toBe(true);
-    // If a resolver normalization ever classifies this name, that reclassifies it from the
-    // treat-as-risky fallback (host-mediated) to `safe-fetch` — a RULE relaxation. Revisit here.
-    expect(resolveToolCapability(HTTP_FETCH)).toBeNull();
+    // CHAN-F16 (user decision 2026-11-10): it was unclassified (the node-id row never
+    // matched), so it fell to the treat-as-risky fallback. Reclassifying it is the RULE
+    // relaxation this pin used to warn about, made on purpose.
+    expect(resolveToolCapability(HTTP_FETCH)).toEqual({ safetyTier: 'read', egress: 'safe-fetch' });
+    // Exact id, not a prefix: the http pack's two pure nodes (projected as tools when the
+    // pack is mounted) were not reviewed and stay unclassified. Named, not read off `ids`:
+    // this boot does not mount packs, so a filter over `ids` would check nothing.
+    for (const pure of ['openwop:core.openwop.http.idempotency-key', 'openwop:core.openwop.http.webhook-verify']) {
+      expect(resolveToolCapability(pure), pure).toBeNull();
+    }
   });
   it('R6: and therefore it ASKS in the voice/dispatch shape today — the name set is the working half', () => {
     expect(asVoiceOrDispatchLane().evaluate([], HTTP_FETCH).decision).toBe('require-approval');

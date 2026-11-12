@@ -2,7 +2,17 @@
  * EXACT client org, only while the recording is visible and unexpired, only
  * after the view is on the tenant's hash chain, and only if every check still
  * holds once the bytes are in hand. Real orgs and memberships, real SQLite rows,
- * real memory-blob bytes, the real audit chain and toggle service. */
+ * real memory-blob bytes, the real audit chain and toggle service.
+ *
+ * Sabotage witnesses (w103; src/features/analytics/replayStore.ts
+ * `readReplayChunkForViewer` / `ensurePlaybackGrant` / `fencesHold`): dropping
+ * the pre-read authorize reds the refused-before-any-audit case; dropping the
+ * 401 guard reds it too (403 is not 401); dropping the receipt check, the fixed
+ * expiry or the disable-epoch fence reds the look-like-missing case; swallowing
+ * the audit failure reds both audit-failure cases; dropping the post-fetch
+ * authorize or the post-fetch visibility read reds the in-flight case; dropping
+ * the digest comparison reds the receipt case; never reusing a grant reds the
+ * one-entry case; a 100x grant window reds the expired-grant case. */
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';

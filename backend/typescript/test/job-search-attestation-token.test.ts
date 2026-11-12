@@ -16,7 +16,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  issueAttestation, previewAttestation, resolveAttestation, revokeAttestation, listAttestations,
+  issueAttestation, previewAttestation, resolveAttestation, revokeAttestation, listAttestations, listAllAttestations,
   eraseSubjectAttestations, __hashIndexCountForTest, type IssueResult,
 } from '../src/features/job-search/attestation/token.js';
 import { createApplyGrant, consumeSubmit } from '../src/host/applyGrant.js';
@@ -78,7 +78,7 @@ describe('ADR 0544 P2 — hash at rest, resolve by point lookup', () => {
 
   it('stores only the HASH — a database read yields no working token', async () => {
     const { token, attestationId } = await seed();
-    const rows = await listAttestations(TENANT);
+    const rows = await listAllAttestations(TENANT);
     const rec = rows.find((r) => r.attestationId === attestationId)!;
     // The projection has no hash field at all, and the raw token appears nowhere.
     expect(JSON.stringify(rec)).not.toContain(token);
@@ -149,7 +149,7 @@ describe('ADR 0544 D4 — indistinguishability, compared against each other', ()
   it('unknown and revoked produce the IDENTICAL answer; a cross-tenant token leaks no tenant', async () => {
     const mine = await seed(TENANT);
     const theirs = await seed(OTHER);
-    await revokeAttestation(TENANT, mine.attestationId, Date.now());
+    await revokeAttestation(TENANT, mine.attestationId, Date.now(), SUBJECT);
 
     const unknown = await resolveAttestation('owatt_totally-made-up-token-value');
     const revoked = await resolveAttestation(mine.token);
@@ -180,20 +180,20 @@ describe('ADR 0544 D4 — indistinguishability, compared against each other', ()
     // same path — and it preserves the applicant's own record of what they
     // attested.
     const { attestationId } = await seed();
-    await revokeAttestation(TENANT, attestationId, Date.now());
-    const rows = await listAttestations(TENANT);
+    await revokeAttestation(TENANT, attestationId, Date.now(), SUBJECT);
+    const rows = await listAttestations(TENANT, SUBJECT);
     expect(rows.find((r) => r.attestationId === attestationId)?.revokedAt).toBeTruthy();
   });
 
   it('a second revoke is false, not an error', async () => {
     const { attestationId } = await seed();
-    expect(await revokeAttestation(TENANT, attestationId, Date.now())).toBe(true);
-    expect(await revokeAttestation(TENANT, attestationId, Date.now())).toBe(false);
+    expect(await revokeAttestation(TENANT, attestationId, Date.now(), SUBJECT)).toBe(true);
+    expect(await revokeAttestation(TENANT, attestationId, Date.now(), SUBJECT)).toBe(false);
   });
 
   it('cross-tenant revoke does nothing', async () => {
     const mine = await seed(TENANT);
-    expect(await revokeAttestation(OTHER, mine.attestationId, Date.now())).toBe(false);
+    expect(await revokeAttestation(OTHER, mine.attestationId, Date.now(), SUBJECT)).toBe(false);
     expect(await resolveAttestation(mine.token), 'a neighbour must not be able to revoke mine').toBeTruthy();
   });
 });
@@ -243,7 +243,7 @@ describe('ADR 0544 matrix row 9 — the claims are FROZEN in the token', () => {
       // so the index is the only place that difference is observable. It
       // mutates nothing; the ratchet made it justify itself here, as designed.
       '__hashIndexCountForTest',
-      'eraseSubjectAttestations', 'issueAttestation', 'listAttestations', 'previewAttestation',
+      'eraseSubjectAttestations', 'issueAttestation', 'listAllAttestations', 'listAttestations', 'previewAttestation',
       'resolveAttestation', 'revokeAttestation',
     ]);
   });
@@ -262,7 +262,7 @@ describe('ADR 0464 — erasing the authoriser', () => {
     expect(await resolveAttestation(token)).toBeNull();
     // …and the person is gone from the frozen claim, which is the one place an
     // "immutable" record must yield to an erasure obligation.
-    const rec = (await listAttestations(TENANT)).find((r) => r.attestationId === attestationId)!;
+    const rec = (await listAllAttestations(TENANT)).find((r) => r.attestationId === attestationId)!;
     expect(JSON.stringify(rec)).not.toContain('user-authoriser');
     expect(rec.revokedAt).toBeTruthy();
   });
@@ -272,7 +272,7 @@ describe('ADR 0464 — erasing the authoriser', () => {
     // is not a privacy win.
     const { attestationId } = await seed();
     await eraseSubjectAttestations(TENANT, 'user-authoriser');
-    expect((await listAttestations(TENANT)).some((r) => r.attestationId === attestationId)).toBe(true);
+    expect((await listAllAttestations(TENANT)).some((r) => r.attestationId === attestationId)).toBe(true);
   });
 
   it('leaves attestations naming someone else alone', async () => {
@@ -355,6 +355,6 @@ describe('ADR 0544 P4 — the caller supplies a dealId and nothing else', () => 
     const g = await grant(CAMPAIGN);
     await consumeSubmit(TENANT, g.grantId, Date.now(), 'deal:1');
     await previewAttestation({ tenantId: TENANT, dealId: 'deal:1', actingUser: SUBJECT, now: Date.now() });
-    expect(await listAttestations(TENANT), 'a preview that wrote would defeat its own purpose').toHaveLength(0);
+    expect(await listAllAttestations(TENANT), 'a preview that wrote would defeat its own purpose').toHaveLength(0);
   });
 });

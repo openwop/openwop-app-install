@@ -29,6 +29,7 @@ import { createLedger, getLedger, listDeltas } from '../src/features/team-intent
 import { createDocument, getDocumentByIdForTenant } from '../src/features/documents/documentsService.js';
 import { getProject } from '../src/features/projects/projectsService.js';
 import { createMember } from '../src/host/accessControlService.js';
+import { listMemoryProposals, proposeProjectMemory } from '../src/features/projects/memoryProposals.js';
 
 let BASE = '';
 let server: http.Server;
@@ -80,6 +81,7 @@ async function projectWithDependents() {
   const list = await createList(tenantId, orgId, 'user:x', { name: 'Scoped ideas', projectId: project.id });
   const ledger = await createLedger(project, 'user:x');
   const doc = await createDocument({ tenantId, orgId, title: 'Owned doc', kind: 'note', ownerSubject: owner, provenance: { producedBy: { kind: 'user', id: 'user:x' } }, createdBy: 'user:x' });
+  await proposeProjectMemory({ tenantId, project, text: 'The client prefers brass fittings.', createdBy: 'user:x', proposer: 'agent:a' });
   // A control the cascade must NOT touch: an org document with no owner.
   const free = await createDocument({ tenantId, orgId, title: 'Org doc', kind: 'note', provenance: { producedBy: { kind: 'user', id: 'user:x' } }, createdBy: 'user:x' });
   return { c, tenantId, orgId, project, canvas, list, ledger, doc, free };
@@ -87,7 +89,7 @@ async function projectWithDependents() {
 
 describe('ADR 0839 D2 — a project delete takes its dependents', () => {
   it('every owning feature registered (a forgotten registration is a stranded store)', () => {
-    expect(listSubjectDependentKeys('project')).toEqual(['canvases', 'documents', 'entities', 'priorityLists', 'teamLedger', 'teamLedgerSuggestions']);
+    expect(listSubjectDependentKeys('project')).toEqual(['canvases', 'documents', 'entities', 'memoryProposals', 'priorityLists', 'teamLedger', 'teamLedgerSuggestions']);
   });
 
   it('the delete preview names what will go, and a write is required to ask', async () => {
@@ -95,7 +97,7 @@ describe('ADR 0839 D2 — a project delete takes its dependents', () => {
     const r = await c.get<{ dependents: Counts }>(`${P}/${project.id}/delete-preview`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     // teamLedger = the ledger row + its creation delta.
-    expect(r.body.dependents).toEqual({ canvases: 1, documents: 1, entities: 0, priorityLists: 1, teamLedger: 2, teamLedgerSuggestions: 0 });
+    expect(r.body.dependents).toEqual({ canvases: 1, documents: 1, entities: 0, memoryProposals: 1, priorityLists: 1, teamLedger: 2, teamLedgerSuggestions: 0 });
     // A CO-TENANT org viewer: the project is org-visible, so they hold READ — and the preview
     // still refuses them, because it needs WRITE. (A login in another tenant would 404 on
     // existence and prove nothing about the scope — the w13 probe showed exactly that.)
@@ -112,7 +114,7 @@ describe('ADR 0839 D2 — a project delete takes its dependents', () => {
     const { c, tenantId, project, canvas, list, ledger, doc, free } = await projectWithDependents();
     const del = await c.del<{ dependentsDeleted: Counts }>(`${P}/${project.id}`);
     expect(del.status, JSON.stringify(del.body)).toBe(200);
-    expect(del.body.dependentsDeleted).toEqual({ canvases: 1, documents: 1, entities: 0, priorityLists: 1, teamLedger: 2, teamLedgerSuggestions: 0 });
+    expect(del.body.dependentsDeleted).toEqual({ canvases: 1, documents: 1, entities: 0, memoryProposals: 1, priorityLists: 1, teamLedger: 2, teamLedgerSuggestions: 0 });
 
     expect(await getCanvasForTenant(tenantId, canvas.canvasId), 'owned canvas').toBeNull();
     expect(await getList(tenantId, list.id), 'scoped priority list').toBeNull();
@@ -120,6 +122,7 @@ describe('ADR 0839 D2 — a project delete takes its dependents', () => {
     expect(await getLedger(tenantId, project.id), 'team ledger').toBeNull();
     expect(await listDeltas(tenantId, ledger.ledgerId), 'and its deltas').toEqual([]);
     expect(await getDocumentByIdForTenant(tenantId, doc.documentId), 'owned document').toBeNull();
+    expect(await listMemoryProposals(tenantId, project.id), 'memory proposals').toEqual([]);
     expect(await getDocumentByIdForTenant(tenantId, free.documentId), 'CONTROL: an unowned org document survives').toBeTruthy();
   });
 });

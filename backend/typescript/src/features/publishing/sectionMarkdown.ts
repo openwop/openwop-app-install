@@ -14,6 +14,7 @@
  * escape), never wrapped in invented formatting.
  */
 import { designSectionMarkdown } from '../cms/designSections.js';
+import { pricingPlans } from '../cms/pricingPlans.js';
 import { isFragmentHref, isInternalHref } from '../../host/internalHref.js';
 import type { Section } from '../cms/cmsService.js';
 import { vendorPublicBase } from '../featureRoute.js';
@@ -223,7 +224,14 @@ export function sectionMarkdown(section: Section, baseUrl: string): string | nul
     case 'pricing': {
       const blurb = str(d.blurb);
       const cta = str(d.ctaLabel) && str(d.ctaUrl) ? `[${str(d.ctaLabel)}](${str(d.ctaUrl)})` : '';
-      return `${head()}${blurb ? `${blurb}\n\n` : ''}${cta}`.trim();
+      // ADR 1069 D4 — authored plans: one `###` per plan, status, blurb, link.
+      const plans = pricingPlans(d).map((p) => [
+        `### ${p.name}`,
+        ...(p.status ? [`*${p.status}*`] : []),
+        ...(p.blurb ? [p.blurb] : []),
+        ...(p.ctaLabel && p.ctaUrl ? [`[${p.ctaLabel}](${p.ctaUrl})`] : []),
+      ].join('\n\n')).join('\n\n');
+      return `${head()}${blurb ? `${blurb}\n\n` : ''}${plans ? `${plans}\n\n` : ''}${cta}`.trim();
     }
     case 'entityList':
     case 'entityDetail':

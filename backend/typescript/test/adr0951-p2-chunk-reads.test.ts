@@ -6,7 +6,11 @@
  * now read once per call and compared with the row in hand; consent, the fence
  * a visitor can move at any moment, is still re-read at every boundary, and a
  * read re-checks every fence. The witness counts the storage reads themselves.
- * Real SQLite rows, real toggle service, real blob bytes (memory backend). */
+ * Real SQLite rows, real toggle service, real blob bytes (memory backend).
+ *
+ * Sabotage witnesses (w103; src/features/analytics/replayStore.ts): re-reading
+ * the org fences (`readReplayOrgFences`) at each consent boundary of an upload,
+ * the shape this finding removed, pushes a follow-on chunk past the read bound. */
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';

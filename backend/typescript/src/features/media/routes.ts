@@ -332,8 +332,8 @@ export function registerMediaRoutes(deps: RouteDeps): void {
   app.post(`${BASE}/assets/:assetId/alt-text`, async (req, res, next) => {
     try {
       await requireFeatureEnabled(req, 'accessibility', 'Accessibility');
-      const { orgId, tenantId } = await authorize(req, 'workspace:write');
-      const proposal = await generateAltText(tenantId, orgId, req.params.assetId);
+      const { user, orgId, tenantId } = await authorize(req, 'workspace:write');
+      const proposal = await generateAltText(tenantId, orgId, req.params.assetId, { actingSubject: user.userId });
       res.json({ proposal });
     } catch (err) {
       next(err);

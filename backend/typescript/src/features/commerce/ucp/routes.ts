@@ -22,7 +22,7 @@ import type { User } from '../../users/usersService.js';
 import { getOrg } from '../../../host/accessControlService.js';
 import { resolveToggle } from '../../../host/featureToggles/service.js';
 import { ownerPublicRuntimeLapsed } from '../../../host/publicLapse.js';
-import { listProducts, getProduct, getCart, setCartItem, clearCart, checkoutCart, getOrder, markAsPaid, cancelOrder, liveStripeKeyFor } from '../commerceService.js';
+import { listProducts, getProduct, isPubliclyListed, getCart, setCartItem, clearCart, checkoutCart, getOrder, markAsPaid, cancelOrder, liveStripeKeyFor } from '../commerceService.js';
 import type { Order } from '../commerceService.js';
 import type { Product } from '../commerceService.js';
 import { resolveAp2Payment } from './ap2.js';
@@ -142,7 +142,7 @@ export function registerCommerceUcpRoutes(deps: RouteDeps): void {
   app.get(`${UCP_BASE}/catalog`, async (req, res, next) => {
     try {
       const m = await resolveMerchant(req.params.orgId);
-      const items = (await listProducts(m.tenantId, m.orgId)).filter((p) => p.active).map(toUcpCatalogItem);
+      const items = (await listProducts(m.tenantId, m.orgId)).filter(isPubliclyListed).map(toUcpCatalogItem); // ADR 1098
       res.json({ vertical: 'shopping', items });
     } catch (err) { next(err); }
   });
@@ -150,7 +150,7 @@ export function registerCommerceUcpRoutes(deps: RouteDeps): void {
     try {
       const m = await resolveMerchant(req.params.orgId);
       const p = await getProduct(m.tenantId, m.orgId, req.params.productId);
-      if (!p || !p.active) throw new OpenwopError('not_found', 'Item not found.', 404, {});
+      if (!p || !isPubliclyListed(p)) throw new OpenwopError('not_found', 'Item not found.', 404, {}); // ADR 1098
       res.json(toUcpCatalogItem(p));
     } catch (err) { next(err); }
   });
@@ -185,7 +185,7 @@ export function registerCommerceUcpRoutes(deps: RouteDeps): void {
       if (!Number.isFinite(qty) || qty < 0) throw new OpenwopError('validation_error', '`quantity` must be a non-negative number.', 400, { field: 'quantity' });
       // Only a real active product may enter the cart (an agent can't seed a phantom line).
       const p = await getProduct(m.tenantId, m.orgId, productId);
-      if (!p || !p.active) throw new OpenwopError('validation_error', 'Unknown or inactive item.', 400, { field: 'item_id' });
+      if (!p || !isPubliclyListed(p)) throw new OpenwopError('validation_error', 'Unknown or inactive item.', 400, { field: 'item_id' }); // ADR 1098
       const cart = await setCartItem(m.tenantId, m.orgId, principal.subject, productId, qty);
       res.json(toUcpCart(cart, await cartProducts(m.tenantId, m.orgId, cart.lines.map((l) => l.productId))));
     } catch (err) { next(err); }

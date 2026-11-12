@@ -258,6 +258,15 @@ export function jsonLdBlocks(input: JsonLdInput): object[] {
   // data the page renders (never fabricated: a section missing a required
   // VideoObject field, or carrying a non-https URL, emits nothing).
   for (const s of page.sections) {
+    // ADR 1082 — a `films` section: one VideoObject per film, same rule.
+    if (s.type === 'films') {
+      const films = (s.data as { films?: unknown }).films;
+      for (const f of Array.isArray(films) ? films : []) {
+        const v = f && typeof f === 'object' ? videoObject(f as Record<string, unknown>) : null;
+        if (v) blocks.push(v);
+      }
+      continue;
+    }
     if (s.type !== 'video') continue;
     const v = videoObject(s.data as Record<string, unknown>);
     if (v) blocks.push(v);

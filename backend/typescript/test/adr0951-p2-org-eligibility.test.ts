@@ -3,7 +3,20 @@
  * after an owner/admin attests it is neither; the default is excluded. The
  * attestation in force when a recording started is what covers it: withdrawing
  * fences at once and the sweep deletes, and renewing never revives. Real SQLite
- * rows, real memory-blob bytes, the real toggle and consent services. */
+ * rows, real memory-blob bytes, the real toggle and consent services.
+ *
+ * Sabotage witnesses (w103; src/features/analytics/replayStore.ts): treating
+ * every org as eligible, or recording without an attestation id, reds the
+ * unattested case; offering replay without the org's attestation reds the
+ * unattested and attested cases; dropping the attestation fence in
+ * `fencesHold` reds the withdraw case, and dropping it from the sweep's
+ * `disabledRecordings` reds it too (nothing deleted); a deterministic (not
+ * minted) attestation id reds renewal; dropping the re-attest no-op reds the
+ * re-attest and record-nothing cases; replacing the attestation CAS with a
+ * blind put reds the concurrent case; dropping the reservation's pinned-id
+ * check reds the forged-start case; swallowing an audit failure reds the
+ * audit-failure case; dropping `supersedes` reds the evidence case; auditing a
+ * no-op withdrawal reds the record-nothing case. */
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -112,16 +125,33 @@ describe('ADR 0951 — health/finance exclusion by org attestation', () => {
     const r = row();
     await grant(r);
     await putReplayChunk(r, 0, CHUNK);
-    await new Promise((res) => setTimeout(res, 5));
+    // Coverage is the pinned attestation id, never a clock comparison, so no wait is needed.
     await setReplayOrgEligibility(tenantId, 'client-a', true, 'user:other-admin');
     expect(await getReplaySession(tenantId, 'client-a', r.sessionId)).toMatchObject({ sessionId: r.sessionId });
   });
 
   it('two concurrent attestations mint one id, so neither fences the other', async () => {
-    await Promise.all([
-      setReplayOrgEligibility(tenantId, 'client-a', true, 'user:admin-1'),
-      setReplayOrgEligibility(tenantId, 'client-a', true, 'user:admin-2'),
-    ]);
+    // A deterministic interleaving: admin-1 has read "unattested" and is held at
+    // its audit while admin-2 attests and a recording is reserved under admin-2's
+    // id. Then admin-1 resumes: it must lose the CAS, not overwrite the id.
+    const realAppend = chain.appendAudit;
+    let reached!: () => void;
+    const atAudit = new Promise<void>((res) => { reached = res; });
+    let release!: () => void;
+    const gate = new Promise<void>((res) => { release = res; });
+    vi.spyOn(chain, 'appendAudit').mockImplementation(async (auditTenant, kind, payload) => {
+      if (payload.actor === 'user:admin-1') { reached(); await gate; }
+      return realAppend(auditTenant, kind, payload);
+    });
+    const first = setReplayOrgEligibility(tenantId, 'client-a', true, 'user:admin-1');
+    await atAudit;
+    await setReplayOrgEligibility(tenantId, 'client-a', true, 'user:admin-2');
+    const early = row();
+    await grant(early);
+    await putReplayChunk(early, 0, CHUNK);
+    release();
+    await first;
+    expect(await getReplaySession(tenantId, 'client-a', early.sessionId), 'the late attestation did not fence it').toMatchObject({ sessionId: early.sessionId });
     const r = row();
     await grant(r);
     await putReplayChunk(r, 0, CHUNK);
@@ -151,7 +181,9 @@ describe('ADR 0951 P2 review #5 — eligibility evidence', () => {
   it('attest and withdraw are on the hash chain, and the withdrawal keeps who attested and when', async () => {
     await setReplayOrgEligibility(tenantId, 'client-a', true, 'user:owner');
     await setReplayOrgEligibility(tenantId, 'client-a', false, 'user:admin');
-    const [attested, withdrawn] = await entries();
+    const logged = await entries();
+    expect(logged).toHaveLength(2);
+    const [attested, withdrawn] = logged;
     expect(attested!.payload).toMatchObject({ orgId: 'client-a', eligible: true, actor: 'user:owner', attestationId: expect.any(String) });
     expect(withdrawn!.payload).toMatchObject({ orgId: 'client-a', eligible: false, actor: 'user:admin',
       supersedes: { attestationId: (attested!.payload as { attestationId: string }).attestationId, attestedBy: 'user:owner', attestedAt: expect.any(String) } });

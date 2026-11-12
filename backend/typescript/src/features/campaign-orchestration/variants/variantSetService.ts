@@ -227,9 +227,10 @@ async function parseMember(tenantId: string, orgId: string, raw: unknown, i: num
     refuseUnknownKeys(raw.productRef, new Set(['productId', 'variantId']), `${where}.productRef`);
     await requireSourceFeature('commerce', tenantId);
     const productId = ownerId(raw.productRef.productId, `${where}.productRef.productId`);
-    const { getProduct } = await import('../../commerce/commerceService.js');
+    const { getProduct, refuseUnlistedProduct } = await import('../../commerce/commerceService.js');
     const product = await getProduct(tenantId, orgId, productId);
     if (!product || product.productId !== productId) throw invalid(`${where}: product not found in this campaign's workspace.`, { reason: 'variant_ref_not_found' });
+    refuseUnlistedProduct(product, where); // ADR 1098 — an ad variant is outward-facing
     const variantId = raw.productRef.variantId === undefined ? undefined : ownerId(raw.productRef.variantId, `${where}.productRef.variantId`);
     if (variantId && !product.variants.some((v) => v.variantId === variantId)) throw invalid(`${where}: product variant not found.`, { reason: 'variant_ref_not_found' });
     member.productRef = { productId, ...(variantId ? { variantId } : {}) };

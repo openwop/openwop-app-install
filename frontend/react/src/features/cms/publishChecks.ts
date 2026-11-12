@@ -8,7 +8,7 @@
  * or the Page tab. The labels are i18n keys the dialog resolves.
  */
 import { checkContentA11y } from '../../a11y/contentA11y.js';
-import { cmsPageToA11yModel } from './cmsA11y.js';
+import { cmsPageToA11yModel, splitA11yRef } from './cmsA11y.js';
 import type { Page, Section } from './cmsClient.js';
 import type { PageSeo } from '../publishing/publishingClient.js';
 
@@ -44,7 +44,13 @@ function isEmptySection(s: Section): boolean {
   return false;
 }
 
-export function publishChecks(page: Page, seo: PageSeo | null, opts: { baseLocale: string; locales: readonly string[] }): PublishCheck[] {
+/** `resolvedSections` — the page's sections with shared-section references
+ *  replaced by their content (`resolveSharedRefs`). The accessibility check reads
+ *  them, because a reference carries `data: {}` and its pictures would otherwise
+ *  go unchecked (ADR 1100 D3). Absent ⇒ the raw sections. `sharedUnread` — the
+ *  shared-section read failed while the page has references, so the check is
+ *  incomplete and must not say "passed". */
+export function publishChecks(page: Page, seo: PageSeo | null, opts: { baseLocale: string; locales: readonly string[]; resolvedSections?: readonly Section[]; sharedUnread?: boolean }): PublishCheck[] {
   const out: PublishCheck[] = [];
 
   // ── Blockers ──
@@ -76,14 +82,20 @@ export function publishChecks(page: Page, seo: PageSeo | null, opts: { baseLocal
     }
   }
 
-  const a11y = checkContentA11y(cmsPageToA11yModel(page.sections));
-  if (a11y.length === 0) out.push({ id: 'a11y', level: 'ok', key: 'checkA11yOk' });
+  const a11y = checkContentA11y(cmsPageToA11yModel(opts.resolvedSections ?? page.sections));
+  // ADR 1100 D3 — a shared section whose content could not be read was not
+  // checked, so "passed" would be a claim about pictures nobody looked at.
+  if (a11y.length === 0 && opts.sharedUnread) out.push({ id: 'a11y', level: 'warn', key: 'checkA11yIncomplete' });
+  else if (a11y.length === 0) out.push({ id: 'a11y', level: 'ok', key: 'checkA11yOk' });
   else {
-    const first = a11y.find((i) => i.nodeRef && page.sections.some((s) => s.sectionId === i.nodeRef));
+    const sectionOf = (i: { nodeRef?: string }): string | undefined => (i.nodeRef === undefined ? undefined : splitA11yRef(i.nodeRef).sectionId);
+    const firstSection = a11y.map(sectionOf).find((id) => id !== undefined && page.sections.some((s) => s.sectionId === id));
     out.push({
       id: 'a11y', level: 'warn', key: 'checkA11y', values: { count: a11y.length }, fixOn: 'section',
-      ...(first?.nodeRef ? { sectionId: first.nodeRef } : {}),
+      ...(firstSection ? { sectionId: firstSection } : {}),
     });
+    // The issues found are not all there are when a shared section went unread.
+    if (opts.sharedUnread) out.push({ id: 'a11y-incomplete', level: 'warn', key: 'checkA11yIncomplete' });
   }
 
   // Untranslated sections per supported locale (shared refs translate in the

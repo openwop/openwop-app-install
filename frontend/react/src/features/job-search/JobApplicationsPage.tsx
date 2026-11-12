@@ -134,7 +134,7 @@ export function JobApplicationsPage(): JSX.Element {
       toast.success(t('attRevoked_toast'));
       await refresh();
     } catch {
-      toast.error(t('appsLoadFailed'));
+      toast.error(t('attRevokeFailed'));
     } finally {
       setBusy(false);
       setRevoking(null);
@@ -160,6 +160,9 @@ export function JobApplicationsPage(): JSX.Element {
             </span>
           );
         }
+        // A colleague's application (workspace-visible, ADR 0546): sharing it
+        // would only meet the server's "not yours" refusal, so no button.
+        if (!a.mine) return <span className="muted">{t('attOnlyApplicant')}</span>;
         return (
           <Button
             variant="secondary"
@@ -181,6 +184,11 @@ export function JobApplicationsPage(): JSX.Element {
         orgs={orgs} orgsFailed={orgsFailed} retry={retryOrgs}
         emptyBody={t('orgsEmptyClause')} failedBody={t('orgsFailedClause')} icon={<ShieldIcon />}
       >
+        {/* ADR 1036 D10 — applications are workspace-visible (ADR 0546); say so where a
+            candidate starts or reviews a search, so nobody learns it by surprise.
+            Inside the org gate: with no workspace there is nothing to disclose.
+            Static text, not a Notice: a permanent fact is not a live announcement. */}
+        <p className="muted u-m-0">{t('workspaceVisibility')}</p>
         <Panel>
           {notice ? (
             <div className="u-mb-3">

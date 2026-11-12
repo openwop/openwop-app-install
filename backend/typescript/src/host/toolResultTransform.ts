@@ -168,6 +168,9 @@ export const SCHEMA_READ_EXEMPT_TOOLS: readonly string[] = [
   // `funnelId`). The rationale is at each registration site.
   'openwop:cms.translate-section',
   'openwop:funnels.get',
+  // ADR 1039 D8 — a creative brief's `directions[]` are cited back by index
+  // (a render or reel's `directionIndex`), so a shortened list misnumbers them.
+  'openwop:creative-briefs.get',
 ];
 
 /**

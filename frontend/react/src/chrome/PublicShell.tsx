@@ -76,10 +76,10 @@ function useBlogAvailable(): boolean {
 interface NavLink { to: string; label: string; description?: string }
 /** ADR 1049 — the public-site nav groups, in render order. `pages` is the
  *  ADR 0486 catch-all for a published page that names no group. */
-const NAV_GROUP_ORDER = ['product', 'audience', 'trust', 'company', 'pages', 'legal'] as const;
+const NAV_GROUP_ORDER = ['product', 'audience', 'resources', 'trust', 'company', 'pages', 'legal'] as const;
 type NavGroupId = (typeof NAV_GROUP_ORDER)[number];
 /** The groups a page may NAME in its `siteNav` (server-validated, ADR 1049). */
-const AUTHORED_GROUPS: ReadonlySet<string> = new Set(['product', 'audience', 'trust', 'company', 'legal']);
+const AUTHORED_GROUPS: ReadonlySet<string> = new Set(['product', 'audience', 'resources', 'trust', 'company', 'legal']);
 interface NavGroup { id: NavGroupId; heading: string; links: NavLink[] }
 interface NavEntry extends NavLink { group: NavGroupId; order: number; primary: boolean; cta?: string; utility?: boolean }
 
@@ -223,6 +223,7 @@ function usePublicNav(): { groups: NavGroup[]; flat: NavLink[]; primary: NavLink
   const hasBlog = useBlogAvailable();
   const { pages: published, featured } = usePublishedPages();
   const grouped = published.some((p) => p.nav?.group !== undefined);
+  const hasResources = published.some((p) => p.nav?.group === 'resources');
   // ADR 1062 D3 — `/pricing` renders the CMS `pricing` page when one is
   // published, so that page's `siteNav` (label, description, group, order,
   // primary, cta, utility) places the ONE `/pricing` entry. The slug stays
@@ -273,13 +274,16 @@ function usePublicNav(): { groups: NavGroup[]; flat: NavLink[]; primary: NavLink
       ...(pricingNav?.cta ? { cta: pricingNav.cta } : {}),
       ...(pricingNav?.utility ? { utility: true } : {}),
     },
-    ...(hasBlog ? [{ to: '/blog', label: t('navBlog'), group: grouped ? 'company' as const : 'product' as const, order: 50, primary: false }] : []),
+    // The automatic `/blog` entry sits under Resources when the site has that
+    // group (a blog is a resource), else under Company as before (ADR 1049).
+    ...(hasBlog ? [{ to: '/blog', label: t('navBlog'), group: !grouped ? 'product' as const : hasResources ? 'resources' as const : 'company' as const, order: 50, primary: false }] : []),
     ...(hasDocs ? [{ to: '/docs', label: t('navDocs'), group: 'product' as const, order: 60, primary: false }] : []),
   ];
 
   const headings: Record<NavGroupId, string> = {
     product: t('navGroupProduct'),
     audience: t('navGroupAudience'),
+    resources: t('navGroupResources'),
     trust: t('navGroupTrust'),
     company: t('navGroupCompany'),
     pages: t('navGroupPages'),

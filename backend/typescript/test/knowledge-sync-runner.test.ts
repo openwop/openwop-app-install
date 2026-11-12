@@ -42,7 +42,9 @@ import { loadWorkflowChainPacks, defaultWorkflowChainPackRoots } from '../src/ho
 
 vi.mock('../src/features/connections/connectionsService.js', () => ({ getConnection: vi.fn() }));
 vi.mock('../src/host/knowledgeSourceFetch.js', () => ({ listFolder: vi.fn(), fetchKnowledgeSource: vi.fn(), fetchKnowledgeSourceBytes: vi.fn(), MAX_LIST_FILES: 1000 })); // the real cap, read by the runner's partial-listing message
-vi.mock('../src/features/kb/kbService.js', () => ({ ingestDocument: vi.fn(), deleteDocument: vi.fn(), getCollection: vi.fn(async () => ({ collectionId: 'col' })) })); // `getCollection` (ADR 0643 R4 Should 3): the runner resolves the target collection as the connection owner BEFORE listing/fetching — a readable stub here, so these tests keep exercising the per-file lanes
+vi.mock('../src/features/kb/kbService.js', () => ({ ingestDocument: vi.fn(), deleteDocument: vi.fn(), getCollection: vi.fn(async () => ({ collectionId: 'col' })) }));
+// ADR 1101 D3 — the pass-time org-write check, held open (its witness is knowledge-sync-pass-integrity.test.ts).
+vi.mock('../src/features/knowledge-sync/knowledgeSyncAccess.js', () => ({ passActorMayWrite: vi.fn(async () => true), holdsOrgScope: vi.fn(async () => true) })); // `getCollection` (ADR 0643 R4 Should 3): the runner resolves the target collection as the connection owner BEFORE listing/fetching — a readable stub here, so these tests keep exercising the per-file lanes
 
 import { getConnection, type Connection } from '../src/features/connections/connectionsService.js';
 import {
@@ -53,7 +55,7 @@ import { ingestDocument, deleteDocument, type KnowledgeDocument } from '../src/f
 import { runKnowledgeSyncOnce, syncNow } from '../src/features/knowledge-sync/knowledgeSyncRunner.js';
 import {
   createSyncSource, getSyncSource, listFileStates, syncDocumentId, claimSyncRun,
-  MAX_CONSECUTIVE_FAILURES, setSyncStatus, knowledgeSyncJobId, retryDelayMs,
+  MAX_CONSECUTIVE_FAILURES, setSyncStatus, knowledgeSyncJobId, retryDelayMs, updateSyncSource,
   pauseSourcesForRevokedConnection, syncStateVersion, statusAfterPass, SYNC_LEASE_MS,
   type SyncSource,
 } from '../src/features/knowledge-sync/knowledgeSyncService.js';
@@ -189,7 +191,10 @@ describe('runKnowledgeSyncOnce (ADR 0107 Phase 3)', () => {
     await runKnowledgeSyncOnce(runDeps(), source); // media included → both ingested
     mDelete.mockClear(); // the seed pass delete-then-ingested `i` — only the prune is under test
     mList.mockResolvedValueOnce(listing([binFile('p', 'r1'), imgFile('i', 'r1')])); // folder unchanged
-    const r = await runKnowledgeSyncOnce(runDeps(), { ...source, includeMedia: false });
+    // The STORED row, the shape every lane passes: an in-memory override differs from
+    // the stored row, which the ADR 1101 D1 pre-prune check reads as a changed binding.
+    const optedOut = (await updateSyncSource('tA', source.id, { includeMedia: false }, NOW))!;
+    const r = await runKnowledgeSyncOnce(runDeps(), optedOut);
     expect(r).toMatchObject({ pruned: 1, skippedMedia: 1 }); // the image is dropped from the view → pruned
     expect(mDelete).toHaveBeenCalledWith('tA', 'org1', 'col', syncDocumentId(source.id, 'i'), OWNER_CALLER, { silent: true });
   });
@@ -251,7 +256,10 @@ describe('runKnowledgeSyncOnce (ADR 0107 Phase 3)', () => {
     mList.mockResolvedValueOnce(listing([binFile('p', 'r1'), imgFile('i', 'r1')]));
     await runKnowledgeSyncOnce(runDeps(), source);
     mList.mockResolvedValueOnce(listing([binFile('p', 'r1'), imgFile('i', 'r1')]));
-    const r = await runKnowledgeSyncOnce(runDeps(), { ...source, includeMedia: false });
+    // The STORED row, the shape every lane passes: an in-memory override differs from
+    // the stored row, which the ADR 1101 D1 pre-prune check reads as a changed binding.
+    const optedOut = (await updateSyncSource('tA', source.id, { includeMedia: false }, NOW))!;
+    const r = await runKnowledgeSyncOnce(runDeps(), optedOut);
     expect(r).toMatchObject({ pruned: 1, skippedMedia: 1 });
     expect(r.listingIncomplete).toBeUndefined();
   });

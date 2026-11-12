@@ -39,9 +39,9 @@
 import { checkEligibility, type ApplicantConstraints } from '../domain/eligibility.js';
 import { projectFitScores, JOB_FIT_CRITERIA, type FitProfile } from '../domain/fitScoring.js';
 import { computePriority } from '../../../host/weightedScoring.js';
-import { createApplication } from '../domain/applications.js';
+import { createApplication, subjectDealTag, withdrawUnsentApplication } from '../domain/applications.js';
 import type { JobDigest } from '../domain/digest.js';
-import { consultApplyGrant, claimSubmission, consumeSubmit, releaseSubmission } from '../../../host/applyGrant.js';
+import { consultApplyGrant, claimSubmission, consumeSubmit, refundSubmit, recordSubmissionRejected, releaseSubmission } from '../../../host/applyGrant.js';
 import { answerFor, keysFor, noteAnswerUsed, type AnswerMiss } from './answerBank.js';
 
 /** A question an employer's form asks. */
@@ -200,11 +200,19 @@ export async function applyToListing(
     tenantId: input.tenantId,
     orgId: input.orgId,
     actor: input.subjectId,
-    dealId: `deal:${input.listingId}`,
+    // ADR 1036 D3 — per PERSON: two members applying to one listing are two
+    // applications, never one shared deal.
+    dealId: `deal:${subjectDealTag(input.subjectId)}:${input.listingId}`,
     digest: input.digest,
     profile: input.profile,
     applicant: input.applicant,
   });
+  if (created.notYours) {
+    // A deal with this person's id that someone else created — not ours to
+    // apply on. Release and say so; never ride a colleague's record.
+    await releaseSubmission(input.tenantId, input.subjectId, input.listingId, decision.grantId);
+    return { kind: 'refused', reason: 'deal-not-yours' };
+  }
   if (!created.deal) {
     // The claim must not outlive a run that never sent anything: held, it
     // makes every later pass report `already-applied` for a job that was
@@ -218,19 +226,39 @@ export async function applyToListing(
     };
   }
 
-  // 7 — the outside effect, exactly once.
+  // 7 — spend the unit, BEFORE the send (ADR 1036 D4). This code used to send
+  //     first and consume after, dropping `consumeSubmit`'s answer, against the
+  //     grant's own contract and this module's header: two passes on a
+  //     one-unit grant both passed the read-only consult and both sent. The
+  //     consume CAS is the authoritative ceiling and pace check, so a lost race
+  //     here is a refusal, not a send.
+  const spent = await consumeSubmit(input.tenantId, decision.grantId, input.now, created.deal.dealId);
+  if (!spent) {
+    // Nothing was sent: the deal this call minted must not sit in "Applied"
+    // describing an application that never went out (grade-code row 81).
+    if (!created.existed) await withdrawUnsentApplication(input.tenantId, input.orgId, created.deal.dealId);
+    await releaseSubmission(input.tenantId, input.subjectId, input.listingId, decision.grantId);
+    return { kind: 'refused', reason: 'grant-exhausted' };
+  }
+
+  // 8 — the outside effect, exactly once.
   const sent = await submit(prepared);
   if (!sent.ok) {
-    // Same rule: a board rejection spent nothing and sent nothing — release
-    // the claim so the next pass can retry the listing.
+    // The board said no: nothing reached an employer. FIRST record that, so the
+    // attestation can never call this application sent even if the refund
+    // below loses its races or the process dies (grade-code row 81: the refund
+    // row alone was the only voiding signal). Then return the unit (and the
+    // hour's pace slot while it is still that hour), withdraw the deal this
+    // call minted, and release the claim so the next pass can retry. A
+    // THROWING send never reaches here — its outcome is unknown, so the unit,
+    // the deal and the claim all stand.
+    await recordSubmissionRejected(input.tenantId, decision.grantId, created.deal.dealId);
+    await refundSubmit(input.tenantId, decision.grantId, created.deal.dealId, input.now);
+    if (!created.existed) await withdrawUnsentApplication(input.tenantId, input.orgId, created.deal.dealId);
     await releaseSubmission(input.tenantId, input.subjectId, input.listingId, decision.grantId);
     return { kind: 'refused', reason: 'board-rejected' };
   }
 
-  // 8 — spend the unit and write the audit row the attestation reads. AFTER a
-  //     successful send: the ledger records units actually spent, never units
-  //     an attempt merely intended.
-  await consumeSubmit(input.tenantId, decision.grantId, input.now, created.deal.dealId);
   // The keys were resolved during preparation; re-resolving them here ran the
   // whole normalisation + store lookup a SECOND time per question, on the path
   // that has already spent a submit unit.

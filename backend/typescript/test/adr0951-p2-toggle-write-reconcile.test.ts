@@ -6,7 +6,16 @@
  * and the recording came back. The fix records a durable "replay toggle
  * written" marker BEFORE the toggle write, resolves the write itself, and has
  * every read and sweep apply a pending marker before it trusts an ON.
- * Real SQLite rows, real toggle service, real blob bytes (memory backend). */
+ * Real SQLite rows, real toggle service, real blob bytes (memory backend).
+ *
+ * Sabotage witnesses (w103; src/features/analytics/replayStore.ts and
+ * src/host/featureToggles/service.ts): not writing the intent marker reds the
+ * never-runs case; a read that skips the pending markers reds it too; not
+ * recording an earlier OFF as already applied on a tenant's first reservation
+ * reds the first-recording case; a sweep that does not delete epoch-fenced
+ * recordings reds the late-listener, never-runs and landed-then-threw cases;
+ * a replay intent that never abandons, or a service that does not abandon a
+ * write that never landed, reds the never-landed case. */
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -26,7 +35,6 @@ import {
 import { attestReplayOrg, setReplayToggles } from './helpers/replayToggles.js';
 
 let a: Storage;
-let b: Storage;
 let dir: string;
 let blob: BlobSurface;
 let saved: Record<string, string | undefined>;
@@ -36,7 +44,6 @@ const ENV = ['OPENWOP_SURFACE_BLOB', 'OPENWOP_REPLAY_ALLOW_MEMORY_BLOB'] as cons
 beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 'owp-replay-toggle-write-'));
   a = await openStorage(`sqlite://${join(dir, 'store.db')}`);
-  b = await openStorage(`sqlite://${join(dir, 'store.db')}`);
   initHostExtPersistence(a);
   initInMemorySurfaces({ dataDir: dir });
   saved = Object.fromEntries(ENV.map((k) => [k, process.env[k]]));
@@ -50,7 +57,7 @@ afterEach(async () => {
   registerToggleWriteListener('analytics-replay', onReplayToggleWrite);
   registerToggleWriteIntent('analytics-replay', recordReplayToggleIntent);
   for (const k of ENV) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
-  await a.close(); await b.close();
+  await a.close();
   rmSync(dir, { recursive: true, force: true });
 });
 

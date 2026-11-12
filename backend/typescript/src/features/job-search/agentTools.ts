@@ -26,18 +26,14 @@
  * an authority object, which is the whole reason those objects exist.
  */
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { resolveFeatureToggle, resolveReadOrgScope } from '../../host/agentToolKit.js';
+import { resolveReadOrgScope } from '../../host/agentToolKit.js';
 import { JOB_SEARCH_TOGGLE } from './service.js';
 import { listListings } from './boards/listing.js';
 import { listApplications } from './domain/applications.js';
+import { actingUserIds } from '../connections/connectionsService.js';
 
 export const JOB_SEARCH_LISTINGS_TOOL_ID = 'openwop:job-search.listings.read';
 export const JOB_SEARCH_APPLICATIONS_TOOL_ID = 'openwop:job-search.applications.read';
-
-const toolError = (code: string, message: string): { content: string; isError: true; hostMessage: true } => ({
-  content: JSON.stringify({ error: code, message }),
-  isError: true, hostMessage: true,
-});
 
 export function registerJobSearchAgentTools(): void {
   registerFeatureAgentTool({
@@ -57,16 +53,22 @@ export function registerJobSearchAgentTools(): void {
       inputSchema: {
         type: 'object',
         properties: {
+          orgId: { type: 'string', description: 'The organization to read as (needed only when the workspace has several).' },
           limit: { type: 'integer', minimum: 1, maximum: 100, description: 'Max listings to return (default 25).' },
         },
         additionalProperties: false,
       },
     },
     async run(input, scope) {
-      if (!(await resolveFeatureToggle(JOB_SEARCH_TOGGLE, scope))) {
-        return toolError('feature_disabled', 'Job search is not enabled for this workspace.');
-      }
-      if (!scope.actingUserId) return { content: JSON.stringify({ listings: [] }) };
+      // ADR 1036 D8 — the SAME gate the HTTP route applies
+      // (`authorizeOrgScope(…, 'workspace:read')`, routes.ts), via its tool-lane
+      // twin, as the applications tool below does. This used to check only the
+      // toggle and the acting user. Listings are tenant-wide data (one feed per
+      // workspace), so the gate proves membership, exactly as on the route —
+      // parity, not narrowing.
+      const gate = await resolveReadOrgScope(scope, { featureId: JOB_SEARCH_TOGGLE, featureLabel: 'Job search' }, typeof input.orgId === 'string' && input.orgId ? input.orgId : undefined);
+      if (gate.kind === 'error') return gate.result;
+      if (gate.kind === 'empty') return { content: JSON.stringify({ listings: [], note: gate.note }) };
 
       const limit = typeof input.limit === 'number' && Number.isFinite(input.limit)
         ? Math.max(1, Math.min(100, Math.floor(input.limit)))
@@ -99,7 +101,8 @@ export function registerJobSearchAgentTools(): void {
       name: JOB_SEARCH_APPLICATIONS_TOOL_ID,
       description:
         'List this workspace\'s job applications and their current pipeline stage. '
-        + 'Use it to answer "what have I applied to?" or "what is waiting on a reply?". '
+        + 'Applications are visible to every member; `mine` is true only for the asking user\'s own. '
+        + 'Use it to answer "what have I applied to?" (only `mine`) or "what is waiting on a reply?". '
         + 'Read-only — advancing a stage happens through the workflow surface, not here.',
       inputSchema: {
         type: 'object',
@@ -118,12 +121,18 @@ export function registerJobSearchAgentTools(): void {
       if (gate.kind === 'error') return gate.result;
       if (gate.kind === 'empty') return { content: JSON.stringify({ applications: [], note: gate.note }) };
       const rows = await listApplications(scope.tenantId, gate.orgId);
+      // Every spelling the asking human has here (the run carries `req.userId`,
+      // the deal the canonical user id) — raw equality would call nothing mine.
+      const me = await actingUserIds(scope.tenantId, scope.actingUserId);
       return {
         content: JSON.stringify({
           applications: rows.map(({ deal }) => ({
             title: deal.title,
             stageId: deal.stageId,
             status: deal.status,
+            // Applications are workspace-visible (ADR 0546 / ADR 1036 D10). The
+            // model must not present a colleague's as the user's own.
+            mine: me.has(deal.createdBy),
           })),
         }),
       };

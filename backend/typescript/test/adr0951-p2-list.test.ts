@@ -1,7 +1,14 @@
 /** ADR 0951 P2.4 — the recordings list is bounded per request: narrowed to the
  * org, committed, active, unexpired and fence-current BEFORE any per-row read,
  * one consent read per visitor, and paginated. Real SQLite rows in the
- * production shape; the toggles and consent run through their real services. */
+ * production shape; the toggles and consent run through their real services.
+ *
+ * Sabotage witnesses (w103; src/features/analytics/replayStore.ts
+ * `listReplaySessionsForOrg`): dropping the retention cutoff, the committed
+ * filter, the page break, the newest-first sort or the strict cursor `<` reds
+ * the paging case; keying the consent memo per row reds the one-read-per-visitor
+ * case; ignoring the consent generation, a cached attestation, or listing while
+ * replay is off reds the withdrawn/unattested/off case. */
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,7 +19,7 @@ import type { Storage } from '../src/storage/storage.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { getStrictGrantGeneration, mergeConsentCategories } from '../src/features/consent/consentService.js';
-import { REPLAY_DEFAULT_RETENTION_DAYS, REPLAY_LIST_PAGE, listReplaySessionsForOrg } from '../src/features/analytics/replayStore.js';
+import { REPLAY_DEFAULT_RETENTION_DAYS, REPLAY_LIST_PAGE, listReplaySessionsForOrg, setReplayOrgEligibility } from '../src/features/analytics/replayStore.js';
 import { attestReplayOrg, setReplayToggles } from './helpers/replayToggles.js';
 
 let a: Storage;
@@ -84,16 +91,22 @@ describe('ADR 0951 P2.4 — bounded recordings list', () => {
       return read(key);
     });
     expect((await listReplaySessionsForOrg(tenantId, 'client-a')).sessions).toHaveLength(45);
-    // getStrictGrantGeneration reads the consent row twice per visitor.
-    expect(consentReads).toBeLessThanOrEqual(4);
+    // getStrictGrantGeneration reads the consent row twice per visitor: two visitors, four reads.
+    expect(consentReads).toBe(4);
   });
 
   it('a withdrawn visitor, an unattested org and replay off all list nothing for those rows', async () => {
-    await seed(3, { subjectKey: 'visitor:stays' });
+    const stays = await seed(3, { subjectKey: 'visitor:stays' });
     await seed(2, { subjectKey: 'visitor:leaves' });
+    await seed(2, { orgId: 'client-b', subjectKey: 'visitor:org-b' });
     await mergeConsentCategories({ tenantId, subjectKey: 'visitor:leaves', categories: { 'analytics.replay': false }, source: 'public:client-a' });
-    expect((await listReplaySessionsForOrg(tenantId, 'client-a')).sessions).toHaveLength(3);
+    expect((await listReplaySessionsForOrg(tenantId, 'client-a')).sessions.map((s) => s.sessionId)).toEqual(stays);
+    // client-b's attestation is withdrawn: its rows stop listing, client-a's do not.
+    expect((await listReplaySessionsForOrg(tenantId, 'client-b')).sessions).toHaveLength(2);
+    await setReplayOrgEligibility(tenantId, 'client-b', false, 'user:admin');
+    expect(await listReplaySessionsForOrg(tenantId, 'client-b')).toEqual({ sessions: [] });
+    expect((await listReplaySessionsForOrg(tenantId, 'client-a')).sessions.map((s) => s.sessionId)).toEqual(stays);
     await setReplayToggles('off');
-    expect((await listReplaySessionsForOrg(tenantId, 'client-a')).sessions).toEqual([]);
+    expect(await listReplaySessionsForOrg(tenantId, 'client-a')).toEqual({ sessions: [] });
   });
 });

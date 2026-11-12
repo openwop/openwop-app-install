@@ -20,6 +20,10 @@ export interface ProjectMember { ref: string; role: ProjectRole; addedAt: string
 /** ADR 0054 D6 — the group-chat cadence policy (shared with the advisory board). */
 export interface TurnPolicy { rounds: number; order: 'declared' | 'round-robin'; synthesize: boolean }
 export interface Project { id: string; tenantId: string; orgId: string; name: string; workflows: string[]; charter?: ProjectCharter; members?: ProjectMember[]; visibility?: ProjectVisibility; moderatorRosterId?: string; turnPolicy?: TurnPolicy; boardId: string;
+  /** ADR 1091 — a provider's computed health; on the single-project read only. */
+  computedHealth?: ComputedProjectHealth;
+  /** ADR 1095 — the caller's own role on the project; single-project read only. */
+  myRole?: ProjectRole;
   /** ADR 0084 — a project created via `POST /notebooks` carries this marker. It
    *  is NOT the "does deleting this erase a corpus" question — read
    *  `deletesCorpus` for that. `ensureNotebookForProject` (opening the Sources
@@ -88,6 +92,18 @@ export async function listProjects(): Promise<Project[]> {
 
 export async function createProject(orgId: string, name: string): Promise<Project> {
   return asJson<Project>(await fetch(base, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ orgId, name }) })), 'createProject');
+}
+
+/** ADR 1091 — a provider's computed health, on the single-project read. */
+export interface ComputedProjectHealth { level: ProjectHealth; reason: string; source: string; asOf: string; providerId: string }
+
+/** ADR 1092 D2 — memory an agent proposed for a person to approve. */
+export interface MemoryProposal { proposalId: string; text: string; proposer: string; proposedAt: string; status: 'pending' | 'approved' | 'dismissed'; decidedAt?: string }
+export async function listMemoryProposals(id: string): Promise<MemoryProposal[]> {
+  return (await asJson<{ proposals: MemoryProposal[] }>(await fetch(`${base}/${encodeURIComponent(id)}/memory-proposals`, fetchOpts({ headers: authedHeaders() })), 'listMemoryProposals')).proposals;
+}
+export async function decideMemoryProposal(id: string, proposalId: string, decision: 'approve' | 'dismiss'): Promise<MemoryProposal> {
+  return (await asJson<{ proposal: MemoryProposal }>(await fetch(`${base}/${encodeURIComponent(id)}/memory-proposals/${encodeURIComponent(proposalId)}/${decision}`, fetchOpts({ method: 'POST', headers: authedHeaders() })), 'decideMemoryProposal')).proposal;
 }
 
 export async function getProject(id: string): Promise<Project> {

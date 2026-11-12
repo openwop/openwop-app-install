@@ -1118,7 +1118,11 @@ export interface ChatToolLoopOpts {
    *  within-turn set of tools already run vs the tool about to run. `deny` → forbidden;
    *  `require-approval` → the same per-tool deferral as the ADR 0132 approval. Absent ⇒
    *  no firewall (the unchanged path). */
-  firewall?: { evaluate: (seenToolNames: readonly string[], nextToolName: string) => { decision: 'allow' | 'deny' | 'require-approval'; reason?: string; ruleId?: string; origin?: 'baseline' | 'policy' } };
+  firewall?: { evaluate: (seenToolNames: readonly string[], nextToolName: string, input?: Record<string, unknown>, callKey?: string) => { decision: 'allow' | 'deny' | 'require-approval'; reason?: string; ruleId?: string; origin?: 'baseline' | 'policy' } };
+  /** ADR 0834 FW2-D1 — per-call approvals for the ADR 0132 scope gate (the SAME grant the
+   *  firewall is built with, so one approval answers both gates for one call). A tool in
+   *  `capabilityScope.requireApproval` runs only when this says its exact call is approved. */
+  approvalGrant?: { check: (toolName: string, origin: 'baseline' | 'policy' | undefined, input: Record<string, unknown> | undefined, callKey: string) => boolean };
   /** ADR 0397 Phase 1 — best-effort sink for a firewall verdict that narrowed a tool
    *  call (`deny` / `require-approval`). The host closure captures the tenant + run and
    *  records it to the unified governance decision log; this loop stays feature-free and
@@ -1504,7 +1508,7 @@ export async function runChatToolLoop(
       // ceiling. Recorded as agent.toolReturned{forbidden} is wrong here (it is not
       // forbidden, it is deferred), so it carries a distinct message + the pending
       // list; the requested/resolved decision is recorded by the conversation.
-      if (requireApprovalSet && requireApprovalSet.has(call.name)) {
+      if (requireApprovalSet && requireApprovalSet.has(call.name) && !opts.approvalGrant?.check(call.name, 'baseline', call.input, call.id)) {
         if (!pendingApprovals.some((p) => p.toolName === call.name)) {
           // ADR 0834 D2 (FW2-CD-5) — the owner's OWN scope ask is user-level: approving
           // it must not satisfy a later workspace/platform ask on the same tool.
@@ -1540,7 +1544,7 @@ export async function runChatToolLoop(
       // ADR 0132 approval (collected as a pending approval, recorded upstream). Runs
       // after the per-tool gates; narrows only.
       if (opts.firewall) {
-        const fw = opts.firewall.evaluate(firewallSeen, call.name);
+        const fw = opts.firewall.evaluate(firewallSeen, call.name, call.input, call.id);
         if (fw.decision === 'deny') {
           // CGOV-6: operator-alertable audit on a firewall denial (mirrors the
           // ADR 0102 perm gate's `agent_tool_permission_denied`). No secret material

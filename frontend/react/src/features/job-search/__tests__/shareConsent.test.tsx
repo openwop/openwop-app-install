@@ -25,8 +25,8 @@ import type { VerifierClaim } from '../attestationVerifyClient.js';
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 const APPS: JobApplication[] = [
-  { dealId: 'deal:1', title: 'Staff Backend Engineer', companyName: 'Northwind', stage: 'Applied', appliedAt: '2026-03-02' },
-  { dealId: 'deal:2', title: 'Platform Engineer', companyName: 'Contoso', stage: 'Applied', appliedAt: '2026-03-05' },
+  { dealId: 'deal:1', title: 'Staff Backend Engineer', companyName: 'Northwind', stage: 'Applied', appliedAt: '2026-03-02', mine: true },
+  { dealId: 'deal:2', title: 'Platform Engineer', companyName: 'Contoso', stage: 'Applied', appliedAt: '2026-03-05', mine: true },
 ];
 
 const PREVIEW: VerifierClaim[] = [

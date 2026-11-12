@@ -124,7 +124,7 @@ const FIELD_START = String.raw`(?:^|[{;,])[ \t]*`;
  *   kicktodo-wearable-link     (`providerUserId`)   — COVERED (eraseWearableLinksForSubject),
  *                              but BOUND FOR THE WRONG FIELD — see the note below
  *   strategy:cadence           (`ownerUserId`)      — COVERED (eraseSubjectStrategy -> eraseCadenceSubject)
- *   insights:config            (`principalUserId`)  — NOT covered; recorded as debt below
+ *   insights:config            (`principalUserId`)  — COVERED since ADR 1102 D8 (eraseInsightsSuiteSubject); was debt
  * Do not copy those figures; re-derive them.
  *
  * `kicktodo-wearable-link` IS BOUND COINCIDENTALLY, and saying so is the point.
@@ -395,6 +395,7 @@ const EXPECTED_COVERED = new Set([
   'users:user',
   'users:canonical',
   'profiles:profile',
+  'insights:config', // ADR 1102 D8 — `eraseInsightsSuiteSubject`; was RECORDED_DEBT (COS-1)
   // SCC-1 — moved out of ACTOR_ATTRIBUTED_DEBT: `eraseScheduledChatsSubject`
   // disables the schedule + tombstones `createdBy` (ordinal 207, ADR 0125).
   'schedchat:config',
@@ -432,30 +433,11 @@ const RECORDED_DEBT = new Map<string, string>([
   //    a decision from its owning feature that this CRM change is not the place to make.
   ['podcasts:show', 'FOUND BY the CRM-2 email widening: `ownerName`/`ownerEmail` are the RSS-required podcast owner contact, which is published in the feed itself. Erasure semantics are genuinely unclear (removing them breaks the feed the directories validate), so this needs the podcasts owner rather than a guess made here.'],
   ['production:vendor', 'FOUND BY the CRM-2 email widening: `contactEmail` is an EXTERNAL person\'s address on a vendor row (already declared PII by PROD2-M6). A vendor is an org business record like a CRM contact, so the cure is the same anonymize-do-not-delete shape crm/erasure.ts now uses — it just needs the production owner to confirm which fields are relationship vs person.'],
-  // ── FOUND BY the COS-1 userId-suffix widening (see USER_ID_FIELD above).
-  //    `insights:config` keys per-tenant suite config by `principalUserId` — the
-  //    RFC 0048 opaque principal the suite is scoped to. Its own module states
-  //    "DELIBERATELY no registerSubjectEraser … no declared PII", and that
-  //    reasoning is about the TALENT SNAPSHOT (a run output, not persisted), not
-  //    about this row: the config row IS durable and IS keyed to a person.
-  //
-  //    AND THE FIELD-LEVEL ANNOTATION IS OVERRIDDEN TOO, explicitly — rebutting
-  //    only the module-level comment would leave the narrower claim standing and
-  //    reading as unchallenged. `insightsSuiteService.ts` annotates the field
-  //    itself: "The user the suite is scoped to (opaque principal id, RFC 0048 —
-  //    not PII)". OPACITY IS NOT NON-IDENTIFIABILITY. An RFC 0048 principal id is
-  //    opaque to a READER, but it is the stable, durable handle that identifies
-  //    exactly one person to this system — which is why erasure keys on it. The
-  //    same reasoning would exempt every `userId` in this census. The annotation
-  //    is correct that the value carries no in-band personal data and should NOT
-  //    join the global log-mask union; it is wrong that this puts the row outside
-  //    a DSAR's reach. Both the module- and field-level notes are recorded as
-  //    rebutted, so a later reader does not find one of them and stop. On
-  //    that person's erasure the honest act is to re-point or delete the suite
-  //    scoping, which changes who a scheduled weekly variance run acts as — an
-  //    insights-suite owner's decision, not one an assistant change should make.
-  //    Recorded rather than guessed at. Reclaimed today only by tenant teardown.
-  ['insights:config', 'FOUND BY the COS-1 userId-suffix widening: `principalUserId` scopes the suite (and keys `weeklyScheduleJobId`), so erasing that person leaves a durable row naming them AND a scheduled job running as them. The module\'s existing "deliberately no eraser" note is about the talent SNAPSHOT (a run output), not this row. Delete-vs-re-point is the insights-suite owner\'s call. Reclaimed today only by tenant teardown.'],
+  // ADR 1102 D8 (2026-11-11) — `insights:config` LEFT this ledger because the work
+  //    landed (`eraseInsightsSuiteSubject`, `features/insights-suite/insightsSuiteService.ts`),
+  //    not because the gate stopped seeing it. The decision its note asked of the
+  //    feature owner was DELETE: the suite runs AS its principal (ADR 1102 D4), so the
+  //    eraser removes the job(s), the subscription(s) and the row.
 ]);
 
 /**
@@ -490,7 +472,6 @@ const ACTOR_ATTRIBUTED_DEBT = new Map<string, string>([
   ['campaign-brief:targeting-pack', 'Saved campaign-brief artifact. Same shape as ad-angle.'],
   ['campaign-brief:voc-evidence', 'Saved voice-of-customer evidence. May quote THIRD-PARTY prose, which an id-keyed eraser cannot reach either way — recorded so that limit is visible, not implied.'],
   ['chatwidget:config', 'A public chat-widget configuration (`createdBy` + a minted token). The widget must keep working when its author leaves, so this is re-attribute-or-transfer, not delete.'],
-  ['creative-briefs:render', 'A render job/output row carrying its requester. Short-lived in practice but has no TTL, so it is debt rather than exempt.'],
   ['discovery:collection', 'Merchandising collection authored by a member; org storefront config.'],
   ['discovery:merch-rule', 'Merchandising rule authored by a member; org storefront config.'],
   ['funnels:funnel', 'A funnel definition — org config authored by a member.'],
@@ -519,7 +500,6 @@ const ACTOR_ATTRIBUTED_DEBT = new Map<string, string>([
   ['advisory:board', 'FOUND BY the CONS-7 cross-file widening. `AdvisoryBoard.createdBy` (advisory-board/types.ts). The board is a tenant\'s simulation configuration — personas, turn policy, a `livingPersonaAck` right-of-publicity acknowledgement. Deleting it on erasure would destroy the org\'s configured board; the acknowledgement in particular is a COMPLIANCE record about a decision, which argues for re-attribute rather than delete. Needs the advisory-board owner. Reclaimed today only by tenant teardown.'],
   ['campaign-brief:brief', 'FOUND BY the CONS-7 cross-file widening. `CampaignBrief.createdBy` (campaign-brief/types.ts). Org marketing collateral — the same shape as the `campaign-brief:*` artifacts already on this list, which is itself the tell that the family was only PARTLY visible before.'],
   ['campaign-brief:persona', 'FOUND BY the CONS-7 cross-file widening. `Persona.createdBy` (campaign-brief/types.ts). An audience persona is org marketing config, not a person\'s own data (the persona DESCRIBES a market segment). Re-attribute.'],
-  ['creative-briefs:brief', 'FOUND BY the CONS-7 cross-file widening. `CreativeBrief.createdBy` (creative-briefs/types.ts). Same shape as campaign-brief: org creative collateral authored by a member.'],
 ]);
 
 /** NO-GROWTH for the actor-attribution class, tracked separately from `DEBT_CEILING`
@@ -654,8 +634,15 @@ const ACTOR_ATTRIBUTED_DEBT = new Map<string, string>([
  *  `test/adr1051-surface-floor.test.ts` § D8 witnesses it through the live
  *  registry. MEASURED on the rebase onto `2de05f1c9` (the test's own count):
  *  the ledger holds 15 entries (main had 16 under a ceiling of 17), so the
- *  ceiling drops to 15 with no slack. Ledger 15, ceiling 15. */
-const ACTOR_DEBT_CEILING = 15;
+ *  ceiling drops to 15 with no slack. Ledger 15, ceiling 15.
+ *
+ *  ADR 1039 D7 (2026-11-03, feature loop row 82): `creative-briefs:brief` and
+ *  `creative-briefs:render` leave this ledger. `features/creative-briefs/erasure.ts`
+ *  registers `eraseCreativeBriefsSubject`, which tombstones the actor fields in place
+ *  (briefs, versions, renders, grounding settings) by CAS and keeps the rows.
+ *  `test/adr1039-p2-brief-cascade-and-erasure.test.ts` witnesses every field, both
+ *  stored spellings and the not-an-edit rule. Ledger 13, ceiling 13. */
+const ACTOR_DEBT_CEILING = 13;
 
 /** NO-GROWTH: debt may only shrink. Raising this is a deliberate, reviewable act.
  *  RAISED 4→5 (2026-08-15, the R3 subjectId widening): the WIDENED matcher found
@@ -734,7 +721,10 @@ const ACTOR_DEBT_CEILING = 15;
  *  leaves the ledger because the work landed (`eraseJourneyEnrollmentSubject` +
  *  the merge copy/unmerge pair in `features/campaign-journeys/journeyService.ts`).
  */
-const DEBT_CEILING = 6;
+/*  ADR 1102 D8 (2026-11-11, feature loop row 91) — 6 -> 5: `insights:config` leaves
+ *  the ledger because the work landed (`eraseInsightsSuiteSubject`).
+ */
+const DEBT_CEILING = 5;
 
 /**
  * ADR 0584 §Correction (FORM-ERASE-1) — PARTIAL COVERAGE: a store that DOES
@@ -1674,9 +1664,12 @@ describe('ADR 0464 — feature-owned subject-bearing stores', () => {
       }
     }
 
-    // …and the one that is NOT covered is recorded rather than rounded to covered.
-    expect(RECORDED_DEBT.has('insights:config')).toBe(true);
-    expect(stores.get('insights:config')?.hasEraser, 'features/insights-suite registers no eraser').toBe(false);
+    // ADR 1102 D8 — the one this widening found UNCOVERED is now covered by its own
+    // eraser, and the eraser really is registered (not directory-inferred).
+    expect(RECORDED_DEBT.has('insights:config')).toBe(false);
+    expect(stores.get('insights:config')?.hasEraser).toBe(true);
+    const insights = stripComments(readFileSync(join(FEATURES_ROOT, 'insights-suite', 'feature.ts'), 'utf8'));
+    expect(/registerSubjectEraser\(eraseInsightsSuiteSubject\)/.test(insights), 'insights-suite must register its eraser').toBe(true);
   });
 
   it('KB-3: a COMMENTED-OUT eraser does not count as coverage (the probe that came back green)', () => {
@@ -1830,8 +1823,9 @@ const SIGNAL_FREE_BASELINE: readonly string[] =
   (JSON.parse(readFileSync(SIGNAL_FREE_BASELINE_FILE, 'utf8')) as { namespaces: string[] }).namespaces;
 /** The baseline size. It may only go DOWN; never raise it.
  *  252 when the gate landed (P1, #5647). Wave 1 (P2, 2026-11-09): 31 reviewed → 221.
- *  D2 (2026-11-10): 8 that declare PII via declarePiiFields joined the census → 213. */
-const SIGNAL_FREE_BASELINE_CEILING = 213;
+ *  D2 (2026-11-10): 8 that declare PII via declarePiiFields joined the census → 213.
+ *  ADR 1036 D7 (row 81): job-search:steering keyed per subject, now census-governed → 212. */
+const SIGNAL_FREE_BASELINE_CEILING = 212;
 
 /** Reviewed signal-free feature stores: each holds no subject data, and says why.
  *  Each was read at its declaration: the row type with its nested types, AND the
@@ -1878,6 +1872,8 @@ const SIGNAL_FREE_REVIEWED = new Map<string, string>([
   ['usage:rollup', 'per-tenant token and call totals by provider and model'],
   ['voice:realtime-config', 'per-tenant realtime provider and model; the credential is a BYOK ref'],
   ['webinars:sync-state', 'last sync time per tenant, org and webinar event'],
+  ['whatsapp:inbound-seen', 'keyed by a sha256 of tenant, connection and provider message id; holds status, time, state only (ADR 1053 D4)'],
+  ['whatsapp:status-parked', 'keyed by a sha256 of tenant, connection and provider message id; holds status, time, state only (ADR 1053 D3)'],
 ]);
 
 /** ADR 0464 §9 D1 (2026-11-10) — a feature package may carry its own reviews in

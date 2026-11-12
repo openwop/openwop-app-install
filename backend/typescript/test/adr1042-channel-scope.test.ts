@@ -33,6 +33,14 @@
  * returning no scope for a narrow run in `effectiveTurnScope` (unit case),
  * letting any from-me message be self (relay case), and not detecting WhatsApp
  * `@g.us` groups (detection case) each turned red.
+ * Grade-tests wave 101 (2026-11-10): a read tool that egresses off-host, and a read
+ * tool safe mode holds for approval, are still dropped from a narrow list (the
+ * egress and baseline conditions each turned red alone once those fixtures
+ * existed). Not reachable alone, so not claimed: the narrow list's fallback to
+ * the agent allowlist when the scope's own list is empty (`CHANNEL_SAFE_READ_TOOLS`
+ * is empty, so every fallback still yields nothing), and the per-turn half of
+ * the exchange's `suppressRecall` check (every narrow turn also runs in a
+ * conversation stamped narrow).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -66,7 +74,9 @@ const { getToggleDefault } = await import('../src/host/featureToggles/registry.j
 const { registerReplyTransport } = await import('../src/features/connections/messagingOutbound.js');
 const { turnToolAllowlist, narrowChannelToolIds, CHANNEL_SAFE_READ_TOOLS, effectiveTurnScope } = await import('../src/host/conversationToolLoop.js');
 const { isRelayGroup } = await import('../src/messaging/groupDetection.js');
-const { builtinAgentTool } = await import('../src/host/agentToolProvider.js');
+const { builtinAgentTool, registerFeatureAgentTool } = await import('../src/host/agentToolProvider.js');
+const { safeModeBaseline } = await import('../src/host/laneFirewall.js');
+const { resolveToolCapability } = await import('../src/features/capability-firewall/toolCapabilityResolver.js');
 const { registerCrmAgentTools, CRM_LIST_COMPANIES_TOOL_ID } = await import('../src/features/crm/agentTools.js');
 const { approveSender, putChannelSettings, setSenderSelf } = await import('../src/features/channel-ingress/stores.js');
 const { getAgentRegistry } = await import('../src/executor/agentRegistry.js');
@@ -75,9 +85,21 @@ type Harness = Awaited<ReturnType<typeof bootChannelHarness>>;
 const KANBAN_ADD_TODO = 'openwop:kanban.add-todo'; // a write builtin
 const AGENT = 'test.c1042.channel-agent';
 const AGENT_TOOLS = [CRM_LIST_COMPANIES_TOOL_ID, KANBAN_ADD_TODO];
+const WEB_RESEARCH = 'openwop:ai.research.web'; // a read builtin with classified egress
+const HELD_READ = 'test.c1042.held-read'; // a read tool safe mode holds (registered below)
 
 describe('the allowlist a channel turn compiles from', () => {
-  beforeAll(() => { registerCrmAgentTools(); });
+  beforeAll(() => {
+    registerCrmAgentTools();
+    // A read tool that declares a safe-mode approval, through the real registration seam.
+    registerFeatureAgentTool({
+      contentTrust: 'trusted',
+      effect: 'read',
+      safeModeApproval: { reason: 'test: a read safe mode still holds for approval' },
+      def: { name: HELD_READ, description: 'Test read held by safe mode.', inputSchema: { type: 'object', properties: {} } },
+      run: async () => ({ content: '{}' }),
+    });
+  });
 
   it('narrow with no configured allowlist offers nothing, not even a workspace read', () => {
     expect(turnToolAllowlist([CRM_LIST_COMPANIES_TOOL_ID], undefined, { mode: 'narrow', allowlist: [] }, true)).toEqual([]);
@@ -93,6 +115,18 @@ describe('the allowlist a channel turn compiles from', () => {
     const safe = new Set([CRM_LIST_COMPANIES_TOOL_ID, KANBAN_ADD_TODO]);
     expect(narrowChannelToolIds([CRM_LIST_COMPANIES_TOOL_ID, KANBAN_ADD_TODO, 'mcp:unknown.tool'], safe)).toEqual([CRM_LIST_COMPANIES_TOOL_ID]);
     expect(narrowChannelToolIds([], safe)).toEqual([]);
+  });
+
+  it('a listed READ tool is still dropped when it egresses off-host or safe mode holds it for approval', () => {
+    // Non-vacuity: each is a builtin declaring effect "read", so only the egress and
+    // the safe-mode-baseline conditions can drop it.
+    expect(builtinAgentTool(WEB_RESEARCH)?.effect).toBe('read');
+    expect(resolveToolCapability(WEB_RESEARCH)?.egress).toBe('safe-fetch');
+    expect(builtinAgentTool(HELD_READ)?.effect).toBe('read');
+    expect(safeModeBaseline().tools.has(HELD_READ)).toBe(true);
+    expect(resolveToolCapability(HELD_READ)?.egress ?? 'none').toBe('none');
+    const safe = new Set([CRM_LIST_COMPANIES_TOOL_ID, WEB_RESEARCH, HELD_READ]);
+    expect(narrowChannelToolIds([CRM_LIST_COMPANIES_TOOL_ID, WEB_RESEARCH, HELD_READ], safe)).toEqual([CRM_LIST_COMPANIES_TOOL_ID]);
   });
 
   it('a full (self) turn keeps the agent\'s tools, the workspace read included', () => {
@@ -161,11 +195,7 @@ describe('ingress hands each turn its scope (real app, loop stubbed)', () => {
   });
 
   async function waitForCall(n: number): Promise<(typeof calls)[number]> {
-    const end = Date.now() + 45_000;
-    while (calls.length < n) {
-      if (Date.now() > end) throw new Error(`expected ${n} loop calls, saw ${calls.length}`);
-      await new Promise((r) => setTimeout(r, 50));
-    }
+    await vi.waitFor(() => { expect(calls.length, `expected ${n} loop calls`).toBeGreaterThanOrEqual(n); }, { timeout: 45_000, interval: 50 });
     return calls[n - 1]!;
   }
 

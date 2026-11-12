@@ -77,6 +77,7 @@ import {
 } from '../messaging/relayLifecycle.js';
 import { selectRoutingRule } from '../messaging/bridge.js';
 import { RELAY_DEVICE_TOKEN_TTL_MS } from '../messaging/outboundRetention.js';
+import { disabledRelayChannels, relayChannelDisabled, setRelayChannelEnabled } from '../messaging/relayChannelSwitch.js';
 import { isRelayGroup } from '../messaging/groupDetection.js';
 import { enforceChannelInboundRateLimit } from '../middleware/rateLimit.js';
 import { createLogger } from '../observability/logger.js';
@@ -287,6 +288,7 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
       const caller = req.userId ?? req.principal?.principalId;
       const now = Date.now();
       const admin = await isRelayWorkspaceAdmin(req);
+      const off = new Set(await disabledRelayChannels(tenantId));
       const devices = await Promise.all((await storage.listRelayDevices(tenantId)).map(async (d) => {
         const owner = await getRelayOwnerRecord(d.relayId, d.tenantId);
         const ownedByCaller = owner !== null && caller !== undefined && owner.ownerUserId === caller;
@@ -307,9 +309,40 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
             ? { userId: owner.ownerUserId, ownedByCaller, ...(ownedByCaller && owner.ownerAccountId ? { accountId: owner.ownerAccountId } : {}) }
             : null,
           canRevoke: d.status !== 'revoked' && (ownedByCaller || admin),
+          // CHAN-F11 — false while a workspace admin has this channel's relay switched off.
+          channelEnabled: !off.has(d.channel),
         };
       }));
       res.json({ devices });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ---- CHAN-F11 (RELAY-KILL-SWITCH-1): per-channel relay switch, per workspace ----
+
+  // Any member may read it (the devices page shows why a device is paused).
+  app.get(`${BASE}/relay/channels`, async (req, res, next) => {
+    try {
+      const tenantId = resolveTenant(req);
+      const off = new Set(await disabledRelayChannels(tenantId));
+      res.json({ channels: RELAY_CHANNELS.map((channel) => ({ channel, enabled: !off.has(channel) })), canManage: await isRelayWorkspaceAdmin(req) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Switching a channel changes every member's relay in the workspace: an admin's act.
+  app.put(`${BASE}/relay/channels/:channel`, async (req, res, next) => {
+    try {
+      await requireRelayAdmin(req);
+      const tenantId = resolveTenant(req);
+      const channel = assertChannel(req.params.channel);
+      const enabled = (req.body ?? {}).enabled;
+      if (typeof enabled !== 'boolean') throw new OpenwopError('invalid_request', 'enabled MUST be a boolean', 400);
+      const off = new Set(await setRelayChannelEnabled(tenantId, channel, enabled));
+      relayLog.info('relay_channel_switched', { tenantId, channel, enabled, by: req.userId ?? req.principal?.principalId ?? 'unknown' });
+      res.json({ channels: RELAY_CHANNELS.map((c) => ({ channel: c, enabled: !off.has(c) })) });
     } catch (err) {
       next(err);
     }
@@ -383,6 +416,14 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
       const device = await requireDevice(req, storage);
       const envelope = parseIngress(req.body, device.channel);
       const sessionKey = `${device.channel}:${envelope.conversationId}`;
+      // CHAN-F11 — a channel a workspace admin switched off is acknowledged and dropped
+      // first: before admission, budget, dedup claim and delivery log, in both modes.
+      // No chat or sender id is logged (the C1 rule for drops before any budget).
+      if (await relayChannelDisabled(device.tenantId, device.channel)) {
+        relayLog.info('relay_inbound_dropped', { relayId: device.relayId, channel: device.channel, reason: 'channel_disabled' });
+        res.status(202).json({ accepted: false, sessionKey, dropped: 'channel_disabled' });
+        return;
+      }
       // ADR 1042 D7 — with Channels into chat on for the tenant, a message no
       // routing rule claims becomes a turn in the device owner's main-chat
       // conversation (no `messaging_sessions` history, no `uppercase` default).
@@ -528,6 +569,12 @@ export function registerMessagingRoutes(app: Express, deps: Deps): void {
   app.get(`${BASE}/device/outbound`, async (req, res, next) => {
     try {
       const device = await requireDevice(req, storage);
+      // CHAN-F11 — a switched-off channel pulls nothing; its queue waits (and ages out
+      // at the token lifetime if the channel stays off, CHAN-F12).
+      if (await relayChannelDisabled(device.tenantId, device.channel)) {
+        res.json({ relayId: device.relayId, messages: [], paused: 'channel_disabled' });
+        return;
+      }
       const limit = Math.min(Number(req.query.limit) || 50, 200);
       const queued = await storage.listRelayOutbound(device.relayId, limit);
       // ADR 1043 D1 — each egress carries how many transient failures it has seen.
@@ -1129,6 +1176,11 @@ export async function enqueueOutbound(
     reactions?: ChatEgressEnvelope['reactions'];
   },
 ): Promise<ChatEgressEnvelope> {
+  // CHAN-F11 — nothing new is queued for a channel a workspace admin switched off.
+  const owning = await storage.getRelayDevice(relayId);
+  if (owning && (await relayChannelDisabled(owning.tenantId, owning.channel))) {
+    throw new OpenwopError('conflict', 'this relay channel is switched off in the workspace', 409, { reason: 'relay_channel_disabled', relayId });
+  }
   const egress: ChatEgressEnvelope = {
     egressId: `egr_${randomUUID()}`,
     relayId,
@@ -1144,7 +1196,7 @@ export async function enqueueOutbound(
   await storage.enqueueRelayOutbound(egress);
   // Best-effort delivery-log entry (queued). tenantId is resolved from the
   // owning device; if the device is gone we skip the log rather than fail.
-  const device = await storage.getRelayDevice(relayId);
+  const device = owning;
   if (device) {
     await storage.appendDeliveryLog({
       logId: `dlv_${randomUUID()}`,

@@ -30,6 +30,7 @@ function fixture(type: Section['type']): Section {
     case 'featureIndex': return { ...base, data: { heading: 'Index', groups: [{ name: 'Leads', items: [{ label: 'Inquiry capture' }] }] } };
     case 'decisionTree': return { ...base, data: { heading: 'Decide', trees: [{ title: 'Go', nodes: [{ id: 'a', text: 'In scope?', options: [{ label: 'No', outcome: 'Refer out.' }] }] }] } };
     case 'scheduleSim': return { ...base, data: { heading: 'Timeline', milestones: [{ id: 'm', label: 'Plumbing rough', startWeek: 0, weeks: 2, floatDays: 3, rework: 'Open tile' }], decisions: [{ title: 'Valve', milestone: 'm', kind: 'selection', options: [{ label: 'On time', delayDays: 0 }] }] } };
+    case 'films': return { ...base, data: { heading: 'Examples', films: [{ src: 'https://cdn.example.com/a.mp4', poster: 'https://cdn.example.com/a.jpg', title: 'Onboard', description: 'A first run.', length: '0:45' }] } };
     case 'hero': return { ...base, data: { heading: 'Hero', subheading: 'Sub', ctaLabel: 'Go', ctaUrl: '/p/next' } };
     case 'richText': return { ...base, data: { heading: 'Rich', text: 'Para one.' } };
     case 'image': return { ...base, data: { token: 'tok-abc', alt: 'An alt', caption: 'A caption' } };

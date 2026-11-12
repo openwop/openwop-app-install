@@ -44,14 +44,29 @@ Meta's Business Solution Terms (effective 2026-01-15) additionally:
      (`AccountSid:AuthToken`). Configure inbound with provider
      `whatsapp-twilio`; the signing secret is your Twilio auth token. Point
      the Twilio WhatsApp webhook at
-     `…/connections-inbound/<connectionId>`.
+     `…/connections-inbound/<connectionId>#rp=5xx,ct&rc=3`. The fragment is a
+     Twilio connection override meant to make Twilio retry a 5xx (by default
+     it retries connect timeouts only, so a STOP this app could not record,
+     answered 5xx, would not be redelivered). **Unverified: check it against
+     Twilio's connection-override docs or a test webhook before relying on it**,
+     in particular that the fragment does not break signature verification
+     (live check `WA85LIVE-1`).
    - **Meta Cloud API direct** (margin path): the `whatsapp-cloud` connection
      (a WABA system-user token). Configure inbound with provider
      `whatsapp-cloud`; the signing secret is your Meta **app secret** (it is
      also the `hub.verify_token` for the GET subscription handshake).
 3. Bind the sender: pair the connection with your WhatsApp sender — the E.164
-   number (Twilio) or the phone-number id (Cloud).
-4. **Record the no-training attestation** (admin):
+   number (Twilio) or the phone-number id (Cloud). Use a **workspace** or
+   **org** connection for a shared number (ADR 1053): a send uses exactly the
+   bound connection's credential, and a personal connection sends only for its
+   owner. Automated replies from inbound-triggered workflows (no person on the
+   run) can use only a workspace connection.
+4. **Delivery status (Twilio).** With inbound configured on the connection and
+   `OPENWOP_OAUTH_CALLBACK_BASE_URL` or `OPENWOP_PUBLIC_BASE_URL` set, each send
+   asks Twilio to post status callbacks to the same ingest URL. Without them a
+   send stays `accepted` (the truth: nothing more is known). Meta Cloud posts
+   statuses to the app webhook on its own.
+5. **Record the no-training attestation** (admin):
    `PUT …/whatsapp/orgs/:orgId/attestation {"confirmNoTraining": true}`.
    Until it is recorded, verified inbound messages are acked but **never fire
    AI workflows** (fail-closed). Managed keys: the platform configures
@@ -67,14 +82,24 @@ Meta's Business Solution Terms (effective 2026-01-15) additionally:
   insufficient. Capture opt-in at collection time; the source is recorded for
   Meta's audit trail.
 - **STOP is immediate.** Inbound STOP/STOPALL/UNSUBSCRIBE/CANCEL/END/QUIT
-  revokes the WhatsApp consent fail-closed; START/UNSTOP/YES re-opts-in.
+  revokes the WhatsApp consent fail-closed, from any connection; a STOP whose
+  write fails is answered 5xx so the provider redelivers it. START/UNSTOP/YES
+  re-opts-in only through a **workspace or org** connection, whose inbound only
+  an admin can configure (ADR 1053 D4a). Each inbound message id is processed
+  once: a replayed or redelivered message does nothing.
 - **The 24-hour window.** A free-form (session) message may only be sent
   within 24h of the recipient's last inbound message. Outside the window only
   a **pre-approved template** may be sent (Twilio ContentSid, or the Meta
   template name + language).
 - **Sends are idempotent across retries and run forks** — an identical send
-  (same tenant/connection/recipient/content) returns the recorded result and
-  is never paid twice.
+  (same tenant/connection/recipient/content, same UTC day) returns the recorded
+  result and is never paid twice. The key is claimed before the provider call:
+  a concurrent duplicate fails `send_in_flight`, and an attempt whose outcome is
+  unknown (a timeout, a 5xx) is not re-sent that day (`send_outcome_unknown`).
+- **"Sent" means accepted.** A send reports `accepted`; delivery (`sent`,
+  `delivered`, `read`, `failed`, `undelivered`) arrives later from the provider
+  and is read with the `delivery-status` node. A failure raises
+  `host.whatsapp.delivery.failed`.
 - **No SMS bypass:** the SMS adapter rejects `whatsapp:` recipients.
 
 ## Costs

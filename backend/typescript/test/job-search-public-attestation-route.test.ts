@@ -91,7 +91,7 @@ describe('ADR 0544 P3 — the public verification route', () => {
 
   it('unknown and REVOKED are byte-identical — status AND body', async () => {
     const { token, attestationId } = await issue();
-    await revokeAttestation(TENANT, attestationId, Date.now());
+    await revokeAttestation(TENANT, attestationId, Date.now(), 'subj-PRIVATE');
 
     const revoked = await fetch(`${BASE}${PUB}/${token}`);
     const unknown = await fetch(`${BASE}${PUB}/owatt_no-such-token-at-all-here`);

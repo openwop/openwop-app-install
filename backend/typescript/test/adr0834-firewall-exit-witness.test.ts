@@ -15,7 +15,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 let managedRound = 0;
-const MANAGED_CALL: { name: string } = { name: '' };
+const MANAGED_CALL: { name: string; input: Record<string, unknown> } = { name: '', input: {} };
 vi.mock('../src/providers/managedProvider.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/providers/managedProvider.js')>();
   return {
@@ -23,7 +23,7 @@ vi.mock('../src/providers/managedProvider.js', async (importOriginal) => {
     // Round 1 calls MANAGED_CALL.name; round 2 answers. Reset per test.
     dispatchManagedToolsRound: vi.fn(async () => {
       managedRound += 1;
-      if (managedRound === 1) return { text: '', toolUses: [{ id: 'c1', name: MANAGED_CALL.name, input: {} }] };
+      if (managedRound === 1) return { text: '', toolUses: [{ id: 'c1', name: MANAGED_CALL.name, input: MANAGED_CALL.input }] };
       return { text: 'done', toolUses: [] };
     }),
   };
@@ -144,8 +144,8 @@ const chatRun = (runId: string, actingUserId: string, chatSessionId: string): Ru
 const noPolicies: ProviderPolicyResolver = { resolveForRun: async () => [] };
 
 type TurnExtra = Pick<Parameters<typeof runConversationAgentToolTurn>[0], 'permissionMode' | 'callerPrincipal'>;
-async function chatTurn(r: RunRecord, call: string, extra: TurnExtra): Promise<void> {
-  managedRound = 0; MANAGED_CALL.name = call; executed.length = 0;
+async function chatTurn(r: RunRecord, call: string, extra: TurnExtra, input: Record<string, unknown> = {}): Promise<void> {
+  managedRound = 0; MANAGED_CALL.name = call; MANAGED_CALL.input = input; executed.length = 0;
   await runConversationAgentToolTurn({
     run: r, agent: agent([call]), systemPrompt: 'sp', history: [{ role: 'user', content: 'run it' }],
     runId: r.runId, nodeId: 'n', conversationId: `${r.runId}:n:0`,
@@ -221,6 +221,23 @@ describe('S5 — voice honours the conversation\'s tool scope', () => {
     expect(out.status).toBe('ok');
     expect(executed).toEqual([PROBE_READ]);
   });
+  it('FW2-D1: a one-call approval opens a scope-held tool over voice for the exact arguments, once', async () => {
+    await ensureConversationMeta('t-0834-voice', 'sess-voice-call', { type: 'agent', ownerUserId: 'owner-1' });
+    await setConversationCapabilityScope('t-0834-voice', 'sess-voice-call', { mode: 'restricted', requireApproval: [PROBE_READ] });
+    const call = (args: Record<string, unknown>, sessionId: string) => executeRealtimeToolCall({
+      tenantId: 't-0834-voice', agentId: VOICE_AGENT, sessionId, name: PROBE_READ, args, actingUserId: 'owner-1', conversationId: 'sess-voice-call',
+    });
+    expect((await call({ q: 'a' }, 'vs-c1')).status).toBe('requires_approval');
+    const [asked] = await listToolApprovals('t-0834-voice', 'sess-voice-call');
+    expect((await resolveToolApproval('t-0834-voice', 'sess-voice-call', PROBE_READ, 'approved', 'owner-1', asked!.requestedAt)).ok).toBe(true);
+    executed.length = 0;
+    expect((await call({ q: 'b' }, 'vs-c2')).status, 'other arguments are held').toBe('requires_approval');
+    const [reasked] = await listToolApprovals('t-0834-voice', 'sess-voice-call');
+    expect((await resolveToolApproval('t-0834-voice', 'sess-voice-call', PROBE_READ, 'approved', 'owner-1', reasked!.requestedAt)).ok).toBe(true);
+    expect((await call({ q: 'b' }, 'vs-c3')).status).toBe('ok');
+    expect(executed).toEqual([PROBE_READ]);
+    expect((await call({ q: 'b' }, 'vs-c4')).status, 'spent: asked again').toBe('requires_approval');
+  });
 });
 
 
@@ -293,7 +310,9 @@ describe('FW2-CD-1 — a run acting as someone else does not spend the owner\'s 
     await ensureConversationMeta('t-0834', 'sess-owned', { type: 'agent', ownerUserId: 'owner-1' });
     await recordToolApprovalRequested('t-0834', 'sess-owned', CODE_EXEC, { origin: 'baseline' });
     const [row] = await listToolApprovals('t-0834', 'sess-owned');
-    expect((await resolveToolApproval('t-0834', 'sess-owned', CODE_EXEC, 'approved', 'owner-1', row!.requestedAt)).ok).toBe(true);
+    // FW2-D1 — a TOOL-WIDE approval (`conversation`): a one-call approval would be spent by
+    // the owner's control turn below, leaving nothing to show that the fork did not fold it.
+    expect((await resolveToolApproval('t-0834', 'sess-owned', CODE_EXEC, 'approved', 'owner-1', row!.requestedAt, 'conversation')).ok).toBe(true);
     // control: the owner's own run uses the approval
     await chatTurn(chatRun('r-cd1a', 'owner-1', 'sess-owned'), CODE_EXEC, {});
     expect(executed).toEqual([CODE_EXEC]);
@@ -326,5 +345,66 @@ describe('FW2-CD-4 — an expired mission keeps the agent from acting', () => {
     });
     await chatTurn(chatRun('r-cd4', 'owner-1', 'sess-expired'), PROBE_READ, {});
     expect(executed).toEqual([]);
+  });
+});
+
+describe('FW2-D1 (CHAN-F2) — through a real chat turn, an approval covers the call it was shown', () => {
+  it('a one-call approval runs the exact call once; different arguments are held and re-asked', async () => {
+    const X = { code: 'print(1)' };
+    const Y = { code: 'print(2)' };
+    await ensureConversationMeta('t-0834', 'sess-fw2d1', { type: 'agent', ownerUserId: 'owner-1' });
+    // The owner's call is held, and lands pending with its arguments.
+    await chatTurn(chatRun('r-d1a', 'owner-1', 'sess-fw2d1'), CODE_EXEC, {}, X);
+    expect(executed).toEqual([]);
+    const [asked] = await listToolApprovals('t-0834', 'sess-fw2d1');
+    expect(asked).toMatchObject({ status: 'pending', lane: 'app' });
+    expect((await resolveToolApproval('t-0834', 'sess-fw2d1', CODE_EXEC, 'approved', 'owner-1', asked!.requestedAt)).ok).toBe(true);
+    // The agent retries with DIFFERENT arguments: not run, and the owner is asked about those.
+    await chatTurn(chatRun('r-d1b', 'owner-1', 'sess-fw2d1'), CODE_EXEC, {}, Y);
+    expect(executed).toEqual([]);
+    const [reasked] = await listToolApprovals('t-0834', 'sess-fw2d1');
+    expect(reasked).toMatchObject({ status: 'pending' });
+    expect(reasked!.requestedInput).toContain('print(2)');
+    expect((await resolveToolApproval('t-0834', 'sess-fw2d1', CODE_EXEC, 'approved', 'owner-1', reasked!.requestedAt)).ok).toBe(true);
+    // The exact call runs, once; the approval is then gone and the same call is held again.
+    await chatTurn(chatRun('r-d1c', 'owner-1', 'sess-fw2d1'), CODE_EXEC, {}, Y);
+    expect(executed).toEqual([CODE_EXEC]);
+    expect((await listToolApprovals('t-0834', 'sess-fw2d1')).filter((r) => r.status === 'approved')).toEqual([]);
+    await chatTurn(chatRun('r-d1d', 'owner-1', 'sess-fw2d1'), CODE_EXEC, {}, Y);
+    expect(executed).toEqual([]);
+  });
+});
+
+describe('CHAN-F2 — the ADR 0132 scope gate on a channel turn uses only per-call approvals', () => {
+  it('a tool-wide approval opens a scope-held tool in-app but not on a channel turn; a one-call channel approval runs once', async () => {
+    const channelRun = (runId: string): RunRecord => {
+      const r = chatRun(runId, 'owner-1', 'sess-chan-scope');
+      return { ...r, metadata: { ...r.metadata, channelIngress: { lane: 'relay:x', scope: 'owner' } } };
+    };
+    await ensureConversationMeta('t-0834', 'sess-chan-scope', { type: 'agent', ownerUserId: 'owner-1' });
+    await setConversationCapabilityScope('t-0834', 'sess-chan-scope', { mode: 'restricted', requireApproval: [PROBE_READ] });
+    // Only the scope gate holds this read (it is not in the safe-mode baseline).
+    await chatTurn(chatRun('r-cs0', 'owner-1', 'sess-chan-scope'), PROBE_READ, {});
+    expect(executed, 'control: the scope gate holds it').toEqual([]);
+    const [asked] = await listToolApprovals('t-0834', 'sess-chan-scope');
+    expect((await resolveToolApproval('t-0834', 'sess-chan-scope', PROBE_READ, 'approved', 'owner-1', asked!.requestedAt, 'conversation')).ok).toBe(true);
+    await chatTurn(chatRun('r-cs1', 'owner-1', 'sess-chan-scope'), PROBE_READ, {});
+    expect(executed, 'in-app: the tool-wide approval opens it').toEqual([PROBE_READ]);
+    // The scope fold used to take every row on a channel turn too, so this ran.
+    await chatTurn(channelRun('r-cs2'), PROBE_READ, {});
+    expect(executed, 'channel: a tool-wide approval does not').toEqual([]);
+
+    // A one-call approval raised on the channel lane runs that call once.
+    await ensureConversationMeta('t-0834', 'sess-chan-scope-2', { type: 'agent', ownerUserId: 'owner-1' });
+    await setConversationCapabilityScope('t-0834', 'sess-chan-scope-2', { mode: 'restricted', requireApproval: [PROBE_READ] });
+    const ch2 = (runId: string): RunRecord => ({ ...channelRun(runId), metadata: { ...channelRun(runId).metadata, chatSessionId: 'sess-chan-scope-2' } });
+    await chatTurn(ch2('r-cs3'), PROBE_READ, {});
+    const [ch] = await listToolApprovals('t-0834', 'sess-chan-scope-2');
+    expect(ch).toMatchObject({ status: 'pending', lane: 'channel' });
+    expect((await resolveToolApproval('t-0834', 'sess-chan-scope-2', PROBE_READ, 'approved', 'owner-1', ch!.requestedAt)).ok).toBe(true);
+    await chatTurn(ch2('r-cs4'), PROBE_READ, {});
+    expect(executed).toEqual([PROBE_READ]);
+    await chatTurn(ch2('r-cs5'), PROBE_READ, {});
+    expect(executed, 'spent: the next call is held again').toEqual([]);
   });
 });

@@ -15,7 +15,7 @@ import type { Response } from 'express';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { requireFeatureEnabled, authorizeOrgScope } from '../featureRoute.js';
 import { JOB_SEARCH_TOGGLE, JOB_SEARCH_LABEL } from './service.js';
-import { createApplication, advanceApplication, listApplications, resolveApplicationPipeline } from './domain/applications.js';
+import { createApplication, advanceApplication, listApplications, resolveApplicationPipeline, isForeignApplicationId } from './domain/applications.js';
 import { createApplyGrant, revokeApplyGrant, applyGrants } from '../../host/applyGrant.js';
 import { listListings, setListingsPublic, listingsArePublic } from './boards/listing.js';
 import { listDeals } from '../crm/crmEntitiesService.js';
@@ -68,7 +68,7 @@ export function registerJobSearchRoutes(deps: RouteDeps): void {
 
   app.get(`${JOB_SEARCH_BASE}/orgs/:orgId/applications`, async (req, res, next) => {
     try {
-      const { tenantId, orgId } = await authorizeOrgScope(req, FEATURE, 'workspace:read');
+      const { tenantId, orgId, user } = await authorizeOrgScope(req, FEATURE, 'workspace:read');
       const rows = await listApplications(tenantId, orgId);
       // Resolve the stage NAME and an applied date here rather than shipping raw
       // ids to the client.
@@ -89,6 +89,12 @@ export function registerJobSearchRoutes(deps: RouteDeps): void {
           // The deal's own creation IS the moment the application was recorded.
           // `customFields.appliedAt` wins when a real submission wrote one.
           appliedAt: (r.deal.customFields as Record<string, unknown> | undefined)?.appliedAt ?? r.deal.createdAt ?? null,
+          // ADR 1036 D10 — the list is the workspace's (ADR 0546); this says which
+          // rows are the caller's own, never who the others belong to. Both sides
+          // are the canonical user id: `createdBy` is written from
+          // `resolveCallerUser(req).userId` (here and via the grant's subject), and
+          // `user.userId` is that same resolver's answer.
+          mine: r.deal.createdBy === user.userId,
         })),
       });
     } catch (err) {
@@ -106,12 +112,26 @@ export function registerJobSearchRoutes(deps: RouteDeps): void {
         res.status(400).json({ error: 'validation_error', message: 'dealId must be a `deal:`-prefixed string.' });
         return;
       }
+      // ADR 1036 D3 — the pipeline's per-person id shape belongs to the person it
+      // names. Member ids are visible across a workspace, so without this a
+      // colleague could pre-create `deal:<their tag>:<listing>` and block that
+      // person's application to the listing forever (grade-code row 81).
+      if (isForeignApplicationId(body.dealId, user.userId)) {
+        res.status(409).json({ error: 'conflict', message: 'That application id belongs to someone else in this workspace.' });
+        return;
+      }
       const result = await createApplication({
         tenantId, orgId, actor: user.userId, dealId: body.dealId,
         digest: normaliseDigest(body.digest),
         profile: normaliseProfile(body.profile),
         applicant: normaliseApplicant(body.applicant),
       });
+      // ADR 1036 D3 — a deal id a colleague created is a conflict, not their
+      // application echoed back.
+      if (result.notYours) {
+        res.status(409).json({ error: 'conflict', message: 'That application belongs to someone else in this workspace.' });
+        return;
+      }
       // An ineligible application is NOT an error — it is a decision, and the
       // caller needs the quoted reason. 200 with `eligible:false` says that;
       // a 4xx would conflate "we chose not to apply" with "you called this wrong".
@@ -151,8 +171,10 @@ export function registerJobSearchRoutes(deps: RouteDeps): void {
 
   app.get(`${JOB_SEARCH_BASE}/orgs/:orgId/agent/steering`, async (req, res, next) => {
     try {
-      const { tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:read');
-      res.json(await getSteering(tenantId));
+      // ADR 1036 D7 — the caller's OWN steering; a colleague's goals and policy
+      // are not readable here.
+      const { tenantId, user } = await authorizeOrgScope(req, FEATURE, 'workspace:read');
+      res.json(await getSteering(tenantId, user.userId));
     } catch (err) {
       next(err);
     }
@@ -208,8 +230,9 @@ function sendRefusal(res: Response, reason: IssueRefusal): void {
 
   app.get(`${JOB_SEARCH_BASE}/orgs/:orgId/attestations`, async (req, res, next) => {
     try {
-      const { tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:read');
-      res.json({ attestations: await listAttestations(tenantId) });
+      // ADR 1036 D5 — the caller's OWN attestations, not the tenant's.
+      const { tenantId, user } = await authorizeOrgScope(req, FEATURE, 'workspace:read');
+      res.json({ attestations: await listAttestations(tenantId, user.userId) });
     } catch (err) {
       next(err);
     }
@@ -253,8 +276,8 @@ function sendRefusal(res: Response, reason: IssueRefusal): void {
 
   app.delete(`${JOB_SEARCH_BASE}/orgs/:orgId/attestations/:attestationId`, async (req, res, next) => {
     try {
-      const { tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
-      const ok = await revokeAttestation(tenantId, req.params.attestationId ?? '', Date.now());
+      const { tenantId, user } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
+      const ok = await revokeAttestation(tenantId, req.params.attestationId ?? '', Date.now(), user.userId);
       if (!ok) {
         res.status(404).json({ error: 'not_found', message: 'Attestation not found or already revoked.' });
         return;
@@ -463,9 +486,10 @@ function sendRefusal(res: Response, reason: IssueRefusal): void {
 
   app.delete(`${JOB_SEARCH_BASE}/orgs/:orgId/grants/:grantId`, async (req, res, next) => {
     try {
-      const { tenantId, orgId } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
+      const { tenantId, orgId, user } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
       // Revocation is immediate and does not require the campaign to stop (D5).
-      const ok = await revokeApplyGrant(tenantId, orgId, req.params.grantId ?? '', Date.now());
+      // ADR 1036 D5 — only the person the grant acts for, or who issued it.
+      const ok = await revokeApplyGrant(tenantId, orgId, req.params.grantId ?? '', Date.now(), user.userId);
       if (!ok) {
         res.status(404).json({ error: 'not_found', message: 'Grant not found or already revoked.' });
         return;

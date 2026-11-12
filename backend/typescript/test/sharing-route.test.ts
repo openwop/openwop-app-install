@@ -303,6 +303,30 @@ describe('R2 SR-1 — cms/kb shares carry a RENDERED markdown body (the Blocker:
     expect(md).toContain('isn’t included in this shared view');
   });
 
+  // ADR 1069 D4 — a pricing section's AUTHORED plans are its own words, so the
+  // share carries them; a pricing section without plans is still the live
+  // billing read and keeps the honest note.
+  it('cms_page share carries authored pricing plans; a billing-tier pricing section stays noted', async () => {
+    const { owner, orgId } = await ownerWithMember('viewer');
+    const r = await owner.post<{ pageId: string }>(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, {
+      title: 'Pricing', sections: [
+        { type: 'pricing', data: { heading: 'Plans', plans: [{ name: 'Pilot', status: 'Open now', blurb: 'Made with us.' }, { name: 'Solo', status: 'Coming' }] } },
+      ],
+    });
+    expect(r.status, JSON.stringify(r.body)).toBe(201);
+    const token = (await mintLink(owner, orgId, { resourceType: 'cms_page', resourceId: r.body.pageId })).body.token;
+    const md = String((await client().get<SharedBody>(shared(token))).body.resource.markdown);
+    expect(md).toContain('**Pilot** · Open now\nMade with us.');
+    expect(md).toContain('**Solo** · Coming');
+    expect(md).not.toContain('isn’t included in this shared view');
+
+    const r2 = await owner.post<{ pageId: string }>(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, {
+      title: 'Tiers', sections: [{ type: 'pricing', data: { heading: 'Plans', tiers: ['pro'] } }],
+    });
+    const token2 = (await mintLink(owner, orgId, { resourceType: 'cms_page', resourceId: r2.body.pageId })).body.token;
+    expect(String((await client().get<SharedBody>(shared(token2))).body.resource.markdown)).toContain('isn’t included in this shared view');
+  });
+
   // Absorbs the former "resolves a KB-collection overview by token" case, which
   // built the identical fixture to assert the structured `name` + `documents`.
   it('kb_collection resolve prerenders name/description/documents to markdown', async () => {

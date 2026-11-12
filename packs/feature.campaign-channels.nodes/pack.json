@@ -1,6 +1,6 @@
 {
   "name": "feature.campaign-channels.nodes",
-  "version": "1.19.0",
+  "version": "1.19.1",
   "kind": "node",
   "description": "Campaign Studio channel-generation node pack. One parameterized `generate` node turns a brief's messaging kernel into a channel deliverable (landing page / ad variants / email sequence / creative briefs / social posts) \u2014 grounded in the KB (kb.rag citations) + brand voice (ctx.features.brand) via the run-scoped provider \u2014 plus a `content.quality.check` node. Drives the five channel child workflows the orchestration fans out. v1.14.0 (ADR 0945 D8): render-concepts is role:side-effect + side-effectful, so a :fork serves the recorded concepts instead of generating (and paying) again.",
   "author": "OpenWOP App",
@@ -29,7 +29,7 @@
       "typeId": "feature.campaign-channels.nodes.create-creative-briefs",
       "version": "1.0.0",
       "label": "Channel: Create Creative Briefs",
-      "description": "ADR 1020 D14: creates an APPROVED creative_briefs draft's visual briefs as managed entities on the Creative Briefs page, after the channel's approval (a rejected draft leaves nothing behind). Idempotent on (campaignBriefId, title); failures counted into briefCreateErrors; skips when the creative-briefs feature is off. Inputs: { briefId, draft }. Output: { summary, createdBriefIds, briefCreateErrors? } or { skipped: true, summary }; fails creative_briefs_not_created when none could be added. role:\"side-effect\": a replay fork serves the recorded outcome. Charges nothing.",
+      "description": "ADR 1020 D14: creates an APPROVED creative_briefs draft's visual briefs as managed entities on the Creative Briefs page, after the channel's approval (a rejected draft leaves nothing behind). Idempotent on (campaignBriefId, title); failures counted into briefCreateErrors; skips when the creative-briefs feature is off. Inputs: { briefId, draft }. Output: { summary, createdBriefIds, briefCreateErrors? } or { skipped: true, summary }; fails creative_briefs_not_created when none could be added, and forbidden_scope when the person the run acts for lacks workspace:write on the org (ADR 1039 D1). role:\"side-effect\": a replay fork serves the recorded outcome. Charges nothing.",
       "category": "integration",
       "role": "side-effect",
       "capabilities": [

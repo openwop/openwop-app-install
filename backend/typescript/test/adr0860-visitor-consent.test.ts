@@ -414,7 +414,9 @@ describe('ADR 0860 D7 — a form submit links a session only to a contact it cre
     await setPolicy(T, { defaultMode: 'opt-out' });
     const form = (await owner.post(`/host/openwop-app/forms/orgs/${orgId}/forms`, FORM)).body;
     await owner.patch(`/host/openwop-app/forms/orgs/${orgId}/forms/${form.formId}/status`, { status: 'published' });
-    const page = await owner.post(cms(orgId, '/pages'), { title: 'Step 0860' });
+    // ADR 1023 D6 — the sink attributes only a PUBLISHED funnel's step that serves
+    // this form, so the step page carries the form and the funnel is published.
+    const page = await owner.post(cms(orgId, '/pages'), { title: 'Step 0860', sections: [{ type: 'form', data: { formId: form.formId } }] });
     await owner.post(cms(orgId, `/pages/${page.body.pageId}/publish`));
     const fun = await owner.post(`/host/openwop-app/funnels/orgs/${orgId}/funnels`, {
       name: 'G', slug: 'g-0860', steps: [{ stepId: 'st-a', kind: 'optin', pageId: page.body.pageId }],
@@ -423,6 +425,7 @@ describe('ADR 0860 D7 — a form submit links a session only to a contact it cre
     const funnelId = fun.body.funnel?.funnelId;
     expect(funnelId, 'the funnel create must return an id').toEqual(expect.any(String));
     if (typeof funnelId !== 'string') throw new Error('unreachable: asserted above');
+    expect((await owner.post(`/host/openwop-app/funnels/orgs/${orgId}/funnels/${funnelId}/publish`)).status).toBe(200);
     const r = await pub.post(`/host/openwop-app/public-forms/${form.formId}/submit`, {
       values: { name: 'Fay', email: 'fay-0860@example.com' }, sessionKey: 'vk-fay', consentToken: 'forged',
       context: { funnelId, stepId: 'st-a', visitor: 'vk-fay' },

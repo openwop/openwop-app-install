@@ -369,6 +369,11 @@ export const PUBLIC_PATH_PREFIXES = [
   '/llms.txt',
   '/robots.txt',
   '/sitemap.xml',
+  // ADR 1057 D1 — the crawlable `/docs` + `/docs/:slug` document doors (docs
+  // routes). Published-only, tenant from the configured site org, the same
+  // posture as `/p` above. Missing here, the door 401s every crawler — the
+  // `/llms.txt` lesson one line up.
+  '/docs',
   // ADR 0281 — the dealer PARTNER PORTAL. The capability token in the path IS the
   // credential (the Sharing pattern): tenant/org/dealer resolve FROM the token,
   // never the request; a bad token 404s uniformly. Rides the global per-IP rate

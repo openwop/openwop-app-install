@@ -59,13 +59,21 @@ const norm = (s: string | undefined): string => (s ?? '').replace(/\s+/g, ' ').t
 /** Spread an optional `nodeRef` only when present (exactOptionalPropertyTypes). */
 const refOf = (r: string | undefined): { nodeRef?: string } => (r ? { nodeRef: r } : {});
 
-/** Missing alt text on non-decorative images (WCAG 1.1.1). */
+/** ADR 1100 — an alt that is a file name (`IMG_2041.jpg`, `Screenshot 2026-…`)
+ *  describes nothing. Twin of the backend `FILENAME_ALT`; keep the two equal. */
+export const FILENAME_ALT = /^(?:[\w ().,-]+\.(?:jpe?g|png|gif|webp|svg|avif|heic|bmp|tiff?)|(?:IMG|DSC|DSCN|PXL|MVIMG)[_ -]?\d+.*|Screenshot[ _-]?\d.*)$/i;
+
+/** Missing alt text on non-decorative images (WCAG 1.1.1); a file-name alt is a
+ *  warning (it is not empty, but it does not describe the picture). */
 function checkImages(model: ContentA11yModel): A11yIssue[] {
   const issues: A11yIssue[] = [];
   model.images.forEach((img, i) => {
     if (img.decorative) return; // decorative ⇒ alt="" is correct, not a defect
-    if (!norm(img.alt)) {
+    const alt = norm(img.alt);
+    if (!alt) {
       issues.push({ id: `missing-alt-${i}`, kind: 'missing-alt', severity: 'error', wcag: '1.1.1', messageKey: 'missingAlt', ...refOf(img.ref) });
+    } else if (FILENAME_ALT.test(alt)) {
+      issues.push({ id: `filename-alt-${i}`, kind: 'missing-alt', severity: 'warning', wcag: '1.1.1', messageKey: 'altFilename', ...refOf(img.ref), params: { alt } });
     }
   });
   return issues;

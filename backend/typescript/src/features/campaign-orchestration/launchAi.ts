@@ -65,7 +65,10 @@ export function projectCampaignStageAi(source: {
   }
   const refs = declaredRunCredentialRefs(source.configurable);
   const managed = choice.source === 'managed' && isManagedRef(choice.credentialRef);
-  const ref = runAiCredentialRef(source.configurable);
+  // Issue #5764 — a source whose default froze the workspace binding's key passes
+  // that key on: the stage names its provider on the wire (rung 1), so without it
+  // the stage would choose the provider and then have no key.
+  const ref = runAiCredentialRef(source.configurable) ?? (choice.source === 'workspace' ? choice.credentialRef : undefined);
   const namedProvider = ref ? refNamedProvider(ref, advertisedByokProviders()) : null;
   if ((managed && ref) || (namedProvider && namedProvider !== choice.provider)) {
     throw new OpenwopError('validation_error', 'The source run has incompatible frozen AI and credential choices.', 422, { reason: 'campaign_ai_source_mismatch' });

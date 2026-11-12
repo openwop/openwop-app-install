@@ -13,6 +13,9 @@
  *  4. ADR 1043 D9 (CHAN-P1b) — opens one of THEIR OWN devices to approve or deny
  *     who may write to it, with the connection's own senders section and group
  *     warning; a workspace admin opens any device to revoke an approval.
+ *  5. CHAN-F11 — a workspace admin switches one relay channel off for the whole
+ *     workspace (say, WhatsApp only); everyone sees which channels are off, and a
+ *     device on one shows as paused.
  *
  * NOT a chat (CLAUDE.md "AI chat — reuse"): channel conversations land in the
  * main chat; this page only manages who may write in and who answers.
@@ -41,8 +44,8 @@ import { listAgents, type AgentEntry } from '../../client/agentsClient.js';
 import { ConnectionChannelPanel } from './ConnectionChannelPanel.js';
 import { SendersSection } from './SendersSection.js';
 import {
-  getChannelSettings, getInbound, listChannelConnections, listRelayDevices, refusalMessage, revokeRelayDevice,
-  type ChannelConnection, type ChannelSettings, type InboundConfig, type RelayDevice,
+  getChannelSettings, getInbound, getRelayChannels, listChannelConnections, listRelayDevices, refusalMessage, revokeRelayDevice, setRelayChannel,
+  type ChannelConnection, type ChannelSettings, type InboundConfig, type RelayChannelSwitches, type RelayDevice,
 } from './channelIngressClient.js';
 
 export const CHANNEL_INGRESS_FEATURE = 'channel-ingress';
@@ -184,6 +187,58 @@ function RelaySendersPanel({ device, onClose }: { device: RelayDevice; onClose: 
 /** Who may open a device's senders: its owner, or a workspace admin (`canRevoke` on another's device). */
 const canOpenSenders = (d: RelayDevice): boolean => d.status === 'active' && d.owner !== null && (d.owner.ownedByCaller || d.canRevoke);
 
+/** CHAN-F11 — the per-channel relay switch. Admins get the switches; everyone else
+ *  sees a notice only when a channel is off. */
+function RelayChannelSwitchesPanel({ onChanged }: { onChanged: () => void }): JSX.Element | null {
+  const { t } = useTranslation('channel-ingress');
+  const [view, setView] = useState<RelayChannelSwitches | null>(null);
+  const [pending, setPending] = useState<string | null>(null);
+  useEffect(() => { void getRelayChannels().then(setView).catch(() => setView(null)); }, []);
+  if (!view) return null;
+  const nameOf = (channel: string): string => t(`channel_${channel}`, { defaultValue: channel });
+  const off = view.channels.filter((c) => !c.enabled).map((c) => nameOf(c.channel));
+  if (!view.canManage) {
+    return off.length ? <Notice variant="info">{t('channelsPausedNotice', { channels: off.join(', ') })}</Notice> : null;
+  }
+  const toggle = async (channel: string, enabled: boolean): Promise<void> => {
+    if (pending) return;
+    setPending(channel);
+    try {
+      const channels = await setRelayChannel(channel, enabled);
+      setView({ ...view, channels });
+      toast.success(t(enabled ? 'channelSwitchedOn' : 'channelSwitchedOff', { channel: nameOf(channel) }));
+      onChanged();
+    } catch (err) {
+      toast.error(refusalMessage(err) ?? t('channelSwitchFailed'));
+    } finally {
+      setPending(null);
+    }
+  };
+  return (
+    <fieldset className="u-grid u-gap-2 u-m-0 u-p-0 u-border-0">
+      <legend className="u-fs-14 u-fw-600">{t('channelSwitchTitle')}</legend>
+      <p className="muted u-fs-13 u-m-0">{t('channelSwitchHint')}</p>
+      <div className="u-flex u-flex-wrap u-gap-4">
+        {view.channels.map((c) => (
+          <label key={c.channel} className="u-flex u-items-center u-gap-1">
+            <input
+              type="checkbox"
+              role="switch"
+              checked={c.enabled}
+              aria-disabled={pending !== null || undefined}
+              aria-busy={pending === c.channel || undefined}
+              aria-label={t('channelSwitchLabel', { channel: nameOf(c.channel) })}
+              onChange={() => void toggle(c.channel, !c.enabled)}
+            />
+            <span>{nameOf(c.channel)}</span>
+            <span className="muted u-fs-12" aria-hidden="true">{c.enabled ? t('channelOn') : t('channelOff')}</span>
+          </label>
+        ))}
+      </div>
+    </fieldset>
+  );
+}
+
 function RelayDevicesSection(): JSX.Element {
   const { t } = useTranslation('channel-ingress');
   const [devices, setDevices] = useState<RelayDevice[] | null>(null);
@@ -220,8 +275,9 @@ function RelayDevicesSection(): JSX.Element {
         : d.owner && !d.owner.ownedByCaller ? <span className="u-fs-12 muted">{t('accountHidden')}</span> : '—'
     ) },
     { key: 'status', header: t('colStatus'), render: (d) => {
-      const s = d.status === 'revoked' ? 'revoked' : d.status === 'registered' ? 'registered' : d.online ? 'online' : 'offline';
-      const tone = s === 'online' ? 'completed' : s === 'revoked' ? 'cancelled' : s === 'registered' ? 'paused' : 'waiting';
+      // CHAN-F11 — an active device on a switched-off channel is paused, whatever its heartbeat.
+      const s = d.status === 'revoked' ? 'revoked' : d.status === 'registered' ? 'registered' : d.channelEnabled === false ? 'channelPaused' : d.online ? 'online' : 'offline';
+      const tone = s === 'online' ? 'completed' : s === 'revoked' ? 'cancelled' : s === 'registered' || s === 'channelPaused' ? 'paused' : 'waiting';
       return <StatusBadge status={tone} label={t(`status_${s}`)} />;
     } },
     { key: 'heartbeat', header: t('colHeartbeat'), cellClassName: 'u-tabular', sortValue: (d) => d.lastHeartbeatAt ?? null, render: (d) => (d.lastHeartbeatAt ? formatDateTime(d.lastHeartbeatAt) : t('never')) },
@@ -246,6 +302,7 @@ function RelayDevicesSection(): JSX.Element {
         <h2 id="chan-devices-title" className="u-fs-16 u-m-0">{t('devicesTitle')}</h2>
         <p className="muted u-fs-13 u-m-0">{t('devicesHint')}</p>
       </div>
+      <RelayChannelSwitchesPanel onChanged={load} />
       {failed ? (
         <>
           <Notice variant="error" announce={t('devicesLoadError')}>{t('devicesLoadError')}</Notice>

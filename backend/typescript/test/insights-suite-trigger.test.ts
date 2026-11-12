@@ -1,24 +1,21 @@
 /**
- * ADR 0081 Phase 4 — Workday work-anniversary trigger source.
+ * ADR 0081 Phase 4 → ADR 1102 D6 — the work-anniversary trigger, which this host
+ * does NOT arm.
  *
- * `applyConfig` reconciles a deterministic webhook trigger subscription that starts the
- * `anniversary-draft` meta-workflow: enabling registers it active, disabling pauses it
- * (there is no deleteSubscription — pause makes ingest a no-op, architect C1), re-enable
- * revives it, and re-save is idempotent. An ingested anniversary-shaped event resolves
- * the workflow and starts a run carrying subjectId/milestone as ctx.triggerData.
+ * ADR 0081 P4 armed a webhook subscription that started `anniversary-draft` on an
+ * ingested anniversary event, and this file witnessed that it registered, paused,
+ * revived and delivered. It never witnessed the run getting anywhere: the chain
+ * requires `subjectId`, `workdayBaseUrl` and `recipient`, the trigger lane seeds
+ * declared defaults only (ADR 0677 `ISWF-6a`), and mapping the event into the bag is
+ * `ISWF-6b`, still deferred. So every fire died at its first node (`INS91-6`), and the
+ * config door logged `anniversaryArmed:true` about it. ADR 1102 D6 refuses to arm it
+ * in `applyConfig`, the one choke point, and pauses any row a pre-1102 save left.
  *
- * The Workday→event emission (Workday POSTing the anniversary webhook to the ingest
- * endpoint) is the integration boundary, NOT host code — the ingest seam is exercised
- * here directly with an anniversary-shaped payload (no live Workday needed).
+ * Red when: `applyConfig` arms a subscription again; the refusal writes the config
+ * row first; a save stops pausing the caller's legacy row or stops DELETING another
+ * principal's (`INS91-5`); a paused row starts runs on ingest.
  *
- * Sabotage-witnessed (/grade-tests w20): binding the subscription to the wrong workflow,
- * an id that varies per save, dropping the revive or the pause write, or not registering
- * the chain-backed anniversary workflow each red the case named for it. Every config
- * carries a FIXED, distinct `updatedAt`: two `new Date()` saves can share a millisecond,
- * which made a re-save byte-identical and the idempotency case unable to fail. The generic
- * §C-1 dedup case was cut — `trigger-ingestion.test.ts` › "dedup: a re-delivery of the same
- * external delivery id returns the prior runId (effectively-once)" goes red under the same
- * sabotage, and `applyConfig` passes no dedup option of its own.
+ * When `ISWF-6b` lands, the refusal case below is the one that must flip.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -30,8 +27,9 @@ import {
   __resetTriggerBridgeStore,
   getSubscription,
   listSubscriptions,
+  registerSubscription,
 } from '../src/host/triggerBridgeService.js';
-import { ingestExternalEvent, type TriggerEvent } from '../src/host/triggerIngestionService.js';
+import { ingestExternalEvent } from '../src/host/triggerIngestionService.js';
 import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
 import { saveConfig, __clearToggleStore } from '../src/host/featureToggles/service.js';
 import { insightsSuiteFeature } from '../src/features/insights-suite/feature.js';
@@ -42,20 +40,22 @@ import {
 import {
   applyConfig,
   anniversaryTriggerSubscriptionId,
+  getConfig,
   __resetInsightsSuiteStore,
   type InsightsSuiteConfig,
 } from '../src/features/insights-suite/insightsSuiteService.js';
+import { OpenwopError } from '../src/types.js';
 
 const cfg = (over: Partial<InsightsSuiteConfig> = {}): InsightsSuiteConfig => ({
   tenantId: 't1',
   principalUserId: 'u-ceo',
-  businessUnits: ['TX'],
-  anniversaryTriggerEnabled: true,
+  businessUnit: 'TX',
+  anniversaryTriggerEnabled: false,
   updatedAt: '2026-01-01T00:00:00.000Z',
   ...over,
 });
 
-describe('ADR 0081 §4 — work-anniversary trigger subscription (sqlite memory)', () => {
+describe('ADR 1102 D6 — the work-anniversary trigger is refused, and legacy rows are disarmed (sqlite memory)', () => {
   const storage = openSqliteStorage(':memory:');
   const hostSuite = createHostAdapterSuite({ storage });
   const deps = { storage, hostSuite };
@@ -89,62 +89,44 @@ describe('ADR 0081 §4 — work-anniversary trigger subscription (sqlite memory)
     await saveConfig({ ...insightsSuiteFeature.toggleDefault!, status: 'on' }, 'trigger-test');
   });
 
-  it('enabled config registers a deterministic, active subscription bound to anniversary-draft', async () => {
-    const config = cfg();
-    await applyConfig(config);
-    const subId = anniversaryTriggerSubscriptionId(config);
-    expect(subId).toBe('insights-anniversary:t1:u-ceo');
-    const sub = await getSubscription(subId);
-    expect(sub?.workflowId).toBe(ANNIVERSARY_DRAFT_ID);
-    expect(sub?.source).toBe('webhook');
-    expect(sub?.state).toBe('active');
+  /** A subscription as a pre-ADR-1102 save left it (the arming path is gone). */
+  const legacyArmed = (principal: string) => registerSubscription({
+    subscriptionId: `insights-anniversary:t1:${principal}`,
+    tenantId: 't1',
+    source: 'webhook',
+    workflowId: ANNIVERSARY_DRAFT_ID,
+    featureId: 'insights-suite',
+    verificationMode: 'none',
+    label: 'Work-anniversary recognition draft',
   });
 
-  it('re-save is idempotent (one subscription, deterministic id)', async () => {
+  it('arming is refused with a typed 400, BEFORE anything is written', async () => {
+    let err: unknown;
+    try { await applyConfig(cfg({ anniversaryTriggerEnabled: true })); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(OpenwopError);
+    expect((err as OpenwopError).httpStatus).toBe(400);
+    expect((err as OpenwopError).details).toMatchObject({ field: 'anniversaryTriggerEnabled', reason: 'trigger_lane_unrunnable' });
+    expect(await getConfig('t1'), 'a refusal that persists is worse than the bug').toBeNull();
+    expect(await listSubscriptions('t1')).toEqual([]);
+  });
+
+  it('a save PAUSES the caller\'s own legacy subscription (its delivery history is kept)', async () => {
+    await legacyArmed('u-ceo');
+    expect((await getSubscription('insights-anniversary:t1:u-ceo'))?.state).toBe('active');
     await applyConfig(cfg());
-    await applyConfig(cfg({ updatedAt: '2026-01-02T00:00:00.000Z' }));
-    expect((await listSubscriptions('t1')).filter((s) => s.workflowId === ANNIVERSARY_DRAFT_ID)).toHaveLength(1);
+    expect((await getSubscription(anniversaryTriggerSubscriptionId(cfg())))?.state).toBe('paused');
   });
 
-  it('disabling pauses the subscription; re-enabling revives it (registerSubscription alone would not)', async () => {
-    const config = cfg();
-    const subId = anniversaryTriggerSubscriptionId(config);
-    await applyConfig(config);
-    expect((await getSubscription(subId))?.state).toBe('active');
-    await applyConfig(cfg({ anniversaryTriggerEnabled: false, updatedAt: '2026-01-02T00:00:00.000Z' }));
-    expect((await getSubscription(subId))?.state).toBe('paused');
-    await applyConfig(cfg({ anniversaryTriggerEnabled: true, updatedAt: '2026-01-03T00:00:00.000Z' }));
-    expect((await getSubscription(subId))?.state).toBe('active');
+  it('a save DELETES another principal\'s legacy subscription (INS91-5)', async () => {
+    await legacyArmed('u-previous');
+    await applyConfig(cfg());
+    expect(await getSubscription('insights-anniversary:t1:u-previous'), 'a previous principal\'s trigger kept accepting events').toBeNull();
   });
 
-  it('an ingested anniversary event resolves anniversary-draft and starts a run carrying subjectId/milestone in ctx.triggerData', async () => {
-    const config = cfg();
-    await applyConfig(config);
-    const subId = anniversaryTriggerSubscriptionId(config);
-    const result = await ingestExternalEvent(deps, subId, {
-      source: 'webhook',
-      method: 'POST',
-      headers: { 'x-event': 'worker.anniversary' },
-      rawBody: JSON.stringify({ subjectId: 'subj-42', milestone: '10 years' }),
-      externalDeliveryId: 'wd-anniv-1',
-    });
-    expect(result.outcome).toBe('delivered');
-    expect(result.runId).toBeTruthy();
-    const run = await storage.getRun(result.runId!);
-    expect(run?.workflowId).toBe(ANNIVERSARY_DRAFT_ID);
-    const te = (run!.metadata as { triggerData: TriggerEvent }).triggerData;
-    expect(te.source).toBe('webhook');
-    expect(te.contentTrust).toBe('untrusted'); // external input is untrusted (LLM nodes wrap it)
-    expect(te.webhook?.body).toEqual({ subjectId: 'subj-42', milestone: '10 years' });
-  });
-
-  it('a disabled (paused) subscription skips ingestion — no run starts', async () => {
-    // Arm it FIRST: disabling a never-armed trigger pauses nothing (no row exists), and
-    // ingest then skips for "no subscription", not "paused" — the state this case
-    // used to pass in (/grade-tests w20).
+  it('a paused legacy subscription skips ingestion — no run starts', async () => {
+    await legacyArmed('u-ceo');
+    await applyConfig(cfg());
     const subId = anniversaryTriggerSubscriptionId(cfg());
-    await applyConfig(cfg());
-    await applyConfig(cfg({ anniversaryTriggerEnabled: false, updatedAt: '2026-01-02T00:00:00.000Z' }));
     expect((await getSubscription(subId))?.state).toBe('paused');
     const result = await ingestExternalEvent(deps, subId, {
       source: 'webhook',

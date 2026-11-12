@@ -54,6 +54,7 @@ function fixture(type: Section['type']): Section {
     case 'featureIndex': return { ...base, data: { heading: 'Index', groups: [{ name: 'Leads', items: [{ label: 'Inquiry capture' }] }] } };
     case 'decisionTree': return { ...base, data: { heading: 'Decide', trees: [{ title: 'Go', nodes: [{ id: 'a', text: 'In scope?', options: [{ label: 'No', outcome: 'Refer out.' }] }] }] } };
     case 'scheduleSim': return { ...base, data: { heading: 'Timeline', milestones: [{ id: 'm', label: 'Plumbing rough', startWeek: 0, weeks: 2, floatDays: 3, rework: 'Open tile' }], decisions: [{ title: 'Valve', milestone: 'm', kind: 'selection', options: [{ label: 'On time', delayDays: 0 }] }] } };
+    case 'films': return { ...base, data: { heading: 'Examples', films: [{ src: 'https://cdn.example.com/a.mp4', poster: 'https://cdn.example.com/a.jpg', title: 'Onboard', description: 'A first run.', length: '0:45' }] } };
     case 'hero':
       return { ...base, data: { eyebrow: 'Eyebrow', heading: 'Hero heading', subheading: 'Sub with **bold**', ctaLabel: 'Go', ctaUrl: '/p/next', ctaLabel2: 'Docs', ctaUrl2: 'https://example.com/d' } };
     case 'richText':
@@ -223,6 +224,10 @@ describe('ADR 0384 sectionHtml — golden fixture', () => {
 <section data-owp-section="scheduleSim">
 <h2 id="timeline">Timeline</h2>
 <ol><li>Plumbing rough (if late: Open tile)</li></ol>
+</section>
+<section data-owp-section="films">
+<h2 id="examples">Examples</h2>
+<ul><li><figure><img src="https://cdn.example.com/a.jpg" alt="Onboard"><figcaption><strong>Onboard</strong> (0:45). A first run. <a href="https://cdn.example.com/a.mp4">Onboard</a></figcaption></figure></li></ul>
 </section>
 </main>`);
   });

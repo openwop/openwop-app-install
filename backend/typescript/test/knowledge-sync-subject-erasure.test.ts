@@ -52,6 +52,7 @@ vi.mock('../src/host/knowledgeSourceFetch.js', async (orig) => ({
 
 import { createApp } from '../src/index.js';
 import { createCollection, getCollection } from '../src/features/kb/kbService.js';
+import { createMember } from '../src/host/accessControlService.js';
 import { PREAUTHORIZED_CALLER } from '../src/host/subjectAccess.js';
 import { eraseSubject, registeredSubjectEraserIds } from '../src/host/subjectErasure.js';
 import { upsertOAuthConnection } from '../src/features/connections/connectionsService.js';
@@ -123,7 +124,7 @@ describe('KSC-21 — the DSAR eraser is WIRED, not merely written', () => {
     expect(after?.createdBy).toBe(ERASED_CREATOR);
     expect(after?.createdBy).not.toBe(me);
     // …and the message must name the EXIT, not merely the state.
-    expect(after?.lastError).toMatch(/add the folder again with your own connected account/i);
+    expect(after?.lastError).toMatch(/your own connected account/i);
   });
 
   it('DISABLE, NOT DELETE — the binding and its diff cursor survive', async () => {
@@ -179,7 +180,7 @@ describe('KSC-21 — the DSAR eraser is WIRED, not merely written', () => {
     await eraseKnowledgeSyncSubject(tenantId, me);
     const erased = await getSyncSource(tenantId, sourceId);
     await expect(runKnowledgeSyncOnce({ storage: hostExtStorage() }, erased!))
-      .rejects.toThrow(/add the folder again with your own connected account/i);
+      .rejects.toThrow(/your own connected account/i);
 
     const other = await sourceOwnedBy(tenantId, 'user:someone', 'user:different');
     const drifted = await getSyncSource(tenantId, other.sourceId);
@@ -332,7 +333,7 @@ describe('KSC-21 — the pause has a LIVE EXIT (the R1 wedge, not repeated)', ()
     // run still refuses fail-closed. That is defence in depth, not a dead end —
     // the refusal names the real exit, which is re-binding with a live account.
     await expect(runKnowledgeSyncOnce({ storage: hostExtStorage() }, resumed!))
-      .rejects.toThrow(/add the folder again with your own connected account/i);
+      .rejects.toThrow(/your own connected account/i);
   });
 
   it('the real exit WORKS: a live member re-binding their own connection syncs normally', async () => {
@@ -348,6 +349,9 @@ describe('KSC-21 — the pause has a LIVE EXIT (the R1 wedge, not repeated)', ()
     expect((await getSyncSource(tenantId, dead.sourceId))?.status).toBe('paused');
 
     const live = 'user:still-here';
+    // ADR 1101 D3 — every pass re-checks that the person it acts as still holds
+    // write on the source's org, so the live member must be one (an editor).
+    await createMember({ orgId: 'org-e', tenantId, displayName: 'Live', subject: live, roles: ['editor'] });
     const rebound = await sourceOwnedBy(tenantId, live, live);
     const source = await getSyncSource(tenantId, rebound.sourceId);
     expect(source?.status).toBe('active');

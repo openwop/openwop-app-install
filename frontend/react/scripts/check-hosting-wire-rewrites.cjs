@@ -200,6 +200,20 @@ for (const src of ['/.well-known/**', '/v1/**', SEAMS_SOURCE, ...V2_SOURCES]) {
   }
 }
 
+// (1b) ADR 1057 D1 — the platform-origin DOCUMENT DOORS (`/`, `/p/**`, `/docs`,
+// `/docs/**`) must also precede the catch-all, or crawlers get the SPA shell: MEASURED
+// 2026-11-04, every `/docs` URL served the generic shell to Googlebot because no
+// rewrite sent it to the backend door. ORDER ONLY: these are deliberately NOT added to
+// the Cloud Run source set that (3) below checks site routes against, because the
+// SPA's own `/docs` route is SUPPOSED to sit under a door (the backend serves humans
+// the same SPA shell there).
+for (const src of ['/', '/p/**', '/docs', '/docs/**']) {
+  const i = idxOf(src);
+  if (i === -1) fail(`no rewrite for the document door "${src}" — crawlers would get the SPA shell instead of the prerender (ADR 0384 / ADR 1057).`);
+  if (!rewrites[i].run?.serviceId) fail(`the document door "${src}" does not target a Cloud Run service.`);
+  if (i > catchAll) fail(`the document door "${src}" (index ${i}) comes AFTER the SPA catch-all (index ${catchAll}) — it is dead, and crawlers get the shell.`);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // (3) ADR 0641 phase 2 — a `site` route MUST NOT collide with a Cloud Run source.
 //

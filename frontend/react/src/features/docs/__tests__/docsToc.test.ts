@@ -1,6 +1,6 @@
 /**
  * UX-D3 / R2R-1 — the DOM-derived docs TOC (`docs/docsToc.ts`, ADR 0392 public docs
- * tier): h1–h3 only (h4 capped), ids slugified and DEDUPED — including two headings
+ * tier): h2–h3 only (h1 is the page title; h4 capped), ids slugified and DEDUPED — including two headings
  * that arrive with the SAME pre-assigned id (R2R-1: the shared renderer stamps
  * section ids, so duplicates are real) — pre-existing ids kept, and no TOC under
  * two headings.
@@ -23,7 +23,7 @@ describe('deriveToc', () => {
     return el;
   };
 
-  it('extracts h1-h3 (h4 ignored), assigns deduped ids, needs ≥2 headings', () => {
+  it('extracts h2-h3 (h4 ignored), assigns deduped ids, needs ≥2 headings', () => {
     const el = container('<h2>Install</h2><p>x</p><h3>Install</h3><h4>Deep</h4><h2>Usage</h2>');
     const toc = deriveToc(el);
     expect(toc.map((e) => e.text)).toEqual(['Install', 'Install', 'Usage']);
@@ -36,6 +36,11 @@ describe('deriveToc', () => {
     const el = container('<h2 id="faq">Pricing</h2><h2 id="faq">Billing</h2><h2 id="faq">Refunds</h2>');
     expect(deriveToc(el).map((e) => e.id)).toEqual(['faq', 'faq-2', 'faq-3']);
     expect(Array.from(el.querySelectorAll('h2')).map((h) => h.id)).toEqual(['faq', 'faq-2', 'faq-3']);
+  });
+
+  it('skips the page title (h1) and the consent banner\'s heading (grade-ux row 88, finding 3)', () => {
+    const el = container('<h1>Welcome</h1><h2>Install</h2><div class="visitor-consent"><h2>Analytics on this site</h2></div><h2>Usage</h2>');
+    expect(deriveToc(el).map((e) => e.text)).toEqual(['Install', 'Usage']);
   });
 
   it('returns [] under 2 headings (no lonely TOC)', () => {

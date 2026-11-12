@@ -30,7 +30,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
-import { __resetTriggerBridgeStore, getSubscription } from '../src/host/triggerBridgeService.js';
+import { __resetTriggerBridgeStore, registerSubscription } from '../src/host/triggerBridgeService.js';
 import { getJob, resetScheduling } from '../src/host/schedulingService.js';
 import { processDueSchedules } from '../src/host/scheduleDaemon.js';
 import { ingestExternalEvent } from '../src/host/triggerIngestionService.js';
@@ -58,8 +58,10 @@ const anniversaryDraftDefinition = buildInsightsMetaWorkflow(ANNIVERSARY_DRAFT_I
 const toggle = (status: FeatureToggleStatus): ToggleConfig => ({ ...insightsSuiteFeature.toggleDefault!, status });
 
 const cfg = (over: Partial<InsightsSuiteConfig> = {}): InsightsSuiteConfig => ({
-  tenantId: 't1', principalUserId: 'u-ceo', businessUnits: ['TX'],
-  scheduleCron: '0 6 * * 1', anniversaryTriggerEnabled: true,
+  tenantId: 't1', principalUserId: 'u-ceo', businessUnit: 'TX',
+  // ADR 1102 D6 — `true` is refused by `applyConfig`; the ingest-gate case below
+  // registers a legacy subscription directly.
+  scheduleCron: '0 6 * * 1', anniversaryTriggerEnabled: false,
   planSource: { projectId: 'acme-analytics' },
   updatedAt: new Date().toISOString(), ...over,
 });
@@ -160,7 +162,6 @@ describe('INS-3 (ADR 0599 §6) — the owning-feature gate fires PER TENANT, at 
       'the exempt tenant must actually FIRE — a schedule that survives but never runs is the same outage the teardown caused',
     ).toBe(1);
     expect(await getJob(weeklyScheduleJobId(vip)), 'the exempt tenant\'s schedule must survive').not.toBeNull();
-    expect((await getSubscription(anniversaryTriggerSubscriptionId(vip)))?.state).toBe('active');
   });
 
   it('with the feature ON for the tenant the job DOES fire — the gate is not vacuous', async () => {
@@ -174,7 +175,12 @@ describe('INS-3 (ADR 0599 §6) — the owning-feature gate fires PER TENANT, at 
   it('trigger ingest is gated the same way — a disabled tenant\'s webhook starts no run', async () => {
     await saveConfig(toggleWithOverride('on', { 't-ingest': { status: 'off' } }), 'test');
     const c = cfg({ tenantId: 't-ingest' });
-    await applyConfig(c);
+    // ADR 1102 D6 — `applyConfig` no longer arms this; a subscription a pre-1102 save
+    // left behind is what the ingest gate still has to hold closed.
+    await registerSubscription({
+      subscriptionId: anniversaryTriggerSubscriptionId(c), tenantId: 't-ingest', source: 'webhook',
+      workflowId: ANNIVERSARY_DRAFT_ID, featureId: 'insights-suite', verificationMode: 'none', label: 'legacy',
+    });
     // Real ingest deps: on the gated path the catalog is never reached; with the gate
     // removed the real catalog has no such workflow and dead-letters — still not `skipped`.
     const res = await ingestExternalEvent(

@@ -25,15 +25,54 @@ import { isAllowed } from '../consent/consentService.js';
 import { visitorAnalyticsAllowed } from '../consent/visitorConsent.js';
 import { createLogger } from '../../observability/logger.js';
 import { registerSubmissionSink } from '../forms/submissionSinks.js';
-import { getFunnel, publicFunnelStep } from './funnelsService.js';
+import { getFunnel, publicFunnelStep, type Funnel, type FunnelStep } from './funnelsService.js';
+import { resolveStepExperiment } from './stepExperimentsEngine.js';
+import { deliverableSectionsForPage, getPage, resolveSharedRefs } from '../cms/cmsService.js';
+import { getMarketingEvent } from '../webinars/entities/marketingEvent.js';
 
 const log = createLogger('funnels.formsSink');
+
+/** True when `formId` appears anywhere in `value` as a `formId` field. */
+function mentionsForm(value: unknown, formId: string, depth = 0): boolean {
+  if (depth > 8 || !value || typeof value !== 'object') return false;
+  if (Array.isArray(value)) return value.some((v) => mentionsForm(v, formId, depth + 1));
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (k === 'formId' && v === formId) return true;
+    if (mentionsForm(v, formId, depth + 1)) return true;
+  }
+  return false;
+}
+
+/**
+ * ADR 1023 D6 — does this step serve `formId`? Its bound form (an application step's
+ * form, a webinar's registration form) or a form in what DELIVERY serves for any of
+ * the step's pages: the holdout and every step-experiment variant page (an
+ * unconsented submitter has no assigned variant to check), each with its running CMS
+ * page experiment's sections and its shared-section refs resolved — a form kept in a
+ * shared section has an empty `data` on the page itself (architect round 1, B3).
+ */
+async function formServedOnStep(tenantId: string, orgId: string, funnel: Funnel, step: FunnelStep, formId: string): Promise<boolean> {
+  if (step.application?.formId === formId) return true;
+  if (step.webinar) {
+    const ev = await getMarketingEvent(tenantId, orgId, step.webinar.marketingEventId);
+    if (ev?.formId === formId) return true;
+  }
+  const exp = await resolveStepExperiment(tenantId, orgId, funnel.funnelId, step.stepId, step.experiment);
+  const pageIds = new Set([step.pageId, ...(exp?.variants ?? []).map((v) => v.pageId).filter((id): id is string => typeof id === 'string')]);
+  for (const pageId of pageIds) {
+    const page = await getPage(tenantId, orgId, pageId);
+    if (!page) continue;
+    const delivered = await resolveSharedRefs({ ...page, sections: await deliverableSectionsForPage(page) });
+    if (mentionsForm(delivered.sections, formId)) return true;
+  }
+  return false;
+}
 
 /** Register the `funnel-attribution` sink. Called once from funnels' boot path. */
 export function registerFunnelsFormsSink(): void {
   registerSubmissionSink({
     id: 'funnel-attribution',
-    async onSubmission(_form, submission, capture) {
+    async onSubmission(form, submission, capture) {
       const ctx = submission.meta.context;
       const funnelId = ctx?.funnelId;
       const stepId = ctx?.stepId;
@@ -48,6 +87,14 @@ export function registerFunnelsFormsSink(): void {
         const ix = funnel.steps.findIndex((s) => s.stepId === stepId);
         const step = funnel.steps[ix];
         if (!step) return undefined;
+        // ADR 1023 D6 (FN72WF-15) — `context` is visitor-supplied: the ids are public
+        // in every step response, so any form of the org could name any step of any
+        // funnel and inflate it. Attribute only a PUBLISHED funnel's step that
+        // actually serves this form.
+        if (funnel.status !== 'published' || !(await formServedOnStep(submission.tenantId, submission.orgId, funnel, step, form.formId))) {
+          log.info('attribution_refused', { tenantId: submission.tenantId, funnelId: funnel.funnelId, stepId: step.stepId, reason: funnel.status !== 'published' ? 'funnel_not_published' : 'form_not_on_step' });
+          return undefined;
+        }
         // GC-FRM-1 — the ONE consent gate, same as `/next`'s consentedVisitor:
         // a context-supplied vk enters analytics only if the tenant's consent
         // store allows it; denied/erroring resolves to the empty visitor.

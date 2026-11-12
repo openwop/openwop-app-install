@@ -34,6 +34,7 @@
  * never a broken document).
  */
 import { designSectionHtml, heroQueueHtml, richTextCardHtml } from '../cms/designSections.js';
+import { pricingPlans } from '../cms/pricingPlans.js';
 import { isFragmentHref, isInternalHref } from '../../host/internalHref.js';
 import type { Section } from '../cms/cmsService.js';
 import type { ResolvedContentSection } from '../../host/contentDataSources.js';
@@ -558,7 +559,12 @@ export function sectionHtml(section: Section, opts: SectionHtmlOptions): string 
     case 'pricing': {
       const blurb = str(d.blurb);
       const cta = anchorHtml(str(d.ctaLabel), str(d.ctaUrl));
-      return `<section>\n${head()}${blurb ? `<p>${inlineMarkdownHtml(blurb)}</p>\n` : ''}${cta ? `<p>${cta}</p>\n` : ''}</section>`;
+      // ADR 1069 D4 — authored `plans` are the section's own content (not a
+      // billing read), so the server renders them: one article per plan.
+      const plans = pricingPlans(d).map((p) =>
+        `<article>\n<h3>${escapeHtml(p.name)}</h3>\n${p.status ? `<p>${escapeHtml(p.status)}</p>\n` : ''}${p.blurb ? `<p>${escapeHtml(p.blurb)}</p>\n` : ''}${p.ctaLabel ? `<p>${anchorHtml(p.ctaLabel, p.ctaUrl)}</p>\n` : ''}</article>\n`,
+      ).join('');
+      return `<section>\n${head()}${blurb ? `<p>${inlineMarkdownHtml(blurb)}</p>\n` : ''}${plans}${cta ? `<p>${cta}</p>\n` : ''}</section>`;
     }
 
     // ADR 0485 — a capability comparison MATRIX renders as a real semantic

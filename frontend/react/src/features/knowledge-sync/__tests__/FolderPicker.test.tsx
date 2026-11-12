@@ -40,12 +40,19 @@ describe('FolderPicker (ADR 0107)', () => {
     await screen.findByText('Q1');
     // The Use button names the folder it will select (en: `Use “{{name}}”`).
     fireEvent.click(screen.getByRole('button', { name: 'Use “Reports”' }));
-    expect(onSelect).toHaveBeenCalledWith('fa'); // the current (drilled-in) folder
+    expect(onSelect).toHaveBeenCalledWith('fa', 'Reports'); // the current (drilled-in) folder, and its name (ADR 1101 D8)
   });
 
   it('shows an empty state when a folder has no subfolders', async () => {
     mBrowse.mockResolvedValue([]);
     render(<FolderPicker orgId="o1" connectionId="c1" onSelect={vi.fn()} />);
     expect(await screen.findByText('No subfolders here.')).toBeTruthy();
+  });
+
+  it('a failed browse is a localized Notice, not the server sentence in a chip (ADR 1101 D7)', async () => {
+    mBrowse.mockRejectedValueOnce(new Error('SERVER ENGLISH 502'));
+    render(<FolderPicker orgId="o1" connectionId="c1" onSelect={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText('Could not list folders.')).toBeTruthy());
+    expect(screen.queryByText(/SERVER ENGLISH/)).toBeNull();
   });
 });

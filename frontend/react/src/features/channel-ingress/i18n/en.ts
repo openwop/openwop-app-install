@@ -163,4 +163,21 @@ export const messages = {
   relayApprovedHint: 'Messages from these senders become conversations in your main chat and run as you. Nothing is sent back to anyone who is not approved.',
   relayAdminOnly: 'Only the owner of this device can approve or deny who writes to it. As a workspace admin, you can revoke an approval.',
   approveGroupRelay: 'On a device, groups are answered only when your assistant is mentioned by name (the name your operator set). If no name is set, group messages are dropped.',
+
+  // CHAN-F11 — the per-channel relay switch.
+  channelSwitchTitle: 'Relay channels',
+  channelSwitchHint: 'Switch a relay channel off for everyone in this workspace. Its messages are dropped and nothing is sent until you switch it back on. Devices keep their pairing and approvals.',
+  channelSwitchLabel: '{{channel}} relay',
+  channelOn: 'On',
+  channelOff: 'Off',
+  channelSwitchedOn: '{{channel}} relay is on.',
+  channelSwitchedOff: '{{channel}} relay is off. Its devices are paused.',
+  channelSwitchFailed: 'Could not change the relay channel.',
+  channelsPausedNotice: 'A workspace admin switched these relay channels off: {{channels}}. Devices on them are paused.',
+  status_channelPaused: 'Paused (channel off)',
+  channel_whatsapp: 'WhatsApp',
+  channel_signal: 'Signal',
+  channel_imessage: 'iMessage',
+  channel_discord: 'Discord',
+  whatsappSettingsLink: "WhatsApp settings: attestation, health and delivery failures",
 } as const;

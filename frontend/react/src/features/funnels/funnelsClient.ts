@@ -9,11 +9,26 @@ import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 const base = `${config.baseUrl}/host/openwop-app/funnels`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
+/** ADR 1023 — a refused request, typed: the page branches on `status` and the
+ *  server's `details.reason` / `details.code` (e.g. `funnel_changed`,
+ *  `step_pages_unpublished`), never on the English message text. */
+export class FunnelsError extends Error {
+  constructor(message: string, readonly status: number, readonly reason?: string) {
+    super(message || `Request failed (${status})`);
+    this.name = 'FunnelsError';
+  }
+}
+
 async function parse<T>(res: Response): Promise<T> {
   if (!res.ok) {
-    let detail = '';
-    try { detail = ((await res.json()) as { message?: string })?.message ?? ''; } catch { /* ignore */ }
-    throw new Error(detail || `Request failed (${res.status})`);
+    let message = '';
+    let reason: string | undefined;
+    try {
+      const body = (await res.json()) as { message?: string; details?: { reason?: string; code?: string } };
+      message = body?.message ?? '';
+      reason = body?.details?.reason ?? body?.details?.code;
+    } catch { /* non-JSON body */ }
+    throw new FunnelsError(message, res.status, reason);
   }
   return (await res.json()) as T;
 }
@@ -42,8 +57,11 @@ export interface Funnel {
 }
 export interface Org { orgId: string; name: string }
 
-export interface StepStatRow { stepId: string; kind: string; name?: string; views: number; completions: number; revenue: number; orders: number; conversion: number | null; revenueByCurrency?: Record<string, number> }
-export interface FunnelStats { funnelId: string; steps: StepStatRow[]; days: Array<{ day: string; steps: Record<string, { views: number; completions: number; revenue: number; orders: number }> }>; eventWindow: number; rebuiltAt: string | null }
+/** ADR 1023 D5 — `views` are distinct visitors (first view), `completions` how many
+ *  of THOSE viewers completed the step, `unattributed` completions with no tracked
+ *  view (never part of `conversion`; absent from an older backend). */
+export interface StepStatRow { stepId: string; kind: string; name?: string; views: number; completions: number; unattributed?: number; revenue: number; orders: number; conversion: number | null; revenueByCurrency?: Record<string, number> }
+export interface FunnelStats { funnelId: string; steps: StepStatRow[]; days: Array<{ day: string; steps: Record<string, { views: number; completions: number; unattributed?: number; revenue: number; orders: number }> }>; eventWindow: number; rebuiltAt: string | null }
 
 export interface VariantResult { key: string; pageId: string | null; weight: number; sessions: number; conversions: number; conversionRate: number; zScore: number | null; significant: boolean | null; insufficientSample: boolean }
 export interface ExperimentResults {
@@ -76,7 +94,9 @@ export async function listFunnels(orgId: string): Promise<Funnel[]> {
   return (await parse<{ funnels: Funnel[] }>(res)).funnels;
 }
 
-export interface FunnelDraft { name: string; slug?: string; steps?: Array<Pick<FunnelStep, 'kind' | 'pageId'> & { stepId?: string; name?: string; routing?: StepRule[]; webinar?: { marketingEventId: string } | null; application?: { formId: string } | null }>; completionCta?: { label: string; url: string } | null; primaryHostname?: string | null }
+export interface FunnelDraft { name: string; slug?: string; steps?: Array<Pick<FunnelStep, 'kind' | 'pageId'> & { stepId?: string; name?: string; routing?: StepRule[]; webinar?: { marketingEventId: string } | null; application?: { formId: string } | null }>; completionCta?: { label: string; url: string } | null; primaryHostname?: string | null;
+  /** ADR 1023 D8 — the `updatedAt` this editor loaded; a newer row refuses the edit (409 `funnel_changed`). */
+  expectedUpdatedAt?: string }
 
 /** ONE funnel by id — what `/funnels/:funnelId` loads (ADR 0522). The editor is
  *  reachable by URL alone (bookmark, shared link, reload), so it must not depend

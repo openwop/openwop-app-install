@@ -171,7 +171,7 @@ export function registerFunnelsRoutes(deps: RouteDeps): void {
     try {
       const { orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
       const b = req.body ?? {};
-      const funnel = await updateFunnel(tenantId, orgId, req.params.funnelId, { name: b.name, slug: b.slug, steps: b.steps, completionCta: b.completionCta, campaignId: b.campaignId, primaryHostname: b.primaryHostname });
+      const funnel = await updateFunnel(tenantId, orgId, req.params.funnelId, { name: b.name, slug: b.slug, steps: b.steps, completionCta: b.completionCta, campaignId: b.campaignId, primaryHostname: b.primaryHostname, ...(b.expectedUpdatedAt !== undefined ? { expectedUpdatedAt: b.expectedUpdatedAt } : {}) });
       if (!funnel) throw new OpenwopError('not_found', 'Funnel not found.', 404, {});
       res.json({ funnel });
     } catch (err) { next(err); }
@@ -180,7 +180,10 @@ export function registerFunnelsRoutes(deps: RouteDeps): void {
   app.post(`${BASE}/funnels/:funnelId/publish`, async (req: Request, res: Response, next) => {
     try {
       const { orgId, tenantId } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
-      const funnel = await publishFunnel(tenantId, orgId, req.params.funnelId);
+      // ADR 1023 D7 — the same rule as the approval lane: a funnel whose step pages
+      // are not published would go live as a 404, so it is refused
+      // (`step_pages_unpublished`); publishing a funnel never publishes pages.
+      const funnel = await publishFunnel(tenantId, orgId, req.params.funnelId, { requirePublishedPages: true, direct: true });
       if (!funnel) throw new OpenwopError('not_found', 'Funnel not found.', 404, {});
       res.json({ funnel });
     } catch (err) { next(err); }
@@ -252,11 +255,11 @@ export function registerFunnelsRoutes(deps: RouteDeps): void {
       const days = await getFunnelStats(tenantId, orgId, funnel.funnelId);
       // per-step totals in STEP ORDER (steps no longer on the funnel — e.g. a
       // removed step with history — are appended, tolerate-on-read)
-      const totals = new Map<string, { views: number; completions: number; revenue: number; orders: number; revenueByCurrency: Record<string, number> }>();
+      const totals = new Map<string, { views: number; completions: number; unattributed: number; revenue: number; orders: number; revenueByCurrency: Record<string, number> }>();
       for (const row of days) {
         for (const [stepId, cell] of Object.entries(row.steps)) {
-          const t = totals.get(stepId) ?? { views: 0, completions: 0, revenue: 0, orders: 0, revenueByCurrency: {} };
-          t.views += cell.views; t.completions += cell.completions; t.revenue += cell.revenue; t.orders += cell.orders;
+          const t = totals.get(stepId) ?? { views: 0, completions: 0, unattributed: 0, revenue: 0, orders: 0, revenueByCurrency: {} };
+          t.views += cell.views; t.completions += cell.completions; t.unattributed += cell.unattributed ?? 0; t.revenue += cell.revenue; t.orders += cell.orders;
           for (const [code, amt] of Object.entries(cell.revenueByCurrency ?? {})) t.revenueByCurrency[code] = (t.revenueByCurrency[code] ?? 0) + amt;
           totals.set(stepId, t);
         }
@@ -265,7 +268,7 @@ export function registerFunnelsRoutes(deps: RouteDeps): void {
       const steps = [
         ...funnel.steps.map((s) => ({
           stepId: s.stepId, kind: s.kind, ...(s.name ? { name: s.name } : {}),
-          ...(totals.get(s.stepId) ?? { views: 0, completions: 0, revenue: 0, orders: 0, revenueByCurrency: {} }),
+          ...(totals.get(s.stepId) ?? { views: 0, completions: 0, unattributed: 0, revenue: 0, orders: 0, revenueByCurrency: {} }),
         })),
         ...[...totals.entries()].filter(([id]) => !known.has(id))
           .map(([stepId, t]) => ({ stepId, kind: 'removed' as const, ...t })),

@@ -1,6 +1,7 @@
 /** `a11y` namespace — português do Brasil (ADR 0363 P2). */
 export const messages = {
   missingAlt: 'Uma imagem está sem texto alternativo.',
+  altFilename: 'O texto alternativo “{{alt}}” é um nome de arquivo, não uma descrição.',
   headingSkip: 'O nível de título pula de H{{from}} para H{{to}}.',
   linkEmpty: 'Um link não tem texto.',
   linkGeneric: 'O texto do link “{{text}}” não é descritivo por si só.',
@@ -13,6 +14,18 @@ export const messages = {
   panelSummary_other: '{{count}} problemas encontrados',
   severityError: 'Erro',
   severityWarning: 'Aviso',
+  // ADR 1100 D3 — where an issue is, on a CMS page.
+  issueLocationSection: 'Seção {{n}}: {{type}}',
+  altFilledFromLibrary: 'Texto alternativo preenchido a partir da biblioteca de mídia. Confira se ele combina com esta página.',
+  altClearedOnSwap: 'O texto alternativo da imagem anterior foi removido. Descreva a nova imagem.',
+  issueLocationSectionItem: 'Seção {{n}}: {{type}}, imagem {{item}}',
+  issueLocationShared: '{{where}} (seção compartilhada)',
+  issueLocationLabel: 'Local:',
+  panelIncompleteShared: 'Uma seção compartilhada ainda não foi lida ou não pôde ser lida, então as imagens dela não foram verificadas.',
+  goToSection: 'Ir para {{where}}',
+  // ADR 1100 D4 — the CMS link into the ONE chat, scoped to the Reviewer.
+  askReviewer: 'Consultar o revisor de acessibilidade',
+  askReviewerSeed: 'Verifique a acessibilidade da página “{{title}}” e me diga o que corrigir e onde. (Para o revisor: id da página {{pageId}}.)',
 
   // P4 — preferências de acessibilidade
   prefsButton: 'Preferências de acessibilidade',

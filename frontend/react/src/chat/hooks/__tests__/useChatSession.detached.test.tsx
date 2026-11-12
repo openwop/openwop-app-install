@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import type { BYOKActiveConfig } from '../../../byok/lib/useBYOKConfig.js';
+import type { StorageSubjectState } from '../../../platform/useStorageSubject.js';
+import type { ChatSessionHeader } from '../../../client/chatSessionsClient.js';
 
 /**
  * ADR 1040 D1/D2 — a persisted EMBED (`detached`) is a real, saved conversation
@@ -12,9 +14,11 @@ import type { BYOKActiveConfig } from '../../../byok/lib/useBYOKConfig.js';
  *   - neither reset nor a `not_found` load eagerly creates an empty row (a tab
  *     needs that to stop a remount loop; a detached embed does not remount).
  *
- * Red when: core.ts loads the slot for a detached hook (`useCurrentCache`), the
- * reseed guard admits it, useSessionPersistence drops `participants` from the
- * create, or the eager creates lose their `!detached` guard.
+ * Red when: core.ts loads or writes the slot for a detached hook
+ * (`useCurrentCache`, `writeCurrentCache`), the IDN-11 reseed guard admits it,
+ * useSessionPersistence drops `participants` from the create, either eager
+ * create (reset, `not_found` recovery) loses its `!detached` guard, or the
+ * `not_found` recovery stops opening a fresh chat.
  */
 
 vi.mock('../../../client/streamsClient.js', () => ({ subscribeToRun: () => ({ close: vi.fn() }) }));
@@ -46,17 +50,17 @@ vi.mock('../../conversationTransport.js', async (importOriginal) => ({
   ...(await importOriginal<Transport>()),
   openConversationSession: openConversationSessionMock,
   // A synchronous exchange (the agent turn is already on the wire), so `send` settles.
-  sendConversationTurn: vi.fn(() => Promise.resolve({
+  sendConversationTurn: vi.fn<Transport['sendConversationTurn']>(() => Promise.resolve({
     turns: [
       { messageId: 'c:1:user', role: 'user', turnIndex: 1, from: 'user', content: 'hello guide', ts: 0 },
       { messageId: 'c:2:agent', role: 'agent', turnIndex: 2, from: 'assistant', content: 'hi', ts: 0 },
     ],
     lastSeq: 2,
   })),
-  fetchTurns: vi.fn(() => Promise.resolve({ turns: [], lastSeq: 0 })),
+  fetchTurns: vi.fn<Transport['fetchTurns']>(() => Promise.resolve({ turns: [], lastSeq: 0 })),
 }));
 // The storage subject, controllable: the IDN-11 reseed fires when it settles.
-const subject = vi.hoisted(() => ({ value: { status: 'pending' } as { status: 'pending' } | { status: 'anonymous' } | { status: 'user'; subject: string } }));
+const subject = vi.hoisted((): { value: StorageSubjectState } => ({ value: { status: 'pending' } }));
 vi.mock('../../../platform/useStorageSubject.js', () => ({ useStorageSubject: () => subject.value }));
 
 import { useChatSession } from '../useChatSession.js';
@@ -76,7 +80,11 @@ beforeEach(() => {
   localStorage.clear();
   subject.value = { status: 'pending' };
   vi.mocked(createChatSession).mockReset();
-  vi.mocked(createChatSession).mockResolvedValue(undefined as never);
+  // The real client answers the created row's header.
+  vi.mocked(createChatSession).mockImplementation(async (opts): Promise<ChatSessionHeader> => ({
+    sessionId: opts?.sessionId ?? 'minted', tenantId: 't-1', title: opts?.title ?? 'New chat',
+    createdAt: '2026-01-02T00:00:00Z', updatedAt: '2026-01-02T00:00:00Z', messageCount: 0,
+  }));
   vi.mocked(listChatSessionMessagesPage).mockReset();
   vi.mocked(listChatSessionMessagesPage).mockResolvedValue({ messages: [], nextCursor: null });
   // The user's main chat is in the singleton slot.
@@ -90,6 +98,8 @@ describe('ADR 1040 D1 — a detached embed is never the main chat', () => {
     expect(result.current.session.id).not.toBe(MAIN.id);
     expect(result.current.session.messages).toEqual([]);
     await act(async () => { await result.current.send('hello guide', CONFIG); });
+    // The turn landed (so the post-send persist ran), and still not into the slot.
+    expect(result.current.session.messages.map((m) => m.content)).toContain('hello guide');
     expect(localStorage.getItem(LS_CURRENT_SESSION_KEY)).toBe(before);
   });
 
@@ -107,9 +117,12 @@ describe('ADR 1040 D1 — a detached embed is never the main chat', () => {
     localStorage.clear();
     const { result, rerender } = renderHook(() => useChatSession());
     persistSession(MAIN);
+    expect(result.current.session.id).not.toBe(MAIN.id);
     subject.value = { status: 'user', subject: 'u-1' };
     rerender();
-    await waitFor(() => expect(result.current.session.id).toBe(MAIN.id));
+    // The SAME drain the detached case uses: the reseed lands within it.
+    await act(async () => { await Promise.resolve(); });
+    expect(result.current.session.id).toBe(MAIN.id);
   });
 });
 
@@ -120,7 +133,12 @@ describe('ADR 1040 D1/D2 — the row: created by the first send, with the agent 
     expect(vi.mocked(createChatSession)).not.toHaveBeenCalled();
     await act(async () => { await result.current.send('hello guide', CONFIG); });
     await waitFor(() => expect(vi.mocked(createChatSession)).toHaveBeenCalled());
-    expect(vi.mocked(createChatSession)).toHaveBeenCalledWith(expect.objectContaining({ sessionId: result.current.session.id, participants: PARTICIPANTS }));
+    expect(result.current.session.messages.map((m) => m.content)).toContain('hello guide');
+    // Every create (the run-id write-through and the message persist may both
+    // ensure the row) names this conversation and its agent, and nothing else.
+    for (const [arg] of vi.mocked(createChatSession).mock.calls) {
+      expect(arg).toEqual({ sessionId: result.current.session.id, title: expect.any(String), participants: PARTICIPANTS });
+    }
   });
 
   it('reset in a reopened (backend-keyed) detached embed creates no empty row', async () => {

@@ -21,6 +21,7 @@ import { liveEditRefusal, refuseLiveEdit } from '../cms/contentApproval.js';
 import { negotiateLocale } from '../../host/i18n/index.js';
 import { resolveOperatorDisplayNames, resolveSubjectDisplays } from '../../host/subjectDisplay.js';
 import { SYSTEM_SITE_ORG, SYSTEM_SITE_TENANT } from '../../host/systemSite.js';
+import { publicDocsTenant } from '../../host/publicDocsLane.js';
 import { userRef } from '../../host/conversationStore.js';
 // ADR 0236 (campaign gap D1) — the visitor-scoped experiment assignment seam.
 // Publishing COMPOSES the CMS experiment config (read-only) and the ONE consent
@@ -317,8 +318,8 @@ function listCacheKey(orgId: string, filter?: PageListFilter): string {
   return [orgId, f.kind ?? '', f.tag ?? '', f.category ?? '', f.authorId ?? '', f.q ?? '', f.collection ?? ''].join('\u0000');
 }
 
-async function listPublishedWithSeo(orgId: string, filter?: PageListFilter): Promise<PublishedWithSeo> {
-  const cacheKey = listCacheKey(orgId, filter);
+async function listPublishedWithSeo(orgId: string, filter?: PageListFilter, opts: { includeDocs?: boolean } = {}): Promise<PublishedWithSeo> {
+  const cacheKey = `${listCacheKey(orgId, filter)}${opts.includeDocs ? '\u0000+docs' : ''}`;
   const cached = publishedListCache.get(cacheKey);
   if (cached) return cached;
   const tenantId = await resolvePublicOrg(orgId);
@@ -327,8 +328,11 @@ async function listPublishedWithSeo(orgId: string, filter?: PageListFilter): Pro
   // enumerated by the docs feature's own nav tree instead. This is the single
   // choke point for sitemap.xml, feed.rss, AND the blog surface (ADR 0391's
   // `filter` narrows further, e.g. kind:'post').
+  // ADR 1057 D2 — the SITEMAP alone asks for them back (`includeDocs`), and only
+  // for the site org with the docs lane open (`sitemapXml` decides); RSS, the
+  // nav and the blog never do.
   const published = (await listPages(tenantId, orgId, { ...filter, status: 'published' }))
-    .filter((p) => p.collection !== 'docs');
+    .filter((p) => opts.includeDocs || p.collection !== 'docs');
   const seoByPage = new Map<string, PageSeo>();
   for (const s of await seoStore.list()) {
     if (s.tenantId === tenantId && s.orgId === orgId) seoByPage.set(s.pageId, s);
@@ -387,8 +391,14 @@ function capPublic<T>(rows: T[], orgId: string, surface: string): T[] {
 }
 
 export async function sitemapXml(orgId: string, baseUrl: string): Promise<string> {
+  // ADR 1057 D2 — docs pages are in the sitemap only where they have a crawlable
+  // home: the configured site org's `/docs/<slug>` door, and only while the docs
+  // lane is open (the door's own predicate, so this never lists a URL it 404s).
+  // Any other org's docs have no door here (`publicPageUrl` gives them a JSON read).
+  const siteOrg = process.env.OPENWOP_PUBLIC_SITE_ORG_ID?.trim();
+  const includeDocs = Boolean(siteOrg && siteOrg === orgId && (await publicDocsTenant(orgId)));
   const rows = capPublic(
-    (await listPublishedWithSeo(orgId)).rows.filter(({ seo }) => !seo?.noindex).sort((a, b) => (a.page.slug < b.page.slug ? -1 : 1)),
+    (await listPublishedWithSeo(orgId, undefined, { includeDocs })).rows.filter(({ seo }) => !seo?.noindex).sort((a, b) => (a.page.slug < b.page.slug ? -1 : 1)),
     orgId, 'sitemap',
   );
   const urls = rows

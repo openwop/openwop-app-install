@@ -48,6 +48,22 @@ upgrade is neither: list it in `breakingConfig`.
 
 ## Version log
 
+### v0.13.0 — 2026-11-11
+
+- **Required stop:** no. **Rolling-safe:** yes.
+- **Schema:** sqlite 52 / postgres 50 · **App migrations:** 26 (unchanged).
+- New settings: `OPENWOP_CHANNEL_APPROVAL_TTL_MIN` (default 1440 minutes) and
+  `OPENWOP_INTEGRITY_GAUGES` (on unless `false`). No setting changes meaning.
+- Hosting: a self-kept `firebase.json` needs the new `/docs` and `/docs/**`
+  rewrites.
+- Adds a public trial entry, unlisted (quote-only) products, project health and
+  read tools, a relay channel kill switch, WhatsApp settings in Connections and
+  new CMS sections (`films`, `pricing.plans`, a `resources` nav group).
+- Tool approvals cover one exact call by default; creative briefs, alt text and
+  WhatsApp sends need `workspace:write`; removing a knowledge-sync source
+  deletes its synced documents.
+- [CHANGELOG §0.13.0](./CHANGELOG.md#0130--2026-11-11)
+
 ### v0.12.0 — 2026-11-10
 
 - **Required stop:** no. **Rolling-safe:** yes.

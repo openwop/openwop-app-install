@@ -16,11 +16,19 @@
  *    gate before it can become a document;
  *  - no policy WRITE — a chain must not be able to widen its own eligibility.
  *
- * Every op is scoped to the run's tenant. There is no orgId parameter a caller
- * could supply to reach another workspace: the org comes from the run's own
- * scope, so a chain cannot address a workspace its run does not belong to.
+ * Every op is scoped to the run's tenant. `listApplications` and
+ * `recordOutcome` DO take an `orgId` from the node input.
+ *
+ * CORRECTED (ADR 1036 D2): this header used to say "there is no orgId parameter
+ * … the org comes from the run's own scope". `BundleScope` carries no org. What
+ * stops a run reaching an org its person is not in is the ADR 0832 floor at the
+ * seam (`host/featureSurfaces.ts` `orgFloor`): membership at `workspace:read`
+ * by default, and at the scope {@link JOB_SEARCH_SURFACE_POLICY} names for a
+ * writer — `recordOutcome` needs `workspace:write`, as a stage move does over
+ * HTTP. A run with no person (a system run) is tenant-trusted, the floor's rule
+ * for every surface.
  */
-import type { FeatureSurface } from '../../host/featureSurfaces.js';
+import type { FeatureSurface, FeatureSurfaceOrgPolicy } from '../../host/featureSurfaces.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { checkEligibility, type ApplicantConstraints } from './domain/eligibility.js';
 import { projectFitScores, JOB_FIT_CRITERIA, type FitProfile } from './domain/fitScoring.js';
@@ -28,6 +36,7 @@ import { computePriority } from '../../host/weightedScoring.js';
 import { guardRewrite } from './domain/tailorGuard.js';
 import { listApplications, advanceApplication } from './domain/applications.js';
 import { runTenantCampaignPass } from './autopilot/campaignRun.js';
+import { resolveCampaignSubject } from './agent/campaignQueue.js';
 import type { JobDigest } from './domain/digest.js';
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
@@ -75,6 +84,11 @@ const applicantOf = (v: unknown): ApplicantConstraints => {
   };
 };
 
+/** ADR 1036 D2 — the scope each writer's HTTP door asks, for the ADR 0832 floor. */
+export const JOB_SEARCH_SURFACE_POLICY: FeatureSurfaceOrgPolicy = {
+  methodScopes: { recordOutcome: 'workspace:write' },
+};
+
 export function buildJobSearchSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
   return {
@@ -116,30 +130,33 @@ export function buildJobSearchSurface(scope: BundleScope): FeatureSurface {
     },
 
     /**
-     * WF-JS-1 — trigger the tenant's standing campaign pass. Takes NO inputs by
-     * design (see the header law): the pass derives everything from the
-     * tenant's own steering, grants, listings and answer bank, and every
+     * WF-JS-1 — trigger ONE person's campaign pass. Takes NO inputs by design
+     * (see the header law): the pass derives everything from that person's own
+     * steering, grants and answer bank plus the tenant's listings, and every
      * submission inside it is bounded by the ADR 0541 machinery. `isReplay` is
      * derived structurally inside the pass (ADR 0531 ambient context) — a
      * caller cannot assert liveness. `now` comes from the surface, not the
      * chain, for the same reason.
+     *
+     * ADR 1036 D1 — the person comes from the RUN (`resolveCampaignSubject`),
+     * never from input, and a run that names nobody is a typed refusal. The
+     * report is COUNTS ONLY: run output is readable across the workspace, and a
+     * grant id, a free-text campaign id or the listings someone applied to are
+     * theirs.
      */
     async runCampaignPass() {
-      const report = await runTenantCampaignPass(tenantId, Date.now());
+      const subjectId = await resolveCampaignSubject(scope);
+      const report = await runTenantCampaignPass(tenantId, subjectId, Date.now());
       return {
         ranGrants: report.ranGrants,
         listings: report.listings,
         skippedNoSubmitLane: report.skippedNoSubmitLane,
         skippedDailyCap: report.skippedDailyCap,
-        results: report.results.map((r) => ({
-          grantId: r.grantId,
-          campaignId: r.campaignId,
-          considered: r.digest.considered,
-          applied: r.digest.applied,
-          alreadyApplied: r.digest.alreadyApplied,
-          parked: r.digest.parked.length,
-          skipped: r.digest.skipped,
-        })),
+        considered: report.results.reduce((n, r) => n + r.digest.considered, 0),
+        applied: report.results.reduce((n, r) => n + r.digest.applied.length, 0),
+        alreadyApplied: report.results.reduce((n, r) => n + r.digest.alreadyApplied, 0),
+        parked: report.results.reduce((n, r) => n + r.digest.parked.length, 0),
+        skipped: report.results.reduce((n, r) => n + r.digest.skipped.length, 0),
       };
     },
   };

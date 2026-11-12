@@ -177,6 +177,12 @@ interface AltTextProposal {                        // mirrors AutotagProposal
 | 9 | Replay/fork | Alt-text generation composes the ADR 0108 non-recorded service op; the node's effect is the media mutation, classified via ADR 0341 `isSideEffectingNode`; provider determinism via ADR 0326 invocation log. No `featureVariant` stamp needed. |
 | 10 | Frontend | `accessibilityClient.ts` + affordances **embedded** in media/cms/app-builder/document surfaces (`<A11yIssuesPanel>`, "Generate alt text"); reuse `useFocusTrap`, the shared announcer, `ui/` tokens; no standalone dashboard. |
 
+> **CORRECTED 2026-11-11 (ADR 1100, feature loop row 89) — three rows above were false when measured.**
+> - **#7** ("published pages benefit (better alt text)"): no placement read the asset's alt text. The CMS picker set only the token, every renderer reads the section's own `alt`, and the document editor inserted the file name. ADR 1100 D2 fills an empty alt from the library when a picture is placed.
+> - **#8** (`generateAltText` = `workspace:write`): true of the route and the chat tool, not of the workflow surface, which ran at the seam's default `workspace:read` org floor. ADR 1100 D1.
+> - **#9** ("provider determinism via ADR 0326 invocation log"): the alt-text node dispatches through `resolveHeadlessAi`, which writes no invocation record, and as `role: action` it re-ran live on every replay fork. ADR 1100 D6 makes it `side-effectful`, so a fork serves the recorded proposal.
+> - The P3 "chat-drivable" Reviewer could read nothing (two tools, neither a read). ADR 1100 D4.
+
 ---
 
 ## Phase 1 — implementation corrections (2026-07-12, `/architect` pre-review)

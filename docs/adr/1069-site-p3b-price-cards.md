@@ -1,6 +1,6 @@
 # ADR 1069 — Site design batch Phase 3b1: plan cards and the callout footnote
 
-Status: Accepted (2026-11-07). D1 and D2 are implemented in the PR that records them.
+Status: Accepted (2026-11-07). D1 and D2 are implemented in the PR that records them. D3 (2026-11-10, DeckTalk) is implemented in the PR that records it.
 
 Part of Phase 3 of myndhyve-1e's myndhyve.ai design batch (David approved the
 work), owned by f2. It follows [ADR 1066](1066-site-p3a-hero-visuals.md) and
@@ -91,3 +91,66 @@ Both are sabotage-witnessed (see the PR).
   - add the buttons: free → "Read the code" → the open-source page;
     featured → "Book a free call".
 - **`sec:mh-pricing-offer`:** `noteStyle: 'callout'`.
+
+## Addendum (2026-11-10): D3, named tier lists with a status pill
+
+Requested by DeckTalk (dev-c5, relaying David): a pricing page whose plans have
+names, a status ("Open now", "Coming", "Talk to us") and a button, but no prices
+yet. Measured on its live section: it authored `layout: "cards"`, which has no
+plan mode, and the `list` plan mode never drew a column's `badge`. A title with
+no unit would also have taken the big price type.
+
+- **A `badge` also makes a plan list.** The D1 test (`unit` or `ctaLabel`, no
+  status flags) gains `badge`. A status list still never becomes plans.
+- **The badge is a status pill** on its own line under the name
+  (`fp-col__status`), not inside the heading, so the heading reads as the
+  plan's name. In the accent on a light card, in the inverse ink on the
+  featured dark card; tokens only, so it holds in both themes.
+- **No column with a `unit` ⇒ a named tier list** (`fp-cols--plans-named`): the
+  title is the plan name at display size, not price size. `highlight` keeps the
+  featured dark card and the primary button, as in D1. Nothing invents a number.
+- The prerender already printed `badge` as text (`sectionHtml.ts`), so crawlers
+  are unchanged. No validator change: `badge` was already kept.
+
+The authored, price-less tier list for the `pricing` SECTION (the second half of
+the ask) is separate: `pricing.tiers` is already an array of billing tier ids, so
+it gets a new field rather than a second meaning for that one. That is a later
+PR; DeckTalk is covered by D3.
+
+Tests: `planCards.test.tsx` "named tier list (ADR 1069 D3)", sabotage-witnessed
+(a badge not triggering plans, the pill not drawn, and the named class dropped
+each red a case).
+
+## Addendum (2026-11-10): D4, authored `plans` on the `pricing` section
+
+The second half of DeckTalk's ask: the `pricing` section itself can carry
+named plans for a site that has no billing tiers yet. D3 covers DeckTalk's
+`columns` page today; D4 lets a site keep its `/pricing` page on the `pricing`
+section it already uses.
+
+- **A new field, `plans`:** `[{ name, status?, blurb?, ctaLabel?, ctaUrl?,
+  highlight? }]`, at most 8 plans. `name` ≤ 80, `status` ≤ 40 (the badge
+  bound), `blurb` ≤ 600, `ctaLabel` ≤ 120. `ctaUrl` goes through the same link
+  guard as every CTA (`safeLink`). It is not `tiers`, which stays an array of
+  billing tier ids: one field with two meanings would make old pages and
+  locale overlays ambiguous (dev-c5's point).
+- **No price can be authored.** The validator keeps only those six keys, so a
+  `price`, `unit` or `amount` is dropped. That keeps ADR 0391's rule that a
+  price comes only from billing.
+- **When `plans` is present it replaces the live billing read.** The SPA draws
+  the D3 named tier cards (the same classes, so no new CSS) and makes no
+  `/public/pricing` request. Without `plans`, nothing changes.
+- **A saved plan needs a name.** A locale overlay drops a nameless plan instead
+  of failing, like every other overlay field.
+- **Every server projection carries the plans**, because they are authored
+  content, not a billing read: the prerender (one `<article>` per plan), the
+  Markdown view, and a static share. A share of a `pricing` section without
+  plans keeps the "live content" note. One reader, `cms/pricingPlans.ts`,
+  serves all three, so they cannot disagree.
+- **Page Builder:** a "Plans (JSON)" field under the pricing fields (the ADR
+  1080 JSON pattern), and the preview counts named plans when they are set.
+
+Tests: `adr1069-pricing-plans.test.ts` (validation, prerender, Markdown),
+`sharing-route.test.ts` (the share carries plans; a tier section stays noted),
+and `SectionRenderer.pricingPlans.test.tsx` (the cards, no billing fetch, the
+highlight, the fallback).

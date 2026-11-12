@@ -61,6 +61,23 @@ export interface KnowledgeFetchDeps {
    *  (no-user) caller has no connection and fails closed. */
   actingUserId: string;
   orgId?: string;
+  /**
+   * ADR 1101 D2 — PIN the credential to this exact connection row (ADR 0627 D5, at
+   * the broker's selection choke): returned iff `active`, this provider, and the
+   * acting user's own / an authorized org row / the workspace row — never the
+   * user → org → workspace fall-through. The knowledge-sync lane always passes the
+   * source's bound connection, so a pass can only ever read the folder as the
+   * account the user chose. Absent ⇒ the unpinned broker (agent-knowledge's
+   * one-off connection imports, unchanged).
+   */
+  connectionId?: string;
+}
+
+/** The broker option that carries `deps.connectionId` (ADR 1101 D2). Spread into
+ *  EVERY `brokeredFetch` call in this file — a call that forgets it falls through
+ *  silently, which `knowledge-sync-connection-pin.test.ts` ratchets. */
+function pinOf(deps: KnowledgeFetchDeps): { connectionId?: string } {
+  return deps.connectionId !== undefined ? { connectionId: deps.connectionId } : {};
 }
 
 /** Cap a single source fetch so an ingest can't pull an unbounded blob. */
@@ -163,7 +180,7 @@ async function fetchGoogleDriveDoc(deps: KnowledgeFetchDeps, ref: string): Promi
 
   // 1) Metadata → name + mimeType (also the cheapest probe of access/connection).
   const metaUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=name%2CmimeType&supportsAllDrives=true`;
-  const meta = await brokeredFetch(egressDeps, { provider: 'google', url: metaUrl });
+  const meta = await brokeredFetch(egressDeps, { ...pinOf(deps), provider: 'google', url: metaUrl });
   failClosed(meta, 'google');
   const metaJson = (await readJson(meta)) as { name?: unknown; mimeType?: unknown } | undefined;
   const name = typeof metaJson?.name === 'string' && metaJson.name.trim() ? metaJson.name.trim() : 'Drive document';
@@ -180,7 +197,7 @@ async function fetchGoogleDriveDoc(deps: KnowledgeFetchDeps, ref: string): Promi
   }
 
   // 2) Content.
-  const content = await brokeredFetch(egressDeps, { provider: 'google', url: plan.url });
+  const content = await brokeredFetch(egressDeps, { ...pinOf(deps), provider: 'google', url: plan.url });
   failClosed(content, 'google');
   const text = await readText(content);
   if (!text.trim()) {
@@ -231,14 +248,14 @@ async function fetchGoogleDriveBytes(deps: KnowledgeFetchDeps, ref: string, maxB
   };
   // 1) meta → name + mimeType (the file's true type drives extraction).
   const metaUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?fields=name%2CmimeType&supportsAllDrives=true`;
-  const meta = await brokeredFetch(egressDeps, { provider: 'google', url: metaUrl });
+  const meta = await brokeredFetch(egressDeps, { ...pinOf(deps), provider: 'google', url: metaUrl });
   failClosed(meta, 'google');
   const metaJson = (await readJson(meta)) as { name?: unknown; mimeType?: unknown } | undefined;
   const name = typeof metaJson?.name === 'string' && metaJson.name.trim() ? metaJson.name.trim() : 'Drive file';
   const contentType = typeof metaJson?.mimeType === 'string' ? metaJson.mimeType : 'application/octet-stream';
   // 2) bytes — `alt=media` streams the file directly (200, same host, no redirect).
   const contentUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`;
-  const content = await brokeredFetch(egressDeps, { provider: 'google', url: contentUrl });
+  const content = await brokeredFetch(egressDeps, { ...pinOf(deps), provider: 'google', url: contentUrl });
   failClosed(content, 'google');
   const bytes = await readBytes(content.res, maxBytes);
   return { title: name, contentBase64: bytes.toString('base64'), contentType, sourceUrl: contentUrl };
@@ -284,7 +301,7 @@ async function fetchOneDriveBytes(deps: KnowledgeFetchDeps, syncProvider: string
   };
   // 1) item metadata (credentialed, graph.microsoft.com) — NO $select: the
   //    `@microsoft.graph.downloadUrl` is an instance annotation that $select can drop.
-  const meta = await brokeredFetch(egressDeps, { provider: 'microsoft-graph', url: base });
+  const meta = await brokeredFetch(egressDeps, { ...pinOf(deps), provider: 'microsoft-graph', url: base });
   failClosed(meta, 'microsoft-graph');
   const item = (await readJson(meta)) as { name?: unknown; file?: { mimeType?: unknown }; ['@microsoft.graph.downloadUrl']?: unknown } | undefined;
   const name = typeof item?.name === 'string' && item.name.trim() ? item.name.trim() : 'OneDrive file';
@@ -497,7 +514,7 @@ async function listDropboxFolder(deps: KnowledgeFetchDeps, folderId: string): Pr
   let body = JSON.stringify({ path: ref === 'root' ? '' : ref, recursive: false, limit: 200 });
   const out: SyncFolderFile[] = [];
   for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
-    const r = await brokeredFetch(egressDeps, { provider: 'dropbox', url, method: 'POST', body });
+    const r = await brokeredFetch(egressDeps, { ...pinOf(deps), provider: 'dropbox', url, method: 'POST', body });
     failClosed(r, 'dropbox');
     const json = (await readJson(r)) as { entries?: unknown; cursor?: unknown; has_more?: unknown } | undefined;
     // ADR 0605 R1 — a `2xx` with no `entries` array is not an empty folder.
@@ -530,7 +547,7 @@ async function fetchDropboxBytes(deps: KnowledgeFetchDeps, ref: string, maxBytes
     ...(deps.orgId ? { orgId: deps.orgId } : {}),
   };
   // get_temporary_link returns a short-lived direct-download URL (on *.dropboxusercontent.com).
-  const linkRes = await brokeredFetch(egressDeps, { provider: 'dropbox', url: 'https://api.dropboxapi.com/2/files/get_temporary_link', method: 'POST', body: JSON.stringify({ path: ref }) });
+  const linkRes = await brokeredFetch(egressDeps, { ...pinOf(deps), provider: 'dropbox', url: 'https://api.dropboxapi.com/2/files/get_temporary_link', method: 'POST', body: JSON.stringify({ path: ref }) });
   failClosed(linkRes, 'dropbox');
   const json = (await readJson(linkRes)) as { link?: unknown; metadata?: { name?: unknown } } | undefined;
   const link = json?.link;
@@ -565,7 +582,7 @@ async function listBoxFolder(deps: KnowledgeFetchDeps, folderId: string): Promis
   let offset = 0;
   for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
     const url = `https://api.box.com/2.0/folders/${id}/items?fields=id%2Cname%2Ctype%2Cetag%2Cmodified_at&limit=${limit}&offset=${offset}`;
-    const r = await brokeredFetch(egressDeps, { provider: 'box', url });
+    const r = await brokeredFetch(egressDeps, { ...pinOf(deps), provider: 'box', url });
     failClosed(r, 'box');
     const json = (await readJson(r)) as { entries?: unknown; total_count?: unknown } | undefined;
     // ADR 0605 R1 — a `2xx` with no `entries` array is not an empty folder.
@@ -620,14 +637,14 @@ async function fetchBoxBytes(deps: KnowledgeFetchDeps, ref: string, maxBytes: nu
   };
   const id = safeBoxId(ref, 'file');
   // 1) meta → name (title + MIME inference; Box gives no content type otherwise).
-  const meta = await brokeredFetch(egressDeps, { provider: 'box', url: `https://api.box.com/2.0/files/${id}?fields=name` });
+  const meta = await brokeredFetch(egressDeps, { ...pinOf(deps), provider: 'box', url: `https://api.box.com/2.0/files/${id}?fields=name` });
   failClosed(meta, 'box');
   const metaJson = (await readJson(meta)) as { name?: unknown } | undefined;
   const name = typeof metaJson?.name === 'string' && metaJson.name.trim() ? metaJson.name.trim() : 'Box file';
   // 2) content → a 302 to dl.boxcloud.com. redirect:'manual' RETURNS the 302 (the token
   //    stays on api.box.com, never sent to the download host); read the Location and
   //    fetch it un-credentialed + SSRF-guarded.
-  const dl = await brokeredFetch(egressDeps, { provider: 'box', url: `https://api.box.com/2.0/files/${id}/content`, redirect: 'manual' });
+  const dl = await brokeredFetch(egressDeps, { ...pinOf(deps), provider: 'box', url: `https://api.box.com/2.0/files/${id}/content`, redirect: 'manual' });
   if (dl.outcome === 'no_connection') throw new OpenwopError('credential_required', 'Connect your Box account first.', 409, { provider: 'box' });
   if (dl.outcome === 'host_not_allowed') throw new OpenwopError('validation_error', 'Resolved Box URL is not an allowed host.', 400, {});
   if (dl.outcome === 'insecure_base') throw new OpenwopError('validation_error', 'Box URL must be https.', 400, {});
@@ -824,7 +841,7 @@ export async function browseFolders(deps: KnowledgeFetchDeps, provider: string, 
     let pageToken: string | undefined;
     for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
       const url = `https://www.googleapis.com/drive/v3/files?q=${q}&fields=${fields}&pageSize=200&supportsAllDrives=true&includeItemsFromAllDrives=true` + (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '');
-      const r = await brokeredFetch(egressDeps, { provider: 'google', url });
+      const r = await brokeredFetch(egressDeps, { ...pinOf(deps), provider: 'google', url });
       failClosed(r, 'google');
       const body = (await readJson(r)) as { files?: unknown; nextPageToken?: unknown } | undefined;
       for (const f of Array.isArray(body?.files) ? body.files : []) { const rec = f as Record<string, unknown>; pushName(out, typeof rec.id === 'string' ? rec.id : '', rec.name); if (out.length >= MAX_LIST_FILES) return out; }
@@ -838,7 +855,7 @@ export async function browseFolders(deps: KnowledgeFetchDeps, provider: string, 
     let url: string | undefined = `${graphItemsBase('microsoft-graph', folderId.trim() || 'root')}/children?$select=${encodeURIComponent('id,name,folder')}&$top=200`;
     const out: BrowseFolder[] = [];
     for (let page = 0; page < MAX_LIST_PAGES && url; page += 1) {
-      const r = await brokeredFetch(egressDeps, { provider: 'microsoft-graph', url });
+      const r = await brokeredFetch(egressDeps, { ...pinOf(deps), provider: 'microsoft-graph', url });
       failClosed(r, 'microsoft-graph');
       const body = (await readJson(r)) as { value?: unknown; ['@odata.nextLink']?: unknown } | undefined;
       for (const it of Array.isArray(body?.value) ? body.value : []) { const rec = it as Record<string, unknown>; if (!rec.folder) continue; pushName(out, typeof rec.id === 'string' ? rec.id : '', rec.name); if (out.length >= MAX_LIST_FILES) return out; }
@@ -854,7 +871,7 @@ export async function browseFolders(deps: KnowledgeFetchDeps, provider: string, 
     let body = JSON.stringify({ path: ref === 'root' || ref === '' ? '' : ref, recursive: false, limit: 200 });
     const out: BrowseFolder[] = [];
     for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
-      const r = await brokeredFetch(egressDeps, { provider: 'dropbox', url, method: 'POST', body });
+      const r = await brokeredFetch(egressDeps, { ...pinOf(deps), provider: 'dropbox', url, method: 'POST', body });
       failClosed(r, 'dropbox');
       const json = (await readJson(r)) as { entries?: unknown; cursor?: unknown; has_more?: unknown } | undefined;
       for (const e of Array.isArray(json?.entries) ? json.entries : []) { const rec = e as Record<string, unknown>; if (rec['.tag'] !== 'folder') continue; pushName(out, typeof rec.id === 'string' ? rec.id : '', rec.name); if (out.length >= MAX_LIST_FILES) return out; }
@@ -871,7 +888,7 @@ export async function browseFolders(deps: KnowledgeFetchDeps, provider: string, 
     const limit = 1000;
     let offset = 0;
     for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
-      const r = await brokeredFetch(egressDeps, { provider: 'box', url: `https://api.box.com/2.0/folders/${id}/items?fields=id%2Cname%2Ctype&limit=${limit}&offset=${offset}` });
+      const r = await brokeredFetch(egressDeps, { ...pinOf(deps), provider: 'box', url: `https://api.box.com/2.0/folders/${id}/items?fields=id%2Cname%2Ctype&limit=${limit}&offset=${offset}` });
       failClosed(r, 'box');
       const json = (await readJson(r)) as { entries?: unknown; total_count?: unknown } | undefined;
       const entries = Array.isArray(json?.entries) ? json.entries : [];
@@ -935,7 +952,7 @@ async function listOneDriveFolder(deps: KnowledgeFetchDeps, syncProvider: string
   let url: string | undefined = `${graphItemsBase(syncProvider, folderId)}/children?$select=${select}&$top=200`;
   const out: SyncFolderFile[] = [];
   for (let page = 0; page < MAX_LIST_PAGES && url; page += 1) {
-    const r = await brokeredFetch(egressDeps, { provider: 'microsoft-graph', url });
+    const r = await brokeredFetch(egressDeps, { ...pinOf(deps), provider: 'microsoft-graph', url });
     failClosed(r, 'microsoft-graph');
     const body = (await readJson(r)) as { value?: unknown; ['@odata.nextLink']?: unknown } | undefined;
     // ADR 0605 R1 — an OData collection always carries `value`, even when empty;
@@ -1001,7 +1018,7 @@ async function listGoogleDriveFolder(deps: KnowledgeFetchDeps, folderId: string)
       `https://www.googleapis.com/drive/v3/files?q=${q}&fields=${fields}` +
       `&pageSize=200&supportsAllDrives=true&includeItemsFromAllDrives=true` +
       (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '');
-    const r = await brokeredFetch(egressDeps, { provider: 'google', url });
+    const r = await brokeredFetch(egressDeps, { ...pinOf(deps), provider: 'google', url });
     failClosed(r, 'google');
     const body = (await readJson(r)) as { files?: unknown; nextPageToken?: unknown } | undefined;
     // ADR 0605 R1 — a `2xx` that is not a Drive file list is not an empty folder.
@@ -1050,7 +1067,7 @@ async function fetchOneDriveItem(deps: KnowledgeFetchDeps, syncProvider: string,
   const base = graphItemsBase(syncProvider, ref); // validates the item id
 
   // 1) meta → name + mimeType (also the cheapest access/connection probe).
-  const meta = await brokeredFetch(egressDeps, { provider: 'microsoft-graph', url: `${base}?$select=name,file` });
+  const meta = await brokeredFetch(egressDeps, { ...pinOf(deps), provider: 'microsoft-graph', url: `${base}?$select=name,file` });
   failClosed(meta, 'microsoft-graph');
   const metaJson = (await readJson(meta)) as { name?: unknown; file?: { mimeType?: unknown } } | undefined;
   const name = typeof metaJson?.name === 'string' && metaJson.name.trim() ? metaJson.name.trim() : 'OneDrive file';
@@ -1060,7 +1077,7 @@ async function fetchOneDriveItem(deps: KnowledgeFetchDeps, syncProvider: string,
   }
 
   // 2) content
-  const content = await brokeredFetch(egressDeps, { provider: 'microsoft-graph', url: `${base}/content` });
+  const content = await brokeredFetch(egressDeps, { ...pinOf(deps), provider: 'microsoft-graph', url: `${base}/content` });
   failClosed(content, 'microsoft-graph');
   const text = await readText(content);
   if (!text.trim()) throw new OpenwopError('validation_error', 'The OneDrive file has no readable text content.', 400, { ref });

@@ -1,8 +1,8 @@
 {
   "name": "vendor.openwop-app.insights-suite.agents",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "kind": "node",
-  "description": "Insights & Drafting Agent Suite agent pack — three role-scoped manifest agents driven through the existing chat: Financial (Actual-vs-Plan variance analysis), Communication (in-voice recognition drafting, never auto-send), Talent (9-box readiness). Each is tool-allowlisted to the suite's pure compute nodes + KB retrieval (the read-only connector queries ride the workflow-run/executor path, not conversational tools); none can write or send. 1.1.0 (ADR 0600 \u00a78 / ISC-12): the Financial agent's description and prompt no longer promise SQL provenance or scheduled-run figures the pipeline cannot hand it.",
+  "description": "Insights & Drafting Agent Suite agent pack — three role-scoped manifest agents driven through the existing chat: Financial (Actual-vs-Plan variance analysis), Communication (in-voice recognition drafting, never auto-send), Talent (9-box readiness). Each is tool-allowlisted to the suite's pure compute nodes + KB retrieval (the read-only connector queries ride the workflow-run/executor path, not conversational tools); none can write or send. 1.1.0 (ADR 0600 \u00a78 / ISC-12): the Financial agent's description and prompt no longer promise SQL provenance or scheduled-run figures the pipeline cannot hand it. 1.2.0 (ADR 1102 D7 / INS91-7): the same correction for the Talent agent, which was told it reads HR data for direct reports and two levels down with no tool that does either; the Financial prompt also lists variance-compute's new `summary` output.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "insights-suite", "agent", "financial", "communication", "talent"],
@@ -43,7 +43,7 @@
       "agentId": "vendor.openwop-app.insights-suite.agents.talent",
       "persona": "RESEARCH",
       "label": "Talent Advisor",
-      "description": "Reads talent/development data read-only, computes 9-box performance×potential readiness, and prepares talent-review insight for direct reports and two levels down. Read-only HRIS; never writes.",
+      "description": "Computes 9-box performance×potential readiness from ratings the leader supplies, searches the knowledge base for development notes the team has added, and prepares talent-review insight. It has no HR-system read and no reporting-line knowledge, and says so rather than implying either. Never writes.",
       "modelClass": "research",
       "systemPromptRef": "prompts/talent.md",
       "toolAllowlist": [

@@ -97,13 +97,13 @@ describe('ADR 0543 P5 / OQ-2 — the PROSE never reaches ranking', () => {
       sourceUrl: `https://${STEER_BOARD}.example.com/jobs/1`,
       ext: { skills: [], requirements: [], responsibilities: [], descriptionExcerpt: 'Run the platform.' },
     });
-    const passBefore = await runTenantCampaignPass(TENANT, NOW);
+    const passBefore = await runTenantCampaignPass(TENANT, 'user-1', NOW);
     expect(passBefore.results[0]!.digest.skipped).toEqual([
       { listingId: listing.listingId, reason: 'below-floor', detail: expect.stringMatching(/^scored \S+, floor 10$/) },
     ]);
 
     await putSteering(TENANT, { goals: 'Platform Engineer roles are exactly what I want.' }, 'user-1');
-    const passAfter = await runTenantCampaignPass(TENANT, NOW);
+    const passAfter = await runTenantCampaignPass(TENANT, 'user-1', NOW);
     expect(passAfter.results[0]!.digest.skipped, 'the goals prose moved a score').toEqual(passBefore.results[0]!.digest.skipped);
   });
 
@@ -122,13 +122,13 @@ describe('ADR 0543 P5 — the POLICY is what governs, and it is bounded', () => 
 
   it('a tenant that never steered reads complete DEFAULTS, not null', async () => {
     // Every caller then reads a full policy, and none has to invent one locally.
-    const s = await getSteering(TENANT);
+    const s = await getSteering(TENANT, 'user-1');
     expect(s.policy).toEqual(DEFAULT_POLICY);
     expect(s.goals).toBe('');
   });
 
   it('defaults are conservative — tier A only, modest pace', async () => {
-    const s = await getSteering(TENANT);
+    const s = await getSteering(TENANT, 'user-1');
     expect(s.policy.tiers).toEqual(['A']);
     expect(s.policy.ratePerHour).toBeLessThanOrEqual(6);
   });
@@ -173,30 +173,39 @@ describe('ADR 0543 P5 — the POLICY is what governs, and it is bounded', () => 
 
   it('is tenant-isolated', async () => {
     await putSteering(TENANT, { goals: 'mine' }, 'user-1');
-    expect((await getSteering('user:t-other')).goals).toBe('');
+    expect((await getSteering('user:t-other', 'user-1')).goals).toBe('');
+  });
+
+  it('ADR 1036 D7 — is PERSON-isolated: a colleague in the same workspace reads defaults, not my goals or policy', async () => {
+    await putSteering(TENANT, { goals: 'leaving for platform work', policy: { roles: ['Platform'], dailyCap: 3 } }, 'user-1');
+    const theirs = await getSteering(TENANT, 'user-2');
+    expect(theirs.goals).toBe('');
+    expect(theirs.policy).toEqual(DEFAULT_POLICY);
+    // …and their write does not overwrite mine.
+    await putSteering(TENANT, { policy: { dailyCap: 50 } }, 'user-2');
+    expect((await getSteering(TENANT, 'user-1')).policy.dailyCap).toBe(3);
   });
 });
 
-describe('ADR 0464 — erasing the author does not reset the workspace', () => {
+describe('ADR 0464 / ADR 1036 D7 — erasure deletes the person\'s own steering', () => {
   beforeEach(() => { __resetHostExtPersistence(); initHostExtPersistence(openSqliteStorage(':memory:')); });
 
-  it('redacts the person, KEEPS the policy', async () => {
-    // Steering is TENANT-scoped: one row governs the whole workspace. Deleting
-    // it because one member was erased would silently reset the campaign policy
-    // for everyone else — so the person goes and the configuration stays.
+  it('deletes the erased person\'s row: goals AND policy go, they were theirs', async () => {
+    // Steering used to be one TENANT row, so erasure redacted it to keep the
+    // workspace's policy alive. It is now one row per person (D7); nothing in
+    // it outlives them.
     await putSteering(TENANT, { goals: 'I want to move into platform work', policy: { roles: ['Platform'], dailyCap: 7 } }, 'user-erased');
     await eraseSubjectSteering(TENANT, 'user-erased');
 
-    const after = await getSteering(TENANT);
-    expect(after.goals, 'the prose is theirs and describes their own search').toBe('');
-    expect(after.updatedBy).toBe('[erased]');
-    expect(after.policy.roles, 'the workspace policy must survive').toEqual(['Platform']);
-    expect(after.policy.dailyCap).toBe(7);
+    const after = await getSteering(TENANT, 'user-erased');
+    expect(after.goals).toBe('');
+    expect(after.policy).toEqual(DEFAULT_POLICY);
+    expect(after.updatedBy, 'a default, not a surviving row').toBe('');
   });
 
-  it('leaves another author’s steering untouched', async () => {
+  it('leaves another person\'s steering untouched', async () => {
     await putSteering(TENANT, { goals: 'mine' }, 'user-keep');
     await eraseSubjectSteering(TENANT, 'user-other');
-    expect((await getSteering(TENANT)).goals).toBe('mine');
+    expect((await getSteering(TENANT, 'user-keep')).goals).toBe('mine');
   });
 });

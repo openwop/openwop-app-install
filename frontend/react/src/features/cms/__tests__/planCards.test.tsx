@@ -52,6 +52,42 @@ describe('plan cards (ADR 1069 D1)', () => {
   });
 });
 
+// ADR 1069 D3 — DeckTalk's live section (dt-price-plans), moved to `list`.
+const tiers = [
+  { title: 'Pilot', text: 'Your first production, made with us.', badge: 'Open now', highlight: true, ctaLabel: 'Request a pilot', ctaUrl: '/p/pilot' },
+  { title: 'Solo', text: 'For one presenter.', badge: 'Coming', ctaLabel: 'Join the list', ctaUrl: '/p/pilot' },
+  { title: 'Organization', text: 'For larger rollouts.', badge: 'Talk to us' },
+];
+
+describe('named tier list (ADR 1069 D3)', () => {
+  it('a badge alone makes a plan list, drawn as a status pill; no unit ⇒ named, not priced', () => {
+    const c = renderSection({ sectionId: 'sec:tiers', type: 'columns', data: { layout: 'list', columns: tiers.map((t) => ({ title: t.title, badge: t.badge })) } });
+    const s = c.querySelector('section')!;
+    expect(s.classList.contains('fp-cols--plans'), 'badges with no button or unit still make plan cards').toBe(true);
+    expect(s.classList.contains('fp-cols--plans-named')).toBe(true);
+    expect([...c.querySelectorAll('.fp-col__status .fp-col__badge')].map((b) => b.textContent)).toEqual(['Open now', 'Coming', 'Talk to us']);
+    // The pill is its own line, not inside the heading: the name reads alone.
+    expect(screen.getByRole('heading', { name: 'Pilot' })).toBeTruthy();
+  });
+
+  it('highlight makes the featured dark card with no price; buttons follow highlight', () => {
+    const c = renderSection({ sectionId: 'sec:tiers', type: 'columns', data: { layout: 'list', columns: tiers } });
+    const [pilot, solo, org] = [...c.querySelectorAll('.fp-col')];
+    expect(pilot!.classList.contains('fp-tone--inverse'), 'the featured tier is the dark card').toBe(true);
+    expect(pilot!.querySelector('.fp-col__cta a')?.classList.contains('fp-btn--primary')).toBe(true);
+    expect(solo!.querySelector('.fp-col__cta a')?.classList.contains('fp-btn--ghost')).toBe(true);
+    expect(org!.querySelector('.fp-col__cta')).toBeNull();
+    expect(c.textContent, 'no number is invented').not.toMatch(/\$|\d/);
+  });
+
+  it('a priced plan list is NOT named (the ADR 1069 D1 price styling stays)', () => {
+    const c = renderSection({ sectionId: 'sec:offer', type: 'columns', data: { layout: 'list', columns: [...plans, { title: 'Pilot', badge: 'Open now' }] } });
+    const s = c.querySelector('section')!;
+    expect(s.classList.contains('fp-cols--plans')).toBe(true);
+    expect(s.classList.contains('fp-cols--plans-named')).toBe(false);
+  });
+});
+
 describe('callout footnote (ADR 1069 D2)', () => {
   it('boxes the note behind a decorative mark', () => {
     const c = renderSection({ sectionId: 'sec:offer', type: 'columns', data: { layout: 'list', columns: plans, note: '**Not included:** your ad spend.', noteStyle: 'callout' } });

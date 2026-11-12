@@ -10,14 +10,18 @@
  * The scalar job fields ride CRM's typed custom fields; the structured digest
  * does not (D2 — `customFields` is scalars-only).
  */
-import { createDeal, updateDeal, listDeals, listFieldDefs, createFieldDef, listPipelines, createPipeline, deletePipeline } from '../../crm/crmEntitiesService.js';
+import { createDeal, updateDeal, deleteDeal, listDeals, listFieldDefs, createFieldDef, listPipelines, createPipeline, deletePipeline } from '../../crm/crmEntitiesService.js';
 import type { Deal } from '../../crm/entities/deals.js';
 import { jobDigests, type JobDigest } from './digest.js';
 import { checkEligibility, type ApplicantConstraints, type EligibilityVerdict } from './eligibility.js';
 import { projectFitScores, JOB_FIT_CRITERIA, type FitProfile } from './fitScoring.js';
 import { computePriority } from '../../../host/weightedScoring.js';
 import { listBoardAdapters } from '../boards/adapters.js';
+import { createHash } from 'node:crypto';
 import { DurableCollection } from '../../../host/hostExtPersistence.js';
+import { collectPerOrg } from '../../../host/featureDataExport.js';
+import { registerSubjectEraser } from '../../../host/subjectErasure.js';
+import { subjectKeyForms } from '../../../host/subjectErasureRedaction.js';
 
 /** The pipeline every application lands on. `non-revenue` by construction — a
  *  revenue pipeline here would produce the misleading rollup ADR 0540 D3 removes. */
@@ -208,6 +212,30 @@ export interface CreateApplicationResult {
   matchScore: number;
   /** True when the application already existed — a retry, not a new apply. */
   existed: boolean;
+  /** ADR 1036 D3 — the id names a deal someone ELSE created. No deal is
+   *  returned: echoing it would hand a colleague's application to the caller. */
+  notYours?: true;
+}
+
+/**
+ * ADR 1036 D3 — the per-person part of an application deal id.
+ *
+ * Deal ids used to be `deal:<listingId>`, one per listing per org, so two
+ * members applying to the same posting shared ONE deal: the second "applied"
+ * on the first's record, and erasing either deleted the other's application. A
+ * short hash keeps the person's id out of the deal id (it is visible across the
+ * workspace) while making the pair unique.
+ */
+export function subjectDealTag(subjectId: string): string {
+  return createHash('sha256').update(subjectId).digest('hex').slice(0, 16);
+}
+
+/** True when `dealId` has the pipeline's per-person shape and names someone
+ *  other than `userId` — a caller must not mint, and so squat, a colleague's
+ *  application id (the manual-application route refuses it, 409). */
+export function isForeignApplicationId(dealId: string, userId: string): boolean {
+  const tagged = /^deal:([0-9a-f]{16}):/.exec(dealId);
+  return tagged !== null && tagged[1] !== subjectDealTag(userId);
 }
 
 /**
@@ -229,6 +257,9 @@ export async function createApplication(input: CreateApplicationInput): Promise<
   }
 
   const existing = (await listDeals(tenantId, orgId, {})).find((d) => d.dealId === dealId);
+  if (existing && existing.createdBy !== actor) {
+    return { deal: null, digest: null, eligibility, matchScore, existed: true, notYours: true };
+  }
   if (existing) return { deal: existing, digest: provisional, eligibility, matchScore, existed: true };
 
   const pipeline = await ensureApplicationPipeline(tenantId, orgId);
@@ -262,6 +293,17 @@ export async function createApplication(input: CreateApplicationInput): Promise<
 
   await jobDigests.put(provisional);
   return { deal, digest: provisional, eligibility, matchScore, existed: false };
+}
+
+/**
+ * Withdraw a deal the pipeline minted for a submission that never went out
+ * (the grant refused at the consume CAS, or the board said no). Left in place it
+ * sat in the first stage — "Applied" — and the list, the funnel and CRM
+ * described an application nobody received (grade-code row 81). Deleted through
+ * CRM so the cascade removes its digest with it.
+ */
+export async function withdrawUnsentApplication(tenantId: string, orgId: string, dealId: string): Promise<void> {
+  await deleteDeal(tenantId, orgId, dealId, { actor: 'system:job-search-pipeline' });
 }
 
 /** Advance an application to a named stage, through CRM so stage history records it. */
@@ -317,3 +359,40 @@ export async function listApplications(tenantId: string, orgId: string): Promise
   }
   return out;
 }
+
+
+/**
+ * ADR 1036 D6 — subject erasure for the applications themselves.
+ *
+ * An application is a CRM deal (ADR 0540), and the CRM eraser keeps deals: they
+ * are the workspace's business records, so it anonymizes the CONTACT and leaves
+ * the relationship. That rule is right for a sales pipeline and wrong for this
+ * one. A deal in the job-search pipeline is one person's job application — "Title
+ * — Company", its stage history, its match score — and after the CRM eraser ran
+ * it still named them as `createdBy`. A DSAR reported success while their
+ * application history survived. Nothing in this package erased it.
+ *
+ * So the deals the subject CREATED in the application pipeline are deleted
+ * through `deleteDeal`, whose delete cascade (`lifecycle/crmCascade.ts`) removes
+ * the digests, drafts and follow-ups with them. Keyed on `createdBy` — the
+ * applicant — not `owner`, which CRM lets anyone reassign. Only the application
+ * pipeline is walked (bound or legacy name-matched, via the read-only lookup the
+ * export uses), so a deal in any other pipeline is never touched. The CRM eraser
+ * never rewrites `createdBy`, so the two run in either order.
+ */
+export async function eraseSubjectApplications(tenantId: string, subjectKey: string): Promise<void> {
+  if (!tenantId || !subjectKey) return;
+  const { forms } = subjectKeyForms(subjectKey);
+  const doomed = await collectPerOrg(tenantId, async (orgId) => {
+    const pipeline = await findApplicationPipelineReadOnly(tenantId, orgId);
+    if (!pipeline) return [];
+    return (await listDeals(tenantId, orgId, { pipelineId: pipeline.pipelineId }))
+      .filter((d) => forms.has(d.createdBy))
+      .map((d) => ({ orgId, dealId: d.dealId }));
+  });
+  for (const { orgId, dealId } of doomed) {
+    await deleteDeal(tenantId, orgId, dealId, { actor: 'system:job-search-erasure' });
+  }
+}
+
+registerSubjectEraser(eraseSubjectApplications);

@@ -222,7 +222,9 @@ function FeatureIndex({ d, sx }: { d: Raw; sx: string }): JSX.Element {
   );
 }
 
-export const DESIGN_SECTION_TYPES = ['statusTable', 'dateCalc', 'conversation', 'featureIndex', 'decisionTree', 'scheduleSim'] as const;
+// `films` (ADR 1082) is listed here for the editor preview and the type lists;
+// it renders in SectionRenderer beside `video`, whose player it reuses.
+export const DESIGN_SECTION_TYPES = ['statusTable', 'dateCalc', 'conversation', 'featureIndex', 'decisionTree', 'scheduleSim', 'films'] as const;
 
 export function isDesignSection(type: string): boolean {
   return (DESIGN_SECTION_TYPES as readonly string[]).includes(type);

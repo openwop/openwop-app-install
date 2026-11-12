@@ -1,7 +1,19 @@
 /** ADR 0951 P2.2/P2.5: the consent row, not a successful deletion callback,
  * decides whether a recording can be read or finalized. Two SQLite clients
  * share real rows and real blob bytes. Faults pause a specific CAS or fail the
- * existing cleanup hook; no consent/store evaluator is mocked. */
+ * existing cleanup hook; no consent/store evaluator is mocked.
+ *
+ * Sabotage witnesses (w103; src/features/analytics/replayStore.ts): writing
+ * without a current generation (w103-rcf-no-generation), a read fence that
+ * ignores consent or is skipped (w103-rcf-fence-consent, w103-rcf-no-fence),
+ * not checking the pinned generation on a later chunk (w103-rcf-pin-check),
+ * dropping the pre-PUT or post-CAS consent re-check (w103-rcf-precheck,
+ * w103-rcf-postcheck), rescuing a lost acknowledgement without the fences
+ * (w103-rcf-ack-rescue), an eraser that skips the subject (w103-rcf-erase-skip),
+ * and a consent outage read as "no grant" (w103-rcf-outage-null). In
+ * src/features/consent/consentService.ts: no second consent read
+ * (w103-rcf-single-read) and dropping either tombstone check
+ * (w103-rcf-tombstone-subject, w103-rcf-tombstone-session). */
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -120,6 +132,9 @@ describe('ADR 0951 P2 — consent fences every recording boundary', () => {
   it('withdrawal before the first reservation CAS cannot be missed by an empty erasure scan', async () => {
     const mine = row();
     await choose(mine, true);
+    // The withdrawal's erasure does nothing for this writer (as when its scan
+    // ran before the pointer existed): the writer's own re-check must refuse.
+    failCleanupHook();
     const cas = a.kvCompareAndSwap.bind(a);
     let withdrew = false;
     vi.spyOn(a, 'kvCompareAndSwap').mockImplementation(async (...args) => {
@@ -135,7 +150,11 @@ describe('ADR 0951 P2 — consent fences every recording boundary', () => {
     expect(writes, 'a refusal observed after reservation must stop before the blob provider').toBe(0);
     expect(await get(mine)).toBeNull();
     expect(await keys(mine)).toEqual([]);
-    await expect(eraseSubjectReplays(tenantId, mine.subjectKey)).resolves.toEqual({ rowsTouched: expect.any(Number) });
+    // The refusing writer fenced its own session and dropped its pointers: nothing is left to erase.
+    expect(JSON.parse((await b.kvGet(rawKey(mine)))!)).toEqual({
+      tenantId, orgId: mine.orgId, sessionId: mine.sessionId, privacy: { state: 'erased', erasedAt: expect.any(String) },
+    });
+    await expect(eraseSubjectReplays(tenantId, mine.subjectKey)).resolves.toEqual({ rowsTouched: 0 });
   });
 
   it('a grant changed during a read cannot authorize bytes from the prior generation', async () => {
@@ -210,7 +229,7 @@ describe('ADR 0951 P2 — consent fences every recording boundary', () => {
       }
       return result;
     });
-    await expect(putReplayChunk(mine, 0, CHUNK)).rejects.toThrow();
+    await expect(putReplayChunk(mine, 0, CHUNK)).rejects.toThrow('finalization response lost');
     expect(injected).toBe(true);
     expect(await get(mine)).toBeNull();
     expect(await keys(mine)).toEqual([]);

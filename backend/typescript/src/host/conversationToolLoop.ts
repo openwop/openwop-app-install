@@ -56,7 +56,7 @@ import { resolveConversationModelTarget, unchosenModelTarget, type ConversationM
 import type { RoutingTarget } from '../features/model-router/routeTurn.js';
 import { resolveUserNamedSecret } from '../byok/userNamedSecret.js';
 import { createLogger } from '../observability/logger.js';
-import { listToolApprovals, recordToolApprovalRequested, approvedToolSets, claimApprovedToolApprovals, returnUnspentToolApprovals, type ToolApprovalRecord } from '../features/conversation-tools/approvalLedger.js';
+import { listToolApprovals, recordToolApprovalRequested, claimApprovedToolApprovals, returnUnspentToolApprovals, makeApprovalGrant, deleteSpentCallApprovals, scopeFoldRows, type ApprovalGrant, type ToolApprovalRecord } from '../features/conversation-tools/approvalLedger.js';
 import { computeFirewallStamp } from '../features/capability-firewall/firewallHook.js';
 import { buildLaneFirewall, safeModeBaseline } from './laneFirewall.js';
 import { resolveConversationToolGate } from './conversationToolScope.js';
@@ -439,25 +439,33 @@ export const GROUP_ROOM_NO_TOOLS_NOTICE =
 
 
 /**
- * ADR 1042 CHAN-F3 (security review H2) — the approvals a turn's firewall may fold,
- * and how the turn settles them when its loop returns or throws.
+ * ADR 1042 CHAN-F3 (security review H2) + ADR 0834 FW2-D1 (CHAN-F2) — the approvals a
+ * turn may use, as ONE per-call grant every gate of the turn asks (the ADR 0132 scope
+ * gate and the firewall), and how the turn settles them when its loop returns or throws.
  *
- *  - Not acting as the conversation's owner: nothing is folded (ADR 0834 D3).
- *  - An in-app turn: every approved row is folded and nothing changes in the ledger
- *    (ADR 0132, per tool for the rest of the conversation).
- *  - A channel-ingress turn: each approval covers ONE call. The rows are CLAIMED
- *    (compare-and-delete) before the loop, and only the rows this turn won are
- *    folded, so two instances running turns on one conversation cannot both spend
- *    one approval. `settle(spent)` hands back the claims the turn did not spend.
+ *  - Not acting as the conversation's owner: nothing is usable (ADR 0834 D3).
+ *  - An in-app turn: tool-wide (`conversation`) approvals cover any call of the tool; a
+ *    `call` approval covers the one call whose arguments it was shown, and is DELETED
+ *    after the turn spends it.
+ *  - A channel-ingress turn: only `call` approvals count (exact arguments), each covers
+ *    ONE call. The rows are CLAIMED (compare-and-delete) before the loop, so two
+ *    instances cannot both spend one; `settle()` hands back the claims not spent.
  */
 export async function approvalsForTurn(input: {
   channelTurn: boolean; actsAsOwner: boolean; approvals: readonly ToolApprovalRecord[];
-}): Promise<{ folded: readonly ToolApprovalRecord[]; settle: (spent: readonly string[]) => Promise<void> }> {
+}): Promise<{ grant: ApprovalGrant; settle: () => Promise<void> }> {
   const none = async (): Promise<void> => undefined;
-  if (!input.actsAsOwner) return { folded: [], settle: none };
-  if (!input.channelTurn) return { folded: input.approvals, settle: none };
+  if (!input.actsAsOwner) return { grant: makeApprovalGrant([], { singleUse: true, requireDigest: true }), settle: none };
+  if (!input.channelTurn) {
+    const grant = makeApprovalGrant(input.approvals, { singleUse: false, requireDigest: false });
+    return { grant, settle: () => deleteSpentCallApprovals(grant.spent()) };
+  }
   const claimed = await claimApprovedToolApprovals(input.approvals);
-  return { folded: claimed, settle: (spent) => (claimed.length ? returnUnspentToolApprovals(claimed, new Set(spent)) : none()) };
+  const grant = makeApprovalGrant(claimed, { singleUse: true, requireDigest: true });
+  return {
+    grant,
+    settle: () => (claimed.length ? returnUnspentToolApprovals(claimed, new Set(grant.spent().map((r) => r.toolName))) : none()),
+  };
 }
 
 /** Append the no-tools notice to a composed scaffold IFF this turn's tool loop
@@ -664,9 +672,13 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   // coming. Folded only when the acting principal IS the owner.
   const actingPrincipal = typeof actingUserId === 'string' ? actingUserId : undefined;
   const approvals = await listToolApprovals(run.tenantId, conversationStateKey);
+  const channelTurn = Boolean((run.metadata as Record<string, unknown> | undefined)?.['channelIngress']);
   const gate = await resolveConversationToolGate({
     tenantId: run.tenantId, conversationKey: conversationStateKey,
-    ceiling: tools.map((t) => t.def.name), approvals,
+    // CHAN-F2 — the scope fold takes denials and in-app tool-wide approvals only. A `call`
+    // approval, and every approval on a channel turn, is answered per call by the turn's
+    // grant at the dispatch gate (it used to fold every row, claimed or not).
+    ceiling: tools.map((t) => t.def.name), approvals: scopeFoldRows(approvals, channelTurn),
     foldApprovalsOnlyFor: actingPrincipal ?? '',
     run, ...(params.storage ? { storage: params.storage } : {}),
   });
@@ -678,9 +690,7 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   // here, before the loop, and only the rows this turn won are folded, so two instances
   // running turns on one conversation cannot both spend one approval. Unspent claims
   // go back after the loop (`returnUnspentToolApprovals`).
-  const channelTurn = Boolean((run.metadata as Record<string, unknown> | undefined)?.['channelIngress']);
   const turnApprovals = await approvalsForTurn({ channelTurn, actsAsOwner, approvals });
-  const { approvedTools, approvedBaselineTools } = approvedToolSets(turnApprovals.folded);
 
   // ADR 0150 / ADR 0834 D3 — `bypass` is honoured only for the principal the tools ACT
   // AS (`run.metadata.actingUserId`). A participant can read and post in a shared
@@ -694,13 +704,11 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   // ADR 0135 / ADR 0834 D1 — the capability firewall, built by the ONE lane factory and
   // ALWAYS (the old skip — bypass + rule-less + default-allow — is how a lane could be
   // firewall-less at all). The factory wires decision + shadow logging.
-  // H2 / CHAN-F3 — the hook is synchronous; it reports each claimed approval it spends,
-  // and the unspent claims are handed back once the loop returns (or throws).
-  const spentApprovals: string[] = [];
+  // H2 / CHAN-F3 + FW2-D1 — the hook asks the turn's grant per call; the grant records what it
+  // spent, and the turn settles it once the loop returns (or throws).
   const { hook: firewall, posture: fw } = await buildLaneFirewall({
     tenantId: run.tenantId, lane: 'chat', bypass,
-    approvedTools, approvedBaselineTools,
-    ...(channelTurn ? { singleUseApprovals: true, onApprovalSpent: (toolName: string) => { spentApprovals.push(toolName); } } : {}),
+    grant: turnApprovals.grant,
     resource: params.conversationId, dedupeKey: runId,
   });
   // ADR 0397 — stamp the resolved posture for provenance. Written when there are rules, a
@@ -746,6 +754,7 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
       ...(toolPermissions ? { toolPermissions } : {}),
       ...(capabilityScope ? { capabilityScope } : {}),
       firewall, // decisions are logged by the hook itself (ADR 0834 D1)
+      approvalGrant: turnApprovals.grant, // FW2-D1 — the same grant answers the ADR 0132 scope gate
       ...(onEvent ? { onEvent } : {}),
     },
     { callAIWithTools, executeTool: chatExecuteTool },
@@ -755,7 +764,7 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   const loopRun = runLoopWithBumpFallback(runOnce, loopModel, loopFallbackModel);
   // CHAN-F3 — whether the loop returns or throws, spent claims stay deleted (the call
   // they allowed has run) and the rest go back.
-  const { result: loop, modelUsed } = await loopRun.finally(() => turnApprovals.settle(spentApprovals));
+  const { result: loop, modelUsed } = await loopRun.finally(() => turnApprovals.settle());
 
   // ADR 0132 Phase 3 — record any tool call the agent deferred for approval, with the
   // ask's origin and arguments, so the composer's conversation-tools control shows it
@@ -766,7 +775,7 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   const clarificationAsk = clarificationCollector?.drain();
   const pendingApprovals = loop.pendingApprovals ?? [];
   for (const p of actsAsOwner ? pendingApprovals : []) {
-    try { await recordToolApprovalRequested(run.tenantId, conversationStateKey, p.toolName, { ...(p.origin ? { origin: p.origin } : {}), input: p.input }); }
+    try { await recordToolApprovalRequested(run.tenantId, conversationStateKey, p.toolName, { ...(p.origin ? { origin: p.origin } : {}), input: p.input, lane: channelTurn ? 'channel' : 'app' }); }
     catch { /* best-effort — the agent's reply already told the user it is pending */ }
   }
 

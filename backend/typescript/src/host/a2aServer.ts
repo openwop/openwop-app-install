@@ -359,6 +359,7 @@ async function dispatchA2aRequest(
         // sealed before it is persisted, never echoed.
         const authorization = pushAuthorizationFrom(cfg);
         const rec = await setA2aTaskPushConfig(taskId, {
+          protocol: '0.3', // CHAN-F7 — a 0.3 client keeps the 0.3 push body
           url,
           ...(typeof cfg?.tokenFingerprint === 'string'
             ? { tokenFingerprint: cfg.tokenFingerprint }

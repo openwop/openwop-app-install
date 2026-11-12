@@ -1,4 +1,4 @@
-> **Published white-label install bundle.** Auto-synced from `openwop/openwop-app` (source `1bdbf2bde3`). Clone or download the release zip, then follow **[WHITE-LABEL.md](./frontend/react/WHITE-LABEL.md)** to deploy your own. Generated — PRs here are not merged; development happens upstream.
+> **Published white-label install bundle.** Auto-synced from `openwop/openwop-app` (source `d956ad184`). Clone or download the release zip, then follow **[WHITE-LABEL.md](./frontend/react/WHITE-LABEL.md)** to deploy your own. Generated — PRs here are not merged; development happens upstream.
 
 # openwop-app — OpenWOP Application
 
@@ -705,6 +705,17 @@ toggle above. Activation is pure operator config — reversible, and **inert unt
        OPENWOP_BILLING_TRIAL_CARD={"bundle:bookai-author-suite":"if_required"}
        ```
        The key must name a bundle in that deployment's `distributions/bundles.json`.
+   - **A "Start your trial" button (ADR 1097):** link any CTA (a CMS button, or a
+     link from another site) to `https://<app-host>/start-trial?plan=<tier>` or
+     `/start-trial?bundle=<id>`, optionally `&cadence=year`. A signed-out visitor signs
+     in or creates an account and comes back to the same URL; a signed-in one sees the
+     trial this workspace would get (from the knobs above) and continues to the normal
+     Stripe Checkout. The page never claims a trial the checkout would not send: an
+     unpriced target, no `TRIAL_DAYS` entry, a used trial, an existing plan, a missing
+     Stripe key or the `billing` toggle OFF each get their own message and a link to
+     the billing page, store or `/pricing`. Only an owner/admin (`host:billing:manage`)
+     can start it, as with any checkout. Example: `TRIAL_DAYS={"plan:pro":7}` and a
+     button to `/start-trial?plan=pro` gives "Start your 7-day free trial of Pro".
    - **Preflight every change:** `node scripts/check-billing-config.mjs --cloud-run
      <service> --region <r> --project <p>` (or with the vars in your shell) — it
      expands `bundle:` entries, enforces standalone bundles, validates every knob

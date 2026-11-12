@@ -26,10 +26,21 @@ import {
   type AdLayoutTemplate, type CreativeBrief, type CreativeRender, type LayerNudge, type RenderWarning,
 } from './creativeBriefsClient.js';
 import { getRun } from '../../client/runsClient.js';
+import { Link } from 'react-router-dom';
 
 type TFn = ReturnType<typeof useTranslation>['t'];
 
 /** Platform display names — proper nouns, identical in every locale. */
+/** ADR 1039 D2 — the reel run's error codes a person can act on, as copy keys. */
+const REEL_FAILURE_REASONS: Record<string, string> = {
+  credential_required: 'reelReasonNoKey',
+  byok_required_but_unresolved: 'reelReasonKeyUnreadable',
+  provider_unavailable: 'reelReasonProvider',
+  provider_timed_out: 'reelReasonTimeout',
+  provider_rate_limited: 'reelReasonBudget',
+  validation_error: 'reelReasonInvalid',
+};
+
 const PLATFORM_LABELS: Record<string, string> = {
   meta: 'Meta', tiktok: 'TikTok', linkedin: 'LinkedIn', 'google-display': 'Google Display',
 };
@@ -60,6 +71,9 @@ export function RendersSection({ orgId, brief, dirty, onSaveFirst }: { orgId: st
   const [generatingReel, setGeneratingReel] = useState(false);
   // R2 CRB-SP-9 — set when the poll exhausted without observing an outcome.
   const [reelUnresolved, setReelUnresolved] = useState(false);
+  // ADR 1039 D2 — the server refused the reel before starting a run: the
+  // workspace has no Replicate key. A persistent state, not a toast.
+  const [reelNeedsKey, setReelNeedsKey] = useState(false);
   // Guard the slow reel poll against unmount — otherwise a still-running loop would
   // setState + toast on a gone component (grade-ux REEL-2).
   const mountedRef = useRef(true);
@@ -160,6 +174,7 @@ export function RendersSection({ orgId, brief, dirty, onSaveFirst }: { orgId: st
   const pollReel = useCallback(async (runId: string): Promise<void> => {
     try {
       let status = 'pending';
+      let failureCode: string | undefined;
       // R2 CRB-SP-9 — `cancelled` IS a terminal status on the run substrate;
       // treating it as pending kept "Generating reel…" up for the full five
       // minutes and then asserted "failed" about a run the USER cancelled.
@@ -170,7 +185,9 @@ export function RendersSection({ orgId, brief, dirty, onSaveFirst }: { orgId: st
         // whole point of REEL-2 — the run is still going, and the handle is what lets the
         // next mount pick it up and finally tell the user what happened.
         if (!mountedRef.current) return;
-        status = (await getRun(runId)).status;
+        const snap = await getRun(runId);
+        status = snap.status;
+        failureCode = snap.error?.code;
       }
       if (!mountedRef.current) return;
       if (status === 'completed') {
@@ -181,7 +198,14 @@ export function RendersSection({ orgId, brief, dirty, onSaveFirst }: { orgId: st
         // was no retry path either).
         try { await reload(); }
         catch { toast.error(t('refreshAfterSuccessFailed')); }
-      } else if (status === 'failed') { clearPendingReel(brief.briefId); toast.error(t('reelFailed')); }
+      } else if (status === 'failed') {
+        clearPendingReel(brief.briefId);
+        // ADR 1039 D2 — say why, from the run's error CODE. The raw message is
+        // provider text (status codes, response snippets, English), so it is
+        // never shown; an unmapped code gets the plain "failed".
+        const reason = failureCode ? REEL_FAILURE_REASONS[failureCode] : undefined;
+        toast.error(reason ? t('reelFailedWith', { reason: t(reason) }) : t('reelFailed'));
+      }
       else if (status === 'cancelled') { clearPendingReel(brief.briefId); toast.info(t('reelCancelled')); }
       // R2 CRB-SP-9 — loop exhaustion: we genuinely do NOT know. Asserting
       // "failed" claimed an observation the client never made. The handle is
@@ -205,6 +229,7 @@ export function RendersSection({ orgId, brief, dirty, onSaveFirst }: { orgId: st
     // expensive render of all.
     if (dirty && !(await onSaveFirst())) return;
     setGeneratingReel(true);
+    setReelNeedsKey(false);
     let runId: string;
     try {
       ({ runId } = await generateReel(orgId, brief.briefId, {
@@ -213,7 +238,8 @@ export function RendersSection({ orgId, brief, dirty, onSaveFirst }: { orgId: st
       }));
     } catch (e) {
       if (mountedRef.current) {
-        toast.error(e instanceof Error && e.message ? e.message : t('reelFailed'));
+        if ((e as { code?: unknown }).code === 'credential_required') setReelNeedsKey(true);
+        else toast.error(e instanceof Error && e.message ? e.message : t('reelFailed'));
         setGeneratingReel(false);
       }
       return;
@@ -305,6 +331,11 @@ export function RendersSection({ orgId, brief, dirty, onSaveFirst }: { orgId: st
               screen-reader user hears the slow poll's progress + terminal state. */}
           <p id="reel-hint" className="u-fs-13 u-text-muted u-mt-1">{t('generateReelHint')}</p>
           <p className="sr-only" role="status" aria-live="polite">{generatingReel ? t('reelGenerating') : ''}</p>
+          {reelNeedsKey ? (
+            <Notice variant="warning" announce={t('reelNeedsKey')}>
+              {t('reelNeedsKey')} <Link to="/access?tab=connections" className="inline-link">{t('reelNeedsKeyLink')}</Link>
+            </Notice>
+          ) : null}
           {/* ADR 0399 §a × ADR 0401 — per-layer imagery: choose from the library
               or GENERATE with AI; unset falls back to the mood board. */}
           <div className="u-flex u-gap-3 u-wrap">

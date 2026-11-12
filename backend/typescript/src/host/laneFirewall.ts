@@ -20,7 +20,7 @@
  *
  * @see docs/adr/0834-capability-firewall-exit-decision.md
  */
-import { buildFirewallHook, SENSITIVE_APPROVAL_TOOLS, type FirewallHook } from '../features/capability-firewall/firewallHook.js';
+import { buildFirewallHook, SENSITIVE_APPROVAL_TOOLS, type FirewallHook, type FirewallApprovalGrant } from '../features/capability-firewall/firewallHook.js';
 import { getCapabilityRules, getUnknownToolPolicy, getFirewallMode, getDefaultDenyVerdict, getPlatformRules } from '../features/capability-firewall/ruleStore.js';
 import type { CapabilityRule, FirewallMode } from '../features/capability-firewall/types.js';
 import { declaredSafeModeApprovals } from './agentToolProvider.js';
@@ -44,6 +44,8 @@ export interface LaneFirewallInput {
   /** ADR 1042 (security review H2) — see `FirewallHookOptions.singleUseApprovals`. */
   singleUseApprovals?: boolean;
   onApprovalSpent?: (toolName: string) => void;
+  /** ADR 0834 FW2-D1 — per-call approvals; replaces the by-name sets (see the hook). */
+  grant?: FirewallApprovalGrant;
   /** The governance-log `resource` (a conversation id, run id, session). */
   resource?: string;
   /** Dedupe shadow would-blocks per run/session rather than per hook (voice builds a
@@ -105,6 +107,7 @@ export async function buildLaneFirewall(input: LaneFirewallInput): Promise<LaneF
     ...(input.approvedBaselineTools ? { approvedBaselineTools: input.approvedBaselineTools } : {}),
     ...(input.singleUseApprovals ? { singleUseApprovals: true } : {}),
     ...(input.onApprovalSpent ? { onApprovalSpent: input.onApprovalSpent } : {}),
+    ...(input.grant ? { grant: input.grant } : {}),
     ...(shadowLogged ? { shadowLogged } : {}),
     onUnclassified: (toolName) => log.debug('firewall_unclassified_tool', { toolName, unknownToolPolicy, lane }),
     // ADR 0397 Phase 1 / ADR 0834 D1 — every narrowing verdict, every lane. Fire-and-

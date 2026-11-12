@@ -71,10 +71,17 @@ async function sendRelay(storage: Storage, reply: ChannelReply): Promise<ReplyTr
   const device = await storage.getRelayDevice(reply.lane.relayId);
   // The device must still be this tenant's and live; the reply goes to the chat it came from.
   if (!device || device.tenantId !== reply.tenantId || device.status === 'revoked') return { sent: false, error: 'relay_unavailable' };
-  const egress = await enqueueOutbound(storage, device.relayId, {
-    channel: device.channel as RelayChannel, conversationId: reply.chatId, text: clip(reply.text, 'relay'), replyToMessageId: reply.inboundMessageId,
-  });
-  return { sent: true, providerRef: egress.egressId };
+  try {
+    const egress = await enqueueOutbound(storage, device.relayId, {
+      channel: device.channel as RelayChannel, conversationId: reply.chatId, text: clip(reply.text, 'relay'), replyToMessageId: reply.inboundMessageId,
+    });
+    return { sent: true, providerRef: egress.egressId };
+  } catch (err) {
+    // CHAN-F11 — the workspace switched this relay channel off while the turn ran.
+    const reason = (err as { details?: { reason?: unknown } }).details?.reason;
+    if (reason === 'relay_channel_disabled') return { sent: false, error: 'relay_channel_disabled' };
+    throw err;
+  }
 }
 
 export function registerChannelReplyTransports(storage: Storage): void {

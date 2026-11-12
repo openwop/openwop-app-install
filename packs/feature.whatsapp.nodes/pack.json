@@ -1,22 +1,44 @@
 {
   "name": "feature.whatsapp.nodes",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "kind": "node",
-  "description": "WhatsApp BSP feature node pack (ADR 0394) — the governed whatsapp.send node over the ctx.features.whatsapp surface. Every compliance gate (explicit per-number opt-in, the 24h customer-service window, template-vs-session discipline, fork-stable idempotency) lives in the host service the surface fronts; the node is a thin, typed-failure caller. Side-effectful: a replay-mode fork reproduces the recorded outcome, never a second paid send.",
+  "description": "WhatsApp BSP feature node pack (ADR 0394) \u2014 the governed whatsapp.send node over the ctx.features.whatsapp surface. Every compliance gate (explicit per-number opt-in, the 24h customer-service window, template-vs-session discipline, fork-stable idempotency) lives in the host service the surface fronts; the node is a thin, typed-failure caller. Side-effectful: a replay-mode fork reproduces the recorded outcome, never a second paid send.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
-  "keywords": ["feature", "whatsapp", "messaging", "bsp", "twilio"],
-  "engines": { "openwop": ">=1.0.0 <3.0.0" },
+  "keywords": [
+    "feature",
+    "whatsapp",
+    "messaging",
+    "bsp",
+    "twilio"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <3.0.0"
+  },
   "nodes": [
     {
       "typeId": "feature.whatsapp.nodes.send",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "WhatsApp Send",
-      "description": "Sends one WhatsApp message through the tenant's bound BSP number: a free-form session message (only within 24h of the recipient's last inbound) or a pre-approved template (ContentSid + variables). Fails typed — never silently — on missing opt-in, a closed window, or a missing number binding.",
+      "description": "Sends one WhatsApp message through the tenant's bound BSP number: a free-form session message (only within 24h of the recipient's last inbound) or a pre-approved template (ContentSid / Meta template name + variables + languageCode). Reports what is known: the BSP accepted it (accepted, deliveryStatus \"accepted\"; `sent` is a deprecated alias). Delivery is reported later, from verified provider callbacks, by the delivery-status node. Fails typed \u2014 never silently \u2014 on missing opt-in, a closed window, a missing number binding, a connection the run may not use, or a duplicate send already in flight.",
       "category": "integration",
       "role": "action",
       "capabilities": []
+    },
+    {
+      "typeId": "feature.whatsapp.nodes.delivery-status",
+      "version": "1.0.0",
+      "label": "WhatsApp Delivery Status",
+      "description": "Reads what WhatsApp has reported for one sent message (accepted, sent, delivered, read, failed, undelivered, plus the provider error code). Written only from verified provider callbacks on the sending connection. An unknown message id is a typed not_found, never a fabricated status. A READ: it re-executes on replay/fork.",
+      "category": "integration",
+      "role": "read",
+      "capabilities": []
     }
   ],
-  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
 }

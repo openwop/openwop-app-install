@@ -1,6 +1,6 @@
 {
   "name": "vendor.openwop-app.assistant.agents",
-  "version": "1.0.5",
+  "version": "1.0.8",
   "kind": "node",
   "description": "Executive-Assistant agent pack. The chief-of-staff orchestrator + the extractor + the drafter. Tool-allowlisted to the assistant's REGISTERED chat tools (memory-graph reads, commitment upsert, board population, briefing compose, and the enqueue-action approval igniter \u2014 ADR 0308 seam), plus the shared workspace read tools, knowledge search, the documents owner for persistence, and the projected `prioritize` compute node. Draft-only: outbound actions are enqueued for the principal's approval, never auto-sent.",
   "author": "OpenWOP App",
@@ -32,6 +32,10 @@
         "openwop:knowledge.search",
         "openwop:goals.list",
         "openwop:projects.list",
+        "openwop:projects.get",
+        "openwop:projects.knowledge.search",
+        "openwop:projects.portfolio",
+        "openwop:projects.memory.propose",
         "openwop:proposals.list",
         "openwop:tasks.deck",
         "openwop:conversations.search",

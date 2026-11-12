@@ -31,7 +31,7 @@ import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { __clearToggleStore, getEffectiveConfig, saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { __resetInsightsSuiteStore, getConfig } from '../src/features/insights-suite/insightsSuiteService.js';
-import { listJobs, registerJob } from '../src/host/schedulingService.js';
+import { deleteJob, listJobs, registerJob } from '../src/host/schedulingService.js';
 
 let BASE: string;
 const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
@@ -58,10 +58,15 @@ afterAll(async () => {
 const putConfig = (bodyObj: Record<string, unknown>) =>
   fetch(`${BASE}/host/openwop-app/insights-suite/config`, { method: 'PUT', headers: H, body: JSON.stringify(bodyObj) });
 
+/** ADR 1102 D4 — the principal is the CALLER (here the dev-token's key principal),
+ *  never a body field, so every job this suite arms carries this one id. */
+const WEEKLY = 'insights-weekly:default:';
+const weeklyJobs = async () => (await listJobs('default')).filter((j) => j.jobId.startsWith(WEEKLY));
+
 describe('ADR 0081 §6 — cron validation at PUT /config', () => {
   it('rejects a malformed cron with 400 invalid_request', async () => {
     const before = await getConfig('default');
-    const res = await putConfig({ principalUserId: 'u-ceo', businessUnits: ['TX'], scheduleCron: 'not a cron', planSource: { projectId: 'p' } });
+    const res = await putConfig({ businessUnits: ['TX'], scheduleCron: 'not a cron', planSource: { projectId: 'acme-analytics' } });
     expect(res.status).toBe(400);
     const body = await res.json() as { error?: string; message?: string };
     expect(body.error).toBe('invalid_request');
@@ -71,7 +76,7 @@ describe('ADR 0081 §6 — cron validation at PUT /config', () => {
 
   it('rejects an out-of-range cron field with 400', async () => {
     const before = await getConfig('default');
-    const res = await putConfig({ principalUserId: 'u-ceo', businessUnits: ['TX'], scheduleCron: '99 * * * *', planSource: { projectId: 'p' } });
+    const res = await putConfig({ businessUnits: ['TX'], scheduleCron: '99 * * * *', planSource: { projectId: 'acme-analytics' } });
     expect(res.status).toBe(400);
     const body = await res.json() as { error?: string; message?: string };
     expect(body.message).toBe('scheduleCron is not a valid 5-field cron expression.');
@@ -79,24 +84,27 @@ describe('ADR 0081 §6 — cron validation at PUT /config', () => {
   });
 
   it('accepts a valid cron with 200 and persists it', async () => {
-    const res = await putConfig({ principalUserId: 'u-ceo', businessUnits: ['TX'], scheduleCron: '0 6 * * 2', scheduleTimezone: 'America/Chicago', planSource: { projectId: 'acme-analytics' } });
+    const res = await putConfig({ businessUnits: ['TX'], scheduleCron: '0 6 * * 2', scheduleTimezone: 'America/Chicago', planSource: { projectId: 'acme-analytics' } });
     expect(res.status).toBe(200);
     const body = await res.json() as { config?: { scheduleCron?: string } };
     expect(body.config?.scheduleCron).toBe('0 6 * * 2');
     // The response echoes its input whether or not the write ran — read the row back.
     const stored = await getConfig('default');
-    expect(stored?.principalUserId).toBe('u-ceo');
+    expect(stored?.principalUserId, 'the principal is the caller, not a body field').toBeTruthy();
     expect(stored?.scheduleCron).toBe('0 6 * * 2');
-    expect((await listJobs()).find((j) => j.ownerUserId === 'u-ceo')?.cronExpr).toBe('0 6 * * 2');
+    const jobs = await weeklyJobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.cronExpr).toBe('0 6 * * 2');
+    expect(jobs[0]!.ownerUserId).toBe(stored!.principalUserId);
   });
 
   it('accepts an absent cron (schedule simply not configured) with 200', async () => {
-    const res = await putConfig({ principalUserId: 'u-nocron', businessUnits: ['TX'] });
+    const res = await putConfig({ businessUnits: ['TX'] });
     expect(res.status).toBe(200);
     const body = await res.json() as { config?: { principalUserId?: string; scheduleCron?: string } };
-    expect(body.config?.principalUserId).toBe('u-nocron');
+    expect(body.config?.principalUserId).toBeTruthy();
     expect(body.config?.scheduleCron).toBeUndefined();
-    expect((await listJobs()).some((j) => j.ownerUserId === 'u-nocron'), 'no cron ⇒ no job armed').toBe(false);
+    expect(await weeklyJobs(), 'no cron ⇒ no job armed (and the previous case\'s job is removed)').toEqual([]);
   });
 });
 
@@ -120,18 +128,18 @@ describe('ADR 0599 §6 — every field is validated BEFORE the row is written', 
   it('rejects an invalid IANA timezone with 400 and writes NOTHING', async () => {
     const before = await getConfig('default');
     // One transposed letter — a valid cron with an invalid zone, the live case.
-    const res = await putConfig({ principalUserId: 'u-tz', businessUnits: ['TX'], scheduleCron: '0 6 * * 2', scheduleTimezone: 'America/Chicgo', planSource: { projectId: 'p' } });
+    const res = await putConfig({ businessUnits: ['TX'], scheduleCron: '0 6 * * 2', scheduleTimezone: 'America/Chicgo', planSource: { projectId: 'acme-analytics' } });
     expect(res.status, 'an invalid timezone must be a 400 refusal, not a 500 after the write').toBe(400);
     expect((await res.json() as { error?: string }).error).toBe('invalid_request');
     // The refusal did not persist: the stored row is untouched.
     expect(await getConfig('default')).toEqual(before);
-    expect((await listJobs()).some((j) => j.ownerUserId === 'u-tz')).toBe(false);
+    expect(await weeklyJobs()).toEqual([]);
   });
 
   it('refuses to ARM a schedule with no planSource.projectId — every fire would die at node 1', async () => {
-    const res = await putConfig({ principalUserId: 'u-nosource', businessUnits: ['TX'], scheduleCron: '0 6 * * 2' });
+    const res = await putConfig({ businessUnits: ['TX'], scheduleCron: '0 6 * * 2' });
     expect(res.status).toBe(400);
-    expect((await listJobs()).some((j) => j.ownerUserId === 'u-nosource')).toBe(false);
+    expect(await weeklyJobs()).toEqual([]);
   });
 
   /**
@@ -153,16 +161,19 @@ describe('ADR 0599 §6 — every field is validated BEFORE the row is written', 
    */
   it('a squatted job id is refused BEFORE the write, not 400d after it', async () => {
     const before = await getConfig('default');
-    // Another tenant squats this tenant's deterministic weekly-variance job id —
-    // reachable today through `POST /scheduler/jobs` with an explicit `jobId`.
+    // Another tenant squats this tenant's deterministic weekly-variance job id. Since
+    // ADR 1102 D4 the generic `POST /scheduler/jobs` refuses an explicit id under the
+    // reserved prefix, so this is the LEGACY squat (a row written before the
+    // reservation), planted directly.
+    const squatId = `${WEEKLY}${before!.principalUserId}`;
     const squatted = await registerJob({
-      jobId: 'insights-weekly:default:u-squat',
+      jobId: squatId,
       tenantId: 't-attacker',
       cronExpr: '0 6 * * 3',
     });
     expect(squatted.ok, 'the squat itself must succeed — otherwise this probe proves nothing').toBe(true);
 
-    const res = await putConfig({ principalUserId: 'u-squat', businessUnits: ['TX'], scheduleCron: '0 6 * * 2', planSource: { projectId: 'p' } });
+    const res = await putConfig({ businessUnits: ['TX'], scheduleCron: '0 6 * * 2', planSource: { projectId: 'acme-analytics' } });
     expect(res.status, 'an unarmable schedule must be a 400 refusal').toBe(400);
     expect((await res.json() as { error?: string }).error).toBe('invalid_request');
     // The refusal did not persist — the same guarantee `ISC-6` established one
@@ -170,14 +181,21 @@ describe('ADR 0599 §6 — every field is validated BEFORE the row is written', 
     // the row lands and only THEN does the 400 come back.
     expect(await getConfig('default'), 'a refused save must not leave a config row claiming a cron').toEqual(before);
     // And it did not clobber the other tenant's row on the way out.
-    expect((await listJobs()).find((j) => j.jobId === 'insights-weekly:default:u-squat')?.tenantId).toBe('t-attacker');
+    expect((await listJobs()).find((j) => j.jobId === squatId)?.tenantId).toBe('t-attacker');
   });
 
-  it('an armed schedule carries featureId + the inputs the chain needs', async () => {
-    const res = await putConfig({ principalUserId: 'u-armed', businessUnits: ['TX'], scheduleCron: '0 6 * * 2', scheduleTimezone: 'America/Chicago', planSource: { projectId: 'acme-analytics' } });
+  it('an armed schedule carries featureId, the inputs the chain needs, and runs AS its principal', async () => {
+    // The squat above holds this tenant's id under another tenant; clear it the way
+    // the refusal message says (save with no cron is not enough — the row is not
+    // ours to delete), by removing the squat directly.
+    await deleteJob(`${WEEKLY}${(await getConfig('default'))!.principalUserId}`);
+    const res = await putConfig({ businessUnits: ['TX'], scheduleCron: '0 6 * * 2', scheduleTimezone: 'America/Chicago', planSource: { projectId: 'acme-analytics' } });
     expect(res.status).toBe(200);
-    const job = (await listJobs()).find((j) => j.ownerUserId === 'u-armed');
+    const [job] = await weeklyJobs();
     expect(job?.featureId).toBe('insights-suite');
     expect(job?.inputs).toEqual({ projectId: 'acme-analytics', businessUnit: 'TX' });
+    // ADR 1102 D4 (architect B4) — `ownerUserId` is attribution; `actingUserId` is
+    // what makes the run use its principal's own connections.
+    expect(job?.metadata?.actingUserId).toBe((await getConfig('default'))!.principalUserId);
   });
 });

@@ -56,7 +56,7 @@ interface Role { pack: string; agentId: string; suite: string; allow: string[]; 
 const CS = 'vendor.openwop-app.campaign-studio.agents';
 const ROLES: Role[] = [
   { pack: CS, agentId: `${CS}.creative-director`, suite: 'evals/creative-director.json',
-    allow: ['campaign-brief.get-brief', 'campaign-studio.get-design', 'creative-briefs.list', 'media.list', 'brand.list-brands', 'brand.resolve-voice', 'brand.compliance-check'].map(T),
+    allow: ['campaign-brief.get-brief', 'campaign-studio.get-design', 'creative-briefs.list', 'creative-briefs.get', 'media.list', 'brand.list-brands', 'brand.resolve-voice', 'brand.compliance-check'].map(T),
     never: ['campaign-studio.render', 'campaign-channels.generate', 'email.save-draft'].map(T) },
   { pack: CS, agentId: `${CS}.copywriter`, suite: 'evals/copywriter.json',
     allow: ['campaign-brief.get-brief', 'brand.resolve-voice', 'campaign-channels.channels', 'campaign-channels.generate', 'email.get-campaign', 'email.save-draft', 'brand.compliance-check'].map(T),

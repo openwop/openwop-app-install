@@ -11,10 +11,12 @@
  *
  * TST-DEB-5 — red when: repeat views are not deduped per visitor, a canceled
  * order joins, a refund stops subtracting, a deleted funnel's day rows survive a
- * rebuild, a partial funnelRef is stamped, or the completion CTA accepts a
+ * rebuild, a partial funnelRef is stamped, an unpaid (`pending`) order counts as
+ * revenue (ADR 1023 D4), or the completion CTA accepts a
  * non-http(s)/non-internal URL or ignores an explicit null clear. Amounts are
- * cent-sensitive (74.99 × 1 + 74.99 × 2 − 25.37 refunded = 199.60 = 19960 minor
- * units), so a dropped cent or an un-subtracted refund changes the asserted value.
+ * cent-sensitive (74.99 × 2 paid − 25.37 refunded = 124.61 = 12461 minor units;
+ * the pending 74.99 is not money received), so a dropped cent, an un-subtracted
+ * refund or a counted pending order changes the asserted value.
  * Cross-tenant stats is a DOUBLE GUARD (the org gate `assertOrgScope` answers
  * "Organization not found." before the stats read's own tenant scope); the case
  * asserts the outer guard's exact refusal.
@@ -112,8 +114,10 @@ describe('funnels Phase 3 — rollups + revenue join', () => {
     await v.get(pub(orgId, `/revenue-path?vk=${vk}`));
     await v.get(pub(orgId, `/revenue-path/next?from=p3-landing&vk=${vk}`)); // completes landing, views checkout
 
-    // orders: two stamped orders (74.99 + 149.98), the second partly refunded
-    // (−25.37); one canceled (excluded); one unstamped (never joins).
+    // orders: two stamped orders (74.99 + 149.98) — ADR 1023 D4: only the second is
+    // PAID, so only it is revenue; the first stays `pending` (an abandoned checkout,
+    // which used to be counted) — the paid one partly refunded (−25.37); one
+    // canceled (excluded); one unstamped (never joins).
     const prod = await createProduct({ tenantId, orgId, createdBy: 'u', type: 'digital', name: 'Course', price: 74.99, currency: 'USD' });
     await createOrder({ tenantId, orgId, createdBy: 'u', lines: [{ productId: prod.productId, quantity: 1 }], funnelRef: { funnelId, stepId: 'p3-checkout' } });
     const refunded = await createOrder({ tenantId, orgId, createdBy: 'u', lines: [{ productId: prod.productId, quantity: 2 }], funnelRef: { funnelId, stepId: 'p3-checkout' } });
@@ -140,18 +144,18 @@ describe('funnels Phase 3 — rollups + revenue join', () => {
     expect(landingRow.completions).toBe(1);
     expect(landingRow.conversion).toBeCloseTo(0.5, 2);
     expect(checkoutRow.views).toBe(1);
-    expect(checkoutRow.orders).toBe(2);                 // canceled excluded
-    expect(cents(checkoutRow.revenue)).toBe(19960);     // 7499 + 14998 − 2537
+    expect(checkoutRow.orders).toBe(1);                 // pending and canceled excluded (ADR 1023 D4)
+    expect(cents(checkoutRow.revenue)).toBe(12461);     // 14998 − 2537; the pending 7499 is not money received
     // VP-R2-4 — revenue carries its currency dimension (the sum stays bare).
     expect(Object.keys(checkoutRow.revenueByCurrency)).toEqual(['USD']);
-    expect(cents(checkoutRow.revenueByCurrency.USD!)).toBe(19960);
+    expect(cents(checkoutRow.revenueByCurrency.USD!)).toBe(12461);
     expect(stats.body.eventWindow).toBeGreaterThan(0);
 
     // rebuild route (write scope) works and is idempotent
     const rb = await user.post(authed(orgId, `/${funnelId}/stats/rebuild`));
     expect(rb.status).toBe(200);
     const again = await user.get<StatsBody>(authed(orgId, `/${funnelId}/stats`));
-    expect(cents(row(again, 'p3-checkout').revenue)).toBe(19960);
+    expect(cents(row(again, 'p3-checkout').revenue)).toBe(12461);
   });
 
   it('full recompute drops stale day rows and tolerates removed steps; cross-tenant 404', async () => {

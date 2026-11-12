@@ -34,6 +34,12 @@ const api = vi.hoisted(() => ({
   deleteFunnel: vi.fn<typeof FC.deleteFunnel>(),
   updateFunnel: vi.fn<typeof FC.updateFunnel>(),
 }));
+// ADR 1023 — the page asks the effective-access answer before offering writes;
+// these cases are about an editor, so the caller may write.
+vi.mock('../../../client/accessClient.js', async (importOriginal) => {
+  const orig = await importOriginal<Record<string, unknown>>();
+  return { ...orig, getEffectiveAccess: vi.fn(async () => ({ roles: ['member'], scopes: ['workspace:read', 'workspace:write'], basis: 'member' as const })) };
+});
 vi.mock('../funnelsClient.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
   return { ...orig, ...api };
@@ -108,6 +114,8 @@ describe('FN-B-8 — the step-rename edit surface', () => {
         { stepId: 's1', kind: 'landing', pageId: 'p1', name: 'Hero pitch' },
         { stepId: 's2', kind: 'thankyou', pageId: 'p1' },
       ],
+      // ADR 1023 D8 — the save names the version it edited, so a newer one refuses it.
+      expectedUpdatedAt: FUNNEL.updatedAt,
     });
     // `toHaveBeenCalledWith` ignores an `undefined` key; the untouched step must carry none.
     expect(sentSteps()[1]).not.toHaveProperty('name');

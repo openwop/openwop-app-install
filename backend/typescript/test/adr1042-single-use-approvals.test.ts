@@ -8,9 +8,9 @@
  * for the next one (same tool, any arguments). CHAN-F3: the turn CLAIMS its
  * approvals before it runs (`claimApprovedToolApprovals`, a compare-and-delete), so
  * two instances cannot both spend one; the spent claim stays deleted and the rest
- * are handed back (`returnUnspentToolApprovals`), so a later turn asks again too. FW2-D1 (binding the
- * approval to the shown arguments) is still deferred; this is the narrower
- * one-call grain, not argument binding.
+ * are handed back (`returnUnspentToolApprovals`), so a later turn asks again too. FW2-D1
+ * (CHAN-F2) adds argument binding on top: see `adr0834-fw2d1-argument-bound-approvals.test.ts`;
+ * the `approvalsForTurn` block below covers how each lane uses and settles approvals.
  *
  * Red when: single-use is ignored (the second call is allowed); a spend is not
  * reported; spending removes a pending or denied row; a policy ask is satisfied
@@ -134,49 +134,68 @@ describe('claim before use (CHAN-F3: two instances cannot spend one approval)', 
   });
 });
 
-describe('approvalsForTurn — what the loop folds, per lane (CHAN-F3)', () => {
+describe('approvalsForTurn — what a turn may use, per lane (CHAN-F3, FW2-D1)', () => {
   const storage = openSqliteStorage(':memory:');
   beforeAll(() => { initHostExtPersistence(storage); });
   afterAll(async () => { __resetHostExtPersistence(); await storage.close(); });
-  async function approved(conv: string): Promise<void> {
-    await recordToolApprovalRequested('t-at', conv, TOOL);
-    await resolveToolApproval('t-at', conv, TOOL, 'approved', 'user:o');
+  const INPUT = { code: 'print(1)' };
+  async function approved(conv: string, grain: 'call' | 'conversation' = 'call'): Promise<void> {
+    await recordToolApprovalRequested('t-at', conv, TOOL, { input: INPUT });
+    const pending = (await listToolApprovals('t-at', conv))[0]!;
+    await resolveToolApproval('t-at', conv, TOOL, 'approved', 'user:o', pending.requestedAt, grain);
   }
 
-  it('a channel turn folds only what it claimed; a concurrent channel turn folds nothing', async () => {
+  it('a channel turn can use only what it claimed; a concurrent channel turn can use nothing', async () => {
     await approved('c1');
     const rows = await listToolApprovals('t-at', 'c1');
     const [a, b] = await Promise.all([
       approvalsForTurn({ channelTurn: true, actsAsOwner: true, approvals: rows }),
       approvalsForTurn({ channelTurn: true, actsAsOwner: true, approvals: rows }),
     ]);
-    expect([a.folded.length, b.folded.length].sort()).toEqual([0, 1]);
-    // Settling: the winner spent nothing, so its claim comes back.
-    await Promise.all([a.settle([]), b.settle([])]);
-    expect((await listToolApprovals('t-at', 'c1')).map((r) => r.status)).toEqual(['approved']);
+    // Asked about the same exact call, exactly one of the two turns holds an approval.
+    expect([a.grant.check(TOOL, 'baseline', INPUT, 'k-a'), b.grant.check(TOOL, 'baseline', INPUT, 'k-b')].sort()).toEqual([false, true]);
+    expect(await listToolApprovals('t-at', 'c1')).toEqual([]); // claimed and spent
+    await Promise.all([a.settle(), b.settle()]);
+    expect(await listToolApprovals('t-at', 'c1')).toEqual([]); // spent ⇒ not handed back
   });
 
-  it('a channel turn that spent its approval leaves it gone', async () => {
+  it('a channel turn hands back a claim it did not spend', async () => {
     await approved('c2');
-    const turn = await approvalsForTurn({ channelTurn: true, actsAsOwner: true, approvals: await listToolApprovals('t-at', 'c2') });
-    await turn.settle([TOOL]);
-    expect(await listToolApprovals('t-at', 'c2')).toEqual([]);
+    const before = await listToolApprovals('t-at', 'c2');
+    const turn = await approvalsForTurn({ channelTurn: true, actsAsOwner: true, approvals: before });
+    await turn.settle();
+    expect(await listToolApprovals('t-at', 'c2')).toEqual(before);
   });
 
-  it('an in-app turn folds every approval and leaves the ledger alone', async () => {
-    await approved('c3');
-    const rows = await listToolApprovals('t-at', 'c3');
-    const turn = await approvalsForTurn({ channelTurn: false, actsAsOwner: true, approvals: rows });
-    expect(turn.folded).toEqual(rows);
-    await turn.settle([TOOL]);
-    expect(await listToolApprovals('t-at', 'c3')).toEqual(rows);
+  it('a channel turn cannot use a tool-wide approval (fails closed: the owner is asked again)', async () => {
+    await approved('c2b', 'conversation');
+    const turn = await approvalsForTurn({ channelTurn: true, actsAsOwner: true, approvals: await listToolApprovals('t-at', 'c2b') });
+    expect(turn.grant.check(TOOL, 'baseline', INPUT, 'k')).toBe(false);
+    await turn.settle();
+    expect((await listToolApprovals('t-at', 'c2b')).map((r) => r.grain)).toEqual(['conversation']); // handed back, unused
   });
 
-  it('a turn not acting as the owner folds nothing and claims nothing', async () => {
+  it('an in-app turn keeps a tool-wide approval and deletes a one-call approval it spent', async () => {
+    await approved('c3', 'conversation');
+    const wide = await approvalsForTurn({ channelTurn: false, actsAsOwner: true, approvals: await listToolApprovals('t-at', 'c3') });
+    expect(wide.grant.check(TOOL, 'baseline', { other: true }, 'k1')).toBe(true);
+    expect(wide.grant.check(TOOL, 'baseline', INPUT, 'k2')).toBe(true);
+    await wide.settle();
+    expect((await listToolApprovals('t-at', 'c3')).map((r) => r.status)).toEqual(['approved']);
+
+    await approved('c3b', 'call');
+    const once = await approvalsForTurn({ channelTurn: false, actsAsOwner: true, approvals: await listToolApprovals('t-at', 'c3b') });
+    expect(once.grant.check(TOOL, 'baseline', INPUT, 'k1')).toBe(true);
+    expect(once.grant.check(TOOL, 'baseline', INPUT, 'k2')).toBe(false); // one call
+    await once.settle();
+    expect(await listToolApprovals('t-at', 'c3b')).toEqual([]);
+  });
+
+  it('a turn not acting as the owner can use nothing and claims nothing', async () => {
     await approved('c4');
     const rows = await listToolApprovals('t-at', 'c4');
     for (const channelTurn of [true, false]) {
-      expect((await approvalsForTurn({ channelTurn, actsAsOwner: false, approvals: rows })).folded).toEqual([]);
+      expect((await approvalsForTurn({ channelTurn, actsAsOwner: false, approvals: rows })).grant.check(TOOL, 'baseline', INPUT, 'k')).toBe(false);
     }
     expect(await listToolApprovals('t-at', 'c4')).toEqual(rows);
   });

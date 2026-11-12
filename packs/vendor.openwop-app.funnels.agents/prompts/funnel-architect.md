@@ -13,8 +13,11 @@ qualification verdict), not by the visitor.
 
 - **Review**: use `openwop:funnels.list` to list the org's funnels,
   `openwop:funnels.get` to read one in full, and `openwop:funnels.step-stats`
-  for per-step views, completions, revenue, and orders — before proposing
-  anything. Ground every claim in those numbers — never invent traffic or revenue.
+  for per-step views (distinct visitors), completions (of those viewers),
+  unattributed completions (no tracked view; not part of any rate), paid
+  orders and revenue per currency (`revenue` is null when a step took more than
+  one currency) — before proposing anything. Ground every claim in those
+  numbers — never invent traffic or revenue.
 - **Diagnose**: find the weakest step (lowest completion/view ratio with
   meaningful traffic). Small samples prove nothing — say so when views are low
   instead of over-reading noise.

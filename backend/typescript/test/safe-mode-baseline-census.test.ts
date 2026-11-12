@@ -49,6 +49,7 @@ const SELF = 'addressed only to the acting user (their inbox / their own board /
 const HOST_NO_ASK_WRITES: ReadonlyArray<readonly [string, string]> = [
   ['openwop:campaign-intel.propose-reallocation', `${OWN_GATE}. It reads the campaigns' live daily budgets through the acting user's own ad connections (ids out, budgets in) and opens ONE campaign-spend approval; it changes no budget (ADR 0952 D8)`],
   ['openwop:app-builder.render', DRAFT],
+  ['openwop:projects.memory.propose', 'files a pending memory proposal on the project; nothing becomes memory until a person with write access approves it on the Memory tab (ADR 1092 D2)'],
   ['openwop:assistant.enqueue-action', OWN_GATE],
   ['openwop:assistant.populate-board', IN_HOST],
   ['openwop:assistant.upsert-commitment', IN_HOST],
@@ -113,12 +114,13 @@ const NO_ASK_WRITES: ReadonlyArray<readonly [string, string]> = [...HOST_NO_ASK_
 /** Reads that DO reach off-host, adjudicated individually. */
 const NO_ASK_READ_EGRESS: ReadonlyArray<readonly [string, string]> = [
   ['openwop:ai.research.web', 'a search query to the configured search provider (classified read/safe-fetch); default-on baseline — asking would gate every research turn'],
+  // ADR 1100 D5 — was in HOST_READS ("no off-host send"), which was false.
+  ['openwop:accessibility.alt-text.generate', 'one image the caller may write (assertOrgScope workspace:write) to the managed vision provider, else the workspace BYOK default; returns a proposal, stores nothing; asking would gate every review turn'],
 ];
 
 /** Reads with no off-host send and no durable change. Reviewed as a set; a new read that
  *  egresses belongs in NO_ASK_READ_EGRESS (or ASKS), never here. */
 const HOST_READS: readonly string[] = [
-  'openwop:accessibility.alt-text.generate',
   'openwop:accessibility.check',
   'openwop:agent-evals.get-summary',
   'openwop:agent-evals.list-suites',
@@ -164,6 +166,7 @@ const HOST_READS: readonly string[] = [
   'openwop:core.rag.retriever-basic',
   'openwop:core.rag.retriever-contextual-compression',
   'openwop:creative-briefs.list',
+  'openwop:creative-briefs.get', // ADR 1039 D8
   'openwop:dealers.list-dealers',
   'openwop:dealers.list-outlets',
   'openwop:dealers.list-registrations',
@@ -228,7 +231,10 @@ const HOST_READS: readonly string[] = [
   'openwop:priority-matrix.list-ranked-ideas',
   'openwop:priority-matrix.schedule-status',
   'openwop:production.get-vendors',
+  'openwop:projects.get',
+  'openwop:projects.knowledge.search',
   'openwop:projects.list',
+  'openwop:projects.portfolio',
   'openwop:promotions.apply-preview',
   'openwop:promotions.list',
   'openwop:proposals.list',

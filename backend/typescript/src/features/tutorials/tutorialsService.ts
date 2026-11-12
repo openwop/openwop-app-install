@@ -28,12 +28,13 @@
  * fallback that a tenant's kernel row supersedes the moment `entities` is on.
  */
 
-import { deleteSystemEntity, getSystemEntity, listSystemEntities, mintSystemType, putSystemEntity } from '../entities/entitiesService.js';
+import { deleteSystemEntity, getSystemEntity, listAllSystemRowsBounded, listSystemEntities, mintSystemType, putSystemEntity } from '../entities/entitiesService.js';
 import { TUTORIAL_DOC_KIND, TUTORIAL_FIELD_KEYS, TUTORIAL_FIELDS, TUTORIAL_TYPE } from './tutorialType.js';
 import { SEED_TUTORIALS, type SeededTutorial } from './seedTutorials.js';
 import { registerFieldKindValidator, getFieldKindValidator } from '../../host/customFields/index.js';
 import { OpenwopError } from '../../types.js';
 import { createLogger } from '../../observability/logger.js';
+import { INTEGRITY_GAUGE_ROW_CAP } from '../../host/integrityGauges.js';
 import { recordTutorialStaleSeedServed } from '../../observability/metricSeams.js';
 
 const log = createLogger('feature.tutorials');
@@ -198,6 +199,30 @@ function keepKernelRow(view: TutorialView, reader: 'list' | 'get'): boolean {
   if (!isStaleSeedCopy(view)) return true;
   recordTutorialStaleSeedServed(reader);
   return false;
+}
+
+/**
+ * ADR 1104 — the tutorials integrity gauge (PROBE-1038-4): every tenant's
+ * tutorial rows against the shipped seeds, as aggregate counts. `staleSeedCopies`
+ * are the rows the readers now yield to the seed (TUT-STALE-1); a seed run
+ * rewrites them. `customizedBehind` are tenant edits on an older seed version,
+ * which keep winning by design. Daily and read-only; never a request path.
+ */
+export async function tutorialIntegrityGauge(perTenantCap: number = INTEGRITY_GAUGE_ROW_CAP): Promise<{ rows: number; seedCopies: number; staleSeedCopies: number; tenantsWithStale: number; customizedBehind: number; tenantAuthored: number; truncatedTenants: number }> {
+  const stale = new Set<string>();
+  let rows = 0, seedCopies = 0, staleSeedCopies = 0, customizedBehind = 0, tenantAuthored = 0;
+  const { rows: all, truncatedTenants } = await listAllSystemRowsBounded(TUTORIAL_TYPE, perTenantCap);
+  for (const rec of all) {
+    const view = rowToView(rec.values ?? {}, rec.ext as Record<string, unknown> | undefined);
+    if (!view) continue;
+    rows += 1;
+    if (!view.seedVersion) { tenantAuthored += 1; continue; }
+    seedCopies += 1;
+    if (isStaleSeedCopy(view)) { staleSeedCopies += 1; stale.add(rec.tenantId); continue; }
+    const seed = SEED_TUTORIALS.find((t) => t.id === view.id);
+    if (view.customized && seed && seed.seedVersion !== view.seedVersion) customizedBehind += 1;
+  }
+  return { rows, seedCopies, staleSeedCopies, tenantsWithStale: stale.size, customizedBehind, tenantAuthored, truncatedTenants };
 }
 
 /**

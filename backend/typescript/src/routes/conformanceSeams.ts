@@ -140,6 +140,11 @@ export const SEAM_OPERATIONS: readonly SeamOperation[] = [
   // `permittedPurposes` is ignored: `purposePropagation` is not advertised, so
   // its scenario stays inapplicable on the advert, not on a 404.
   { operationId: 'invokeA2aPeer', method: 'post', v2Path: '/conformance/seams/sample/a2a/invoke', served: true, floor: false },
+  // Suite 2.46.44 (RFC 0259 §Conformance) — declared, NOT served: this host does
+  // not yet record `resolvedVia` or advertise `interrupt.resolvedVia`, so the
+  // `v2-interrupt-resolved-via` legs record inapplicable. Listed so the
+  // manifest↔yaml parity holds; the alias answers 404. #5585 serves it.
+  { operationId: 'readInterruptToken', method: 'post', v2Path: '/conformance/seams/sample/interrupts/token', served: false, floor: false },
 ];
 
 /** `served: false` operations with their path compiled once — the alias runs on

@@ -488,10 +488,16 @@ export async function createCreativeBriefs(ctx) {
         directions: Array.isArray(vb.directions) ? vb.directions : [],
         moodBoard: [],
         campaignBriefId: briefId,
-        actor: 'campaign-channels',
       });
       if (r && r.brief && typeof r.brief.briefId === 'string') createdBriefIds.push(r.brief.briefId);
-    } catch { briefCreateErrors += 1; /* entity creation is additive — the draft flow still works */ }
+    } catch (err) {
+      // ADR 1039 D1 — the creative-briefs write floor refused the run's person.
+      // Approving again cannot change that, so say what did happen.
+      if (err && err.code === 'forbidden_scope') {
+        return { status: 'failed', error: { code: 'forbidden_scope', message: 'The person this workflow runs for cannot add creative briefs in this workspace. Someone with edit access can run it, or add the briefs by hand.' } };
+      }
+      briefCreateErrors += 1; /* entity creation is additive — the draft flow still works */
+    }
   }
   // Grade-ux H1 — the run card says what happened and where to find it; a step
   // that created nothing at all is a failure, not a quiet "completed".

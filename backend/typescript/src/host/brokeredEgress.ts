@@ -47,8 +47,22 @@ export type BrokeredCallDeps = Pick<BrokeredEgressDeps, 'tenantId' | 'actingUser
 export type BrokeredPostOutcome =
   | { outcome: 'no_connection' }
   | { outcome: 'insecure_base' }
-  | { outcome: 'request_failed'; timedOut: boolean }
+  /** ADR 1053 D1 — `connectFailed`: the dial itself failed (refused, unresolved,
+   *  connect timeout), so no request byte reached the provider. A paid-send caller
+   *  may retry only then; any other failure may follow an accepted request. */
+  | { outcome: 'request_failed'; timedOut: boolean; connectFailed?: boolean }
   | { outcome: 'sent'; res: Awaited<ReturnType<typeof undiciFetch>>; provenance: ConnectionUseProvenance };
+
+/** Error codes that mean the connection was never established (ADR 1053 D1). */
+const CONNECT_PHASE_CODES: ReadonlySet<string> = new Set([
+  'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH', 'UND_ERR_CONNECT_TIMEOUT',
+  // The egress dispatcher's own refusals (SSRF / denied host) happen at lookup, before any byte is sent.
+  'OPENWOP_WEBHOOK_EGRESS_DENIED', 'OPENWOP_EGRESS_URL_REJECTED',
+]);
+function failedBeforeConnect(err: unknown): boolean {
+  const cause = (err as { cause?: { code?: unknown } } | null)?.cause;
+  return typeof cause?.code === 'string' && CONNECT_PHASE_CODES.has(cause.code);
+}
 
 /** How the resolved secret is placed in the auth header (default `Authorization`,
  *  overridable via `authHeaderName`).
@@ -150,7 +164,8 @@ export async function brokeredPost(
     });
     return { outcome: 'sent', res, provenance: resolved.provenance };
   } catch (err) {
-    return { outcome: 'request_failed', timedOut: err instanceof Error && err.name === 'TimeoutError' };
+    const timedOut = err instanceof Error && err.name === 'TimeoutError';
+    return { outcome: 'request_failed', timedOut, ...(!timedOut && failedBeforeConnect(err) ? { connectFailed: true } : {}) };
   }
 }
 

@@ -130,7 +130,7 @@ describe('ADR 0541 D2 — the gate consults; every refusal is the same outcome',
   it('refuses after revocation, immediately', async () => {
     const g = await mint();
     expect((await consult()).allowed).toBe(true);
-    await revokeApplyGrant(TENANT, 'org-1', g.grantId, Date.now());
+    await revokeApplyGrant(TENANT, 'org-1', g.grantId, Date.now(), 'subj-1');
     expect((await consult()).allowed).toBe(false);
   });
 
@@ -227,7 +227,7 @@ describe('ADR 0541 D3 — the ceiling is a TRUE ceiling', () => {
 
   it('a revoked grant consumes nothing, even mid-campaign', async () => {
     const g = await mint();
-    await revokeApplyGrant(TENANT, 'org-1', g.grantId, Date.now());
+    await revokeApplyGrant(TENANT, 'org-1', g.grantId, Date.now(), 'subj-1');
     expect(await consumeSubmit(TENANT, g.grantId, Date.now())).toBe(false);
   });
 });
@@ -346,9 +346,9 @@ describe('/code-review — revoke is ORG-scoped, not merely tenant-scoped', () =
     // The gap was INSIDE a tenant: the list route filters on orgId and revoke
     // did not, so read and write disagreed about who owns a grant.
     const g = await mint({ orgId: 'org-1' });
-    expect(await revokeApplyGrant(TENANT, 'org-2', g.grantId, Date.now()), 'cross-org revoke must fail').toBe(false);
+    expect(await revokeApplyGrant(TENANT, 'org-2', g.grantId, Date.now(), 'subj-1'), 'cross-org revoke must fail').toBe(false);
     expect((await applyGrants.get(`${TENANT}:${g.grantId}`))?.revokedAt).toBeUndefined();
     // …and the rightful org still can.
-    expect(await revokeApplyGrant(TENANT, 'org-1', g.grantId, Date.now())).toBe(true);
+    expect(await revokeApplyGrant(TENANT, 'org-1', g.grantId, Date.now(), 'subj-1')).toBe(true);
   });
 });

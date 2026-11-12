@@ -46,6 +46,7 @@ export const messages = {
   navGroupProduct: 'Produit',
   navGroupPages: 'Pages',
   navGroupAudience: 'Pour qui',
+  navGroupResources: 'Ressources',
   navGroupTrust: 'Confiance',
   navGroupCompany: 'Entreprise',
   navGroupLegal: 'Juridique',

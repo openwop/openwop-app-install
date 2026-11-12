@@ -8,6 +8,8 @@
  */
 import { useCallback, useEffect, useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Link } from 'react-router-dom';
+import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
 import { Button } from '../../ui/Button.js';
 import { Notice } from '../../ui/Notice.js';
 import { SelectField, TextField } from '../../ui/Field.js';
@@ -99,6 +101,8 @@ function BindingForm({ connectionId, inboundProvider }: { connectionId: string; 
   }, [connectionId]);
   useEffect(load, [load]);
 
+  // WA85UX-24 — the link lands on the WhatsApp settings card, which exists only with the toggle on.
+  const whatsappOn = useFeatureAccess('whatsapp').enabled;
   const help = inboundProvider === 'whatsapp-twilio' || inboundProvider === 'whatsapp-cloud' ? t(`bindingHelp_${inboundProvider}`) : t('bindingHelp_chat');
   const run = async (op: () => Promise<SenderBinding | null>, ok: string): Promise<void> => {
     if (busy) return;
@@ -120,6 +124,11 @@ function BindingForm({ connectionId, inboundProvider }: { connectionId: string; 
       <div>
         <h4 id={`${id}-title`} className="u-fs-14 u-m-0">{t('bindingTitle')}</h4>
         <p className="muted u-fs-13 u-m-0">{t('bindingHelp')}</p>
+        {whatsappOn && (inboundProvider === 'whatsapp-twilio' || inboundProvider === 'whatsapp-cloud') ? (
+          // ADR 1053 D10 (grade-ux WA85UX-20) — where the admin pairs the number, the way to
+          // the attestation that decides whether its inbound may start an AI workflow.
+          <p className="muted u-fs-13 u-m-0"><Link className="inline-link" to="/access?tab=connections&view=whatsapp">{t('whatsappSettingsLink')}</Link></p>
+        ) : null}
       </div>
       <TextField label={t('bindingLabel')} help={help} value={value} placeholder={t('bindingNone')} autoComplete="off" disabled={binding === undefined} onChange={(e) => setValue(e.target.value)} />
       {error ? <p role="alert" className="u-m-0 u-text-danger">{error}</p> : null}

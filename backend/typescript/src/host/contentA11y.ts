@@ -23,6 +23,8 @@ export interface A11yIssue {
   severity: A11ySeverity;
   wcag: string;
   nodeRef?: string;
+  /** ADR 1100 — `filename`: the alt is present but is a file name (a warning). */
+  detail?: 'filename';
 }
 
 export interface ContentA11yModel {
@@ -85,11 +87,16 @@ function parseColorToRgb(css: string): Rgb | null {
 
 // ── Rules (twin of the FE checkers) ──────────────────────────────────────────
 
+/** ADR 1100 — a file-name alt (twin of the FE `FILENAME_ALT`; keep equal). */
+export const FILENAME_ALT = /^(?:[\w ().,-]+\.(?:jpe?g|png|gif|webp|svg|avif|heic|bmp|tiff?)|(?:IMG|DSC|DSCN|PXL|MVIMG)[_ -]?\d+.*|Screenshot[ _-]?\d.*)$/i;
+
 function checkImages(model: ContentA11yModel): A11yIssue[] {
   const out: A11yIssue[] = [];
   model.images.forEach((img) => {
     if (img.decorative) return;
-    if (!norm(img.alt)) out.push({ kind: 'missing-alt', severity: 'error', wcag: '1.1.1', ...refOf(img.ref) });
+    const alt = norm(img.alt);
+    if (!alt) out.push({ kind: 'missing-alt', severity: 'error', wcag: '1.1.1', ...refOf(img.ref) });
+    else if (FILENAME_ALT.test(alt)) out.push({ kind: 'missing-alt', severity: 'warning', wcag: '1.1.1', detail: 'filename', ...refOf(img.ref) });
   });
   return out;
 }
@@ -129,6 +136,9 @@ export function checkContentA11y(model: ContentA11yModel): A11yIssue[] {
   return [...checkImages(model), ...checkHeadings(model), ...checkLinks(model), ...checkContrast(model)];
 }
 
+/** ADR 1100 D5 — the shape of a section/block/component id. */
+export const A11Y_REF_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
+
 /** Coerce untrusted node/tool input into a safe {@link ContentA11yModel} (bounded,
  *  unknown keys dropped) — inline content, NOT an artifact ref (NodeContext has no
  *  artifact-read seam; P3 correction). */
@@ -136,22 +146,25 @@ export function coerceContentA11yModel(raw: unknown): ContentA11yModel {
   const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
   const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v.slice(0, 2000) : []);
   const s = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
+  // ADR 1100 D5 — a ref is echoed back in a TRUSTED tool result, so it must be an
+  // id, not copied page text. Anything else is dropped; the issue still reports.
+  const ref = (v: unknown): string | undefined => (typeof v === 'string' && A11Y_REF_RE.test(v) ? v : undefined);
   return {
     images: arr(o.images).map((x) => {
       const i = (x ?? {}) as Record<string, unknown>;
-      return { alt: s(i.alt), decorative: i.decorative === true, ref: s(i.ref) };
+      return { alt: s(i.alt), decorative: i.decorative === true, ref: ref(i.ref) };
     }),
     headings: arr(o.headings).map((x) => {
       const i = (x ?? {}) as Record<string, unknown>;
-      return { level: typeof i.level === 'number' ? i.level : 1, ref: s(i.ref) };
+      return { level: typeof i.level === 'number' ? i.level : 1, ref: ref(i.ref) };
     }),
     links: arr(o.links).map((x) => {
       const i = (x ?? {}) as Record<string, unknown>;
-      return { text: s(i.text), ref: s(i.ref) };
+      return { text: s(i.text), ref: ref(i.ref) };
     }),
     colorPairs: arr(o.colorPairs).map((x) => {
       const i = (x ?? {}) as Record<string, unknown>;
-      return { fg: s(i.fg) ?? '', bg: s(i.bg) ?? '', ref: s(i.ref), large: i.large === true };
+      return { fg: s(i.fg) ?? '', bg: s(i.bg) ?? '', ref: ref(i.ref), large: i.large === true };
     }),
   };
 }

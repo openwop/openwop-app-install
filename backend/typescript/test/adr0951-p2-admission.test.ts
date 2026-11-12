@@ -2,7 +2,17 @@
  * visits, at most 2,000 recorded sessions per client org per UTC day, and 30
  * minutes per session. The daily counter is a durable CAS row, so the ceiling
  * holds across instances. Real SQLite rows and real memory-blob bytes; the
- * toggles resolve through the real service. */
+ * toggles resolve through the real service. The sample share is measured over
+ * fixed visit ids, so it is the same number on every run.
+ *
+ * Sabotage witnesses (w103; src/features/analytics/replayStore.ts):
+ * skipping the `replaySampled` refusal, or sampling `<=` the percent (11%), reds
+ * the 10% sample; accepting -1, 150, 12.5 or a blank value reds the operator
+ * sample; admitting on every chunk instead of only a new row reds "counts each
+ * new session once"; `>` instead of `>=` at the ceiling, a non-CAS counter
+ * write, a month-keyed counter, keeping one day instead of two, `<=` in the
+ * counter prune, or skipping the prune reds the daily ceiling; `>=` at 30
+ * minutes, or measuring from the client's `startedAt`, reds the session length. */
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -86,10 +96,14 @@ describe('ADR 0951 P2.3 — replay admission', () => {
     expect(await counted()).toBe(0);
     await putReplayChunk(kept, 0, CHUNK);
     expect(await counted()).toBe(1);
+    // Fixed ids: the share is one deterministic number (0.1015 for these 20,000
+    // visits), and the band is narrow enough that an 11% sample falls outside it.
     let share = 0;
-    for (let i = 0; i < 4_000; i++) if (replaySampled(row())) share++;
-    expect(share / 4_000).toBeGreaterThan(0.08);
-    expect(share / 4_000).toBeLessThan(0.12);
+    for (let i = 0; i < 20_000; i++) {
+      if (replaySampled({ tenantId: 'replay-admission-share', orgId: 'client-a', subjectKey: 'visitor:admit', sessionId: `visit-${i}` })) share++;
+    }
+    expect(share / 20_000).toBeGreaterThan(0.095);
+    expect(share / 20_000).toBeLessThan(0.105);
   });
 
   it('the operator sample is an integer 0-100, anything else is the approved default', () => {

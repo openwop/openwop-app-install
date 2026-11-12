@@ -17,9 +17,21 @@
  * fields present and skips the required-field checks.
  */
 import { cleanContent, cleanOpaqueToken, optionalCleanContent } from '../../host/boundedStrings.js';
+import { isValidUploadDate } from '../../host/videoUploadDate.js';
 import { OpenwopError } from '../../types.js';
 
-export const DESIGN_SECTION_TYPES = ['statusTable', 'dateCalc', 'conversation', 'featureIndex', 'decisionTree', 'scheduleSim'] as const;
+export const DESIGN_SECTION_TYPES = ['statusTable', 'dateCalc', 'conversation', 'featureIndex', 'decisionTree', 'scheduleSim', 'films'] as const;
+
+/** ADR 0843 — a film's play-button length: `m:ss` (minutes may run to three
+ *  digits). The prerender turns it into an ISO 8601 `PT#M#S`. Shared by `video`
+ *  (cmsService) and `films` (ADR 1082). */
+export const VIDEO_LENGTH_RE = /^\d{1,3}:[0-5]\d$/;
+/** ADR 1082 — a film's frame shape, and the facet a `films` section may filter on. */
+export const FILM_SHAPES = ['16:9', '9:16', '1:1'] as const;
+export const FILM_FILTERS = ['useCase', 'shape'] as const;
+/** ADR 1082 — the caller's https-only media-URL rule (cmsService `httpsMediaUrl`,
+ *  the `video` rule), injected so there is one rule and no import cycle. */
+export type MediaUrlRule = (v: unknown, field: string) => string | undefined;
 export type DesignSectionType = (typeof DESIGN_SECTION_TYPES)[number];
 
 export const DESIGN_MAX = {
@@ -28,6 +40,7 @@ export const DESIGN_MAX = {
   indexGroups: 24, indexItems: 16, indexKey: 8, indexId: 24,
   queueRows: 6, cardActions: 2,
   trees: 16, treeNodes: 16, treeOptions: 6, treeText: 300, nodeId: 40,
+  films: 24, useCase: 40, filmTitle: 160, filmDescription: 1000, // the `video` caps (MAX.title, MAX.videoDescription)
   milestones: 24, simDecisions: 80, simOptions: 4, weeks: 260, delayDays: 365,
   simChoices: 5, simDeps: 6, simPresets: 6, presetRules: 6, choiceText: 160, riskText: 400,
 } as const;
@@ -58,13 +71,53 @@ export function isDesignSectionType(type: string): type is DesignSectionType {
 }
 
 /** The type-specific fields. The caller adds eyebrow, heading, lede and tone. */
-export function buildDesignSectionData(type: DesignSectionType, d: Raw, partial: boolean): Raw {
+export function buildDesignSectionData(type: DesignSectionType, d: Raw, partial: boolean, mediaUrl?: MediaUrlRule): Raw {
   const has = (k: string): boolean => d[k] !== undefined;
   const text = (k: string, max: number): Raw => {
     const v = opt(d[k], max, k);
     return v ? { [k]: v } : {};
   };
   switch (type) {
+    case 'films': {
+      // ADR 1082 D1 — N films, each held to the `video` rules: https-only URLs
+      // (the injected rule), plain text, `length` as m:ss, the upload-date rule.
+      if (!mediaUrl) throw new Error('films: the caller must inject the media-URL rule');
+      const raw = objects(d.films, DESIGN_MAX.films);
+      const films = raw.map((f, i) => {
+        const at = (k: string): string => `films[${i}].${k}`;
+        const src = mediaUrl(f.src, at('src'));
+        const poster = mediaUrl(f.poster, at('poster'));
+        const captions = mediaUrl(f.captions, at('captions'));
+        const title = opt(f.title, DESIGN_MAX.filmTitle, at('title'));
+        const description = opt(f.description, DESIGN_MAX.filmDescription, at('description'));
+        const lengthRaw = typeof f.length === 'string' ? f.length.trim() : '';
+        const length = VIDEO_LENGTH_RE.test(lengthRaw) ? lengthRaw : undefined;
+        const uploadRaw = typeof f.uploadDate === 'string' ? f.uploadDate.trim() : '';
+        const uploadDate = isValidUploadDate(uploadRaw) ? uploadRaw : undefined;
+        const useCase = opt(f.useCase, DESIGN_MAX.useCase, at('useCase'));
+        const shape = pick(FILM_SHAPES, f.shape);
+        if (!partial) {
+          for (const [k, v] of [['src', src], ['poster', poster], ['title', title], ['description', description]] as const) {
+            if (!v) throw new OpenwopError('validation_error', `films.${at(k)} is required.`, 400, { field: at(k) });
+          }
+          if (!length) throw new OpenwopError('validation_error', `films.${at('length')} is required as m:ss (e.g. 1:57).`, 400, { field: at('length') });
+          if (uploadRaw && !uploadDate) throw new OpenwopError('validation_error', `films.${at('uploadDate')} must be YYYY-MM-DD or an ISO 8601 datetime with a timezone.`, 400, { field: at('uploadDate') });
+          if (f.shape !== undefined && !shape) throw new OpenwopError('validation_error', `films.${at('shape')} must be one of ${FILM_SHAPES.join(', ')}.`, 400, { field: at('shape') });
+        }
+        return {
+          ...(src ? { src } : {}), ...(poster ? { poster } : {}), ...(captions ? { captions } : {}),
+          ...(title ? { title } : {}), ...(description ? { description } : {}),
+          ...(length ? { length } : {}), ...(uploadDate ? { uploadDate } : {}),
+          ...(useCase ? { useCase } : {}), ...(shape ? { shape } : {}),
+        };
+      });
+      if (!partial && films.length === 0) throw required('films', 'films');
+      const filter = pick(FILM_FILTERS, d.filter);
+      if (!partial && d.filter !== undefined && !filter) {
+        throw new OpenwopError('validation_error', `films.filter must be one of ${FILM_FILTERS.join(', ')}.`, 400, { field: 'filter' });
+      }
+      return { films, ...(filter ? { filter } : {}) };
+    }
     case 'statusTable': {
       const columns = (Array.isArray(d.columns) ? d.columns : []).slice(0, DESIGN_MAX.tableColumns)
         .map((c) => cleanContent(c, DESIGN_MAX.label, 'columns')).filter((c) => c.length > 0);
@@ -266,6 +319,10 @@ export function designSectionHtml(type: string, d: Raw, head: string, escapeHtml
   if (!isDesignSectionType(type)) return null;
   const e = escapeHtml;
   switch (type) {
+    case 'films':
+      // ADR 1082 — each film as a figure crawlers read; its VideoObject rides jsonLdBlocks.
+      return `<section>\n${head}<ul>${objects(d.films, DESIGN_MAX.films).map((f) =>
+        `<li><figure>${/^https:\/\//i.test(str(f.poster)) ? `<img src="${e(str(f.poster))}" alt="${e(str(f.title))}">` : ''}<figcaption><strong>${e(str(f.title))}</strong>${str(f.length) ? ` (${e(str(f.length))})` : ''}${str(f.description) ? `. ${e(str(f.description))}` : ''}${/^https:\/\//i.test(str(f.src)) ? ` <a href="${e(str(f.src))}">${e(str(f.title))}</a>` : ''}</figcaption></figure></li>`).join('')}</ul>\n</section>`;
     case 'statusTable': {
       const rows = objects(d.rows, DESIGN_MAX.tableRows);
       const hasStatus = rows.some((r) => str(r.status));
@@ -296,6 +353,9 @@ export function designSectionHtml(type: string, d: Raw, head: string, escapeHtml
 export function designSectionMarkdown(type: string, d: Raw, head: string): string | null {
   if (!isDesignSectionType(type)) return null;
   switch (type) {
+    case 'films':
+      return `${head}${objects(d.films, DESIGN_MAX.films).map((f) =>
+        `- **${str(f.title)}**${str(f.length) ? ` (${str(f.length)})` : ''}${str(f.description) ? `: ${str(f.description)}` : ''}${/^https:\/\//i.test(str(f.src)) ? ` [Watch](${str(f.src)})` : ''}`).join('\n')}`;
     case 'statusTable': {
       const rows = objects(d.rows, DESIGN_MAX.tableRows);
       const hasStatus = rows.some((r) => str(r.status));

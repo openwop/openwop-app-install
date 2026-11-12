@@ -26,7 +26,16 @@ export interface ToolApproval {
   resolvedBy?: string;
   /** ADR 0834 D6 — the held call's arguments (scrubbed, capped); present while pending. */
   requestedInput?: string;
+  /** FW2-D1 — the arguments above are not all of them (cut, or a secret masked). */
+  inputTruncated?: boolean;
+  /** FW2-D1 — `channel`: asked from a messaging channel; only one-call approval exists. */
+  lane?: 'app' | 'channel';
+  /** FW2-D1 — what an approval covers: this exact call once, or the tool for the conversation. */
+  grain?: ApprovalGrain;
+  /** CHAN-F17 — a channel row (a pending ask, or an unused one-call approval) stops counting at this time. */
+  expiresAt?: string;
 }
+export type ApprovalGrain = 'call' | 'conversation';
 
 export interface CapabilityScopeView {
   scope: CapabilityScope;
@@ -64,9 +73,26 @@ export async function setCapabilityScope(sessionId: string, scope: CapabilitySco
 }
 
 /** Approve or deny a PENDING per-tool approval. `requestedAt` is the version the user
- *  saw — the server refuses (409) if the request changed since (ADR 0834 D6). */
-export async function resolveToolApproval(sessionId: string, toolName: string, decision: 'approved' | 'denied', requestedAt?: string): Promise<ToolApproval> {
-  const res = await fetch(`${base(sessionId)}/approvals/${encodeURIComponent(toolName)}`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ decision, ...(requestedAt ? { requestedAt } : {}) }) }));
+ *  saw — the server refuses (409) if the request changed since (ADR 0834 D6). `grain`
+ *  (FW2-D1): `call` (the server default) covers this exact call once; `conversation`
+ *  covers the tool for the rest of the conversation. */
+export async function resolveToolApproval(sessionId: string, toolName: string, decision: 'approved' | 'denied', requestedAt?: string, grain?: ApprovalGrain): Promise<ToolApproval> {
+  const res = await fetch(`${base(sessionId)}/approvals/${encodeURIComponent(toolName)}`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ decision, ...(requestedAt ? { requestedAt } : {}), ...(grain ? { grain } : {}) }) }));
   if (res.status === 409) throw new ApprovalConflictError('approval_conflict');
   return (await asJson<{ approval: ToolApproval }>(res, 'resolveToolApproval')).approval;
+}
+
+/** CHAN-F17 — revoke an approval the owner gave (a tool-wide grant, or a one-call approval
+ *  not yet used). `resolvedAt` is the version the user saw; the server refuses (409) one
+ *  that changed or is already gone. */
+export async function revokeToolApproval(sessionId: string, toolName: string, resolvedAt: string): Promise<void> {
+  const res = await fetch(`${base(sessionId)}/approvals/${encodeURIComponent(toolName)}?resolvedAt=${encodeURIComponent(resolvedAt)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
+  if (res.status === 409) throw new ApprovalConflictError('approval_conflict');
+  if (!res.ok) await asJson<unknown>(res, 'revokeToolApproval');
+}
+
+/** CHAN-F17 — a channel row whose expiry has passed: a pending ask that can no longer be
+ *  decided, or a one-call approval that no longer lets its call through. */
+export function isExpiredApproval(a: ToolApproval, nowMs: number = Date.now()): boolean {
+  return a.expiresAt !== undefined && Date.parse(a.expiresAt) <= nowMs;
 }

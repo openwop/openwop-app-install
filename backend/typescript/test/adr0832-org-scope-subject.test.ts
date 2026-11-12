@@ -229,6 +229,7 @@ describe('never a grant', () => {
       'features/crm/leadIntel/runReservation.ts', // ADR 0954 P2: cause hash must match the existing frozen primary reservation; verifier only refuses, never grants
       'features/experiments/promotionService.ts', // ADR 0950: stamps the authenticated requester as cause; never grants actor/tool authority
       'features/experiments/surface.ts', // ADR 0950: narrows every method to the run's person's org; cause is attribution, not a grant
+      'features/knowledge-sync/surface.ts', // ADR 1101 D3 (`surface.ts:68`): REFUSES only — a run that carries a causing member is not the scheduler, so `runOnce` returns a typed `forbidden` failure; its presence never lets a run do or see more
       // ADR 0944 D2: NARROWS only — a deep @mention run from a client-bound conversation is
       // caused by the speaker, so the run lane re-checks THAT person on the stamped client.
       'host/conversationExchange.ts',

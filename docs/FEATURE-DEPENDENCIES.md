@@ -10,7 +10,7 @@
 | Bucket | Count | Meaning |
 |---|---|---|
 | Declared (`dependsOn`) | 16 | real hard deps, disable-lock active |
-| Undeclared → always-on target | 115 | correctly undeclared — an always-on dep can never lock (ADR 0439) |
+| Undeclared → always-on target | 119 | correctly undeclared — an always-on dep can never lock (ADR 0439) |
 | **[1] Primitive** (undeclared → toggleable) | **0** | misfiled cross-cutting infra → **extract to a `host/` seam** |
 | **[2] Soft-read** (undeclared → toggleable) | **105** | domain read, target vacuous-when-off → **leave documented** (no lock) |
 | **[3] Hard-dep** (undeclared → toggleable) | **0** | target refuses when off → **declare `dependsOn`** |
@@ -60,7 +60,7 @@ _None._
 | `funnels` | `cdp` | static | collectService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `service-desk` | `cdp` | static | identityService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `cms` | `comments` | dyn | commentsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
-| `creative-briefs` | `comments` | static | commentsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
+| `creative-briefs` | `comments` | dyn | commentsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `kb` | `comments` | dyn | commentsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `priority-matrix` | `comments` | dyn | commentsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `campaign-connectors` | `commerce` | static | commerceService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |

@@ -612,6 +612,57 @@ function VideoSection({ d, eyebrow, heading, sx = '' }: { d: Record<string, unkn
   );
 }
 
+/**
+ * ADR 1082 — a `films` section: N films in a grid, each the same click-to-play
+ * `SectionFilm` a `video` section uses, in a frame shaped by its `shape`
+ * (16:9 default, 9:16, 1:1). With `filter` ('useCase' | 'shape'), the ADR 1064
+ * P3b chips: "All" plus each distinct value in first-seen order, aria-pressed
+ * toggle buttons in a named group, a polite count, and filtered cards kept in
+ * the DOM with `hidden`. Fewer than two distinct values ⇒ no chips.
+ */
+const FILM_SHAPE_CLASS: Record<string, string> = { '16:9': '16x9', '9:16': '9x16', '1:1': '1x1' };
+function FilmsSection({ d, eyebrow, heading, sx = '' }: { d: Record<string, unknown>; eyebrow?: string | undefined; heading?: string | undefined; sx?: string }): JSX.Element {
+  const { t } = useTranslation('cms');
+  const [pick, setPick] = useState<string | null>(null);
+  const films = (Array.isArray(d.films) ? d.films : []).filter((f): f is Record<string, unknown> => typeof f === 'object' && f !== null);
+  const facet = d.filter === 'useCase' || d.filter === 'shape' ? d.filter : null;
+  const valueOf = (f: Record<string, unknown>): string => (facet === 'shape' ? str(f.shape) || '16:9' : facet ? str(f.useCase) : '');
+  const values = facet ? [...new Set(films.map(valueOf).filter(Boolean))] : [];
+  const shown = films.filter((f) => pick === null || valueOf(f) === pick).length;
+  const chip = (label: string, value: string | null): JSX.Element => (
+    <Button key={value ?? '*'} variant="quiet" size="sm" className="fp-filter__chip" aria-pressed={pick === value} onClick={() => setPick(value)}>{label}</Button>
+  );
+  return (
+    <section className={`cms-public-section fp-section fp-film-gallery${sx}`}>
+      <div className="fp-shell">
+        <SectionHead eyebrow={eyebrow} heading={heading} lede={str(d.lede) || undefined} />
+        {values.length > 1 ? (
+          <>
+            <div className="fp-filter" role="group" aria-label={t('filmFilterLabel')}>
+              {chip(t('filmFilterAll', { count: films.length }), null)}
+              {values.map((v) => chip(v, v))}
+            </div>
+            <p className="sr-only" role="status">{t('filmFilterShowing', { shown, total: films.length })}</p>
+          </>
+        ) : null}
+        <ul className="fp-film-gallery__grid">
+          {films.map((f, i) => (
+            <li key={i} className={`fp-film-gallery__item fp-film-gallery__item--${FILM_SHAPE_CLASS[str(f.shape)] ?? '16x9'}`} hidden={pick !== null && valueOf(f) !== pick}>
+              <SectionFilm d={f} />
+              {str(f.useCase) || str(f.shape) ? (
+                <p className="fp-film-gallery__tags">
+                  {str(f.useCase) ? <span className="fp-col__badge">{str(f.useCase)}</span> : null}
+                  {str(f.shape) ? <span className="fp-col__badge">{str(f.shape)}</span> : null}
+                </p>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </section>
+  );
+}
+
 /** One film of a `video` section (its first, or its ADR 1032 `film2`). */
 function SectionFilm({ d, corner = false }: { d: Record<string, unknown>; corner?: boolean }): JSX.Element | null {
   const { t } = useTranslation('cms');
@@ -1359,12 +1410,16 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
         // get a filled dot, partial items an amber half dot, future items a
         // hollow one. A list with neither (pricing) is unchanged.
         const status = cols.some((c) => c.future || c.partial);
-        // ADR 1069 D1 — a list of plans (any column with a price unit or a
-        // button, and no status) gets the plan cards: big prices, the button
-        // pinned to the foot, the highlighted plan raised.
-        const plans = !status && cols.some((c) => str(c.unit) || str(c.ctaLabel));
+        // ADR 1069 D1 — a list of plans (any column with a price unit, a button
+        // or a status badge, and no status flags) gets the plan cards: big prices,
+        // the button pinned to the foot, the highlighted plan raised. D3 — a plan
+        // list where NO column has a unit is a NAMED tier list (DeckTalk:
+        // "Pilot · Open now" before prices exist): the title is the plan name at
+        // heading size, not a price, and nothing invents a number.
+        const plans = !status && cols.some((c) => str(c.unit) || str(c.ctaLabel) || str(c.badge));
+        const named = plans && !cols.some((c) => str(c.unit));
         return (
-          <section className={`cms-public-section fp-section fp-cols fp-cols--list${status ? ' fp-cols--status' : ''}${plans ? ' fp-cols--plans' : ''}${sx}${mx}`}>
+          <section className={`cms-public-section fp-section fp-cols fp-cols--list${status ? ' fp-cols--status' : ''}${plans ? ' fp-cols--plans' : ''}${named ? ' fp-cols--plans-named' : ''}${sx}${mx}`}>
             <div className="fp-shell">
               <SectionHead eyebrow={eyebrow} heading={heading} lede={str(d.lede) || undefined} />
               <div className={`fp-cols__grid${stg}`}>
@@ -1372,6 +1427,9 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
                   <div key={i} className={`fp-col${c.highlight ? ' fp-col--highlight' : ''}${plans && c.highlight ? ' fp-tone--inverse' : ''}${c.future ? ' fp-col--future' : c.partial ? ' fp-col--partial' : ''}`}>
                     {str(c.eyebrow) ? <p className="fp-col__eyebrow">{str(c.eyebrow)}</p> : null}
                     {str(c.title) ? <h3 className="fp-col__title">{str(c.title)}{str(c.unit) ? <>{' '}<small className="fp-col__unit">{str(c.unit)}</small></> : null}</h3> : null}
+                    {/* ADR 1069 D3 — the status pill ("Open now", "Coming") under the
+                        name: a status reads as its own line, not part of a price. */}
+                    {str(c.badge) ? <p className="fp-col__status"><span className="fp-col__badge">{str(c.badge)}</span></p> : null}
                     {str(c.text) ? <p className="fp-col__text">{inlineMarkdown(str(c.text), `list-${i}`)}</p> : null}
                     <ul className="fp-col__items">
                       {(Array.isArray(c.items) ? c.items : []).filter((it) => str(it?.label)).map((it, j) => (
@@ -1913,7 +1971,31 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
     // lists + optional operator display prices) is fetched from the public
     // billing read at render time — NO price is ever baked into the section or
     // the SPA (billing owns the config; honest-when-unconfigured).
-    case 'pricing':
+    case 'pricing': {
+      // ADR 1069 D4 — authored `plans` REPLACE the live billing read: the named
+      // tier cards of D3 (name, status pill, blurb, button; the highlighted plan
+      // is the dark card). No price field exists, so nothing shows a number.
+      const authored = (Array.isArray(d.plans) ? (d.plans as Record<string, unknown>[]) : []).filter((p) => str(p?.name));
+      if (authored.length > 0) {
+        return (
+          <section className={`cms-public-section fp-section fp-pricing fp-cols fp-cols--list fp-cols--plans fp-cols--plans-named${mx}`}>
+            <div className="fp-shell">
+              <SectionHead eyebrow={eyebrow} heading={heading} lede={str(d.blurb) || undefined} />
+              <div className="fp-cols__grid">
+                {authored.map((p, i) => (
+                  <div key={i} className={`fp-col${p.highlight === true ? ' fp-col--highlight fp-tone--inverse' : ''}`}>
+                    <h3 className="fp-col__title">{str(p.name)}</h3>
+                    {str(p.status) ? <p className="fp-col__status"><span className="fp-col__badge">{str(p.status)}</span></p> : null}
+                    {str(p.blurb) ? <p className="fp-col__text">{str(p.blurb)}</p> : null}
+                    {str(p.ctaLabel) ? <p className="fp-col__cta"><CtaLink label={str(p.ctaLabel)} url={str(p.ctaUrl)} primary={p.highlight === true} /></p> : null}
+                  </div>
+                ))}
+              </div>
+              {str(d.ctaLabel) ? <p className="fp-col__cta"><CtaLink label={str(d.ctaLabel)} url={str(d.ctaUrl)} /></p> : null}
+            </div>
+          </section>
+        );
+      }
       return (
         <section className={`cms-public-section fp-section fp-pricing${mx}`}>
           <div className="fp-shell">
@@ -1929,6 +2011,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
           </div>
         </section>
       );
+    }
 
     // ADR 0331 §D2 — a form REFERENCE ({ formId }) resolved live at render
     // time from the public forms read.
@@ -2165,6 +2248,9 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
     case 'video':
       return <VideoSection d={d} eyebrow={eyebrow} heading={heading} sx={`${sx}${mx}`} />;
 
+    case 'films':
+      return <FilmsSection d={d} eyebrow={eyebrow} heading={heading} sx={`${sx}${mx}`} />;
+
     case 'quotes': {
       // R2-G10 — attributed social proof. Real <figure>/<blockquote> semantics;
       // an unattributed quote renders with no byline — never an invented one.
@@ -2380,7 +2466,10 @@ function EditorPreview({ section }: { section: Section }): JSX.Element {
       return (
         <div className="u-grid u-gap-1">
           {str(d.heading) ? <strong><HeadingText text={str(d.heading)} /></strong> : null}
-          <span className="u-label-sm">{t('pricingSectionPreview', { defaultValue: 'Pricing tiers ({{n}})', n: Array.isArray(d.tiers) ? (d.tiers as unknown[]).length : 0 })}</span>
+          {/* ADR 1069 D4 — authored plans replace the tiers, so the preview counts them. */}
+          <span className="u-label-sm">{Array.isArray(d.plans) && d.plans.length > 0
+            ? t('pricingPlansPreview', { n: d.plans.length })
+            : t('pricingSectionPreview', { defaultValue: 'Pricing tiers ({{n}})', n: Array.isArray(d.tiers) ? (d.tiers as unknown[]).length : 0 })}</span>
         </div>
       );
     case 'comparison':

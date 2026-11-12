@@ -20,7 +20,7 @@ import { FolderIcon, PlusIcon, TrashIcon, PencilIcon, CheckIcon, FlagIcon } from
 import { loadErrorMessage } from '../../client/loadErrorMessage.js';
 import { STATUS_CHIP, HEALTH_CHIP } from './ProjectViews.js';
 import {
-  updateCharter, CHARTER_LIMITS,
+  updateCharter, CHARTER_LIMITS, type ComputedProjectHealth,
   type Project, type ProjectCharter, type ProjectStatus, type ProjectHealth, type ProjectMilestone,
 } from './projectsClient.js';
 
@@ -51,6 +51,21 @@ function timelinePct(start?: string, end?: string): number | null {
   return Math.max(0, Math.min(100, Math.round(((now - s) / (e - s)) * 100)));
 }
 
+/** ADR 1091 — a provider's computed health beside the charter's own value. Nothing
+ *  shows when no provider has a reading. */
+function ComputedHealthLine({ computed: c, manual }: { computed?: ComputedProjectHealth; manual?: ProjectHealth }): JSX.Element | null {
+  const { t } = useTranslation('projects');
+  if (!c) return null;
+  return (
+    <div className="proj-lineup" role="group" aria-label={t('computedHealthLabel')}>
+      <span className="muted">{t('computedHealthPrefix')}</span>
+      <span className={`chip ${HEALTH_CHIP[c.level]}`}>{t(HEALTH_LABEL_KEYS[c.level])}</span>
+      <span className="muted">{c.reason} {t('computedHealthSource', { source: c.source })}</span>
+      {manual && manual !== c.level ? <span className="muted">{t('computedHealthManual', { value: t(HEALTH_LABEL_KEYS[manual]) })}</span> : null}
+    </div>
+  );
+}
+
 export function ProjectOverviewTab({ project, canWrite, onSaved, onDirtyChange }: { project: Project; canWrite: boolean; onSaved: (p: Project) => void; onDirtyChange?: (dirty: boolean) => void }): JSX.Element {
   const { t } = useTranslation('projects');
   const ch = project.charter;
@@ -67,6 +82,7 @@ export function ProjectOverviewTab({ project, canWrite, onSaved, onDirtyChange }
     return (
       <>
         {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}
+        <ComputedHealthLine {...(project.computedHealth ? { computed: project.computedHealth } : {})} />
         <StateCard
           icon={<FolderIcon size={22} />}
           title={t('noCharterTitle')}
@@ -94,6 +110,7 @@ export function ProjectOverviewTab({ project, canWrite, onSaved, onDirtyChange }
               {ch.health ? <span className={`chip ${HEALTH_CHIP[ch.health]}`}>{t(HEALTH_LABEL_KEYS[ch.health])}</span> : null}
             </div>
           )}
+          <ComputedHealthLine {...(project.computedHealth ? { computed: project.computedHealth } : {})} {...(ch.health ? { manual: ch.health } : {})} />
         </div>
         {canWrite ? <Button variant="secondary" size="sm" onClick={() => { setError(null); setEditing(true); }}><PencilIcon size={13} /> {t('common:edit')}</Button> : null}
       </div>

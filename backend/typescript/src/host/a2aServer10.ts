@@ -42,6 +42,9 @@ import {
 import {
   listA2aTasksForTenant,
   setA2aTaskPushConfig,
+  getA2aTaskPushConfig,
+  deleteA2aTaskPushConfig,
+  pushConfigIdFor,
   A2aPushUrlDeniedError,
   type A2aTaskRecord,
 } from './a2aTaskStore.js';
@@ -244,7 +247,7 @@ export async function handleA2aRequest10(
       }
       if (!deps) return err10(req.id, 'TASK_NOT_FOUND', 'task not found');
       const cfg = (params?.config ?? params?.taskPushNotificationConfig ?? params) as
-        | { taskId?: unknown; url?: unknown; authentication?: unknown; token?: unknown }
+        | { taskId?: unknown; url?: unknown; authentication?: unknown; token?: unknown; id?: unknown }
         | undefined;
       const id = typeof cfg?.taskId === 'string' ? cfg.taskId : taskIdOf(params);
       const url = typeof cfg?.url === 'string' ? cfg.url : undefined;
@@ -261,9 +264,11 @@ export async function handleA2aRequest10(
         const updated = await setA2aTaskPushConfig(id, {
           url,
           ...(authorization !== undefined ? { authorization } : {}),
+          // CHAN-F7 — a 1.0 config: addressable by id, and pushed as a 1.0 StreamResponse.
+          id: pushConfigIdFor(cfg?.id), protocol: '1.0',
         });
         if (!updated) return err10(req.id, 'TASK_NOT_FOUND', `task not found: ${id}`);
-        return ok(req.id, { taskId: updated.taskId, url: updated.pushConfig?.url });
+        return ok(req.id, pushConfigView10(updated.taskId, updated.pushConfig));
       } catch (e) {
         if (e instanceof A2aPushCredentialInvalidError) {
           return err10(req.id, 'CONTENT_TYPE_NOT_SUPPORTED', e.message);
@@ -278,18 +283,38 @@ export async function handleA2aRequest10(
 
     case A2A_10_METHODS.getPushConfig:
     case A2A_10_METHODS.listPushConfigs:
-    case A2A_10_METHODS.deletePushConfig:
+    case A2A_10_METHODS.deletePushConfig: {
       // ADR 0744 H6 — A2A 1.0.1 §3.3.4: with push not advertised EVERY
       // push-config operation answers `PushNotificationNotSupportedError`
-      // (-32003), not `-32601 method not found` (which says the operation does
-      // not exist in the protocol). With push advertised this host still has
-      // no Get/List/Delete (single un-addressable config per task — the push
-      // sink issue tracks it), and says so as UnsupportedOperationError rather
-      // than inventing an answer.
+      // (-32003), not `-32601 method not found`.
       if (!caps.pushNotifications) {
         return err10(req.id, 'PUSH_NOTIFICATION_NOT_SUPPORTED', 'this host does not support A2A push notifications');
       }
-      return err10(req.id, 'UNSUPPORTED_OPERATION', 'push-config read/delete is not implemented on this host');
+      // CHAN-F7 / RFC 0214 — Get/List/Delete. A task the caller cannot read, an
+      // unknown task, and (for Get) a config id that is not that task's all answer
+      // the SAME `TASK_NOT_FOUND`, so none of them probes for another tenant's task.
+      // The credential is never returned (only id, task and url).
+      if (!deps) return err10(req.id, 'TASK_NOT_FOUND', 'task not found');
+      const id = typeof params?.taskId === 'string' ? params.taskId : taskIdOf(params);
+      if (!id) return err10(req.id, 'TASK_NOT_FOUND', 'params.taskId is required');
+      const rec = await readTask(deps, principal, id, 'strict');
+      if (!rec) return err10(req.id, 'TASK_NOT_FOUND', `task not found: ${id}`);
+      const configIdRaw = params?.id ?? params?.pushNotificationConfigId;
+      const configId = typeof configIdRaw === 'string' ? configIdRaw : undefined;
+      if (req.method === A2A_10_METHODS.listPushConfigs) {
+        const cfg = await getA2aTaskPushConfig(id);
+        return ok(req.id, { configs: cfg ? [pushConfigView10(id, cfg)] : [], nextPageToken: '' });
+      }
+      if (req.method === A2A_10_METHODS.getPushConfig) {
+        const cfg = await getA2aTaskPushConfig(id, configId);
+        if (!cfg) return err10(req.id, 'TASK_NOT_FOUND', `task not found: ${id}`);
+        return ok(req.id, pushConfigView10(id, cfg));
+      }
+      // Delete — idempotent (upstream §3.1.10); the sealed credential goes with the
+      // config (RFC 0214 §A discard on delete).
+      await deleteA2aTaskPushConfig(id, configId);
+      return ok(req.id, {});
+    }
 
     case A2A_10_METHODS.getExtendedCard:
       // §C: served only when `capabilities.extendedAgentCard: true`, which the
@@ -299,4 +324,10 @@ export async function handleA2aRequest10(
     default:
       return { jsonrpc: '2.0', id: req.id, error: { code: -32601, message: `method not found: ${req.method}` } };
   }
+}
+
+/** CHAN-F7 — a 1.0 `TaskPushNotificationConfig` as a caller may see it: id, task and
+ *  target, never the credential (RFC 0214 §A, `a2a-push-secrets-not-returned`). */
+function pushConfigView10(taskId: string, cfg: { url: string; id?: string } | undefined): Record<string, unknown> {
+  return { taskId, ...(cfg?.id !== undefined ? { id: cfg.id } : {}), ...(cfg ? { url: cfg.url } : {}) };
 }

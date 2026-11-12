@@ -128,6 +128,7 @@ function SectionSketch({ type }: { type: SectionType }): JSX.Element {
     featureIndex: [<span key="row" className="cms-sk-row">{box('a', 'col')}{box('b', 'tile')}</span>],
     decisionTree: [line('70', 'a', 'q'), box('b', 'btn'), box('c', 'btn')],
     scheduleSim: [line('90', 'a', 'item'), line('70', 'b', 'item'), line('80', 'c', 'item')],
+    films: [<span key="row" className="cms-sk-row">{box('a', 'img')}{box('b', 'img')}{box('c', 'img')}</span>],
     quotes: [<span key="row" className="cms-sk-row">{box('a', 'quote')}{box('b', 'quote')}</span>],
     pricing: [<span key="row" className="cms-sk-row">{box('a', 'tier')}{box('b', 'tier')}{box('c', 'tier')}</span>],
     productGrid: [<span key="row" className="cms-sk-row">{box('a', 'tile')}{box('b', 'tile')}{box('c', 'tile')}{box('d', 'tile')}</span>],

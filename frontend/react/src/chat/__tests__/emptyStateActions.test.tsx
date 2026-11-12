@@ -6,7 +6,9 @@
  * host's own welcome does) without sending.
  *
  * Red when: ConversationView stops passing the second argument, wires `fill`
- * to the send callback, or wires `send` to the composer seed.
+ * to the send callback (or to the composer's own `onSend`), wires `send` (or
+ * the legacy first argument) to the composer seed, or `fill` stops reaching
+ * the composer's `seed` prop.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
@@ -19,7 +21,7 @@ import { ConversationView, type EmptyStateActions } from '../ConversationView.js
 
 afterEach(cleanup);
 
-function renderView(onPickSuggestion: (t: string) => void): void {
+function renderView(onPickSuggestion: (t: string) => void, onSend: (t: string) => void = vi.fn()): void {
   render(
     <ConversationView
       messages={[]} tenantId="t" error={null} isSending={false}
@@ -31,7 +33,7 @@ function renderView(onPickSuggestion: (t: string) => void): void {
           <button type="button" onClick={() => actions.send('Summarize my book')}>send</button>
         </div>
       )}
-      onSend={vi.fn()} onCancel={null}
+      onSend={onSend} onCancel={null}
       supportsAudioInput={false} supportsImageInput={false} supportsPdfInput={false}
       onResolveInterrupt={vi.fn(async () => undefined)} onRegenerate={vi.fn()} onReconfigureBYOK={vi.fn()}
       hasOlderMessages={false} isLoadingEarlier={false} onLoadEarlier={vi.fn()}
@@ -42,10 +44,13 @@ function renderView(onPickSuggestion: (t: string) => void): void {
 describe('ADR 1040 D3 — empty-state actions', () => {
   it('fill seeds the composer and sends nothing', () => {
     const onPick = vi.fn();
-    renderView(onPick);
+    const onSend = vi.fn();
+    renderView(onPick, onSend);
+    expect(screen.getByTestId('composer').textContent).toBe('');
     fireEvent.click(screen.getByText('fill'));
     expect(screen.getByTestId('composer').textContent).toBe('Outline chapter 3');
     expect(onPick).not.toHaveBeenCalled();
+    expect(onSend).not.toHaveBeenCalled();
   });
 
   it('send (and the legacy first argument) send the text and leave the composer empty', () => {

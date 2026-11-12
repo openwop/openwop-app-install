@@ -24,7 +24,8 @@ import { publicBaseUrl } from '../featureRoute.js';
 import { getOrg } from '../../host/accessControlService.js';
 import { consentTokenHeaderOf, visitorConsentContextOf, type VisitorConsentContext } from '../consent/visitorConsent.js';
 import { requireCmsScope, requireLiveTier } from '../cms/cmsScope.js';
-import { isLiveTierPage } from '../cms/cmsService.js';
+import { getPublishedBySlug, isLiveTierPage } from '../cms/cmsService.js';
+import { publicDocsTenant } from '../../host/publicDocsLane.js';
 import {
   isBotUserAgent,
   prerenderBlogIndex,
@@ -293,56 +294,15 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
-  // Platform-origin document paths. The org is operator-configured (the same
-  // org the SPA's VITE_PUBLIC_SITE_ORG_ID points at); `/` serves the published
-  // `home` slug (ADR 0027).
-  const documentHandler = (slugOf: (req: Request) => string) =>
-    async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-      try {
-        // Bot vs human differ at the same URL — Vary is mandatory (a shared
-        // cache must never serve the bot document to a human or vice versa).
-        res.vary('User-Agent, Accept-Language, Accept-Encoding');
-        const siteOrg = process.env.OPENWOP_PUBLIC_SITE_ORG_ID?.trim();
-        const wantBot = !prerenderDisabled() && siteOrg && isBotUserAgent(req.headers['user-agent']);
-        if (wantBot) {
-          const out = await prerenderPageCached(siteOrg, slugOf(req), publicBaseUrl(req), req.headers['accept-language'], process.env.OPENWOP_PUBLIC_SITE_NAME);
-          if (out !== null) {
-            logDoc('bot_prerender');
-            res.setHeader('Content-Language', out.locale);
-            // no-store, NOT public: the Firebase Hosting CDN in front of this
-            // route STRIPS Vary (observed: `vary: x-fh-requested-host,
-            // accept-encoding`), so a public-cached response at this UA-branched
-            // URL would be served across audiences — a bot document to humans
-            // (or the shell to crawlers) for up to the TTL. The backend's own
-            // prerender LRU (prerenderPageCached) absorbs the recompute cost;
-            // the custom-domain door (no Firebase CDN, no UA branch) keeps its
-            // public caching.
-            res.setHeader('Cache-Control', 'no-store');
-            setPrerenderSecurityHeaders(res); // ADR 1015 D7 (no runtime: not a bound host)
-            res.type('html').send(out.html);
-            return;
-          }
-          // fall through: unrenderable → serve the shell (the SPA can render it)
-        }
-        const shell = await spaShellHtml();
-        if (shell !== null) {
-          logDoc(wantBot ? 'bot_shell_fallback' : 'human_shell');
-          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-          res.type('html').send(shell);
-          return;
-        }
-        // No shell configured: this route is only reachable once the hosting
-        // rewrite is flipped, which DEPLOY.md gates on configuring the shell.
-        logDoc('no_shell_404');
-        sendError(res, 404, 'not_found', 'No SPA shell is configured on this host.');
-      } catch (err) { next(err); }
-    };
-
-  app.get('/', documentHandler(() => 'home'));
+  app.get('/', platformDocumentDoor(() => 'home'));
 
   // ADR 0812 P3b — the shared-root SPA shell moved to `registerSharedRootShell`
   // below, which `registerAllRoutes` mounts BEFORE every route module.
-  app.get('/p/:slug', documentHandler((req) => req.params.slug as string));
+  // ADR 1057 D1 (M3) — a docs-collection page is not a marketing page: its one
+  // crawlable home is `/docs/<slug>`. Before this, `/p/<docs slug>` served crawlers
+  // a second copy whose canonical named `/docs/<slug>`, and kept serving it with
+  // docs OFF, when that canonical 404s.
+  app.get('/p/:slug', platformDocumentDoor((req) => req.params.slug as string, { admit: admitPublicPage }));
 
   // ── ADR 0824 D4 — the ROOT robots.txt + sitemap.xml doors ──
   // Crawlers only ever ask the origin root. Hosting used to fall these through
@@ -583,6 +543,127 @@ export function __resetShellCacheForTests(): void {
   shellEtag = null; // the validator must reset with the body it belongs to
   shellFetchedAt = 0;
   shellRefreshing = null;
+}
+
+/** ADR 1057 D1 — what a crawler request on a platform-origin document door gets,
+ *  decided BEFORE the page prerender. */
+export type DocumentAdmission =
+  | { kind: 'render'; slug: string }
+  | { kind: 'redirect'; location: string }
+  | { kind: 'notFound' }
+  | { kind: 'html'; html: string; locale?: string };
+
+export interface DocumentDoorOptions {
+  /** Bot branch only. Absent ⇒ render the request's slug (the `/` + `/p/:slug`
+   *  behaviour before ADR 1057). Humans always get the SPA shell. */
+  admit?: (siteOrg: string, slug: string, req: Request) => Promise<DocumentAdmission>;
+}
+
+const logDocServe = (outcome: string): void => {
+  const t = throttleLog(`publishing_doc_${outcome}`);
+  if (t.emit) log.info('publishing_doc_serve', { outcome, suppressed: t.suppressed });
+};
+
+/**
+ * A platform-origin document door (ADR 0384 Phase 4; exported by ADR 1057 D1 so
+ * the docs feature's `/docs` doors are the SAME door, not a copy). The org is
+ * operator-configured (the same org the SPA's VITE_PUBLIC_SITE_ORG_ID points at).
+ * Bots get the prerender (or what `admit` decides); humans get the SPA shell
+ * (OPENWOP_SPA_SHELL_URL / _FILE).
+ */
+export function platformDocumentDoor(slugOf: (req: Request) => string, opts: DocumentDoorOptions = {}) {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      // Bot vs human differ at the same URL — Vary is mandatory (a shared
+      // cache must never serve the bot document to a human or vice versa).
+      res.vary('User-Agent, Accept-Language, Accept-Encoding');
+      const siteOrg = process.env.OPENWOP_PUBLIC_SITE_ORG_ID?.trim();
+      const wantBot = !prerenderDisabled() && siteOrg && isBotUserAgent(req.headers['user-agent']);
+      if (wantBot) {
+        const admission: DocumentAdmission = opts.admit ? await opts.admit(siteOrg, slugOf(req), req) : { kind: 'render', slug: slugOf(req) };
+        // no-store, NOT public: the Firebase Hosting CDN in front of this
+        // route STRIPS Vary (observed: `vary: x-fh-requested-host,
+        // accept-encoding`), so a public-cached response at this UA-branched
+        // URL would be served across audiences — a bot document to humans
+        // (or the shell to crawlers) for up to the TTL. The backend's own
+        // prerender LRU (prerenderPageCached) absorbs the recompute cost;
+        // the custom-domain door (no Firebase CDN, no UA branch) keeps its
+        // public caching.
+        res.setHeader('Cache-Control', 'no-store');
+        if (admission.kind === 'notFound') {
+          logDocServe('bot_not_found');
+          sendError(res, 404, 'not_found', 'Page not found.');
+          return;
+        }
+        if (admission.kind === 'redirect') {
+          logDocServe('bot_redirect');
+          res.redirect(301, admission.location);
+          return;
+        }
+        if (admission.kind === 'html') {
+          logDocServe('bot_prerender');
+          if (admission.locale) res.setHeader('Content-Language', admission.locale);
+          setPrerenderSecurityHeaders(res);
+          res.type('html').send(admission.html);
+          return;
+        }
+        const out = await prerenderPageCached(siteOrg, admission.slug, publicBaseUrl(req), req.headers['accept-language'], process.env.OPENWOP_PUBLIC_SITE_NAME);
+        if (out !== null) {
+          logDocServe('bot_prerender');
+          res.setHeader('Content-Language', out.locale);
+          setPrerenderSecurityHeaders(res); // ADR 1015 D7 (no runtime: not a bound host)
+          res.type('html').send(out.html);
+          return;
+        }
+        // fall through: unrenderable → serve the shell (the SPA can render it)
+      }
+      const shell = await spaShellHtml();
+      if (shell !== null) {
+        logDocServe(wantBot ? 'bot_shell_fallback' : 'human_shell');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.type('html').send(shell);
+        return;
+      }
+      // No shell configured: this route is only reachable once the hosting
+      // rewrite is flipped, which DEPLOY.md gates on configuring the shell.
+      logDocServe('no_shell_404');
+      sendError(res, 404, 'not_found', 'No SPA shell is configured on this host.');
+    } catch (err) { next(err); }
+  };
+}
+
+/** ADR 1057 D1 (M3) — `/p/:slug` for a crawler: a docs page is sent to its `/docs`
+ *  home while the docs lane is open, and is not served at all while it is closed.
+ *  Every other page renders exactly as before.
+ *
+ *  A failed PAGE read renders as before, deliberately (grade-code PB-2): at that
+ *  point nothing says the slug is a docs page, and `docs` is OFF by default, so
+ *  answering 404 there would take down every `/p` page of every docs-off site on a
+ *  transient read error. The prerender re-reads the same store and answers for
+ *  the page itself. Once the page IS known to be a docs page, a failed lane read
+ *  is a 404 (fail closed, PB-3). */
+async function admitPublicPage(siteOrg: string, slug: string): Promise<DocumentAdmission> {
+  let hit: Awaited<ReturnType<typeof getPublishedBySlug>> = null;
+  try {
+    const org = await getOrg(siteOrg);
+    hit = org ? await getPublishedBySlug(org.tenantId, siteOrg, slug) : null;
+  } catch (err) {
+    const t = throttleLog('publishing_p_docs_admission_failed');
+    if (t.emit) log.warn('publishing_p_docs_admission_failed', { slug, error: err instanceof Error ? err.message : String(err), suppressed: t.suppressed });
+    return { kind: 'render', slug };
+  }
+  if (!hit || hit.page.collection !== 'docs') return { kind: 'render', slug };
+  let open: string | null = null;
+  try {
+    open = await publicDocsTenant(siteOrg);
+  } catch (err) {
+    const t = throttleLog('publishing_p_docs_lane_failed');
+    if (t.emit) log.warn('publishing_p_docs_lane_failed', { slug, error: err instanceof Error ? err.message : String(err), suppressed: t.suppressed });
+    return { kind: 'notFound' };
+  }
+  return open
+    ? { kind: 'redirect', location: `/docs/${encodeURIComponent(hit.page.slug)}` }
+    : { kind: 'notFound' };
 }
 
 /**

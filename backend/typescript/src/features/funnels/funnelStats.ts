@@ -27,12 +27,18 @@ import { tenantFeatureCheck } from '../../host/tenantFeatureGate.js';
 const log = createLogger('funnels.stats');
 
 export interface FunnelStepDayStat {
-  /** DISTINCT consented visitors who viewed the step this day (VP-R2-1: raw
-   *  event counts double-counted — the viewer's old double-load, refreshes,
-   *  Back-and-forth, and the sink+/next completion pair all inflated them). */
+  /** ADR 1023 D5 — consented visitors whose FIRST view of the step (within the
+   *  event window) fell on this day. Each visitor counts once per step across all
+   *  days, so day rows sum to distinct visitors. */
   views: number;
-  /** DISTINCT consented visitors who completed the step this day. */
+  /** ADR 1023 D5 — of this day's viewers (the cohort above), how many completed
+   *  the step, whenever they did. Never exceeds `views`. */
   completions: number;
+  /** ADR 1023 D5 — completions with no consented visitor or no recorded view (an
+   *  unconsented form submission, a view that aged out of the window), on the day
+   *  they happened. Reported beside the rate, never inside it. Absent on rows
+   *  written before ADR 1023 (read as 0). */
+  unattributed?: number;
   revenue: number;
   orders: number;
   /** VP-R2-4 (the currency doctrine): revenue per ISO code. `revenue` remains
@@ -60,7 +66,10 @@ const stats = new DurableCollection<FunnelDayStat>('funnels:stat', (s) => s.stat
 const EVENT_WINDOW = 50_000;
 
 const day = (iso: string): string => iso.slice(0, 10);
-const blank = (): FunnelStepDayStat => ({ views: 0, completions: 0, revenue: 0, orders: 0, revenueByCurrency: {} });
+const blank = (): FunnelStepDayStat => ({ views: 0, completions: 0, unattributed: 0, revenue: 0, orders: 0, revenueByCurrency: {} });
+
+/** ADR 1023 D4 — the order statuses in which money was received (net of refunds). */
+const REVENUE_STATUSES: ReadonlySet<string> = new Set(['paid', 'fulfilled', 'refunding', 'partially_refunded']);
 
 /** Recompute every day row for ONE org's funnels (all of them, published or
  *  not — drafts with history keep their numbers). Returns rows written. */
@@ -81,45 +90,71 @@ export async function rebuildFunnelStats(tenantId: string, orgId: string): Promi
     }
     return (row.steps[stepId] ??= blank());
   };
-  // GC-FRM-2 — form-submit completions carry a `submissionId` idempotency key
-  // (ADR 0332 sink): count each submission exactly once, however often its
-  // event lands in the window (the GC-D1-1 never-double-fire discipline).
-  const seenSubmissions = new Set<string>();
-  // VP-R2-1 — count DISTINCT visitors per (step, day, type), not raw events:
-  // raw counts were systematically inflated (the old client double-load
-  // doubled views; a form submission emitted step_completed TWICE — sink +
-  // /next). Route-emitted events always carry a consented vk, but the FORMS
-  // SINK emits `visitor: ''` for unconsented submissions — those flow through
-  // the per-event fallthrough below and are counted once via submissionId
-  // (live, load-bearing code, not belt-and-braces).
-  const seenVisitor = new Set<string>();
   // ADR 0949 P1b — one read of the tenant's events serves both rollups: the day
   // stats keep their disclosed window; experiment rollups use every event (E-2).
   const allEvents = await listCollectedEvents(tenantId, Number.MAX_SAFE_INTEGER);
+
+  // ADR 1023 D5 — VISITOR-COHORT counting (FN72WF-11/-12). Before this, views were
+  // distinct per (step, DAY) and summed into "distinct" totals, and completions
+  // also counted unconsented form submissions and `/next` hits with no view, so a
+  // step's conversion could exceed 100%. Now, over the newest EVENT_WINDOW events:
+  //  - pass 1: each consented visitor's EARLIEST view of a (funnel, step) is one
+  //    view, on that day;
+  //  - pass 2: a completion counts only for a visitor with such a view, once, on
+  //    the VIEW's day (a cohort), so for any set of days completions ≤ views;
+  //  - every other completion (no consented visitor, or a view that aged out of
+  //    the window) is `unattributed`: counted once (per visitor, else per form
+  //    submission — the GC-FRM-2 key — else per event) on its own day, and never
+  //    part of a conversion rate.
+  // Two passes, so the result never depends on event order or equal timestamps.
+  interface StepEvt { type: 'view' | 'complete'; funnelId: string; stepId: string; visitor: string; submissionId: string; eventId: string; day: string }
+  const evs: StepEvt[] = [];
   for (const evt of allEvents.slice(0, EVENT_WINDOW)) {
     if (evt.eventType !== 'funnel.step_viewed' && evt.eventType !== 'funnel.step_completed') continue;
     const p = evt.payload as { orgId?: unknown; funnelId?: unknown; stepId?: unknown; submissionId?: unknown; visitor?: unknown };
     if (p.orgId !== orgId || typeof p.funnelId !== 'string' || typeof p.stepId !== 'string') continue;
     if (!byId.has(p.funnelId)) continue; // deleted funnel — tolerate, no row
-    if (evt.eventType === 'funnel.step_completed' && typeof p.submissionId === 'string' && p.submissionId) {
-      if (seenSubmissions.has(p.submissionId)) continue;
-      seenSubmissions.add(p.submissionId);
+    evs.push({
+      type: evt.eventType === 'funnel.step_viewed' ? 'view' : 'complete',
+      funnelId: p.funnelId, stepId: p.stepId,
+      visitor: typeof p.visitor === 'string' ? p.visitor : '',
+      submissionId: typeof p.submissionId === 'string' ? p.submissionId : '',
+      eventId: evt.eventId, day: day(evt.at),
+    });
+  }
+  const earliest = (m: Map<string, { funnelId: string; stepId: string; day: string }>, key: string, e: StepEvt): void => {
+    const prev = m.get(key);
+    if (!prev || e.day < prev.day) m.set(key, { funnelId: e.funnelId, stepId: e.stepId, day: e.day });
+  };
+  const firstView = new Map<string, { funnelId: string; stepId: string; day: string }>();
+  for (const e of evs) if (e.type === 'view' && e.visitor) earliest(firstView, `${e.funnelId}|${e.stepId}|${e.visitor}`, e);
+  for (const v of firstView.values()) touch(v.funnelId, v.day, v.stepId).views += 1;
+  const completed = new Set<string>();
+  const unattributed = new Map<string, { funnelId: string; stepId: string; day: string }>();
+  for (const e of evs) {
+    if (e.type !== 'complete') continue;
+    const vkey = `${e.funnelId}|${e.stepId}|${e.visitor}`;
+    const view = e.visitor ? firstView.get(vkey) : undefined;
+    if (view) {
+      if (completed.has(vkey)) continue;
+      completed.add(vkey);
+      touch(view.funnelId, view.day, view.stepId).completions += 1;
+      continue;
     }
-    const d = day(evt.at);
-    if (typeof p.visitor === 'string' && p.visitor) {
-      const vkey = `${evt.eventType}|${p.funnelId}|${d}|${p.stepId}|${p.visitor}`;
-      if (seenVisitor.has(vkey)) continue;
-      seenVisitor.add(vkey);
-    }
-    const cell = touch(p.funnelId, d, p.stepId);
-    if (evt.eventType === 'funnel.step_viewed') cell.views += 1;
-    else cell.completions += 1;
+    earliest(unattributed, e.visitor ? `v|${vkey}` : e.submissionId ? `s|${e.submissionId}` : `e|${e.eventId}`, e);
+  }
+  for (const u of unattributed.values()) {
+    const cell = touch(u.funnelId, u.day, u.stepId);
+    cell.unattributed = (cell.unattributed ?? 0) + 1;
   }
 
-  // revenue/orders from funnelRef-stamped, non-canceled orders
+  // ADR 1023 D4 (FN72WF-10) — revenue is money RECEIVED. The public checkout
+  // creates a `pending` order (with `funnelRef`) before any payment, so counting
+  // every non-canceled order showed abandoned checkouts as revenue. A demo
+  // checkout also stays `pending`: no money moved, so it counts nothing.
   for (const order of await listOrders(tenantId, orgId)) {
     const ref = order.funnelRef;
-    if (!ref || order.status === 'canceled' || !byId.has(ref.funnelId)) continue;
+    if (!ref || !REVENUE_STATUSES.has(order.status) || !byId.has(ref.funnelId)) continue;
     const cell = touch(ref.funnelId, day(order.createdAt), ref.stepId);
     cell.orders += 1;
     const net = Math.max(0, order.total - (order.refundedAmount ?? 0));
@@ -157,6 +192,36 @@ export async function getFunnelStats(tenantId: string, orgId: string, funnelId: 
 }
 
 export const FUNNEL_STATS_EVENT_WINDOW = EVENT_WINDOW;
+
+/** One step's totals as a planning agent reads them (the `step-stats` tool and the
+ *  `ctx.features.funnels.stepStats` surface share this — ONE projection). */
+export interface StepTotals {
+  views: number;
+  completions: number;
+  /** ADR 1023 D5 — completions outside the visitor cohort; not in any rate. */
+  unattributed: number;
+  orders: number;
+  /** ADR 1023 D9 — `null` when more than one currency is present: a cross-currency
+   *  sum is not an amount (the VP-R2-4 doctrine the UI already honours). */
+  revenue: number | null;
+  revenueByCurrency: Record<string, number>;
+}
+
+/** Sum day rows into per-step totals (ADR 1023 D9). */
+export function projectStepTotals(days: readonly FunnelDayStat[]): { steps: Record<string, StepTotals>; days: number } {
+  const steps: Record<string, StepTotals> = {};
+  const sums: Record<string, number> = {};
+  for (const row of days) {
+    for (const [stepId, cell] of Object.entries(row.steps)) {
+      const t = (steps[stepId] ??= { views: 0, completions: 0, unattributed: 0, orders: 0, revenue: 0, revenueByCurrency: {} });
+      t.views += cell.views; t.completions += cell.completions; t.unattributed += cell.unattributed ?? 0; t.orders += cell.orders;
+      sums[stepId] = (sums[stepId] ?? 0) + cell.revenue;
+      for (const [code, amt] of Object.entries(cell.revenueByCurrency ?? {})) t.revenueByCurrency[code] = (t.revenueByCurrency[code] ?? 0) + amt;
+    }
+  }
+  for (const [stepId, t] of Object.entries(steps)) t.revenue = Object.keys(t.revenueByCurrency).length > 1 ? null : sums[stepId] ?? 0;
+  return { steps, days: days.length };
+}
 
 // ── the rebuild sweep (reservation/affinity clone) ───────────────────────────
 const POLL_MS = (() => {

@@ -1,6 +1,6 @@
 {
  "name": "core.openwop.workflows.career-search",
- "version": "1.1.1",
+ "version": "1.1.2",
  "kind": "workflow-chain",
  "description": "Career search + apply (ADR 0543 P2/P3). `career.search` scores and screens a posting; `career.apply` checks a proposed résumé rewrite for fabrication and then STARTS a browser session carrying the apply-grant context. Neither chain submits: the ADR 0541 commit gate owns that decision, so an edited chain cannot route around the grant.",
  "author": "OpenWOP App",
@@ -214,9 +214,9 @@
   },
   {
    "chainId": "career.campaign",
-   "version": "1.0.1",
+   "version": "1.0.2",
    "label": "Career: run a campaign pass",
-   "description": "Runs one pass of your standing job-search campaign: every stored listing is screened, scored and — where a board ships a submit lane and your apply grant allows it — applied to, under the grant's ceiling, hourly pace and your daily cap. Takes no parameters by design: targeting comes from your steering policy, authority from grants you issued, answers from your answer bank. The output is the pass digest — what was applied, parked, and skipped, each with its reason. Registered under its stable id so the career agent's board cards can name it (WF-JS-1 / ADR 0543 D3).",
+   "description": "Runs one pass of YOUR standing job-search campaign: every stored listing is screened, scored and — where a board ships a submit lane and your apply grant allows it — applied to, under the grant's ceiling, hourly pace and your daily cap. Takes no parameters by design: the person is the member who started the run or queued its card (a run that names nobody refuses), targeting comes from that person's steering policy, authority from grants they issued, answers from their answer bank. The output is counts only — considered, applied, already applied, parked, skipped — because run output is readable across the workspace (ADR 1036 D1). Registered under its stable id so the career agent's board cards can name it (WF-JS-1 / ADR 0543 D3).",
    "capabilities": [
     "side-effectful"
    ],
@@ -239,7 +239,7 @@
    "outputs": {
     "ranGrants": {
      "type": "number",
-     "description": "Active grants the pass ran under."
+     "description": "Active grants of the run's person the pass ran under."
     },
     "listings": {
      "type": "number",
@@ -253,9 +253,25 @@
      "type": "number",
      "description": "Items not attempted because the day's cap was already spent."
     },
-    "results": {
-     "type": "array",
-     "description": "Per-grant digest: applied dealIds, parked count, and every skip with its reason."
+    "considered": {
+     "type": "number",
+     "description": "Listings the pass looked at for this person."
+    },
+    "applied": {
+     "type": "number",
+     "description": "Applications sent in this pass."
+    },
+    "alreadyApplied": {
+     "type": "number",
+     "description": "Listings this person had already applied to."
+    },
+    "parked": {
+     "type": "number",
+     "description": "Applications waiting on a question only the person can answer."
+    },
+    "skipped": {
+     "type": "number",
+     "description": "Listings skipped, for any reason (below the floor, ineligible, refused, no submit lane, daily cap)."
     }
    }
   }

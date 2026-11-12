@@ -33,6 +33,9 @@
  * @see docs/adr/0046-project-subject.md
  */
 
+import { decideMemoryProposal, listMemoryProposals } from './memoryProposals.js';
+import { getProjectPortfolio } from './portfolio.js';
+import { resolveComputedProjectHealth } from '../../host/projectHealthProviders.js';
 import type { Request } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
@@ -45,6 +48,7 @@ import {
   createProject, getProject, updateProject, deleteProject, projectSubject,
   resolveProjectAccess, listVisibleProjects, addProjectMember, removeProjectMember, setProjectVisibility, setProjectFacet,
   notebookCorpusToDelete, orderProjectAgentCohort, type Project,
+  type ProjectRole,
 } from './projectsService.js';
 import { MAX_MULTI_PARTY_PARTICIPANTS } from '../../host/multiPartyConversation.js';
 import { deleteNotebook, getNotebook } from '../notebooks/notebooksService.js';
@@ -105,7 +109,7 @@ async function requireProject(req: Request, scope: Scope): Promise<Project> {
 const view = (tenantId: string) => async (
   id: string,
   callerSubject?: string,
-): Promise<(Project & { boardId: string; canWrite?: boolean; deletesCorpus: boolean }) | null> => {
+): Promise<(Project & { boardId: string; canWrite?: boolean; deletesCorpus: boolean; myRole?: ProjectRole }) | null> => {
   const p = await getProject(tenantId, id);
   if (!p) return null;
   const boardId = subjectBoardId(tenantId, projectSubject(id));
@@ -131,8 +135,19 @@ const view = (tenantId: string) => async (
   // same `resolveProjectAccess` the gate uses computes it, so the FE never
   // re-derives the rule. Omitted when no caller is supplied (internal callers).
   if (callerSubject === undefined) return { ...p, boardId, deletesCorpus };
-  return { ...p, boardId, deletesCorpus, canWrite: (await resolveProjectAccess(tenantId, id, callerSubject)) === 'write' };
+  // ADR 1095 — the caller's own role on the project (a label, never a scope;
+  // ADR 0054 D2), for presentation such as role-limited tabs.
+  const myRole = (p.members ?? []).find((m) => m.ref === `user:${callerSubject}`)?.role;
+  return { ...p, boardId, deletesCorpus, canWrite: (await resolveProjectAccess(tenantId, id, callerSubject)) === 'write', ...(myRole ? { myRole } : {}) };
 };
+
+/** ADR 1091 — the single-project read carries the computed health, so the detail
+ *  page needs no second request. Not on the list: one provider call per row. */
+async function withComputedHealth<T extends Project | null>(req: Request, p: T): Promise<T | (T & { computedHealth: unknown })> {
+  if (!p) return p;
+  const { computed } = await resolveComputedProjectHealth({ tenantId: tenantOf(req), project: p, callerUserId: actingUserOf(req) });
+  return computed ? { ...p, computedHealth: computed } : p;
+}
 
 export function registerProjectsRoutes(deps: RouteDeps): void {
   const { app } = deps;
@@ -159,6 +174,15 @@ export function registerProjectsRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
+  // ADR 1094 — one page of the portfolio. Registered BEFORE `/:id`, which would
+  // otherwise capture "portfolio" as a project id (Express matches in order).
+  app.get(`${BASE}/portfolio`, async (req, res, next) => {
+    try {
+      const q = (req.query ?? {}) as Record<string, unknown>;
+      res.json(await getProjectPortfolio({ tenantId: tenantOf(req), callerSubject: actingUserOf(req), orgId: q.orgId, lead: q.lead, status: q.status, cursor: q.cursor, limit: q.limit }));
+    } catch (err) { next(err); }
+  });
+
   app.post(BASE, async (req, res, next) => {
     try {
       const orgId = requireString((req.body ?? {})?.orgId, 'orgId');
@@ -171,7 +195,7 @@ export function registerProjectsRoutes(deps: RouteDeps): void {
   app.get(`${BASE}/:id`, async (req, res, next) => {
     try {
       const { id } = await requireProject(req, 'workspace:read');
-      res.json(await view(tenantOf(req))(id, actingUserOf(req)));
+      res.json(await withComputedHealth(req, await view(tenantOf(req))(id, actingUserOf(req))));
     } catch (err) { next(err); }
   });
 
@@ -180,13 +204,42 @@ export function registerProjectsRoutes(deps: RouteDeps): void {
       const project = await requireProject(req, 'workspace:write');
       const { id } = project;
       await updateProject(tenantOf(req), id, (req.body ?? {}) as { name?: unknown; workflows?: unknown; charter?: unknown; moderatorRosterId?: unknown; turnPolicy?: unknown }, { ...(actingUserOf(req) ? { actor: actingUserOf(req) } : {}), origin: 'direct' });
-      res.json(await view(tenantOf(req))(id, actingUserOf(req)));
+      res.json(await withComputedHealth(req, await view(tenantOf(req))(id, actingUserOf(req))));
     } catch (err) { next(err); }
   });
 
   // ADR 0839 D2 — what a delete would take with it from OTHER features (canvases,
   // priority lists, the team ledger, documents), so the confirm can name it before
   // the person commits. Gated exactly like DELETE: only someone who can delete may ask.
+  // ADR 1091 — the project's health: the charter's own value (the override) and
+  // the first provider's computed reading, behind the same read gate.
+  app.get(`${BASE}/:id/health`, async (req, res, next) => {
+    try {
+      const project = await requireProject(req, 'workspace:read');
+      const { computed, failed } = await resolveComputedProjectHealth({ tenantId: tenantOf(req), project, callerUserId: actingUserOf(req) });
+      res.json({ manual: project.charter?.health ?? null, computed: computed ?? null, failed });
+    } catch (err) { next(err); }
+  });
+
+  // ADR 1092 D2 — memory an agent proposed, waiting for a person (read), and the
+  // decision (write: approve adds the project note; dismiss records it).
+  app.get(`${BASE}/:id/memory-proposals`, async (req, res, next) => {
+    try {
+      const project = await requireProject(req, 'workspace:read');
+      res.json({ proposals: await listMemoryProposals(tenantOf(req), project.id) });
+    } catch (err) { next(err); }
+  });
+  app.post(`${BASE}/:id/memory-proposals/:proposalId/:decision`, async (req, res, next) => {
+    try {
+      const raw = String(req.params.decision ?? '');
+      // A plain parameter, checked here (no inline regex: Express 5 drops that syntax).
+      if (raw !== 'approve' && raw !== 'dismiss') throw new OpenwopError('not_found', 'Unknown decision.', 404, { decision: raw });
+      const project = await requireProject(req, 'workspace:write');
+      const decision = raw;
+      res.json({ proposal: await decideMemoryProposal({ tenantId: tenantOf(req), projectId: project.id, proposalId: String(req.params.proposalId ?? ''), decision, actor: `user:${actingUserOf(req) ?? 'unknown'}` }) });
+    } catch (err) { next(err); }
+  });
+
   app.get(`${BASE}/:id/delete-preview`, async (req, res, next) => {
     try {
       const { id } = await requireProject(req, 'workspace:write');

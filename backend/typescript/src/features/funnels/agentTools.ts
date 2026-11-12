@@ -38,7 +38,7 @@ import { runnableBlueprints, FILLED_BY_GENERATE, FUNNEL_ARCHITECT_AGENT_ID } fro
 import { generateFunnelFromBlueprint } from './generateService.js';
 import { surfaceDispatchedRun } from '../../host/turnRunDispatch.js';
 
-import { getFunnelStats } from './funnelStats.js';
+import { getFunnelStats, projectStepTotals } from './funnelStats.js';
 import { findCompactionMarkerPath, COMPACTION_MARKER_IN_INPUT } from '../../host/toolResultTransform.js';
 import { untrustedToolError } from '../../host/agentToolKit.js';
 
@@ -94,22 +94,6 @@ async function assertFunnelsOrgAccess(
     return toolError('forbidden_scope', `The user does not have ${mode === 'workspace:write' ? 'write' : 'read'} access to that organization.`);
   }
   return { orgId };
-}
-
-/** Compact per-step totals over the derived CDP-backed day rows — the shape a
- *  planning agent needs (surface.ts stepStats parity). */
-function projectStepTotals(days: Awaited<ReturnType<typeof getFunnelStats>>): {
-  steps: Record<string, { views: number; completions: number; revenue: number; orders: number }>;
-  days: number;
-} {
-  const steps: Record<string, { views: number; completions: number; revenue: number; orders: number }> = {};
-  for (const row of days) {
-    for (const [stepId, cell] of Object.entries(row.steps)) {
-      const t = (steps[stepId] ??= { views: 0, completions: 0, revenue: 0, orders: 0 });
-      t.views += cell.views; t.completions += cell.completions; t.revenue += cell.revenue; t.orders += cell.orders;
-    }
-  }
-  return { steps, days: days.length };
 }
 
 export function registerFunnelsAgentTools(deps: StartRunDeps): void {
@@ -195,9 +179,11 @@ export function registerFunnelsAgentTools(deps: StartRunDeps): void {
     def: {
       name: FUNNELS_STEP_STATS_TOOL_ID,
       description:
-        'Read per-step conversion stats for a funnel (views, completions, revenue, orders per step, over the recent '
-        + 'event window). Use it to find the weakest step before recommending a change — ground every claim in these '
-        + 'numbers; call out low-traffic steps instead of over-reading noise. Read-only.',
+        'Read per-step conversion stats for a funnel over the recent event window: views (distinct visitors), '
+        + 'completions (of those viewers), unattributed (completions with no tracked view; not part of any rate), '
+        + 'paid orders, and revenueByCurrency (revenue is null when more than one currency is present). Use it to find '
+        + 'the weakest step before recommending a change — ground every claim in these numbers; call out low-traffic '
+        + 'steps instead of over-reading noise. Read-only.',
       inputSchema: {
         type: 'object',
         properties: {

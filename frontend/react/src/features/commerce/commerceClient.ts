@@ -17,6 +17,7 @@ export interface Product {
   components?: { productId: string; variantId?: string; quantity: number }[];
   subscription?: { enabled: boolean; intervals: string[]; savePercent?: number }; // MERCH-E (ADR 0279)
   active: boolean; updatedAt: string;
+  unlisted?: boolean; // ADR 1098 — quote-only: hidden from every public lane, still quotable
 }
 export type ProductFieldType = 'string' | 'number' | 'boolean' | 'date' | 'enum';
 export interface ProductFieldDef { defId: string; key: string; label: string; type: ProductFieldType; required: boolean; options?: string[] }

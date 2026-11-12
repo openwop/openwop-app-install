@@ -63,9 +63,10 @@ describe('flattenSections — deterministic extraction', () => {
   it('produces stable text from the same sections (key-sorted, order-stable)', async () => {
     const org = freshOrg();
     const page = await createPage({ tenantId: TENANT, orgId: org, title: 'T', slug: 'flat', sections: [{ type: 'hero', data: { heading: 'H' } }], createdBy: 'u1' });
-    // Insertion order heading → body is NOT sorted order: only a key sort puts B first.
-    const fixture: Page = { ...page, sections: [{ ...page.sections[0]!, data: { heading: 'H', body: 'B' } }] };
-    expect(flattenSections(fixture)).toBe('T\n\nB\n\nH');
+    // Insertion order text → body is NOT sorted order: only a key sort puts A first.
+    // ADR 1057 D4 — the heading leads as a `## ` line, once (not again in the walk).
+    const fixture: Page = { ...page, sections: [{ ...page.sections[0]!, data: { heading: 'H', text: 'B', body: 'A' } }] };
+    expect(flattenSections(fixture)).toBe('T\n\n## H\n\nA\n\nB');
   });
 });
 
@@ -95,6 +96,10 @@ describe('publish→upsert / republish no-op / unpublish→delete', () => {
   it('unpublishing deletes the doc so the chat never cites a non-public page', async () => {
     const org = freshOrg();
     const page = await publishedDocsPage(org, 'kb-c', 'To Remove');
+    // ADR 1057 D3 — the sync reconciles to the page, so the page has to actually be
+    // unpublished (an `unpublished` event for a still-published page keeps the doc;
+    // `adr1057-docs-kb-lockstep.test.ts` pins that direction).
+    await transitionPage(TENANT, org, page.pageId, 'unpublish', 'u1');
     await syncDocsPage({ tenantId: TENANT, orgId: org, pageId: page.pageId, slug: page.slug, title: page.title, collection: 'docs', event: 'unpublished' });
     expect(await docIn(org, page.pageId)).toBeNull();
   });

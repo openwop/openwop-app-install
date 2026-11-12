@@ -1,6 +1,12 @@
 /** ADR 0957 P1b: losing concurrent mints must delete in the creating client.
  * The barrier only schedules two real CAS calls; it does not choose their
  * results. Reverting cleanup to the tenant root must leave two assets and fail.
+ *
+ * Sabotage witnesses (w103; src/host/runArtifactStore.ts mintAndLink/mintMedia,
+ * src/features/media/mediaService.ts deleteAsset): passing the tenant root
+ * instead of `minted.orgId` to deleteAsset, skipping the CAS-loss branch, minting
+ * into the tenant root instead of `artifactOrg(input)`, or leaving the loser's
+ * bytes in the store each red this case on both backends.
  */
 import { describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -14,6 +20,9 @@ import { resolveMediaAsset } from '../src/host/inMemorySurfaces.js';
 
 const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 
+/** The bookkeeping row `mintAndLink` CASes in (`RunArtifactRecord`'s fields this test reads). */
+interface BookkeepingRow { tenantId: string; linkedArtifactId: string }
+
 describe('client-scoped losing media mint cleanup', () => {
   it.each(['memory', 'sqlite'] as const)('keeps only the winning asset and bytes using real %s CAS', async (backend) => {
     const storage = backend === 'memory' ? await openStorage('memory://') : openSqliteStorage(':memory:');
@@ -26,12 +35,12 @@ describe('client-scoped losing media mint cleanup', () => {
     let mintedTokens: string[] = [];
     const spy = vi.spyOn(storage, 'kvCompareAndSwap').mockImplementation(async (key, expected, next) => {
       if (key === 'hostext:runartifact:client-race:preview') {
-        mintedIds.push(JSON.parse(next).linkedArtifactId as string);
+        const row: BookkeepingRow = JSON.parse(next);
+        mintedIds.push(row.linkedArtifactId);
         arrivals++;
         if (arrivals === 2) {
           // Both real media writes have finished, before either bookkeeping CAS.
-          const input = JSON.parse(next) as { tenantId: string };
-          mintedTokens = (await listAssetsForTenant(input.tenantId)).map((asset) => asset.serveToken);
+          mintedTokens = (await listAssetsForTenant(row.tenantId)).map((asset) => asset.serveToken);
           release();
         }
         await bothArrived;
@@ -54,14 +63,16 @@ describe('client-scoped losing media mint cleanup', () => {
       expect(second).toEqual(first);
       const remaining = await listAssetsForTenant(tenantId);
       expect(remaining).toHaveLength(1);
-      expect(remaining[0]?.orgId).toBe(org.orgId);
-      expect(first?.artifactId).toBe(`media:${remaining[0]?.assetId}`);
+      const winner = remaining[0]!;
+      expect(winner.orgId).toBe(org.orgId);
+      expect(first?.artifactId).toBe(`media:${winner.assetId}`);
       expect((await getRunArtifact('client-race:preview'))?.linkedArtifactId).toBe(first?.artifactId);
-      for (const token of mintedTokens) {
-        const bytes = await resolveMediaAsset(token);
-        if (token === remaining[0]?.serveToken) expect(bytes?.contentBase64).toBe(PNG_B64);
-        else expect(bytes).toBeNull();
-      }
+      // The winner's bytes still serve; the loser's bytes are gone with its row.
+      expect(mintedTokens).toContain(winner.serveToken);
+      const losers = mintedTokens.filter((token) => token !== winner.serveToken);
+      expect(losers).toHaveLength(1);
+      expect((await resolveMediaAsset(winner.serveToken))?.contentBase64).toBe(PNG_B64);
+      expect(await resolveMediaAsset(losers[0]!)).toBeNull();
     } finally { release(); spy.mockRestore(); await storage.close(); }
   });
 });

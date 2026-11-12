@@ -185,12 +185,12 @@ const LAPSE_LANES = [
   'features/commerce/routes.ts',            // storefront, product, checkout, one-click, quote accept
   'features/commerce/ucp/routes.ts',        // UCP merchant lane
   'features/dealers/routes.ts',             // partner portal
-  'features/docs/docsService.ts',           // docs site + llms.txt
   'features/funnels/routes.ts',             // funnel runtime
   'features/podcasts/publicRoutes.ts',      // show/episode pages, feed.xml, audio
   'features/service-desk/intake.ts',        // ADR 0878 D9 — WhatsApp intake (the sender is a visitor)
   'features/service-desk/widgetRoutes.ts',  // service-desk widget
   'features/webinars/formsSubmissionSink.ts', // webinar registration sink
+  'host/publicDocsLane.ts',                 // ADR 1057 — docs site, llms.txt, /docs doors, sitemap
   'middleware/customDomain.ts',             // custom-domain serving
 ].sort();
 

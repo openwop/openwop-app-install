@@ -32,7 +32,7 @@ import {
   type RemoteFile, type SyncFileState, type SyncSource,
 } from '../src/features/knowledge-sync/knowledgeSyncService.js';
 import { upsertOAuthConnection } from '../src/features/connections/connectionsService.js';
-import { createCollection } from '../src/features/kb/kbService.js';
+import { createCollection, ingestDocument, getDocument } from '../src/features/kb/kbService.js';
 
 const NOW = '2026-06-22T00:00:00.000Z';
 
@@ -136,8 +136,12 @@ interface KsBody {
   message?: string;
   orgId?: string;
   source?: SyncSource;
-  sources?: SyncSource[];
+  sources?: Array<SyncSource & { syncedDocuments?: number }>;
   deleted?: boolean;
+  removing?: boolean;
+  remaining?: number;
+  documentsRemoved?: number;
+  user?: { userId: string };
 }
 interface Res { status: number; body: KsBody | undefined }
 function client() {
@@ -275,16 +279,19 @@ describe('create normalizes a Google Drive folder URL (ADR 0107 follow-on)', () 
   beforeEach(() => enableToggle(true));
   const FOLDER_ID = '1AbcDEF_ghiJKL-mnoPQRstuVWxyz0123456789';
 
-  async function seededOrg(who: string): Promise<{ c: ReturnType<typeof client>; orgId: string; connectionId: string; collectionId: string }> {
+  async function seededOrg(who: string): Promise<{ c: ReturnType<typeof client>; orgId: string; connectionId: string; collectionId: string; tenantId: string; userId: string }> {
     const tenantId = `org:${who}-${Date.now()}-${n++}`;
     const c = client();
-    await c.post('/host/openwop-app/test/login', { email: uniqEmail(who), tenantId });
+    const login = await c.post('/host/openwop-app/test/login', { email: uniqEmail(who), tenantId });
     const orgId = String((await c.post('/host/openwop-app/orgs', { name: 'Acme' })).body?.orgId);
     // seed a Google OAuth connection + a KB collection in this tenant/org (Phase 4
     // is satisfied by the built-in `google` provider, so this resolves).
-    const conn = await upsertOAuthConnection({ tenantId, provider: 'google', orgId, tokens: { accessToken: 'x', tokenType: 'Bearer', scopes: ['https://www.googleapis.com/auth/drive.readonly'] } });
+    // ADR 1101 D2 — the caller's OWN connection: an org-shared row (an `orgId`, no
+    // person) is refused at create, because the bare-tenant actor could never use it.
+    const userId = String(login.body?.user?.userId ?? '');
+    const conn = await upsertOAuthConnection({ tenantId, provider: 'google', userId, tokens: { accessToken: 'x', tokenType: 'Bearer', scopes: ['https://www.googleapis.com/auth/drive.readonly'] } });
     const col = await createCollection(tenantId, orgId, 'test', { name: 'Sources' });
-    return { c, orgId, connectionId: conn.connectionId, collectionId: col.collectionId };
+    return { c, orgId, connectionId: conn.connectionId, collectionId: col.collectionId, tenantId, userId };
   }
 
   it('stores the BARE folder id when a folder URL is pasted', async () => {
@@ -337,5 +344,119 @@ describe('create normalizes a Google Drive folder URL (ADR 0107 follow-on)', () 
     // (probe `w23g2-ks-rt-url-reject`, vacuous before this line).
     expect(r.body?.message).toMatch(/Google Drive folder link/i);
     expect((await c.get(`${KS}?orgId=${orgId}`)).body?.sources).toHaveLength(0); // nothing persisted
+  });
+});
+
+describe('ADR 1101 — removal, resume and rebind through the routes', () => {
+  beforeEach(() => enableToggle(true));
+  const FOLDER_ID = '1AbcDEF_ghiJKL-mnoPQRstuVWxyz0123456789';
+
+  async function seededSource(who: string): Promise<{ c: ReturnType<typeof client>; orgId: string; tenantId: string; userId: string; collectionId: string; id: string }> {
+    const tenantId = `org:${who}-${Date.now()}-${n++}`;
+    const c = client();
+    const login = await c.post('/host/openwop-app/test/login', { email: uniqEmail(who), tenantId });
+    const userId = String(login.body?.user?.userId ?? '');
+    const orgId = String((await c.post('/host/openwop-app/orgs', { name: 'Acme' })).body?.orgId);
+    const conn = await upsertOAuthConnection({ tenantId, provider: 'google', userId, tokens: { accessToken: 'x', tokenType: 'Bearer', scopes: [] } });
+    const col = await createCollection(tenantId, orgId, 'test', { name: 'Sources' });
+    const created = await c.post(KS, { orgId, connectionId: conn.connectionId, collectionId: col.collectionId, provider: 'google', externalFolderId: FOLDER_ID, cadence: 'daily', folderName: 'Board packs' });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    return { c, orgId, tenantId, userId, collectionId: col.collectionId, id: String(created.body?.source?.id) };
+  }
+
+  it('D5: Remove deletes the documents the source synced, says how many, and the list counted them first', async () => {
+    const { c, orgId, tenantId, userId, collectionId, id } = await seededSource('ks-remove');
+    const documentId = syncDocumentId(id, 'f1');
+    await ingestDocument(tenantId, orgId, userId, collectionId, { title: 'Synced', text: 'synced from the drive' }, { documentId, contentTrust: 'untrusted' }, { subject: userId });
+    await upsertFileState({ sourceId: id, externalFileId: 'f1', documentId, revision: 'r1', tenantId });
+    const listed = await c.get(`${KS}?orgId=${orgId}`);
+    expect(listed.body?.sources?.[0]?.syncedDocuments, 'the confirm needs the count').toBe(1);
+    expect(listed.body?.sources?.[0]?.folderName).toBe('Board packs');
+
+    const r = await c.del(`${KS}/${id}`);
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body).toMatchObject({ deleted: true, documentsRemoved: 1 });
+    expect(await getDocument(tenantId, orgId, collectionId, documentId, { subject: userId }), 'the synced copy outlived its source (KSC-10)').toBeNull();
+    expect(await getSyncSource(tenantId, id)).toBeNull();
+    expect(await listFileStates(id)).toEqual([]);
+  });
+
+  it('D5: Remove honours the tenant legal hold — nothing is deleted while one is set', async () => {
+    const { c, orgId, tenantId, userId, collectionId, id } = await seededSource('ks-remove-hold');
+    const documentId = syncDocumentId(id, 'f1');
+    await ingestDocument(tenantId, orgId, userId, collectionId, { title: 'Synced', text: 'held content' }, { documentId, contentTrust: 'untrusted' }, { subject: userId });
+    await upsertFileState({ sourceId: id, externalFileId: 'f1', documentId, revision: 'r1', tenantId });
+    const { setRetentionHold, clearRetentionHold } = await import('../src/host/retentionHold.js');
+    await setRetentionHold(tenantId, 'litigation');
+    try {
+      const r = await c.del(`${KS}/${id}`);
+      expect(r.status, JSON.stringify(r.body)).toBe(409);
+      expect(r.body?.message).toMatch(/legal hold/i);
+      expect(await getDocument(tenantId, orgId, collectionId, documentId, { subject: userId }), 'a held tenant\'s document was destroyed').not.toBeNull();
+      expect(await getSyncSource(tenantId, id)).not.toBeNull();
+    } finally {
+      await clearRetentionHold(tenantId);
+    }
+  });
+
+  it('D5: Remove refuses while a pass holds the lease, and a source being removed cannot be resumed', async () => {
+    const { c, tenantId, id } = await seededSource('ks-remove-lease');
+    await setSyncStatus(tenantId, id, 'active', NOW, {});
+    const leased = await getSyncSource(tenantId, id);
+    const { beginSyncAttempt } = await import('../src/features/knowledge-sync/knowledgeSyncService.js');
+    await beginSyncAttempt(leased!, new Date().toISOString());
+    const busy = await c.del(`${KS}/${id}`);
+    expect(busy.status).toBe(409);
+    expect(await getSyncSource(tenantId, id), 'nothing was removed').not.toBeNull();
+
+    // N3 — the normal setter cannot enter `removing`; only removal can. The test seeds
+    // the state through the CAS writer (its own seam), with the lease released.
+    await expect(setSyncStatus(tenantId, id, 'paused', NOW, { pausedReason: 'removing' })).rejects.toMatchObject({ httpStatus: 400 });
+    const { mutateSource } = await import('../src/features/knowledge-sync/knowledgeSyncService.js');
+    await mutateSource(tenantId, id, (cur) => { const next = { ...cur, status: 'paused' as const, pausedReason: 'removing' as const }; delete next.syncStartedAt; return next; });
+    const resume = await c.post(`${KS}/${id}/resume`);
+    expect(resume.status).toBe(409);
+    expect(resume.body?.message).toMatch(/being removed/i);
+    // …nor PAUSED (that would re-label it a user pause, which Sync now overrides), nor
+    // patched, nor rebound — only the removal moves a removing source.
+    const pause = await c.post(`${KS}/${id}/pause`);
+    expect(pause.status).toBe(409);
+    expect((await c.patch(`${KS}/${id}`, { includeMedia: false })).status).toBe(409);
+    expect((await getSyncSource(tenantId, id))?.pausedReason).toBe('removing');
+  });
+
+  it('D8: Resume re-arms a STOPPED source with a fresh retry count and no stale error', async () => {
+    const { c, tenantId, id } = await seededSource('ks-resume-error');
+    await setSyncStatus(tenantId, id, 'error', NOW, { lastError: 'x (stopped after 5 consecutive failures)', lastErrorCode: 'sync_failed', retry: { consecutiveFailures: 5, nextAttemptAt: NOW } });
+    const r = await c.post(`${KS}/${id}/resume`);
+    expect(r.status).toBe(200);
+    const after = await getSyncSource(tenantId, id);
+    expect(after?.status).toBe('active');
+    expect(after?.consecutiveFailures, 'the next failure would have been terminal at once').toBeUndefined();
+    expect(after?.lastError).toBeUndefined();
+    expect(after?.lastErrorCode).toBeUndefined();
+  });
+
+  it('D5b: Rebind switches a STOPPED source to the caller\'s own connection and keeps its id', async () => {
+    const { c, tenantId, id } = await seededSource('ks-rebind');
+    const ws = await upsertOAuthConnection({ tenantId, provider: 'google', tokens: { accessToken: 'w', tokenType: 'Bearer', scopes: [] } });
+    const active = await c.patch(`${KS}/${id}`, { connectionId: ws.connectionId });
+    expect(active.status, 'a RUNNING colleague\'s source must be stopped before its account changes').toBe(409);
+
+    await setSyncStatus(tenantId, id, 'paused', NOW, { pausedReason: 'creator-no-access', lastError: 'no access', lastErrorCode: 'creator_no_access' });
+    const r = await c.patch(`${KS}/${id}`, { connectionId: ws.connectionId });
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    const after = await getSyncSource(tenantId, id);
+    expect(after?.id).toBe(id);
+    expect(after?.connectionId).toBe(ws.connectionId);
+    expect(after?.status).toBe('active');
+    expect(after?.pausedReason).toBeUndefined();
+    expect(after?.lastErrorCode).toBeUndefined();
+
+    const dropbox = await upsertOAuthConnection({ tenantId, provider: 'dropbox', tokens: { accessToken: 'd', tokenType: 'Bearer', scopes: [] } });
+    await setSyncStatus(tenantId, id, 'paused', NOW, { pausedReason: 'user' });
+    const wrong = await c.patch(`${KS}/${id}`, { connectionId: dropbox.connectionId });
+    expect(wrong.status).toBe(400);
+    expect(wrong.body?.message).toMatch(/same provider/i);
   });
 });

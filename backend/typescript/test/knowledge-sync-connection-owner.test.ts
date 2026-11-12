@@ -38,6 +38,7 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { upsertOAuthConnection } from '../src/features/connections/connectionsService.js';
 import { createCollection } from '../src/features/kb/kbService.js';
 import { createSyncSource } from '../src/features/knowledge-sync/knowledgeSyncService.js';
+import { createMember } from '../src/host/accessControlService.js';
 import { hostExtStorage } from '../src/host/hostExtPersistence.js';
 import { runKnowledgeSyncOnce } from '../src/features/knowledge-sync/knowledgeSyncRunner.js';
 
@@ -160,24 +161,47 @@ describe('KSC-2 — a sync source may not bind a colleague\'s connection', () =>
     expect(r.body?.source?.createdBy).toBe(me.userId);
   });
 
-  it('CREATE: a TENANT-LEVEL connection (no userId) is still allowed — nobody to impersonate', async () => {
+  it('CREATE: a TENANT-LEVEL (workspace) connection (no userId) is still allowed — nobody to impersonate', async () => {
     // The first draft of the guard was `conn.userId !== caller`, which ALSO refused
     // this. A connection that names no user makes the run act as the bare tenant,
     // so there is no deputy to confuse; refusing it would break a legitimate setup
     // in the name of a hole it does not have.
+    //
+    // ADR 1101 D2 correction — this case used to build the connection WITH an
+    // `orgId`, i.e. an ORG-shared row, and called it tenant-level. That row could
+    // never sync (the bare-tenant actor holds no `connections:use`), and create now
+    // refuses it (next case). A real workspace connection has neither id.
     const tenantId = `org:ks-tenantconn-${Date.now()}-${n++}`;
     const me = await member('ks-tenantconn', tenantId);
     const shared = await upsertOAuthConnection({
-      tenantId, provider: 'google', orgId: me.orgId,
+      tenantId, provider: 'google',
       tokens: { accessToken: 't', tokenType: 'Bearer', scopes: [] },
     });
     expect(shared.userId).toBeUndefined();
+    expect(shared.orgId).toBeUndefined();
     const col = await createCollection(tenantId, me.orgId, 'test', { name: 'Shared' });
     const r = await me.c.post(KS, {
       orgId: me.orgId, connectionId: shared.connectionId, collectionId: col.collectionId,
       provider: 'google', externalFolderId: FOLDER, cadence: 'hourly',
     });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
+  });
+
+  it('CREATE: an ORG-shared connection (orgId, no userId) is refused with a reason — it could never sync (ADR 1101 D2)', async () => {
+    const tenantId = `org:ks-orgconn-${Date.now()}-${n++}`;
+    const me = await member('ks-orgconn', tenantId);
+    const orgShared = await upsertOAuthConnection({
+      tenantId, provider: 'google', orgId: me.orgId,
+      tokens: { accessToken: 't', tokenType: 'Bearer', scopes: [] },
+    });
+    const col = await createCollection(tenantId, me.orgId, 'test', { name: 'OrgShared' });
+    const r = await me.c.post(KS, {
+      orgId: me.orgId, connectionId: orgShared.connectionId, collectionId: col.collectionId,
+      provider: 'google', externalFolderId: FOLDER, cadence: 'hourly',
+    });
+    expect(r.status, JSON.stringify(r.body)).toBe(400);
+    expect(r.body?.message).toMatch(/organization-shared connection cannot be used/i);
+    expect((await me.c.get(`${KS}?orgId=${me.orgId}`)).body?.sources).toHaveLength(0);
   });
 });
 
@@ -204,6 +228,8 @@ describe('KSC-2 USE LANE — the runner refuses to act as a different user', () 
       tenantId, provider: 'google', orgId: 'org-u', userId: 'user:same',
       tokens: { accessToken: 't', tokenType: 'Bearer', scopes: [] },
     });
+    // ADR 1101 D3 — the person a pass acts as must hold write on the source's org.
+    await createMember({ orgId: 'org-u', tenantId, displayName: 'Same', subject: 'user:same', roles: ['editor'] });
     await createCollection(tenantId, 'org-u', 'test', { name: 'col' }, { collectionId: 'col' }); // ADR 0643 R4 Should 3 — the runner now resolves the target collection BEFORE listing; it must exist
     const source = await createSyncSource(tenantId, 'org-u', {
       connectionId: conn.connectionId, provider: 'google', externalFolderId: FOLDER,
@@ -220,6 +246,7 @@ describe('KSC-2 USE LANE — the runner refuses to act as a different user', () 
       tenantId, provider: 'google', orgId: 'org-u', userId: 'user:whoever',
       tokens: { accessToken: 't', tokenType: 'Bearer', scopes: [] },
     });
+    await createMember({ orgId: 'org-u', tenantId, displayName: 'Whoever', subject: 'user:whoever', roles: ['editor'] }); // ADR 1101 D3
     await createCollection(tenantId, 'org-u', 'test', { name: 'col' }, { collectionId: 'col' }); // ADR 0643 R4 Should 3 — the runner now resolves the target collection BEFORE listing; it must exist
     const source = await createSyncSource(tenantId, 'org-u', {
       connectionId: conn.connectionId, provider: 'google', externalFolderId: FOLDER,

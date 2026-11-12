@@ -7,7 +7,7 @@
  */
 
 import { Button } from '../../ui/Button.js';
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal } from '../../ui/Modal.js';
 import { Notice } from '../../ui/Notice.js';
@@ -17,6 +17,7 @@ import { announce } from '../../ui/announce.js';
 import { formatNumber } from '../../i18n/format.js';
 import { generateAltText, updateAsset, absoluteServeUrl, type MediaAsset, type MediaAltTextSource } from './mediaClient.js';
 import { assetAlt } from './MediaViews.js';
+import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
 
 const MAX_ALT = 250;
 
@@ -38,6 +39,14 @@ export function AltTextDialog({
   const [busy, setBusy] = useState<'generate' | 'save' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null); // status message (GRADE ALT-UX-2)
+  const lockedId = useId();
+  // ADR 1100 D8 — AI generation is the accessibility feature's (its route checks the
+  // toggle AND the plan); typing and "decorative" are media's own and always offered.
+  const a11y = useFeatureAccess('accessibility');
+  const canGenerate = a11y.enabled && !a11y.locked && !a11y.loading;
+  // Off: no button. Locked (plan) or still resolving: the button stays, disabled,
+  // so the layout does not jump and a locked plan says why.
+  const showGenerate = a11y.loading || a11y.enabled;
 
   const generate = async (): Promise<void> => {
     setBusy('generate');
@@ -90,7 +99,8 @@ export function AltTextDialog({
           </div>
         ) : null}
 
-        <p className="u-label-sm u-text-muted">{t('altDialogHelp')}</p>
+        <p className="u-label-sm u-text-muted">{t(canGenerate || (a11y.loading && !a11y.locked) ? 'altDialogHelp' : 'altDialogHelpNoAi')}</p>
+        <p className="u-label-sm u-text-muted">{t('altPlacedNote')}</p>
 
         <TextareaField
           label={t('altTextLabel')}
@@ -113,9 +123,14 @@ export function AltTextDialog({
         {error ? <Notice variant="error">{error}</Notice> : info ? <Notice variant="info">{info}</Notice> : null}
 
         <div className="action-bar u-justify-between">
-          <Button variant="secondary" disabled={decorative || busy !== null} aria-busy={busy === 'generate'} onClick={() => void generate()}>
-            <SparklesIcon aria-hidden /> {busy === 'generate' ? t('altGenerating') : t('altGenerate')}
-          </Button>
+          {showGenerate ? (
+            <span className="u-grid u-gap-1">
+              <Button variant="secondary" disabled={!canGenerate || decorative || busy !== null} aria-busy={busy === 'generate'} aria-describedby={a11y.locked ? lockedId : undefined} onClick={() => void generate()}>
+                <SparklesIcon aria-hidden /> {busy === 'generate' ? t('altGenerating') : t('altGenerate')}
+              </Button>
+              {a11y.locked ? <span id={lockedId} className="u-label-sm u-text-muted">{t('altGenerateLocked')}</span> : null}
+            </span>
+          ) : <span aria-hidden="true" />}
           <span className="u-flex u-gap-2">
             <Button variant="secondary" onClick={onClose}>{t('common:cancel')}</Button>
             <Button variant="primary" disabled={!canSave || busy !== null} aria-busy={busy === 'save'} onClick={() => void save()}>

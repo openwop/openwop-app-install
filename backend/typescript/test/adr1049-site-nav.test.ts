@@ -77,6 +77,8 @@ describe('cleanSiteNav (ADR 1049)', () => {
     const long = cleanSiteNav({ label: 'L'.repeat(80), description: 'D'.repeat(200) });
     expect(long?.label).toHaveLength(40);
     expect(long?.description).toHaveLength(90);
+    // `resources` (added 2026-11-10, DeckTalk) is an authorable group.
+    expect(cleanSiteNav({ group: 'resources', label: 'Guides' })).toEqual({ group: 'resources', label: 'Guides' });
     expect(cleanSiteNav({ order: 0 })).toEqual({ order: 0 });
     expect(cleanSiteNav({ order: 999 })).toEqual({ order: 999 });
   });

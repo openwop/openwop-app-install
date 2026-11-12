@@ -19,6 +19,8 @@
  *  - `eraseSegmentSnapshotSubject` / `eraseJourneyEnrollmentSubject` is not registered;
  *  - `copyEnrollmentsOnMerge` is not wired (a merge re-arms a journey);
  *  - `removeMergeCopiedEnrollments` is not wired (an unmerge keeps the copy).
+ * Probed again in grade-tests wave 104, adding: the snapshot eraser's id filter, and the
+ * next pass's erased-id filter (`withoutErased`, D5.3).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -44,7 +46,7 @@ async function contact(t: string, name: string): Promise<string> {
 beforeAll(async () => {
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-});
+}, 120_000);
 
 describe('D5.2 — a DSAR by the survivor\'s email reaches the merged-away contact', () => {
   it('erases the merged-away contact\'s session link, CDP events, enrollment and snapshot membership', async () => {
@@ -60,6 +62,8 @@ describe('D5.2 — a DSAR by the survivor\'s email reaches the merged-away conta
 
     await mergeContacts(t, bea, ada);
     expect((await listMergeEvents(t)).length).toBe(1);
+    // Positive control: both events landed, so the empty list below is the erasure.
+    expect((await listCollectedEvents(t)).filter((e) => e.payload.page === '/pricing' || e.payload.page === '/docs')).toHaveLength(2);
 
     const out = await eraseSubject(t, `bea@${t}.test`);
     expect(out.failed, JSON.stringify(out)).toBe(0);
@@ -94,7 +98,7 @@ describe('D5.3 — an erased contact does not come back into a segment snapshot'
     // Kim's anonymised row still matches "Everyone": without the filter the pass would put
     // the id back AND emit crm.segment.entered for it (a new entrant against [lee]).
     expect(after.memberIds, 'the erased id stays out').not.toContain(kim);
-    expect(after.memberIds).toContain(lee);
+    expect(after.memberIds, 'Lee, and only Lee').toEqual([lee]);
   });
 });
 

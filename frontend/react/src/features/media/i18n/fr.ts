@@ -112,6 +112,10 @@ export const messages = {
   altDecorativeChip: 'Décorative',
   altDialogTitle: 'Texte alternatif — {{name}}',
   altDialogHelp: 'Le texte alternatif décrit une image pour les utilisateurs de lecteurs d’écran. Rédigez une description concise, générez-la avec l’IA ou marquez l’image comme décorative.',
+  // ADR 1100 D8 — when AI generation is off or not in the plan; D2 — where it goes.
+  altDialogHelpNoAi: 'Le texte alternatif décrit une image pour les utilisateurs de lecteurs d’écran. Rédigez une description concise ou marquez l’image comme décorative.',
+  altGenerateLocked: 'Le texte alternatif par IA n’est pas inclus dans le forfait de cet espace de travail.',
+  altPlacedNote: 'Une fois enregistrée, cette description remplit le texte alternatif la prochaine fois que l’image est placée dans une page ou un document. Les pages qui utilisent déjà cette image conservent leur texte alternatif actuel.',
   altTextLabel: 'Texte alternatif',
   altTextPlaceholder: 'p. ex. Un barista versant un latte art dans un café ensoleillé',
   altCharCount: '{{n}} / {{max}}',

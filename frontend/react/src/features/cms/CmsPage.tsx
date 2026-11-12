@@ -17,6 +17,8 @@ import { Button } from '../../ui/Button.js';
 import { PageHeader } from '../../ui/PageHeader.js';
 
 import { confirm } from '../../ui/confirm.js';import { Notice } from '../../ui/Notice.js';
+import { announce } from '../../ui/announce.js';
+import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
 import { useCmsOrgAccess } from './useCmsOrgAccess.js';
 import { Tabs, TabPanel } from '../../ui/Tabs.js';
 import { StateCard } from '../../ui/StateCard.js';
@@ -42,7 +44,9 @@ import { PublishChecklist } from './PublishChecklist.js';
 import { publishChecks } from './publishChecks.js';
 import { CmsLanguageSettings } from './CmsLanguageSettings.js';
 import { A11yIssuesPanel } from '../../a11y/A11yIssuesPanel.js';
-import { cmsPageToA11yModel } from './cmsA11y.js';
+import { cmsPageToA11yModel, splitA11yRef } from './cmsA11y.js';
+import { libraryAltOf } from './altFromLibrary.js';
+import { a11yCheckAnnouncement, a11yLocateAction, a11yRefPosition, a11ySharedUnreadOf } from './a11yLocation.js';
 import { checkContentA11y, type A11yIssue } from '../../a11y/contentA11y.js';
 import { diffSections, type SectionDiffEntry } from './sectionDiff.js';
 import { resolveSharedRefs } from './resolveSharedRefs.js';
@@ -107,6 +111,7 @@ const CMS_LOCALIZER_AGENT = 'vendor.openwop-app.cms.agents.localizer';
  *  DRAFT sections, and can submit for review; publishing stays a human action.
  *  Same ADR 0058/0073 chat deep-link target. */
 const CMS_CONTENT_EDITOR_AGENT = 'vendor.openwop-app.cms.agents.content-editor';
+const A11Y_REVIEWER_AGENT = 'vendor.openwop-app.accessibility.agents.accessibility-reviewer'; // ADR 1100 D4
 
 
 /** Status → the workflow actions to OFFER (authority is enforced server-side). */
@@ -220,6 +225,8 @@ function postFacetPatch(cur: Page, base: Page | null): { kind?: 'page' | 'post';
 export function CmsPage({ translatorSurface = false }: { translatorSurface?: boolean } = {}): JSX.Element {
   const { t } = useTranslation('cms');
   const navigate = useNavigate();
+  // ADR 1100 D4 — only the Reviewer link reads this; the CMS itself is always on (header).
+  const a11yAccess = useFeatureAccess('accessibility');
   const { routeOrgId, routePageId } = useParams();
   const [orgId, setOrgId] = useState('');
   const [pages, setPages] = useState<Page[] | null>(null);
@@ -263,6 +270,7 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
   // are offered (fail-closed by construction).
   const [previewLocale, setPreviewLocale] = useState('');
   const [a11yIssues, setA11yIssues] = useState<A11yIssue[] | null>(null); // ADR 0363 P2
+  const [a11yIncomplete, setA11yIncomplete] = useState(false); // ADR 1100 D3 — recorded with the result
   // Version history (ADR 0206 B1) — lazily loaded per open of the panel.
   const [versions, setVersions] = useState<PageVersion[] | null>(null);
   const [versionsFailed, setVersionsFailed] = useState(false);
@@ -294,6 +302,9 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
    *  org, recoverable only through version history. The neighbouring
    *  `sharedImpactFailed` flag in this same file is the pattern. */
   const [sharedFailed, setSharedFailed] = useState(false);
+  // ADR 1100 D3 — until the first shared-section read settles, references resolve
+  // to nothing, and the accessibility check must not call them clean.
+  const [sharedLoaded, setSharedLoaded] = useState(false);
   const [editShared, setEditShared] = useState<SharedSection | null>(null);
   const [sharedImpact, setSharedImpact] = useState<Array<{ pageId: string; title: string; status?: string; scheduledPublishAt?: string }> | null>(null);
   const [sharedImpactFailed, setSharedImpactFailed] = useState(false);
@@ -428,9 +439,11 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
     void getLanguageSettings(orgId)
       .then((s) => { if (!cancelled) setSettings(s); })
       .catch(() => { if (!cancelled) { setSettings(null); setSettingsFailed(true); } });
+    setSharedLoaded(false);
     void listSharedSections(orgId)
       .then((s) => { if (!cancelled) { setSharedSections(s); setSharedFailed(false); } })
-      .catch(() => { if (!cancelled) { setSharedSections([]); setSharedFailed(true); } });
+      .catch(() => { if (!cancelled) { setSharedSections([]); setSharedFailed(true); } })
+      .finally(() => { if (!cancelled) setSharedLoaded(true); });
     return () => { cancelled = true; };
   }, [orgId, t]);
 
@@ -753,12 +766,28 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
   const pickMedia = useCallback((): Promise<string | null> => {
     return new Promise<string | null>((resolve) => { setPickerResolve(() => resolve); });
   }, []);
+  // ADR 1100 D2 — the picked asset replaces its row in `assets` (or joins it, for a
+  // fresh upload), so the alt filled from the library is the asset's CURRENT one,
+  // not the one loaded with the page.
+  // The editor's onChange reads the description through `libraryAlt` at CALL
+  // time, and the Browse button calls it right after the pick, before React has
+  // re-rendered — so the ref is updated here, synchronously, not in an effect.
+  const assetsRef = useRef<MediaAssetRef[]>(assets);
+  assetsRef.current = assets;
+  const upsertPickedAsset = useCallback((asset: MediaAssetRef) => {
+    const cur = assetsRef.current;
+    const next = cur.some((a) => a.assetId === asset.assetId) ? cur.map((a) => (a.assetId === asset.assetId ? asset : a)) : [...cur, asset];
+    assetsRef.current = next;
+    setAssets(next);
+  }, []);
+  const libraryAlt = useCallback((token: string) => libraryAltOf(assetsRef.current, token), []);
 
   // ── Shared sections (ADR 0204 C4) ──
   const reloadShared = useCallback(() => {
     void listSharedSections(orgId)
       .then((s) => { setSharedSections(s); setSharedFailed(false); })
-      .catch(() => { setSharedSections([]); setSharedFailed(true); });
+      .catch(() => { setSharedSections([]); setSharedFailed(true); })
+      .finally(() => setSharedLoaded(true));
   }, [orgId]);
 
   const saveAsShared = useCallback(async (section: Section) => {
@@ -1147,6 +1176,29 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
     () => resolveSharedRefs(selected?.sections ?? [], sharedSections, sharedFailed),
     [selected, sharedSections, sharedFailed],
   );
+  // ADR 1100 D3 — the accessibility panel names the section (and, when a section
+  // has several pictures, which one) each issue is in, and says when it is shared.
+  const describeA11yRef = useCallback((nodeRef: string): string | undefined => {
+    const pos = a11yRefPosition(resolvedSections, nodeRef);
+    if (!pos) return undefined;
+    const { n, section: s, item } = pos;
+    const type = sectionLabel(s) || t(`sectionType_${s.type}`, { defaultValue: s.type });
+    const where = item === undefined
+      ? t('a11y:issueLocationSection', { n, type })
+      : t('a11y:issueLocationSectionItem', { n, type, item });
+    return s.ref ? t('a11y:issueLocationShared', { where }) : where;
+  }, [resolvedSections, t]);
+  // Shared sections not read (still loading, or the read failed) while the page has
+  // references: those were not checked, so the check is incomplete, not clean.
+  const a11ySharedUnread = a11ySharedUnreadOf(sharedFailed, sharedLoaded, selected?.sections ?? []);
+  const runA11yCheck = useCallback(() => {
+    const issues = checkContentA11y(cmsPageToA11yModel(resolvedSections));
+    setA11yIssues(issues);
+    // The result is a snapshot: whether it was complete is recorded WITH it, so a
+    // load that finishes while the modal is open cannot turn it into an all-clear.
+    setA11yIncomplete(a11ySharedUnread);
+    announce(a11yCheckAnnouncement(issues.length, a11ySharedUnread).map((m) => t(`a11y:${m.key}`, m.params ?? {})).join(' '));
+  }, [resolvedSections, a11ySharedUnread, t]);
 
   // ADR 0592 §5 — the Public preview resolved for the chosen locale via the
   // client-side mirror of the normative exact→family→base merge, so the editor
@@ -1182,7 +1234,19 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
     ...(!translatorSurface ? [{
       id: 'a11y',
       label: <><ShieldIcon size={13} /> {t('a11y:panelCheck')}</>,
-      onSelect: () => setA11yIssues(checkContentA11y(cmsPageToA11yModel(selected.sections))),
+      onSelect: runA11yCheck, // ADR 1100 D3 — shared sections included
+    }] : []),
+    // ADR 1100 D4 — the Reviewer reads the page itself; the seed names it by id.
+    ...(!translatorSurface && a11yAccess.enabled && !a11yAccess.locked ? [{
+      id: 'a11y-reviewer',
+      label: <><SparklesIcon size={13} /> {t('a11y:askReviewer')}</>,
+      // Through the unsaved-changes guard, like the page's other exits: the Reviewer
+      // reads the SAVED page, so unsaved edits would be lost and not reviewed.
+      onSelect: () => void confirmDiscard().then((ok) => {
+        if (!ok) return;
+        stageComposerDraft(t('a11y:askReviewerSeed', { title: selected.title, pageId: selected.pageId }));
+        void navigate(`/?agent=${encodeURIComponent(A11Y_REVIEWER_AGENT)}`);
+      }),
     }] : []),
   ];
 
@@ -1209,6 +1273,7 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
                                   locales={locales}
                                   translatorMode={translatorSurface}
                                   onPickMedia={pickMedia}
+                                  libraryAlt={libraryAlt}
                                   sharedSections={sharedSections}
                                   sharedFailed={sharedFailed}
                                   {...(translatorSurface ? {} : { onSaveShared: (s: Section) => void saveAsShared(s) })}
@@ -2082,7 +2147,7 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
         <PublishChecklist
           page={selected}
           action={pendingAction}
-          checks={publishChecks(selected, seo, { baseLocale, locales })}
+          checks={publishChecks(selected, seo, { baseLocale, locales, resolvedSections, sharedUnread: a11ySharedUnread })}
           busy={busy}
           onConfirm={() => { const a = pendingAction; void runAction(a).then((ok) => { if (ok) setPendingAction(null); }); }}
           onFix={(c) => {
@@ -2098,7 +2163,7 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
       {pickerResolve ? (
         <MediaPickerDialog
           orgId={orgId}
-          onSelect={(asset) => { pickerResolve(asset.serveToken ?? null); setPickerResolve(null); }}
+          onSelect={(asset) => { upsertPickedAsset(asset); pickerResolve(asset.serveToken ?? null); setPickerResolve(null); }}
           onClose={() => { pickerResolve(null); setPickerResolve(null); }}
         />
       ) : null}
@@ -2118,7 +2183,20 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
       {/* Accessibility checker (ADR 0363 P2) — the shared authored-content check. */}
       {a11yIssues !== null ? (
         <Modal onClose={() => setA11yIssues(null)} label={t('a11y:panelTitle')} showClose>
-          <A11yIssuesPanel issues={a11yIssues} />
+          <A11yIssuesPanel
+            issues={a11yIssues}
+            incomplete={a11yIncomplete ? t('a11y:panelIncompleteShared') : undefined}
+            describeRef={describeA11yRef}
+            // Close, then scroll to the section and focus its Edit button (after the
+            // modal's own focus restore, which jumpToSection's timeout follows).
+            // From another tab the canvas is not mounted yet, so open the section's
+            // editor there instead (it focuses its first field as it opens).
+            onLocate={(ref) => {
+              setA11yIssues(null);
+              const id = splitA11yRef(ref).sectionId;
+              if (a11yLocateAction(workspaceMode) === 'jump') jumpToSection(id); else selectSection(id);
+            }}
+          />
         </Modal>
       ) : null}
 
@@ -2136,6 +2214,7 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
               assets={assets}
               onChange={(data) => setEditShared((s) => (s ? { ...s, data } : s))}
               onPickMedia={pickMedia}
+              libraryAlt={libraryAlt}
             />
             {editShared.localizations && Object.keys(editShared.localizations).length > 0 ? (
               <span className="u-label-sm">{t('sharedOverlaysNote', { locales: Object.keys(editShared.localizations).join(', ') })}</span>

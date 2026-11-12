@@ -88,6 +88,9 @@ const KNOWN_UNEMITTED_FAMILIES: Readonly<Record<string, string>> = {
   searchIndex: UNDISPOSITIONED,
   production: UNDISPOSITIONED,
   auditLogIntegrity: UNDISPOSITIONED,
+  // Suite 2.46.44 (RFC 0258): the scheduler is a DAG until #5583 lands
+  // bounded loopback behind OPENWOP_BOUNDED_LOOPBACK; that change projects it.
+  loopback: 'RFC 0258 bounded loopback: not implemented until #5583; projecting it today would be a false claim',
 };
 
 /** The family seats the v2 schema declares: root records requiring the §3 envelope. */

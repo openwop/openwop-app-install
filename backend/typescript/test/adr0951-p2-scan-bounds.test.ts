@@ -6,7 +6,14 @@
  * toggle write listed every recording in every tenant. Each lane must now read
  * only its own slice: the subject's pointers, the org's rows, the tenants with
  * an enablement row. The witnesses watch the storage calls themselves.
- * Real SQLite rows, real toggle service, real blob bytes (memory backend). */
+ * Real SQLite rows, real toggle service, real blob bytes (memory backend).
+ *
+ * Sabotage witnesses (w103; src/features/analytics/replayStore.ts): an erasure
+ * that lists the tenant's recordings reds the public-reject and withdrawal cases;
+ * skipping the delete, or not writing the subject pointer, reds the withdrawal
+ * case; listing the whole tenant for one org reds the viewer-list case; a sweep
+ * that lists every recording (for its rows or its tenant list), or a global
+ * toggle write that does, reds the last case. */
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -117,5 +124,7 @@ describe('ADR 0951 P2 review #2 — bounded reads', () => {
     await sweepExpiredReplays(); // the one-time backfill of pre-pointer rows is the only full list
     const sweepScans = await listsDuring(() => sweepExpiredReplays());
     expect(sweepScans.filter((p) => p === RECORDINGS), 'no cross-tenant list of recordings').toEqual([]);
+    // The sweep reads exactly the one tenant's slice of the recordings, and no index-wide list.
+    expect(recordingScans(sweepScans)).toEqual([`${RECORDINGS}${tenant}:`]);
   });
 });

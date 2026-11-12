@@ -62,7 +62,7 @@ const ALICE: A2aPrincipal = { tenantId: 'tenant-alice', principalId: 'p-alice', 
 
 let deps: A2aServiceDeps;
 let agent: MockAgent;
-let originHits: Array<{ path: string; headers: Record<string, string> }>;
+let originHits: Array<{ path: string; headers: Record<string, string>; body: string }>;
 let targetHits: number;
 let originStatus: number;
 let outcomes: A2aPushOutcome[];
@@ -104,7 +104,7 @@ beforeEach(async () => {
     .get(ORIGIN)
     .intercept({ path: (p: string) => p.startsWith('/hook'), method: 'POST' })
     .reply((opts) => {
-      originHits.push({ path: String(opts.path), headers: lowerHeaders(opts.headers) });
+      originHits.push({ path: String(opts.path), headers: lowerHeaders(opts.headers), body: String(opts.body ?? '') });
       return originStatus === 307
         ? { statusCode: 307, data: '', responseOptions: { headers: { location: `${TARGET}/stolen` } } }
         : { statusCode: originStatus, data: '' };
@@ -147,7 +147,7 @@ async function send10(method: string, params: Record<string, unknown>) {
 }
 
 /** Open a real 1.0 task (a real run) and register a push config with a credential. */
-async function taskWithPush(extra: Record<string, unknown>): Promise<{ taskId: string; created: unknown }> {
+async function taskWithPush(extra: Record<string, unknown>): Promise<{ taskId: string; created: Awaited<ReturnType<typeof send10>> }> {
   const sent = await send10('SendMessage', {
     message: { messageId: `m-${randomBytes(4).toString('hex')}`, role: 'ROLE_USER', parts: [{ text: 'hi' }] },
   });
@@ -186,6 +186,14 @@ describe('RFC 0214 §A/§C — the push carries the registered destination crede
     expect(originHits[0]!.headers.authorization).toBe(`${SCHEME} ${SENTINEL}`);
     expect(originHits[0]!.headers['openwop-signature']).toBeUndefined();
     expect(outcomes).toEqual([{ delivered: true, status: 204 }]);
+    // CHAN-F7 / RFC 0214 §C — a 1.0 config's body is a 1.0 StreamResponse
+    // (`statusUpdate`, no `final`: 1.0 signals terminality by state) as application/a2a+json.
+    expect(originHits[0]!.headers['content-type']).toBe('application/a2a+json');
+    const body = JSON.parse(originHits[0]!.body) as { statusUpdate?: { taskId?: string; status?: { state?: string }; final?: unknown }; kind?: unknown };
+    expect(body.kind).toBeUndefined();
+    expect(body.statusUpdate?.taskId).toBe(taskId);
+    expect(body.statusUpdate?.status?.state).toBe('TASK_STATE_COMPLETED');
+    expect(body.statusUpdate && 'final' in body.statusUpdate).toBe(false);
 
     // §A: discarded once the task is terminal and its final push was attempted.
     const after = await getA2aTask(taskId);
@@ -215,6 +223,9 @@ describe('RFC 0214 §A/§C — the push carries the registered destination crede
     expect(tokenOnly.error).toBeUndefined();
     await resend();
     expect(originHits.map((h) => h.headers.authorization)).toEqual(['Bearer tok-abc']);
+    // CHAN-F7 — a 0.3 config keeps the 0.3 TaskStatusUpdateEvent body its client parses.
+    expect(originHits[0]!.headers['content-type']).toBe('application/json');
+    expect(JSON.parse(originHits[0]!.body)).toMatchObject({ kind: 'status-update', taskId: id, status: { state: 'input-required' }, final: false });
 
     const withAuth = await rpc('tasks/pushNotificationConfig/set', {
       id,
@@ -260,5 +271,47 @@ describe('RFC 0214 §B — a 3xx is a failed delivery and is never followed', ()
     expect(failed[0]).not.toContain(ORIGIN);
     expect(logged.join('')).not.toContain(SENTINEL);
     expect(JSON.stringify(outcomes)).not.toContain(SENTINEL);
+  });
+});
+
+describe('CHAN-F7 / RFC 0214 — 1.0 Get, List and Delete of a push config', () => {
+  it('Get and List return id, task and url only; Delete is idempotent and discards the credential', async () => {
+    const { taskId, created } = await taskWithPush({ id: 'my-config', authentication: { scheme: SCHEME, credentials: SENTINEL } });
+    expect(created.result).toEqual({ taskId, id: 'my-config', url: `${ORIGIN}/hook` });
+
+    const got = await send10('GetTaskPushNotificationConfig', { taskId, id: 'my-config' });
+    expect(got.result).toEqual({ taskId, id: 'my-config', url: `${ORIGIN}/hook` });
+    expect((await send10('ListTaskPushNotificationConfigs', { taskId })).result).toEqual({ configs: [{ taskId, id: 'my-config', url: `${ORIGIN}/hook` }], nextPageToken: '' });
+    expect(JSON.stringify(got)).not.toContain(SENTINEL);
+
+    // Another config id, and an unknown task, answer the same TASK_NOT_FOUND.
+    const wrongId = await send10('GetTaskPushNotificationConfig', { taskId, id: 'not-mine' });
+    const unknownTask = await send10('GetTaskPushNotificationConfig', { taskId: 'task-that-does-not-exist', id: 'my-config' });
+    expect(wrongId.error?.code).toBe(unknownTask.error?.code);
+    expect(wrongId.result).toBeUndefined();
+
+    expect((await send10('DeleteTaskPushNotificationConfig', { taskId, id: 'my-config' })).result).toEqual({});
+    expect((await send10('DeleteTaskPushNotificationConfig', { taskId, id: 'my-config' })).result).toEqual({}); // idempotent
+    expect((await getA2aTask(taskId))?.pushConfig).toBeUndefined(); // the sealed credential went with it
+    expect((await send10('ListTaskPushNotificationConfigs', { taskId })).result).toEqual({ configs: [], nextPageToken: '' });
+    expect((await send10('GetTaskPushNotificationConfig', { taskId, id: 'my-config' })).error?.code).toBe(unknownTask.error?.code);
+
+    // §A discard on delete: no push after Delete, even at the terminal transition.
+    await finishRun(taskId);
+    expect(originHits).toEqual([]);
+  });
+
+  it('a config id the client did not give (or one that is not a plain token) is a random pnc_ id that encodes nothing', async () => {
+    const { created } = await taskWithPush({});
+    const id = (created.result as { id?: string }).id ?? '';
+    expect(id).toMatch(/^pnc_[0-9a-f]{16}$/);
+    const odd = await taskWithPush({ id: 'tenant:alice/../x' });
+    expect((odd.created.result as { id?: string }).id).toMatch(/^pnc_[0-9a-f]{16}$/);
+  });
+
+  it('Delete on a task the caller cannot read answers as for an unknown task', async () => {
+    const unknown = await send10('DeleteTaskPushNotificationConfig', { taskId: 'task-that-does-not-exist', id: 'x' });
+    expect(unknown.result).toBeUndefined();
+    expect(unknown.error).toBeDefined();
   });
 });

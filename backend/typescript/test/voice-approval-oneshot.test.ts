@@ -89,9 +89,10 @@ describe('A7 — one-shot approvedTools semantics (the voice card\'s Approve)', 
 });
 
 describe('A7 — wiring pins (source-level, the voice-tool-parity idiom)', () => {
-  it('the bridge maps userApproved to a per-tool approvedTools one-shot on the canonical name', () => {
+  it('the bridge maps userApproved to a one-shot baseline approval on the canonical name', () => {
     const src = srcOf('features/voice/realtime/toolBridge.ts');
-    expect(src).toContain('if (input.userApproved) (approvedBaselineTools ??= new Set()).add(name);');
+    // ADR 0834 FW2-D1 — the one-shot rides the per-call grant: this tool, this call, never a policy ask.
+    expect(src).toContain("(input.userApproved === true && tool === name && origin !== 'policy')");
     // Never blanket bypass: the voice lane passes no `bypass` to the lane factory.
     expect(src).not.toMatch(/bypass(Approval)?:\s*true/);
     expect(src).not.toMatch(/buildLaneFirewall\(\{[^}]*\bbypass\b/);

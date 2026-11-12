@@ -55,6 +55,12 @@ function qualityOf(v: unknown): WaQuality {
   return s === 'high' || s === 'medium' || s === 'low' ? s : 'unknown';
 }
 
+/** ADR 1053 D9 — Twilio's `sender_id` is `whatsapp:+E164`. Compare the normalized
+ *  number EXACTLY: a substring test let `+1555123` claim `+15551234`'s rating. */
+export function senderIdMatches(senderId: unknown, senderNumber: string): boolean {
+  return typeof senderId === 'string' && normalizeWaNumber(senderId) === senderNumber;
+}
+
 /**
  * Read the bound sender's health from the Twilio WhatsApp Senders API
  * (`messaging.twilio.com/v2/Channels/Senders`, basic auth — same brokered
@@ -80,6 +86,8 @@ export async function readWhatsAppHealth(deps: BrokeredEgressDeps, connectionId:
 
   const out = await brokeredFetch(deps, {
     provider: 'twilio',
+    // ADR 1053 D2 — the bound connection's credential, through the pinned lane.
+    connectionId,
     url: `https://messaging.twilio.com/v2/Channels/Senders?Channel=whatsapp&PageSize=50`,
     method: 'GET',
     authScheme: 'basic',
@@ -98,7 +106,7 @@ export async function readWhatsAppHealth(deps: BrokeredEgressDeps, connectionId:
   const rows = Array.isArray(json.senders) ? (json.senders as Record<string, unknown>[]) : [];
   // GRADE-CODE 2026-07-17 — never fall back to an arbitrary first sender: an
   // unmatched number renders quality `unknown` honestly, not a neighbor's.
-  const mine = rows.find((r) => typeof r.sender_id === 'string' && r.sender_id.includes(senderNumber));
+  const mine = rows.find((r) => senderIdMatches(r.sender_id, senderNumber));
   const props = (mine?.properties ?? {}) as Record<string, unknown>;
   const sender: WaSenderHealth = {
     senderNumber,

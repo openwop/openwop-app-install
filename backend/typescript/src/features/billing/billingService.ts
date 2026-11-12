@@ -1342,6 +1342,50 @@ async function trialFor(tenantId: string, kind: CheckoutKind, priceId: string, b
   return undefined;
 }
 
+// ── ADR 1097: the public trial entry's read ────────────────────────────────────
+/** What a checkout of one plan tier or bundle would give THIS workspace, before
+ *  any session exists. `available` means `createCheckoutSession` would send a
+ *  trial: the days come from `trialFor`, the same function the checkout calls,
+ *  so this read and the session cannot disagree on the knobs. The other states
+ *  are what the page says instead of claiming a trial:
+ *  - `not_for_sale`: no price at that cadence (or no such bundle);
+ *  - `already_subscribed`: an open plan / an entitled grant (checkout would 409);
+ *  - `included_in_plan`: the plan grants the bundle (checkout would 409);
+ *  - `no_trial`: no trial is configured, or the bundle is one-time;
+ *  - `trial_used`: configured, but this workspace already had that subscription.
+ *  Local state only, never a Stripe call: checkout's own D7 reconcile and its
+ *  409s stay the authority, and the page shows their message if they refuse. */
+export type TrialOfferStatus = 'available' | 'not_for_sale' | 'already_subscribed' | 'included_in_plan' | 'no_trial' | 'trial_used';
+export interface TrialOffer {
+  target: string; cadence: BillingCadence; status: TrialOfferStatus;
+  trialDays?: number; cardRequired?: boolean; label?: string;
+}
+export async function trialOffer(
+  tenantId: string,
+  target: { plan: Exclude<PlanTier, 'free'> } | { bundleId: string },
+  cadence: BillingCadence = 'month',
+): Promise<TrialOffer> {
+  const isPlan = 'plan' in target;
+  const key = isPlan ? `plan:${target.plan}` : `bundle:${target.bundleId}`;
+  const label = isPlan ? undefined : readBundleCatalog()?.bundles[target.bundleId]?.label;
+  const base = { target: key, cadence, ...(label ? { label } : {}) };
+  const known = isPlan || knownBundleIds().includes(target.bundleId);
+  const priceId = !known ? undefined : isPlan ? priceForPlan(target.plan, cadence) : priceForBundle(target.bundleId, cadence);
+  if (!priceId) return { ...base, status: 'not_for_sale' };
+  if (isPlan) {
+    if (isOpenStatus((await getSubscription(tenantId)).status)) return { ...base, status: 'already_subscribed' };
+  } else {
+    if (planCoversBundle(await planGrantedFeatures(tenantId), target.bundleId)) return { ...base, status: 'included_in_plan' };
+    if (isGrantEntitled((await getBundleEntitlements(tenantId)).bundles[target.bundleId])) return { ...base, status: 'already_subscribed' };
+  }
+  const configured = isPlan ? trialDaysFor({ plan: target.plan }) : isOneTimeBundle(target.bundleId) ? undefined : trialDaysFor({ bundleId: target.bundleId });
+  if (!configured) return { ...base, status: 'no_trial' };
+  const days = await trialFor(tenantId, isPlan ? 'plan' : 'bundle', priceId, isPlan ? undefined : target.bundleId);
+  if (!days) return { ...base, status: 'trial_used' };
+  const options = checkoutOptionsFor(isPlan ? { plan: target.plan } : { bundleId: target.bundleId });
+  return { ...base, status: 'available', trialDays: days, cardRequired: options.trialCard !== 'if_required' };
+}
+
 /** ADR 0786 D7 — refuse a checkout that would create a SECOND open plan (or a
  *  second grant of an owned bundle). A row can say "open" when Stripe no longer
  *  does (an R-1 import, a row a pre-0786 out-of-order event resurrected), so with a

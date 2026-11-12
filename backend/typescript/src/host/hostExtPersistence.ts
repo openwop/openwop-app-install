@@ -451,6 +451,24 @@ export class DurableCollection<T> {
   }
 
   /**
+   * ADR 1104 — `listByPrefix` with a hard bound: at most `limit` entities, and
+   * whether more existed. Reads `limit + 1` keys through `kvListPage` (an ordered
+   * index scan of just that page), so a huge slice never loads whole; a backend
+   * without `kvListPage` falls back to `kvList` and slices.
+   */
+  async listByPrefixUpTo(idPrefix: string, limit: number): Promise<{ items: T[]; truncated: boolean }> {
+    const storage = requireStorage();
+    const prefix = this.prefix() + idPrefix;
+    const rows = storage.kvListPage ? await storage.kvListPage(prefix, { limit: limit + 1 }) : (await storage.kvList(prefix)).slice(0, limit + 1);
+    const items: T[] = [];
+    for (const row of rows.slice(0, limit)) {
+      const decoded = this.decode(row.value); // corrupt / invalid → skipped
+      if (decoded !== null) items.push(decoded);
+    }
+    return { items, truncated: rows.length > limit };
+  }
+
+  /**
    * Bounded per-tenant scan for collections whose ids are tenant-prefixed
    * (`${tenantId}:${entityId}`) — the production-shaped alternative to `list()`
    * + a service-layer tenant filter (FEAT-1). Scans only the tenant's slice.

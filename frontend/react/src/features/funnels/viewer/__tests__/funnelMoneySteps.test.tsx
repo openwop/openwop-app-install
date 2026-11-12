@@ -232,4 +232,25 @@ describe('funnel viewer — money steps (ADR 0948 P2c)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     expect(await screen.findByRole('button', { name: 'Yes, add it' })).toBeTruthy();
   });
+
+  // ADR 1023 (grade-ux FN72UX-5) — a refused checkout reads OUR sentence in the
+  // shopper's language, never the server's English. Sabotage-witnessed: restoring
+  // `r.body.message` turns this red.
+  it('a refused checkout shows a localized sentence, not the server message', async () => {
+    mock({
+      [`GET ${PUBLIC}/funnels/launch`]: () => json({ funnel: FUNNEL, stepCount: 4, step: checkoutStep }),
+      [`GET ${PUBLIC}/pages/pc`]: () => json(page('Get the course')),
+      [`GET ${STORE}/products/main`]: () => product('main', 'Course', 100),
+      [`GET ${STORE}/products/alt`]: () => product('alt', 'Course lite', 80),
+      [`GET ${STORE}/products/bump`]: () => product('bump', 'Workbook', 15),
+      [`POST ${STORE}/checkout`]: () => json({ error: 'conflict', message: 'This client has not finished setting up payments, so a funnel with checkout steps cannot go live yet.', details: { code: 'client_settlement_unconfirmed' } }, 409),
+    });
+    renderAt('/fn/org:1/launch');
+    await screen.findByText('Course lite');
+    fireEvent.click(screen.getByRole('radio', { name: /Course lite/ }));
+    fireEvent.change(screen.getByRole('textbox', { name: /Email/ }), { target: { value: 'a@b.test' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue to payment' }));
+    expect(await screen.findByText(/isn’t taking payments yet/)).toBeTruthy();
+    expect(screen.queryByText(/has not finished setting up payments/)).toBeNull();
+  });
 });

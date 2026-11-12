@@ -25,6 +25,8 @@ import { registerTutorialsAgentTools } from './agentTools.js';
 import { buildTutorialsSurface } from './surface.js';
 import { registerChainBackedWorkflow } from '../../host/chainBackedWorkflows.js';
 import { listChains } from '../../host/workflowChainPackLoader.js';
+import { registerIntegrityGauge } from '../../host/integrityGauges.js';
+import { tutorialIntegrityGauge } from './tutorialsService.js';
 
 /** The id prefix every tutorial phase/parent chain ships under. */
 const TUTORIAL_CHAIN_PREFIX = 'tutorial.';
@@ -66,6 +68,8 @@ export const tutorialsFeature: BackendFeature = {
     // allowlisted to the Tutor pack rather than added to the ADR 0315
     // default-on baseline (that is its own ADR-level decision).
     registerTutorialsAgentTools();
+    // ADR 1104 — PROBE-1038-4 as a daily read-only gauge.
+    registerIntegrityGauge('tutorials', tutorialIntegrityGauge);
   },
   // ADR 0014 — the honest `ctx.features.tutorials` READ surface. No launch op:
   // a backend run has no live walkthrough player (the walkthroughs-surface

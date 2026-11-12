@@ -48,6 +48,9 @@ vi.mock('../src/host/featureToggles/service.js', async () => {
 vi.mock('../src/features/connections/connectionsService.js', () => ({ getConnection: vi.fn() }));
 vi.mock('../src/host/knowledgeSourceFetch.js', () => ({ listFolder: vi.fn(), fetchKnowledgeSource: vi.fn(), fetchKnowledgeSourceBytes: vi.fn() }));
 vi.mock('../src/features/kb/kbService.js', () => ({ ingestDocument: vi.fn(), deleteDocument: vi.fn(), getCollection: vi.fn(async () => ({ collectionId: 'col' })) })); // `getCollection` (ADR 0643 R4 Should 3): the runner resolves the target collection as the connection owner BEFORE listing/fetching — a readable stub here, so these tests keep exercising the per-file lanes
+// ADR 1101 D3 — the pass-time org-write check, held open here (its own witness is
+// `knowledge-sync-pass-integrity.test.ts`); these cases are about the surface's gates.
+vi.mock('../src/features/knowledge-sync/knowledgeSyncAccess.js', () => ({ passActorMayWrite: vi.fn(async () => true), holdsOrgScope: vi.fn(async () => true) }));
 
 import { getConnection, type Connection } from '../src/features/connections/connectionsService.js';
 import { listFolder, fetchKnowledgeSource, type SyncFolderListing } from '../src/host/knowledgeSourceFetch.js';
@@ -86,6 +89,11 @@ async function enable(tenantId: string): Promise<void> {
 
 const newSource = (t: string, cadence: 'hourly' | 'daily' = 'hourly') =>
   createSyncSource(t, 'org1', { connectionId: 'c1', provider: 'google', externalFolderId: 'F', collectionId: 'col', cadence }, NOW);
+
+/** ADR 1101 D3 — the ONE scope `runOnce` serves: the scheduler firing the host-minted
+ *  per-source workflow, with no acting user. */
+const scheduled = (t: string, sourceId: string) =>
+  buildKnowledgeSyncSurface({ tenantId: t, workflowId: knowledgeSyncWorkflowId(sourceId), runId: `run-${sourceId}` });
 
 beforeAll(async () => {
   const storage = await openStorage('memory://');
@@ -138,7 +146,7 @@ describe('the knowledge-sync surface runOnce (WF-KB-4 spend gate)', () => {
     const source = await newSource(t);
     await saveConfig({ ...knowledgeSyncFeature.toggleDefault!, status: 'off' }, t); // now DISABLED
 
-    const result = await buildKnowledgeSyncSurface({ tenantId: t }).runOnce({ sourceId: source.id });
+    const result = await scheduled(t, source.id).runOnce({ sourceId: source.id });
     expect(result).toEqual({ status: 'skipped', reason: 'feature-disabled' });
     // The WF-KB-4 guarantee: a disabled tenant's fired job does NO third-party egress.
     expect(mIngest).not.toHaveBeenCalled();
@@ -151,7 +159,7 @@ describe('the knowledge-sync surface runOnce (WF-KB-4 spend gate)', () => {
     const source = await newSource(t);
     toggleFault.on = true; // the toggle store is unavailable
     try {
-      const result = await buildKnowledgeSyncSurface({ tenantId: t }).runOnce({ sourceId: source.id });
+      const result = await scheduled(t, source.id).runOnce({ sourceId: source.id });
       expect(result).toEqual({ status: 'skipped', reason: 'feature-disabled' });
       expect(mList).not.toHaveBeenCalled();
       expect(mIngest).not.toHaveBeenCalled();
@@ -169,7 +177,7 @@ describe('the knowledge-sync surface runOnce (WF-KB-4 spend gate)', () => {
       // Every spelling an operator may type mid-incident (`knowledgeSyncGate.ts` FALSY_ENV).
       for (const stop of ['false', '0', ' OFF ', 'no', 'disabled']) {
         process.env.OPENWOP_KNOWLEDGE_SYNC_DAEMON_ENABLED = stop;
-        const result = await buildKnowledgeSyncSurface({ tenantId: t }).runOnce({ sourceId: source.id });
+        const result = await scheduled(t, source.id).runOnce({ sourceId: source.id });
         expect(result, `kill switch value ${JSON.stringify(stop)}`).toEqual({ status: 'skipped', reason: 'feature-disabled' });
       }
       // Even for an ENABLED tenant, the global switch = zero third-party egress.
@@ -177,7 +185,7 @@ describe('the knowledge-sync surface runOnce (WF-KB-4 spend gate)', () => {
       expect(mList).not.toHaveBeenCalled();
       // …and a non-stop value leaves the (enabled) tenant running.
       process.env.OPENWOP_KNOWLEDGE_SYNC_DAEMON_ENABLED = 'true';
-      const ran = await buildKnowledgeSyncSurface({ tenantId: t }).runOnce({ sourceId: source.id });
+      const ran = await scheduled(t, source.id).runOnce({ sourceId: source.id });
       expect(ran.status).toBe('success');
     } finally {
       if (prev === undefined) delete process.env.OPENWOP_KNOWLEDGE_SYNC_DAEMON_ENABLED;
@@ -191,7 +199,7 @@ describe('the knowledge-sync surface runOnce (WF-KB-4 spend gate)', () => {
     const source = await newSource(t);
     const next = new Date(Date.parse(NOW) + 60 * 60 * 1000).toISOString();
     await setSyncStatus(t, source.id, 'active', NOW, { retry: { consecutiveFailures: 1, nextAttemptAt: next } });
-    const surface = buildKnowledgeSyncSurface({ tenantId: t });
+    const surface = scheduled(t, source.id);
 
     // one second before the retry time: skipped, nothing fetched
     const early = await surface.runOnce({ sourceId: source.id, actingAt: new Date(Date.parse(next) - 1000).toISOString() });
@@ -209,12 +217,132 @@ describe('the knowledge-sync surface runOnce (WF-KB-4 spend gate)', () => {
     const t = 'wf-run';
     await enable(t);
     const source = await newSource(t);
-    const result = await buildKnowledgeSyncSurface({ tenantId: t }).runOnce({ sourceId: source.id });
+    const result = await scheduled(t, source.id).runOnce({ sourceId: source.id });
     expect(result).toEqual({ status: 'success', ingested: 1, pruned: 0, unchanged: 0, failed: 0 });
     // The pass reached the KB write — this is the egress a disabled tenant must NOT do —
     // with the stable id and the untrusted fence.
     expect(mIngest).toHaveBeenCalledTimes(1);
     expect(mIngest.mock.calls[0]![5]).toEqual({ documentId: syncDocumentId(source.id, 'a'), contentTrust: 'untrusted', silent: true });
+  });
+});
+
+describe('ADR 1101 D3 — only the scheduler runs the per-source workflow (`KS2WF-4`)', () => {
+  it('refuses a run with an ACTING USER (builder, `/` picker, a re-executing fork) — zero egress', async () => {
+    const t = 'wf-gate-actor';
+    await enable(t);
+    const source = await newSource(t);
+    const out = await buildKnowledgeSyncSurface({ tenantId: t, workflowId: knowledgeSyncWorkflowId(source.id), actingUserId: 'user:someone' })
+      .runOnce({ sourceId: source.id });
+    expect(out).toMatchObject({ status: 'failure', error: { code: 'forbidden' } });
+    expect(mList).not.toHaveBeenCalled();
+    expect(mIngest).not.toHaveBeenCalled();
+  });
+
+  it('refuses a run of any OTHER workflow (a gallery copy, a hand-built chain) — zero egress', async () => {
+    const t = 'wf-gate-wfid';
+    await enable(t);
+    const source = await newSource(t);
+    for (const scope of [{ tenantId: t }, { tenantId: t, workflowId: 'tenant-copy-of-knowledge-sync' }]) {
+      const out = await buildKnowledgeSyncSurface(scope).runOnce({ sourceId: source.id });
+      expect(out, JSON.stringify(scope)).toMatchObject({ status: 'failure', error: { code: 'forbidden' } });
+    }
+    // Another source's workflow cannot drive THIS source either.
+    const other = await newSource(t);
+    const cross = await buildKnowledgeSyncSurface({ tenantId: t, workflowId: knowledgeSyncWorkflowId(other.id) }).runOnce({ sourceId: source.id });
+    expect(cross).toMatchObject({ status: 'failure', error: { code: 'forbidden' } });
+    expect(mList).not.toHaveBeenCalled();
+  });
+
+  it('a broker `credential_required` (also a 409) is a FAILED run, not a "skipped" one (ADR 1101 D1)', async () => {
+    const t = 'wf-cred-409';
+    await enable(t);
+    const source = await newSource(t);
+    const { OpenwopError } = await import('../src/types.js');
+    mList.mockRejectedValueOnce(new OpenwopError('credential_required', 'Connect your Google account first, then import.', 409, { provider: 'google' }));
+    const out = await scheduled(t, source.id).runOnce({ sourceId: source.id });
+    expect(out, 'any-409-is-a-skip reported a failed pass as skipped').toMatchObject({ status: 'failure' });
+  });
+
+  it('stamps the run id on the persisted lastRun (`KS2WF-10`)', async () => {
+    const t = 'wf-runid';
+    await enable(t);
+    const source = await newSource(t);
+    await scheduled(t, source.id).runOnce({ sourceId: source.id });
+    const { getSyncSource } = await import('../src/features/knowledge-sync/knowledgeSyncService.js');
+    expect((await getSyncSource(t, source.id))?.lastRun?.runId).toBe(`run-${source.id}`);
+  });
+});
+
+describe('ADR 1101 D4 — the per-source workflow is transient host machinery', () => {
+  it('is registered TRANSIENT and named after its folder, and the chain is internal', async () => {
+    const t = 'wf-transient';
+    await enable(t);
+    const source = await createSyncSource(t, 'org1', { connectionId: 'c1', provider: 'google', externalFolderId: 'F', collectionId: 'col', cadence: 'hourly', folderName: 'Board packs' }, NOW);
+    const def = await getRegisteredWorkflowAsync(knowledgeSyncWorkflowId(source.id));
+    const { lifecycleOf } = await import('../src/host/workflowLifecycle.js');
+    expect(lifecycleOf(def!).transient, 'hidden from /builder and the / picker').toBe(true);
+    expect(def?.metadata?.name).toBe('Knowledge Sync — Board packs');
+    expect((await getOwned(t, knowledgeSyncWorkflowId(source.id)))?.transient).toBe(true);
+    const { getChain } = await import('../src/host/workflowChainPackLoader.js');
+    expect(getChain('knowledge-sync.run')?.chain.internal, 'scheduler-only: omitted from the gallery and the / picker').toBe(true);
+  });
+
+  it('deleting a source ARCHIVES its workflow (never deletes it) and stops its job (`KS2WF-6`)', async () => {
+    const t = 'wf-archive';
+    await enable(t);
+    const source = await newSource(t);
+    const workflowId = knowledgeSyncWorkflowId(source.id);
+    const { deleteSyncSource } = await import('../src/features/knowledge-sync/knowledgeSyncService.js');
+    expect(await deleteSyncSource(t, source.id)).toBe(true);
+    const def = await getRegisteredWorkflowAsync(workflowId);
+    const { lifecycleOf } = await import('../src/host/workflowLifecycle.js');
+    expect(def, 'runs re-resolve by id: the definition must survive').toBeTruthy();
+    expect(lifecycleOf(def!).archivedAt, 'archived, so it leaves the catalog').toBeTruthy();
+    expect((await getOwned(t, workflowId))?.archivedAt, 'the ownership row is re-stamped, not removed (teardown walks it)').toBeTruthy();
+    expect(await getJob(knowledgeSyncJobId(source.id))).toBeNull();
+  });
+});
+
+describe('ADR 1101 D3 — the scheduler\'s generic doors over a ksync job', () => {
+  it('the fire gate passes the definition this feature registered, and refuses an EDITED one (`KS2WF-8`)', async () => {
+    const t = 'wf-firegate';
+    await enable(t);
+    const source = await newSource(t);
+    const { knowledgeSyncFireRefusal, ownsKnowledgeSyncJob } = await import('../src/features/knowledge-sync/knowledgeSyncService.js');
+    const job = (await getJob(knowledgeSyncJobId(source.id)))!;
+    expect(ownsKnowledgeSyncJob(job)).toBe(true);
+    expect(job.metadata?.kind, 'the read gate keys on it').toBe('knowledge-sync');
+    expect(await knowledgeSyncFireRefusal(job), 'positive control: the registered shape fires').toBeNull();
+
+    // Someone saves the per-source definition with an extra node: the next fire would
+    // run it with NO actor — tenant-trusted for the ADR 0832 org floor.
+    const { registerWorkflowDurable } = await import('../src/host/workflowsRegistry.js');
+    const def = (await getRegisteredWorkflowAsync(knowledgeSyncWorkflowId(source.id)))!;
+    await registerWorkflowDurable({ ...def, nodes: [...def.nodes, { nodeId: 'extra', typeId: 'core.http.request@1.0.0', config: { url: 'https://example.test' } }] });
+    expect(await knowledgeSyncFireRefusal(job), 'an edited definition fired').toBe('target-refused');
+    // …and a job retargeted at another workflow is refused too.
+    expect(await knowledgeSyncFireRefusal({ ...job, workflowId: 'some-other-workflow' })).toBe('target-refused');
+    // A SINGLE node of the wrong type, or the right node bound to another source.
+    await registerWorkflowDurable({ ...def, nodes: [{ ...def.nodes[0]!, typeId: 'core.http.request@1.0.0' }] });
+    expect(await knowledgeSyncFireRefusal(job), 'one node, wrong type').toBe('target-refused');
+    await registerWorkflowDurable({ ...def, nodes: [{ ...def.nodes[0]!, config: { sourceId: 'sync-someone-elses' } }] });
+    expect(await knowledgeSyncFireRefusal(job), 'right node, another source').toBe('target-refused');
+    await registerWorkflowDurable(def);
+    expect(await knowledgeSyncFireRefusal(job), 'restored ⇒ fires again').toBeNull();
+  });
+
+  it('the read gate makes the job unreachable to someone without write on the source\'s org', async () => {
+    const t = 'wf-readgate';
+    await enable(t);
+    const source = await newSource(t);
+    const { knowledgeSyncJobReadable } = await import('../src/features/knowledge-sync/knowledgeSyncService.js');
+    const { holdsOrgScope } = await import('../src/features/knowledge-sync/knowledgeSyncAccess.js');
+    const job = (await getJob(knowledgeSyncJobId(source.id)))!;
+    vi.mocked(holdsOrgScope).mockResolvedValueOnce(false);
+    expect(await knowledgeSyncJobReadable(job, 'user:other-org'), '"Run now" would fire another org\'s pass actorless').toBe(false);
+    expect(vi.mocked(holdsOrgScope)).toHaveBeenLastCalledWith(t, ['user:other-org'], 'org1', 'workspace:write');
+    expect(await knowledgeSyncJobReadable(job, 'user:writer'), 'positive control').toBe(true);
+    expect(await knowledgeSyncJobReadable({ ...job, metadata: { kind: 'knowledge-sync', sourceId: 'sync-gone' } }, 'user:writer'), 'a missing source is the uniform 404').toBe(false);
   });
 });
 
@@ -226,7 +354,8 @@ describe('boot backfill (WF-KB-3)', () => {
     expect(source.jobId).toBeTruthy();
     // Every source created post-migration already carries a jobId (createSyncSource
     // registers the same workflow+job the backfill would), so the boot backfill —
-    // which targets rows WITHOUT a jobId — has nothing to do and re-registers none.
+    // which targets rows WITHOUT a current-shape job (ADR 1101: `kind`) — has
+    // nothing to do and re-registers none.
     // The jobless-source registration path itself is the same `registerKnowledgeSyncJob`
     // proven by the registration test above.
     const n = await backfillKnowledgeSyncJobs();

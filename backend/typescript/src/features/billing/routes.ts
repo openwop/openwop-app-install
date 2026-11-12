@@ -22,7 +22,7 @@ import {
   setSeats, createBillingCoupon, generateInvoice, listInvoices, getInvoice,
   publicPricingCatalog, publicBillingPolicy, priceForBundle, priceForPlan, bundleStore, publicBundlePricing, publicFeatureLabels, publicCreditPacks,
   isBillingCadence, pastDueGraceEndsAtMs, entitlementEndedAt, STRIPE_KEY_REF,
-  listTokenPacks, priceForTokenPack, listCheckoutsSince, countActiveEntitlements,
+  listTokenPacks, priceForTokenPack, listCheckoutsSince, countActiveEntitlements, trialOffer,
   type BillingCadence,
   type Subscription, type TokenBalance,
 } from './billingService.js';
@@ -179,6 +179,34 @@ export function registerBillingRoutes(deps: RouteDeps): void {
     try {
       await requireFeatureEnabled(req, 'billing', 'Billing');
       res.json({ bundles: await bundleStore(tenantOf(req)) });
+    } catch (err) { next(err); }
+  });
+
+  // ADR 1097 — the public trial entry's read (`/start-trial?plan=|bundle=`): what a
+  // checkout of that plan tier or bundle would give the caller's workspace. Same
+  // gates as checkout (billing toggle, then the ONE billing-write authority), so a
+  // member who could not start the checkout learns that here, before any session.
+  // `checkout` says whether a real Stripe session would open (a key is configured)
+  // or only the demo sentinel, so the page never sends anyone to a demo URL.
+  app.get(`${BASE}/trial-offer`, async (req, res, next) => {
+    try {
+      await requireFeatureEnabled(req, 'billing', 'Billing');
+      await requireBillingManage(req);
+      const q = req.query as { plan?: unknown; bundle?: unknown; cadence?: unknown };
+      if ((q.plan === undefined) === (q.bundle === undefined)) {
+        throw new OpenwopError('validation_error', 'Name exactly one of plan or bundle.', 400, { field: 'plan' });
+      }
+      let target: { plan: 'pro' | 'team' | 'enterprise' } | { bundleId: string };
+      if (q.plan !== undefined) {
+        if (q.plan !== 'pro' && q.plan !== 'team' && q.plan !== 'enterprise') throw new OpenwopError('validation_error', 'plan must be pro, team or enterprise.', 400, { field: 'plan' });
+        target = { plan: q.plan };
+      } else {
+        target = { bundleId: requireString(q.bundle, 'bundle') };
+      }
+      const offer = await trialOffer(tenantOf(req), target, cadenceOf(q.cadence));
+      const live = Boolean(await resolveSecret(STRIPE_KEY_REF));
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({ ...offer, checkout: live ? 'live' : 'demo' });
     } catch (err) { next(err); }
   });
 

@@ -1,8 +1,8 @@
 {
   "name": "feature.accessibility.nodes",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "kind": "node",
-  "description": "Accessibility node pack (ADR 0363) — check authored content for WCAG issues (missing image alt text, skipped heading levels, non-descriptive link text, low color contrast) and generate AI alt text for a media asset, both over ctx.features.accessibility. Enables workflows to gate publishing on zero blocking a11y issues or auto-alt-text a media library.",
+  "description": "Accessibility node pack (ADR 0363) — check authored content for WCAG issues (missing image alt text, skipped heading levels, non-descriptive link text, low color contrast) and propose AI alt text for one media asset (a proposal; nothing is written), both over ctx.features.accessibility.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "accessibility", "a11y", "wcag", "alt-text", "content"],
@@ -19,12 +19,12 @@
     },
     {
       "typeId": "feature.accessibility.nodes.alt-text-generate",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Accessibility: Generate Alt Text",
-      "description": "Generates AI alt text for an image media asset via ctx.features.accessibility.generateAltText (composes the ADR 0108 vision seam; media enforces IDOR + provider-absence). Inputs: { orgId, assetId }. Output: { assetId, altText } (empty altText = decorative).",
+      "description": "Proposes AI alt text for an image media asset via ctx.features.accessibility.generateAltText (composes the ADR 0108 vision seam; the run's person needs workspace:write in the org; media enforces IDOR + provider-absence). Nothing is written to the asset. Inputs: { orgId, assetId }. Output: { assetId, altText } (empty altText = decorative). Side-effectful: a paid vision call, so a replay fork serves the recorded proposal (ADR 1100 D6).",
       "category": "integration",
       "role": "action",
-      "capabilities": []
+      "capabilities": ["side-effectful"]
     }
   ],
   "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }

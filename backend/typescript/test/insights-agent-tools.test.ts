@@ -235,3 +235,50 @@ describe('PROBE-IS-11 — the Financial prompt does not promise provenance the n
     expect(flat).not.toContain('to ask about it — with the source query attached.');
   });
 });
+
+/**
+ * `PROBE-IS-13` (closes `INS91-7`) — ADR 1102 D7. `PROBE-IS-11`'s lesson applied to
+ * the agent it was never applied to.
+ *
+ * The Talent prompt said "You read talent data read-only", "across direct reports
+ * and two levels down", and "must rest on the development-plan evidence you
+ * retrieved". Its allowlist is `talent-score` (which takes ratings, and looks nobody
+ * up) and `knowledge.search`. No tool reads an HR system, and nothing in this host
+ * knows a reporting line. A model told it has read the data narrates data.
+ *
+ * A closed world, like `REVIEWED_PROVENANCE_LINES` above: every line of the Talent
+ * prompt or pack description that mentions an HR read or a reporting line must be on
+ * the reviewed list, i.e. a statement that the agent CANNOT, never a claim that it can.
+ */
+describe('PROBE-IS-13 — the Talent agent does not claim an HR read or a reporting line it lacks', () => {
+  const dir = join(REPO_ROOT, 'packs', 'vendor.openwop-app.insights-suite.agents');
+  const READ_TERMS = ['hris', 'hr system', 'workday', 'talent data', 'direct report', 'two levels', 'reports to', 'retrieved'] as const;
+  const REVIEWED_LINES: readonly string[] = [
+    '- **knowledge search** — search the workspace knowledge base for notes the team has',
+    'what someone added; it is not the HR system.',
+    'You have **no tool that reads the HR system** (Workday or any other), and nothing',
+    'here knows who reports to whom. So you cannot pull a person\'s ratings, list a',
+    'team, or tell who is two levels down. If the leader asks for that, say so, and ask',
+    'this prompt used to say you "read talent data" for "direct reports and two levels',
+    '- **Read-only.** You never write to an HR system or alter a person\'s record. You',
+  ];
+
+  it('every HR-read mention in the Talent prompt is on the reviewed list', () => {
+    const lines = readFileSync(join(dir, 'prompts', 'talent.md'), 'utf8').split('\n').map((l) => l.trim()).filter(Boolean);
+    const mentions = lines.filter((l) => READ_TERMS.some((t) => l.toLowerCase().includes(t)));
+    expect(mentions.length, 'the walk found nothing — the prompt moved or the terms rotted').toBeGreaterThan(0);
+    for (const line of mentions) {
+      expect(REVIEWED_LINES.includes(line), `unreviewed HR-read claim in talent.md: ${JSON.stringify(line)}`).toBe(true);
+    }
+  });
+
+  it('the Talent pack description claims no HR read, and its allowlist still holds no HR read tool', () => {
+    const pack = JSON.parse(readFileSync(join(dir, 'pack.json'), 'utf8')) as { agents: Array<{ agentId: string; description: string; toolAllowlist: string[] }> };
+    const talent = pack.agents.find((a) => a.agentId.endsWith('.talent'))!;
+    expect(talent.description).not.toMatch(/reads talent|two levels down|read-only hris/i);
+    expect(talent.description).toContain('no HR-system read');
+    // If an HR read tool is ever allowlisted, this prompt is wrong in the other
+    // direction and must be rewritten with it.
+    expect(talent.toolAllowlist.some((t) => /workday|hris|people/i.test(t))).toBe(false);
+  });
+});

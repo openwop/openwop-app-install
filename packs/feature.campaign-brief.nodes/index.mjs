@@ -274,7 +274,7 @@ export async function promoteKernel(ctx) {
 export async function getBriefNode(ctx) {
   const cb = ensureBrief(ctx);
   const i = ctx.inputs ?? {};
-  const out = await cb.getBrief({ briefId: str(i.briefId) });
+  const out = await cb.getBrief({ briefId: str(i.briefId), orgId: str(i.orgId) }); // ADR 1023 FN72WF-6: pass the org, so the surface checks the brief belongs to it (an absent orgId arrives as '' and the surface's optStr reads it as none, as before)
   if (!out || !out.brief) {
     return { status: 'failed', error: { code: 'not_found', message: `no campaign brief '${str(i.briefId)}'` } };
   }

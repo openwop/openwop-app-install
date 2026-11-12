@@ -28,7 +28,7 @@ import { assignAt } from '../../host/experiments/runFreeze.js';
 import { getExperimentRow } from '../../host/experiments/store.js';
 import { isFullStepExperiment, isManagedExperiment, linkedStepExperiment, releaseStepExperiment, resolveStepExperiment, storesAsPointer, saveStepExperiment, stepAssignmentScope, stepToEngine } from './stepExperimentsEngine.js';
 import { isNonRootWorkspaceOrg } from '../../host/accessControlService.js';
-import { getProduct } from '../commerce/commerceService.js';
+import { getProduct, refuseUnlistedProduct } from '../commerce/commerceService.js';
 import { getCampaign } from '../campaign-orchestration/campaignService.js';
 import { resolveStorefrontSettlement } from '../commerce-connect/storefrontSettlement.js';
 import { getPage } from '../cms/cmsService.js';
@@ -314,6 +314,20 @@ function coerceIdList(raw: unknown, field: string, max: number): string[] {
 }
 
 /**
+ * ADR 1023 D3 — THE offer-product rule: each id names an ACTIVE product of this
+ * org (`getProduct` itself does not filter inactive rows). Shared by step offers,
+ * the generate lane's pre-run check, and the blueprint `check-offers` node, so a
+ * blueprint cannot draft pages for an offer `create` would later refuse.
+ */
+export async function assertOfferProducts(tenantId: string, orgId: string, productIds: readonly string[]): Promise<void> {
+  for (const productId of new Set(productIds)) {
+    const p = await getProduct(tenantId, orgId, productId);
+    if (!p || !p.active) throw new OpenwopError('not_found', `Offer product not found in this workspace: ${productId}`, 404, { field: 'offer', code: 'offer_not_found', productId });
+    refuseUnlistedProduct(p, 'Funnel offer'); // ADR 1098 — every offer lane (editor, AI generator, workflow surface) passes here
+  }
+}
+
+/**
  * ADR 0948 D1/D2 — validate a step's offer: only on money steps, bumps only on
  * checkout, the one-click product only on upsell/downsell, and EVERY product an
  * ACTIVE product of THIS tenant AND org (`getProduct` is org-checked; a product
@@ -339,10 +353,7 @@ async function coerceOffer(tenantId: string, orgId: string, kind: FunnelStepKind
   if (oneClick && kind === 'checkout') {
     throw new OpenwopError('validation_error', 'A one-click product belongs on an upsell or downsell step.', 400, { field: 'offer.oneClickProductId' });
   }
-  for (const productId of new Set([...productIds, ...bumpProductIds, ...(oneClick ? [oneClick] : [])])) {
-    const p = await getProduct(tenantId, orgId, productId);
-    if (!p || !p.active) throw new OpenwopError('not_found', `Offer product not found in this workspace: ${productId}`, 404, { field: 'offer' });
-  }
+  await assertOfferProducts(tenantId, orgId, [...productIds, ...bumpProductIds, ...(oneClick ? [oneClick] : [])]);
   return { productIds, ...(bumpProductIds.length ? { bumpProductIds } : {}), ...(oneClick ? { oneClickProductId: oneClick } : {}) };
 }
 
@@ -561,7 +572,13 @@ export async function createFunnelReporting(input: FunnelCreateInput): Promise<{
   return { funnel, reused: false };
 }
 
-export interface FunnelUpdateInput { name?: unknown; slug?: unknown; steps?: unknown; completionCta?: unknown; campaignId?: unknown; primaryHostname?: unknown }
+export interface FunnelUpdateInput {
+  name?: unknown; slug?: unknown; steps?: unknown; completionCta?: unknown; campaignId?: unknown; primaryHostname?: unknown;
+  /** ADR 1023 D8 — the `updatedAt` the editor loaded. When given and not the stored
+   *  row's, the edit is refused `funnel_changed` (409) instead of overwriting newer
+   *  steps from a stale tab. Omitted (agent tools, old clients) keeps the old rule. */
+  expectedUpdatedAt?: unknown;
+}
 
 /**
  * ADR 0948 — an editor that predates offers re-submits steps without the `offer`
@@ -607,6 +624,12 @@ export async function updateFunnel(tenantId: string, orgId: string, funnelId: st
   const f = await getFunnel(tenantId, orgId, funnelId);
   if (!f) return null;
   if (f.status === 'archived') throw new OpenwopError('validation_error', 'An archived funnel cannot be edited.', 400, {});
+  // ADR 1023 D8 — checked against the row this write will CAS from, so the check
+  // and the write see the same version (a route-level check would race the write).
+  if (input.expectedUpdatedAt !== undefined && input.expectedUpdatedAt !== f.updatedAt) {
+    throw new OpenwopError('conflict', 'This funnel was changed somewhere else after you opened it. Reload to see the latest version.', 409,
+      { reason: 'funnel_changed', funnelId, updatedAt: f.updatedAt });
+  }
   const next: Funnel = { ...f };
   if (input.name !== undefined) {
     const name = cleanString(input.name, MAX.name);
@@ -718,6 +741,9 @@ export interface PublishFunnelOpts {
   /** ADR 0948 P1b — refuse unless every step page is already published
    *  (`step_pages_unpublished`): the funnel-publish lane never publishes pages. */
   requirePublishedPages?: boolean;
+  /** ADR 1023 D7 — a direct (human, route) publish: same checks, but a lost CAS
+   *  says "reload", not "request publishing again" (there is no review to redo). */
+  direct?: boolean;
 }
 
 /** Every refusal a publish can meet, in one place, so the approval lane can run them
@@ -769,7 +795,7 @@ export async function publishFunnel(tenantId: string, orgId: string, funnelId: s
   const next: Funnel = { ...f, status: 'published', publishedAt: nowIso(), updatedAt: nowIso() };
   // The approval lane (pinned or pages-required) always writes by CAS from the row it
   // checked: a concurrent edit is refused, never overwritten with the checked copy.
-  if (opts.expectedDigest !== undefined || opts.requirePublishedPages) {
+  if (!opts.direct && (opts.expectedDigest !== undefined || opts.requirePublishedPages)) {
     // ADR 0949 P2c — `f` is a hydrated read: compare the row as stored, store the pointer form.
     if (!(await swapStored(f, next))) {
       throw new OpenwopError('conflict', 'This funnel changed while it was being published. Request publishing again.', 409, { reason: 'stale_review', funnelId });

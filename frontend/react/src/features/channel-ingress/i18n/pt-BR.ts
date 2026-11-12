@@ -163,4 +163,21 @@ export const messages = {
   relayApprovedHint: 'As mensagens desses remetentes viram conversas no seu chat principal e rodam como você. Nada é enviado de volta para quem não foi aprovado.',
   relayAdminOnly: 'Só o dono deste dispositivo pode aprovar ou recusar quem escreve para ele. Como administrador do espaço de trabalho, você pode revogar uma aprovação.',
   approveGroupRelay: 'Em um dispositivo, os grupos só recebem resposta quando o seu assistente é mencionado pelo nome (o nome definido pelo seu operador). Se nenhum nome estiver definido, as mensagens de grupo são descartadas.',
+
+  // CHAN-F11 — the per-channel relay switch.
+  channelSwitchTitle: 'Canais de relay',
+  channelSwitchHint: 'Desative um canal de relay para todos neste espaço de trabalho. As mensagens dele são descartadas e nada é enviado até você reativá-lo. Os dispositivos mantêm o pareamento e as aprovações.',
+  channelSwitchLabel: 'Relay do {{channel}}',
+  channelOn: 'Ativado',
+  channelOff: 'Desativado',
+  channelSwitchedOn: 'O relay do {{channel}} está ativado.',
+  channelSwitchedOff: 'O relay do {{channel}} está desativado. Os dispositivos dele estão pausados.',
+  channelSwitchFailed: 'Não foi possível alterar o canal de relay.',
+  channelsPausedNotice: 'Um administrador do espaço de trabalho desativou estes canais de relay: {{channels}}. Os dispositivos neles estão pausados.',
+  status_channelPaused: 'Pausado (canal desativado)',
+  channel_whatsapp: 'WhatsApp',
+  channel_signal: 'Signal',
+  channel_imessage: 'iMessage',
+  channel_discord: 'Discord',
+  whatsappSettingsLink: "Configurações do WhatsApp: declaração, saúde e falhas de entrega",
 } as const;

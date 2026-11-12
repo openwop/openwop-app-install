@@ -4,7 +4,17 @@
  * epoch recorded on an observed OFF, reached through the toggle service's write
  * seam and re-observed by every read, write and sweep. Two SQLite clients share
  * real rows; blob bytes are real (memory backend). No resolver is mocked except
- * the one toggle read the outage witness fails. */
+ * the one toggle read the outage witness fails.
+ *
+ * Sabotage witnesses (w103; src/features/analytics/replayStore.ts): a read
+ * fence that ignores replay state and epoch (w103-df-read-fence), a later chunk
+ * that skips the epoch pin (w103-df-write-epoch), an OFF that does not rotate
+ * the epoch (w103-df-no-rotate), a sweep that ignores epochs or compares one
+ * tenant's epoch to another's (w103-df-sweep-epoch, w103-df-tenant-epoch), an
+ * outage or failed entitlement read treated as OFF (w103-df-outage-off,
+ * w103-df-unresolved-off), a listener that writes an epoch row for a tenant
+ * with none (w103-df-orphan-listener), and leaving consent out of the replay
+ * toggles (w103-df-consent-toggle). */
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -103,7 +113,9 @@ describe('ADR 0951 P2.5 — replay disable fences and deletes', () => {
     expect(await read(mine)).toBeNull();
     expect(await read(theirs)).toMatchObject({ sessionId: theirs.sessionId });
     expect(await sweepExpiredReplays()).toEqual({ deleted: 1, failed: 0 });
+    expect(await keys(mine)).toEqual([]);
     expect(await keys(theirs)).toHaveLength(1);
+    expect(await read(theirs)).toMatchObject({ sessionId: theirs.sessionId });
   });
 
   it('a missed notification is caught by the sweep, and re-enabling still revives nothing', async () => {

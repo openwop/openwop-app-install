@@ -108,6 +108,8 @@ export function FunnelPage(): JSX.Element {
         orgs={orgs} orgsFailed={orgsFailed} retry={retryOrgs}
         emptyBody={t('orgsEmptyClause')} failedBody={t('orgsFailedClause')} icon={<ShieldIcon />}
       >
+        {/* ADR 1036 D10 — the funnel aggregates the whole workspace's applications. */}
+        <p className="muted u-m-0">{t('workspaceVisibility')}</p>
         {failed ? (
           <StateCard
             announce

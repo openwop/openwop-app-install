@@ -44,6 +44,7 @@ const ERASED = new Map<string, Erased>([
 const EXEMPT = new Map<string, string>([
   ['messaging:relay-token-grace', 'tokenHash, relayId, tenantId, validUntil: a token digest and ids, no person'],
   ['messaging:relay-presence', 'relayId, tenantId, channel and heartbeat times: no person'],
+  ['messaging:relay-channel-switch', 'tenantId, the switched-off channels and a time: no person (CHAN-F11; who switched is the route log line)'],
 ]);
 
 /** `lastError` is device-reported free text, not audited for contact ids. Shrink-only. */

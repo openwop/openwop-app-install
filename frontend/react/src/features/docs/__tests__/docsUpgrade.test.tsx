@@ -182,3 +182,19 @@ describe('docs article — breadcrumb (D-G5), pager (D-G3), freshness (D-G6)', (
     expect(screen.queryByRole('navigation', { name: /nearby pages/i })).toBeNull();
   });
 });
+
+// grade-ux row 88, findings 4 and 5. Red when the article is a second <main>
+// (PublicShell already owns the page's main landmark) or the index keeps the
+// app's generic title (WCAG 2.4.2).
+describe('docs landmarks + index title (grade-ux row 88)', () => {
+  it('renders no <main> of its own, and the index sets its own document title', async () => {
+    getDocsNav.mockResolvedValue(nav());
+    document.title = 'generic app title';
+    renderDocs(null);
+    await sidebarWithDocs();
+    expect(screen.queryByRole('main')).toBeNull();
+    expect(document.title).toMatch(/^Documentation — /);
+    cleanup();
+    expect(document.title, 'the title is restored on unmount').toBe('generic app title');
+  });
+});

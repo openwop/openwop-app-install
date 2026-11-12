@@ -42,7 +42,7 @@ afterEach(() => { vi.useRealTimers(); });
 describe('ADR 0411 P3 — generate-reel node', () => {
   it('derives prompt → generates → promotes to a Media asset → stores a reel render with a DETERMINISTIC id', async () => {
     const brief = await createBrief(T, ORG, 'u1', { title: 'Winter Drop', sceneDescription: 'snow on pines' });
-    const out = (await generateReel(mockCtx({ inputs: { orgId: ORG, briefId: brief.briefId, aspectRatio: '9:16' } }))) as NodeOut;
+    const out = (await generateReel(mockCtx({ inputs: { credentialRef: 'replicate', orgId: ORG, briefId: brief.briefId, aspectRatio: '9:16' } }))) as NodeOut;
     expect(out.status).toBe('success');
     expect(out.outputs.render.renderId).toBe('crender:run-1:node-1'); // deterministic ⇒ replay/fork-safe
     expect(out.outputs.render.reel?.prompt).toContain('Winter Drop');
@@ -56,9 +56,9 @@ describe('ADR 0411 P3 — generate-reel node', () => {
     const brief = await createBrief(T, ORG, 'u1', { title: 'Idem', sceneDescription: 'x' });
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(Date.parse('2026-07-01T00:00:00.000Z'));
-    const first = (await generateReel(mockCtx({ inputs: { orgId: ORG, briefId: brief.briefId } }))) as NodeOut;
+    const first = (await generateReel(mockCtx({ inputs: { credentialRef: 'replicate', orgId: ORG, briefId: brief.briefId } }))) as NodeOut;
     vi.setSystemTime(Date.parse('2026-07-01T00:01:00.000Z')); // a re-run a minute later
-    const second = (await generateReel(mockCtx({ inputs: { orgId: ORG, briefId: brief.briefId } }))) as NodeOut;
+    const second = (await generateReel(mockCtx({ inputs: { credentialRef: 'replicate', orgId: ORG, briefId: brief.briefId } }))) as NodeOut;
     expect(second.outputs.render.renderId).toBe(first.outputs.render.renderId);
     expect(first.outputs.render.createdAt).toBe('2026-07-01T00:00:00.000Z');
     expect(second.outputs.render.createdAt).toBe('2026-07-01T00:00:00.000Z'); // the SAME row returned, not a rewrite
@@ -67,7 +67,7 @@ describe('ADR 0411 P3 — generate-reel node', () => {
 
   it('fails typed host_capability_missing when the host does not wire ctx.callVideoGenerator', async () => {
     const brief = await createBrief(T, ORG, 'u1', { title: 'NoVid', sceneDescription: 'x' });
-    await expect(generateReel(mockCtx({ inputs: { orgId: ORG, briefId: brief.briefId }, callVideoGenerator: undefined })))
+    await expect(generateReel(mockCtx({ inputs: { credentialRef: 'replicate', orgId: ORG, briefId: brief.briefId }, callVideoGenerator: undefined })))
       .rejects.toMatchObject({ code: 'host_capability_missing' });
   });
 });

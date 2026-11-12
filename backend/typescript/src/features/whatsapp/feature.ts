@@ -20,36 +20,70 @@
  * terms-free Slack/Discord/Telegram channels — ADR 0394 matrix row 2).
  */
 import type { BackendFeature } from '../types.js';
-import { buildWhatsAppSurface } from './surface.js';
-import { bindWhatsAppStorage, recordInboundMessage, extractWaInbound, eraseWhatsAppSubject, cleanupWhatsAppConnection } from './whatsappService.js';
+import { buildWhatsAppSurface, WHATSAPP_SURFACE_POLICY } from './surface.js';
+import { bindWhatsAppStorage, recordInboundMessage, extractWaInbound, eraseWhatsAppSubject, cleanupWhatsAppConnection, claimInboundMessage, extractWaStatuses, recordDeliveryStatus } from './whatsappService.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { onConnectionRevoked } from '../../host/connectionLifecycle.js';
-import { registerInboundObserver, registerInboundGate } from '../connections/inboundWebhooks.js';
+import { registerInboundObserver, registerInboundGate, registerInboundStatusObserver } from '../connections/inboundWebhooks.js';
+import { getConnection } from '../connections/connectionsService.js';
+import { createLogger } from '../../observability/logger.js';
 import { applyInboundKeyword, whatsappDispatchAllowed } from './compliance.js';
 import { registerWhatsAppRoutes } from './routes.js';
 import { sendWhatsApp } from './whatsappService.js';
 import { registerReplyTransport, type ChannelReply, type ReplyTransportResult } from '../connections/messagingOutbound.js';
 
+const log = createLogger('features.whatsapp');
+
 export const whatsappFeature: BackendFeature = {
   id: 'whatsapp',
-  surface: { id: 'whatsapp', build: buildWhatsAppSurface },
+  surface: { id: 'whatsapp', build: buildWhatsAppSurface, orgPolicy: WHATSAPP_SURFACE_POLICY },
   // No routes in Phase 1 — registration binds the storage handle the workflow
   // surface's brokered egress needs (the initHostExtPersistence lifecycle) and
   // the verified-inbound observer that opens/renews the 24h window ledger.
   registerRoutes: (deps) => {
     bindWhatsAppStorage(deps.storage);
     // Both BSP transports feed the same window ledger + keyword ladder; the
-    // extractor normalizes each provider's envelope to {from, text}[] — EVERY
-    // message in a Cloud batch is processed (a STOP as message 2+ counts).
+    // extractor normalizes each provider's envelope — EVERY message in a Cloud
+    // batch is processed (a STOP as message 2+ counts).
+    //
+    // ADR 1053 D4 — each message id is CLAIMED before its side effects, so a
+    // replayed signed delivery (Twilio signs no timestamp) or a BSP redelivery
+    // does nothing the second time. D5 — STRICT: a failed write releases the
+    // claim and propagates, the route answers 5xx and the BSP redelivers (an
+    // opt-out that could not be written must never be acked). D4a — a START is
+    // applied only from an org/workspace connection, whose inbound config only an
+    // admin can set; a STOP from any connection.
     const onInbound = async ({ tenantId, connectionId, body, now }: { tenantId: string; connectionId: string; body: Record<string, unknown>; now: number }): Promise<void> => {
-      for (const msg of extractWaInbound(body)) {
-        await recordInboundMessage(tenantId, connectionId, msg.from, new Date(now));
-        // Phase 2 — the STOP/START keyword ladder (immediate, fail-closed).
-        await applyInboundKeyword(tenantId, msg.from, msg.text);
+      const messages = extractWaInbound(body);
+      if (messages.length === 0) return;
+      const connection = await getConnection(tenantId, connectionId);
+      const axis: 'user' | 'org' | 'workspace' = connection?.userId ? 'user' : connection?.orgId ? 'org' : 'workspace';
+      const optInAllowed = connection !== null && axis !== 'user';
+      for (const msg of messages) {
+        if (!msg.id) { log.info('whatsapp_inbound_without_id', { tenantId, connectionId }); continue; }
+        const claim = await claimInboundMessage(tenantId, connectionId, msg.id);
+        if (!claim.owned) continue;
+        try {
+          // D6 — the provider's own time when it sends one, never later than now.
+          const at = msg.at && msg.at.getTime() < now ? msg.at : new Date(now);
+          await recordInboundMessage(tenantId, connectionId, msg.from, at);
+          // Phase 2 — the STOP/START keyword ladder (immediate, fail-closed).
+          await applyInboundKeyword(tenantId, msg.from, msg.text, { optInAllowed, connectionId, axis });
+          await claim.complete();
+        } catch (err) {
+          await claim.release();
+          throw err;
+        }
       }
     };
-    registerInboundObserver('whatsapp-twilio', onInbound);
-    registerInboundObserver('whatsapp-cloud', onInbound);
+    registerInboundObserver('whatsapp-twilio', onInbound, { strict: true });
+    registerInboundObserver('whatsapp-cloud', onInbound, { strict: true });
+    // ADR 1053 D3 — delivery truth, from verified callbacks on the sending connection only.
+    const onStatus = async ({ tenantId, connectionId, body }: { tenantId: string; connectionId: string; body: Record<string, unknown> }): Promise<void> => {
+      for (const update of extractWaStatuses(body)) await recordDeliveryStatus(tenantId, connectionId, update);
+    };
+    registerInboundStatusObserver('whatsapp-twilio', onStatus);
+    registerInboundStatusObserver('whatsapp-cloud', onStatus);
     // Phase 2 — the no-training attestation gate: WhatsApp message data never
     // fires an AI workflow for a tenant that has not attested (fail-closed).
     registerInboundGate('whatsapp-twilio', async ({ tenantId }) => whatsappDispatchAllowed(tenantId));

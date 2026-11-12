@@ -55,4 +55,10 @@ describe('checkContentA11y', () => {
     const issues = checkContentA11y({ images: [{ alt: '' }], headings: [{ level: 1 }, { level: 4 }], links: [{ text: 'here' }] });
     expect(issues.map((i) => i.kind).sort()).toEqual(['heading-skip', 'link-text', 'missing-alt']);
   });
+
+  // ADR 1100 — a file-name alt is not empty but describes nothing (warning).
+  it('flags a file-name alt as a warning, not a real description', () => {
+    const issues = checkContentA11y({ images: [{ alt: 'IMG_2041.jpg' }, { alt: 'Screenshot 2026-11-11 at 09.12.33' }, { alt: 'A red bicycle' }, { alt: 'Screenshot of the billing page' }], headings: [], links: [] });
+    expect(issues.map((i) => [i.messageKey, i.severity])).toEqual([['altFilename', 'warning'], ['altFilename', 'warning']]);
+  });
 });

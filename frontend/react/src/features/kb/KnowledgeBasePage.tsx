@@ -1245,7 +1245,9 @@ export function KnowledgeBasePage(): JSX.Element {
               {writesLocked && orgAccess.canWrite ? (
                 <Notice variant="warning">{t('syncPausedNotice')}</Notice>
               ) : null}
-              <KnowledgeSyncPanel orgId={orgId} collectionId={selected.collectionId} />
+              {/* ADR 1101 D8 (`KS2UX-1`) — the panel offers writes only to a writer
+                  (disabled, not absent, while access loads), like every sibling here. */}
+              <KnowledgeSyncPanel orgId={orgId} collectionId={selected.collectionId} showWrites={showWrites} writesDisabled={writesDisabled} />
             </div>
           )}
         </div>

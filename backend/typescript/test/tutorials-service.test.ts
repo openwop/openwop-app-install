@@ -25,6 +25,7 @@ import type { EntityRecord, EntityTypeRecord } from '../src/features/entities/en
 
 const kernel = vi.hoisted(() => ({
   listSystemEntities: vi.fn<typeof Entities.listSystemEntities>(),
+  listAllSystemRowsBounded: vi.fn<typeof Entities.listAllSystemRowsBounded>(),
   getSystemEntity: vi.fn<typeof Entities.getSystemEntity>(),
   putSystemEntity: vi.fn<typeof Entities.putSystemEntity>(),
   mintSystemType: vi.fn<typeof Entities.mintSystemType>(),
@@ -33,7 +34,7 @@ const kernel = vi.hoisted(() => ({
 
 vi.mock('../src/features/entities/entitiesService.js', () => kernel);
 
-const { listTutorials, getTutorial, seedTutorials, countTutorialRows, clearTutorialRows } =
+const { listTutorials, getTutorial, seedTutorials, countTutorialRows, clearTutorialRows, tutorialIntegrityGauge } =
   await import('../src/features/tutorials/tutorialsService.js');
 const { SEED_TUTORIALS } = await import('../src/features/tutorials/seedTutorials.js');
 const { emissionsOf, _resetMetricsForTest } = await import('../src/observability/metrics.js');
@@ -152,6 +153,22 @@ describe('a stale, un-customized seed copy yields to the shipped seed (TUT-STALE
       expect(await getTutorial(TENANT, seed.id)).toMatchObject({ title: 'Old shipped title', source: 'kernel' });
     }
     expect(emissionsOf(STALE_METRIC)).toEqual([]); // a kept copy is not a yield
+  });
+});
+
+describe('the tutorials integrity gauge (ADR 1104, PROBE-1038-4)', () => {
+  it('counts stale copies, customized rows behind the seed, and tenant-authored rows', async () => {
+    const [a, b] = [SEED_TUTORIALS[0]!, SEED_TUTORIALS[1]!];
+    const row = (slug: string, seedVersion: string, ext?: Record<string, unknown>) =>
+      kernelRow({ slug, title: 'T', description: 'd', category: a.category, seed_version: seedVersion }, { phases: [], ...ext });
+    kernel.listAllSystemRowsBounded.mockResolvedValue({ truncatedTenants: 1, rows: [
+      row(a.id, '0.0.1-old'),                         // stale, un-customized: the reader yields to the seed
+      row(b.id, b.seedVersion),                       // current copy
+      row(b.id, '0.0.1-old', { customizedAt: AT }),   // a tenant edit on an older seed: keeps winning
+      row('my-own-tutorial', ''),                     // tenant-authored
+    ] });
+    expect(await tutorialIntegrityGauge(25)).toEqual({ rows: 4, seedCopies: 3, staleSeedCopies: 1, tenantsWithStale: 1, customizedBehind: 1, tenantAuthored: 1, truncatedTenants: 1 });
+    expect(kernel.listAllSystemRowsBounded).toHaveBeenCalledWith('tutorials.lesson', 25); // the cap reaches the read
   });
 });
 

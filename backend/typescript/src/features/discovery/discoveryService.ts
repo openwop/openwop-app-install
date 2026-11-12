@@ -36,7 +36,7 @@ function rrfFuse(lexical: Product[], semanticIds: string[]): Product[] {
     .sort((a, b) => b.score - a.score || a.p.productId.localeCompare(b.p.productId))
     .map((s) => s.p);
 }
-import { listProducts, type Product } from '../commerce/commerceService.js';
+import { listProducts, isPubliclyListed, type Product } from '../commerce/commerceService.js';
 import { listProductFieldDefs } from '../commerce/productFields.js';
 import { createLogger } from '../../observability/logger.js';
 
@@ -219,7 +219,8 @@ export async function resolveCollection(
 ): Promise<Product[]> {
   const c = await getCollection(tenantId, orgId, collectionId);
   if (!c || (opts.activeCollection && !c.active)) return [];
-  const all = (await listProducts(tenantId, orgId)).filter((p) => !opts.activeProducts || p.active !== false);
+  // ADR 1098 — `activeProducts` is the search lanes' scope, so it also drops unlisted (quote-only) products.
+  const all = (await listProducts(tenantId, orgId)).filter((p) => !opts.activeProducts || isPubliclyListed(p));
   if (c.type === 'manual') {
     const ids = new Set(c.productIds ?? []);
     return all.filter((p) => ids.has(p.productId));
@@ -431,10 +432,10 @@ export async function searchProducts(input: {
   // Collection scope resolves the base set (active-only); else the full active catalog.
   let base = input.collectionId
     ? await resolveCollection(tenantId, orgId, input.collectionId)
-    : (await listProducts(tenantId, orgId, input.q, {})).filter((p) => p.active !== false);
+    : (await listProducts(tenantId, orgId, input.q, {})).filter(isPubliclyListed); // ADR 1098
   if (input.collectionId && input.q) {
     // apply the lexical query within the collection via listProducts ranking order
-    const ranked = (await listProducts(tenantId, orgId, input.q, {})).filter((p) => p.active !== false);
+    const ranked = (await listProducts(tenantId, orgId, input.q, {})).filter(isPubliclyListed); // ADR 1098
     const inColl = new Set(base.map((p) => p.productId));
     base = ranked.filter((p) => inColl.has(p.productId));
   }

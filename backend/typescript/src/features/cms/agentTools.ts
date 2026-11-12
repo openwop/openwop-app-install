@@ -192,7 +192,8 @@ export function registerCmsAgentTools(): void {
       description:
         'Read a DRAFT/in-review page\'s RAW sections (base data + which overlay locales already exist) — the '
         + 'read-before-write for editing. Inputs: { pageId, orgId? } → { page: { pageId, slug, title, status, '
-        + 'sections: [{ sectionId, sectionType, data, locales }] } | null }.',
+        + 'sections: [{ sectionId, sectionType, data, locales, shared? }] } | null }. `shared: true` marks a '
+        + 'reference to a shared section, whose content (`data: {}`) is not included.',
       inputSchema: {
         type: 'object',
         properties: {

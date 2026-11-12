@@ -19,6 +19,20 @@
 
 import { isManagedRef, refNamedProvider } from '../aiProviders/credentialRefLadder.js';
 import { resolveUserNamedSecret } from '../byok/userNamedSecret.js';
+import { listSecretRefs, type SecretScope } from '../byok/secretResolver.js';
+
+/**
+ * Is `ref` one of THIS tenant's stored BYOK secrets (scope-bounded, so another
+ * workspace's ref reads as `not_stored`), and does it resolve now? Names only:
+ * the value is read to prove it exists and never leaves. Shared by the headless
+ * AI default (`validateHeadlessSpec`) and the frozen run AI default (ADR 0903,
+ * issue #5764), so both refuse the same refs.
+ */
+export async function tenantRefStatus(scope: SecretScope, ref: string): Promise<'ok' | 'not_stored' | 'unresolved'> {
+  const refs = await listSecretRefs(scope);
+  if (!refs.includes(ref)) return 'not_stored';
+  return (await resolveUserNamedSecret(ref, scope)) ? 'ok' : 'unresolved';
+}
 
 /** The run-level `configurable` that lets `prepareRunSecrets` resolve `ref`
  *  into the run's secret set. Empty for a managed ref or none. */

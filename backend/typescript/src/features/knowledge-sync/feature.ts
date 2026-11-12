@@ -27,7 +27,13 @@ import { registerKnowledgeSyncRoutes } from './routes.js';
 import { onConnectionRevoked } from '../../host/connectionLifecycle.js';
 import { registerTenantPurgeHook } from '../../host/hostExtPersistence.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
-import { pauseSourcesForRevokedConnection, purgeTenantSyncCursors, eraseKnowledgeSyncSubject } from './knowledgeSyncService.js';
+import {
+  pauseSourcesForRevokedConnection, purgeTenantSyncCursors, eraseKnowledgeSyncSubject,
+  ownsKnowledgeSyncJob, knowledgeSyncFireRefusal, knowledgeSyncJobReadable,
+  KNOWLEDGE_SYNC_JOB_KIND, KNOWLEDGE_SYNC_JOB_PREFIX,
+} from './knowledgeSyncService.js';
+import { registerScheduledJobFireGate } from '../../host/scheduledJobFireGates.js';
+import { registerScheduledJobReadGate } from '../../host/scheduledJobReadGates.js';
 import { buildKnowledgeSyncSurface } from './surface.js';
 
 export const knowledgeSyncFeature: BackendFeature = {
@@ -61,6 +67,20 @@ export const knowledgeSyncFeature: BackendFeature = {
     // Registered UNCONDITIONALLY, like the purge hook above — an erasure must
     // never depend on a feature toggle being on today (ADR 0590).
     registerSubjectEraser(eraseKnowledgeSyncSubject);
+    // ADR 1101 D3 — the scheduler's GENERIC doors over a ksync job. The fire gate
+    // reserves the `ksync:` prefix (the generic scheduler may only disable such a
+    // job — never retarget, re-enable or rewrite it) and refuses a fire whose
+    // definition is not the one this feature registered. The read gate makes the job
+    // unreachable there — list, pause, delete, "Run now" — to anyone without write
+    // on the source's org. Both registries are idempotent maps.
+    registerScheduledJobFireGate('knowledge-sync', {
+      owns: ownsKnowledgeSyncJob,
+      gate: knowledgeSyncFireRefusal,
+      refusal: 'dispatch-error',
+      reservedJobIdPrefix: KNOWLEDGE_SYNC_JOB_PREFIX,
+      managedBy: { id: 'knowledge-sync', message: 'This schedule belongs to a knowledge-sync source. Pause, resume or remove it from the collection’s Drive sync panel.' },
+    });
+    registerScheduledJobReadGate(KNOWLEDGE_SYNC_JOB_KIND, knowledgeSyncJobReadable);
   },
   // WF-KB-3 / KSWF-1 — `ctx.features['knowledge-sync']`, the surface the
   // `knowledge-sync.run` node calls to execute one scheduled sync pass. The id
@@ -77,8 +97,11 @@ export const knowledgeSyncFeature: BackendFeature = {
     // both halves: the scheduled cadence runs (per-source scheduler jobs) and the UI shipped. It is
     // the single most consequential of the four doc-rot sites in `KSC-13` because
     // it is the only one rendered to a customer. Say what turning this ON does.
+    // ADR 1101 D9 (`KS2CD-2`) — and say it TRUTHFULLY: it used to add "including
+    // documents uploaded to that collection by hand", which ADR 0107 OQ-1's
+    // resolution measured false (`toPrune` comes only from the source's own cursors).
     description:
-      'Scheduled diff-sync of an external drive folder (Google Drive, OneDrive, SharePoint, Dropbox or Box, via a Connection) into a KB collection. One-way (drive → KB), content untrusted-fenced, SSRF-guarded egress. Once a source is added it syncs on its own cadence (15m / hourly / daily) with no further action — each pass fetches changed files over paid egress and DELETES KB documents whose source file was removed or renamed, including documents uploaded to that collection by hand. External egress, opt-in per tenant.',
+      'Scheduled diff-sync of an external drive folder (Google Drive, OneDrive, SharePoint, Dropbox or Box, via a Connection) into a KB collection. One-way (drive → KB), content untrusted-fenced, SSRF-guarded egress. Once a source is added it syncs on its own cadence (15m / hourly / daily) with no further action — each pass fetches changed files over paid egress and DELETES the KB documents it synced whose source file was removed or renamed (documents uploaded to the collection by hand are never touched), and removing a source removes the documents it synced. External egress, opt-in per tenant.',
     category: 'Content',
     status: 'off',
     bucketUnit: 'tenant',

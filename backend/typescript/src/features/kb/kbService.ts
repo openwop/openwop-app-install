@@ -236,6 +236,10 @@ export function managedCollectionOwner(source: string): string | null | undefine
  */
 export const KB_MAINTENANCE_CALLER: SubjectCaller = Object.freeze({ preAuthorized: true as const });
 
+/** ADR 1057 D4 — the managed sources whose indexer records a `sourceUrl`. Retrieval
+ *  reads a source's document row for its URL only for these collections. */
+const SOURCE_URL_MANAGED: ReadonlySet<ManagedSource> = new Set<ManagedSource>(['docs']);
+
 /**
  * G8 — may `caller` see this managed collection under its owner's plan?
  *
@@ -322,13 +326,17 @@ export interface InternalDocumentFields extends KbEmitOptions {
    *  sanctioned in-process replace path). Every other ingest into a MANAGED collection
    *  is refused at the service, not only at the KB route. */
   managedWrite?: true;
+  /** ADR 1057 D4 — where a reader can open this document's source (the public
+   *  `/docs/<slug>` page of a docs-collection page). Set only by an owning feature's
+   *  indexer; never from a body. Carried onto retrieval `sources[].url`. */
+  sourceUrl?: string;
   /* `origin` / `silent` (ADR 0643 D3) ride here for the same reason the three
    * above do: they are decisions only an in-process caller may express. A route
    * body never reaches them (`ingestDocument` reads them from THIS argument only). */
 }
 
 const PRIVILEGED_COLLECTION_FIELDS = ['collectionId', 'managed', 'boundSubject'] as const;
-const PRIVILEGED_DOCUMENT_FIELDS = ['documentId', 'revision', 'contentTrust', 'managedWrite', 'enrichmentGeneration', 'enrichmentCache'] as const;
+const PRIVILEGED_DOCUMENT_FIELDS = ['documentId', 'revision', 'contentTrust', 'managedWrite', 'enrichmentGeneration', 'enrichmentCache', 'sourceUrl'] as const;
 
 /**
  * Refuse a privileged field that arrived through the UNTRUSTED `input` object.
@@ -630,6 +638,10 @@ export interface KnowledgeDocument {
   contentTrust?: 'trusted' | 'untrusted';
   /** The durable source of truth; chunks are re-derived from this. */
   text: string;
+  /** ADR 1057 D4 — an openable URL for this document's source, set only by an
+   *  in-process indexer (privileged). Stored on the document row only — never in
+   *  chunk or vector metadata — and resolved per source at retrieval time. */
+  sourceUrl?: string;
   /** ADR 0904 P2 — for a PDF: the char offset in `text` where each page starts (index i ⇒
    *  page i+1). Chunks map to the last page starting at or before them. Absent ⇒ no pages. */
   pageOffsets?: number[];
@@ -2028,6 +2040,28 @@ export async function ingestDocument(
   internal: InternalDocumentFields = {},
   caller?: SubjectCaller,
 ): Promise<Omit<KnowledgeDocument, 'text'>> {
+  const prepared = await prepareIngest(tenantId, orgId, actor, collectionId, input, internal, caller);
+  return commitIngest(tenantId, orgId, actor, collectionId, prepared, internal);
+}
+
+/** #5756 — the half of an ingest that can REFUSE: the reindex guard, the subject gate,
+ *  the managed and cap checks, the stable-id clash and source resolution. It writes
+ *  nothing (beyond what the reindex guard itself may cancel), so `upsertDocument` runs
+ *  it BEFORE it removes the prior row. `replacing` is that prior row: its id is not a
+ *  clash, and its slot does not count against the cap, because the commit lands only
+ *  after it is gone. */
+interface PreparedIngest { col: KnowledgeCollection; doc: KnowledgeDocument; inline: boolean; rows: ChunkRow[] }
+
+async function prepareIngest(
+  tenantId: string,
+  orgId: string,
+  actor: string,
+  collectionId: string,
+  input: { title?: unknown; text?: unknown; mediaToken?: unknown; contentBase64?: unknown; contentType?: unknown; url?: unknown },
+  internal: InternalDocumentFields,
+  caller: SubjectCaller | undefined,
+  replacing?: KnowledgeDocument,
+): Promise<PreparedIngest> {
   assertNoPrivilegedFields(input, PRIVILEGED_DOCUMENT_FIELDS, 'document');
   // ADR 0643 D1a — the GUARD RUNS BEFORE THE COLLECTION READ, and the order is load-bearing
   // now that the guard can WRITE: an expired lease cancels the reindex, which clears
@@ -2042,7 +2076,7 @@ export async function ingestDocument(
   // project ingest lanes, onto a bound Strategy KB) wrote TRUSTED text into a
   // collection advisors cite as the strategy itself, until the next sync dropped it.
   if (!internal.managedWrite) refuseManagedCollection(col);
-  const docCount = (await docsInCollection(tenantId, orgId, collectionId)).length; // DEBT-2 — bounded org slice
+  const docCount = (await docsInCollection(tenantId, orgId, collectionId)).length - (replacing ? 1 : 0); // DEBT-2 — bounded org slice
   if (docCount >= MAX.perCollectionDocs) {
     throw new OpenwopError('validation_error', `Document cap reached (${MAX.perCollectionDocs}).`, 400, {});
   }
@@ -2053,7 +2087,7 @@ export async function ingestDocument(
   // namespace still serving the OLD text under ids the new document does not cover.
   // The sanctioned replace path is `upsertDocument`, which removes the prior row first
   // (and is what every internal indexer already calls); this refuses the accidental one.
-  if (typeof internal.documentId === 'string' && internal.documentId.length > 0) {
+  if (typeof internal.documentId === 'string' && internal.documentId.length > 0 && internal.documentId !== replacing?.documentId) {
     const clash = await documentRow(tenantId, orgId, collectionId, internal.documentId);
     if (clash) {
       throw new OpenwopError('conflict', 'A document with this id already exists — delete it or use the upsert path.', 409, { documentId: internal.documentId });
@@ -2085,6 +2119,7 @@ export async function ingestDocument(
     // ADR 0904 P2 — set with `text` in the one place a document's text is written (an
     // upsert is delete + ingest), so the two can never disagree.
     ...(pageOffsets ? { pageOffsets } : {}),
+    ...(typeof internal.sourceUrl === 'string' && internal.sourceUrl ? { sourceUrl: internal.sourceUrl } : {}),
     chunkCount: 0,
     ...(typeof internal.revision === 'number' && internal.revision > 1 ? { revision: internal.revision } : {}),
     createdBy: actor,
@@ -2100,7 +2135,18 @@ export async function ingestDocument(
   const inline = embedMode === 'local' && enrichmentOf(col) !== 'llm';
   const rows = inline ? chunkRows(doc, enrichmentOf(col) as 'off' | 'heading-path') : [];
   doc.chunkCount = inline ? rows.length : chunkText(doc.text).length;
+  return { col, doc, inline, rows };
+}
 
+/** #5756 — the half of an ingest that WRITES (see `prepareIngest`). */
+async function commitIngest(
+  tenantId: string,
+  orgId: string,
+  actor: string,
+  collectionId: string,
+  { col, doc, inline, rows }: PreparedIngest,
+  internal: InternalDocumentFields,
+): Promise<Omit<KnowledgeDocument, 'text'>> {
   if (inline) await hydrate(tenantId, orgId, collectionId); // ensure the namespace exists before adding
   // Durable doc FIRST, then the (ephemeral) vectors — so a crash between the two
   // never leaves orphan vectors without a backing document. If the upsert fails,
@@ -2221,6 +2267,27 @@ async function removeDocumentRow(doc: KnowledgeDocument): Promise<void> {
   }
 }
 
+/** #5756 — undo `removeDocumentRow` for a replace whose new row never landed: the
+ *  prior row goes back verbatim (its `revision`, `enrichmentGeneration`, text and
+ *  counts), under the same lexical mark an ingest takes. Its vectors are not
+ *  re-upserted here: dropping the hydrate marker makes the next search rebuild the
+ *  namespace from durable rows, and the provider-vector cache and revision log
+ *  were never touched by the remove. */
+async function restoreDocumentRow(doc: KnowledgeDocument): Promise<void> {
+  const { tenantId, orgId, collectionId } = doc;
+  const col = await collectionRow(tenantId, orgId, collectionId);
+  if (!col) return; // the collection itself is gone: nothing to restore into
+  const lexicalMutation = await beginLexicalMutation(tenantId, orgId, collectionId, collectionNamespace(col));
+  await documents.put(doc);
+  if (lexicalMutation) await lexicalMutation.lex.finishMutation(tenantId, lexicalMutation.owner, lexicalMutation.operation);
+  hydrated.delete(hydrateKey(tenantId, orgId, collectionId));
+  await commitCollection(tenantId, orgId, collectionId, (fresh) => ({
+    ...fresh,
+    documentCount: fresh.documentCount + 1,
+    chunkCount: fresh.chunkCount + doc.chunkCount,
+  }));
+}
+
 /**
  * Re-ingest a document under a STABLE caller-supplied id (ADR 0100): delete the
  * prior revision if present, then ingest fresh. Idempotent — keying by the
@@ -2236,7 +2303,7 @@ export async function upsertDocument(
   actor: string,
   /** `silent` / `origin` (ADR 0643 D3) intersect the input the way `crm/emit.ts`'s
    *  `emitOptsOf` does — this is an in-process-only path, so they are never a body. */
-  input: { title?: unknown; text?: unknown; contentTrust?: 'trusted' | 'untrusted'; mediaToken?: unknown; contentBase64?: unknown; contentType?: unknown; url?: unknown } & KbEmitOptions,
+  input: { title?: unknown; text?: unknown; contentTrust?: 'trusted' | 'untrusted'; mediaToken?: unknown; contentBase64?: unknown; contentType?: unknown; url?: unknown; sourceUrl?: string } & KbEmitOptions,
   caller?: SubjectCaller,
 ): Promise<Omit<KnowledgeDocument, 'text'>> {
   await mustGetCollection(tenantId, orgId, collectionId, caller); // KBC-1 — the collection's subject gate, before the replace destroys the prior row
@@ -2254,37 +2321,66 @@ export async function upsertDocument(
     // unchanged bio would otherwise keep its stored `trusted` label forever.
     const sameTrust = (prior.contentTrust === 'untrusted' ? 'untrusted' : 'trusted') === (input.contentTrust === 'untrusted' ? 'untrusted' : 'trusted');
     if (sameText && sameTitle && sameTrust) {
-      const { text: _t, enrichmentGeneration: _generation, enrichmentCache: _cache, ...projection } = prior;
+      // ADR 1057 D4 — a source-URL change (a slug rename) is NOT a content change: it
+      // patches the row in place. No re-embed, no revision bump, no staleness event.
+      const nextUrl = typeof input.sourceUrl === 'string' && input.sourceUrl ? input.sourceUrl : undefined;
+      let row = prior;
+      if (nextUrl !== prior.sourceUrl) {
+        const { sourceUrl: _old, ...rest } = prior;
+        const patched: KnowledgeDocument = nextUrl ? { ...rest, sourceUrl: nextUrl } : rest;
+        if (await documents.compareAndSwap(prior, patched)) row = patched;
+        else log.warn('kb_source_url_patch_lost', { tenantId, collectionId, documentId });
+      }
+      const { text: _t, enrichmentGeneration: _generation, enrichmentCache: _cache, ...projection } = row;
       return projection;
     }
-    // Internal replace (KB-CODE-9/10): PRESERVE the per-chunk provider-vector
-    // cache (the textHash mismatch already drives selective re-embed of only
-    // the changed chunks — a full purge would re-bill every chunk) and the
-    // revision log (recorded below). The user-facing delete purges both.
-    // KB-8 — the marker is set BEFORE the row disappears and cleared only once the
-    // re-ingest has landed, so a concurrent retention sweep can never see this document
-    // as an orphan mid-replace.
-    upsertsInFlight.add(inFlightKey);
-    await removeDocumentRow(prior);
   }
   const revision = prior ? (prior.revision ?? 1) + 1 : 1;
   // KB-1 R2 — the privileged trio rides the INTERNAL parameter. `upsertDocument` is the
   // sanctioned in-process replace path (never a route), so it is exactly the caller that
   // is allowed to express them; forwarding them inside `input` would now be refused.
-  const { contentTrust, silent, origin, ...publicInput } = input;
+  const { contentTrust, silent, origin, sourceUrl, ...publicInput } = input;
+  const internal: InternalDocumentFields = {
+    documentId,
+    revision,
+    managedWrite: true,
+    ...(contentTrust ? { contentTrust } : {}),
+    ...(sourceUrl ? { sourceUrl } : {}),
+    ...(origin ? { origin } : {}),
+    // ADR 0643 D3 — a REPLACE is an `updated` transition, owned below; its ingest
+    // half is therefore silent so the two never double-emit. A first-time upsert
+    // (no prior) IS a creation and lets `ingestDocument`'s one site emit it.
+    ...(silent || prior ? { silent: true } : {}),
+  };
+  // #5756 — everything that can REFUSE runs before the prior row is touched, and it
+  // runs with the CALLER. This used to remove the prior row and then call
+  // `ingestDocument` without `caller`, whose own gate refused every subject-bound
+  // collection — after the old version was already gone. A refusal here (gate, cap,
+  // an unresolvable source) now leaves the prior document, its revision and its
+  // vector cache exactly as they were, and burns no revision.
+  const prepared = await prepareIngest(tenantId, orgId, actor, collectionId, publicInput, internal, caller, prior ?? undefined);
   let projection: Omit<KnowledgeDocument, 'text'>;
   try {
-    projection = await ingestDocument(tenantId, orgId, actor, collectionId, publicInput, {
-      documentId,
-      revision,
-      managedWrite: true,
-      ...(contentTrust ? { contentTrust } : {}),
-      ...(origin ? { origin } : {}),
-      // ADR 0643 D3 — a REPLACE is an `updated` transition, owned below; its ingest
-      // half is therefore silent so the two never double-emit. A first-time upsert
-      // (no prior) IS a creation and lets `ingestDocument`'s one site emit it.
-      ...(silent || prior ? { silent: true } : {}),
-    });
+    if (prior) {
+      // Internal replace (KB-CODE-9/10): PRESERVE the per-chunk provider-vector
+      // cache (the textHash mismatch already drives selective re-embed of only
+      // the changed chunks — a full purge would re-bill every chunk) and the
+      // revision log (recorded below). The user-facing delete purges both.
+      // KB-8 — the marker is set BEFORE the row disappears and cleared only once the
+      // re-ingest has landed, so a concurrent retention sweep can never see this document
+      // as an orphan mid-replace.
+      upsertsInFlight.add(inFlightKey);
+      await removeDocumentRow(prior);
+    }
+    try {
+      projection = await commitIngest(tenantId, orgId, actor, collectionId, prepared, internal);
+    } catch (err) {
+      // #5756 — a write fault after the remove (the durable put, the lexical mark).
+      // If the new row never landed, put the prior one back; if it did, the replace
+      // happened and only its vectors are pending (`commitIngest`'s self-heal).
+      if (prior && !(await documentRow(tenantId, orgId, collectionId, documentId))) await restoreDocumentRow(prior);
+      throw err;
+    }
   } finally {
     upsertsInFlight.delete(inFlightKey);
   }
@@ -2340,7 +2436,7 @@ export async function ingestMediaCollection(
         title: asset.name,
         mediaToken: asset.serveToken,
         silent: true, // ADR 0643 D3 (R4 Should 2) — a BULK lane: one batch event below, never one per asset
-      });
+      }, caller); // #5756 — the gate above passed WITH the caller; the upsert re-asks it
       ingested += 1;
     } catch (err) {
       // A per-asset extraction failure (unsupported MIME, empty, too large, OCR/STT off,
@@ -2637,6 +2733,22 @@ export async function tenantRetrieve(tenantId: string, args: KnowledgeRetrieveAr
     if (!c.assetId || seen.has(c.assetId)) continue;
     seen.add(c.assetId);
     sources.push({ sourceId: c.assetId, assetId: c.assetId, title: c.documentTitle, headingPath: c.headingPath, pageNumber: c.pageNumber });
+  }
+  // ADR 1057 D4 — the openable URL lives on the document row (never in chunk or
+  // vector metadata). Only a SOURCE_URL_MANAGED collection's indexer writes one, so
+  // only those sources pay a row read, and the reads run together (grade-code
+  // finding 1: every retrieval used to read every source's full row in series).
+  const urlCollections = new Map(wanted.filter((c) => c.managed !== undefined && SOURCE_URL_MANAGED.has(c.managed)).map((c) => [c.collectionId, c.orgId] as const));
+  if (urlCollections.size > 0) {
+    const collectionOf = new Map<string, string>();
+    for (const c of chunks) if (!collectionOf.has(c.assetId)) collectionOf.set(c.assetId, c.collectionId); // the chunk the source was taken from
+    await Promise.all(sources.map(async (src) => {
+      const collectionId = collectionOf.get(src.assetId);
+      const orgId = collectionId ? urlCollections.get(collectionId) : undefined;
+      if (!collectionId || !orgId) return;
+      const url = (await documentRow(tenantId, orgId, collectionId, src.assetId))?.sourceUrl;
+      if (url) src.url = url;
+    }));
   }
 
   return { chunks, sources, latencyMs: Date.now() - started, hasResults: chunks.length > 0 };

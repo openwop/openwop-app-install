@@ -269,7 +269,7 @@ describe('Phase 2 — compliance layer', () => {
 
   it('STOP revokes the WhatsApp consent immediately; START re-opts-in explicitly', async () => {
     await optIn(RECIPIENT);
-    expect(await applyInboundKeyword(TENANT, `whatsapp:${RECIPIENT}`, 'STOP')).toBe('opt-out');
+    expect(await applyInboundKeyword(TENANT, `whatsapp:${RECIPIENT}`, 'STOP', { optInAllowed: true, connectionId: 'c-test', axis: 'workspace' })).toBe('opt-out');
     let rec = await getConsent(TENANT, RECIPIENT);
     expect(rec?.categories['marketing.whatsapp']).toBe(false);
     // fail-closed: the send gate now denies
@@ -277,10 +277,10 @@ describe('Phase 2 — compliance layer', () => {
     expect(denied).toMatchObject({ sent: false, error: 'consent_denied' });
     // other channel choices were preserved, not clobbered
     expect(rec?.categories.marketing).toBe(true);
-    expect(await applyInboundKeyword(TENANT, `whatsapp:${RECIPIENT}`, 'start')).toBe('opt-in');
+    expect(await applyInboundKeyword(TENANT, `whatsapp:${RECIPIENT}`, 'start', { optInAllowed: true, connectionId: 'c-test', axis: 'workspace' })).toBe('opt-in');
     rec = await getConsent(TENANT, RECIPIENT);
     expect(rec?.categories['marketing.whatsapp']).toBe(true);
-    expect(await applyInboundKeyword(TENANT, `whatsapp:${RECIPIENT}`, 'what time do you open?')).toBeNull();
+    expect(await applyInboundKeyword(TENANT, `whatsapp:${RECIPIENT}`, 'what time do you open?', { optInAllowed: true, connectionId: 'c-test', axis: 'workspace' })).toBeNull();
   });
 });
 
@@ -298,17 +298,18 @@ describe('attestation routes — RBAC (host:whatsapp:manage)', () => {
   }
 
   it('owner attests (explicit confirm required); editor 403s; reads show status', async () => {
-    const tenantId = `org:test-wa-rbac-${Date.now()}`;
+    // ADR 1053 D10 (WA85CD-15) — the attestation is addressed and judged at the WORKSPACE ROOT
+    // of a real shared workspace; any other org in the path is a 404.
     const owner = client();
-    expect((await owner.post('/host/openwop-app/test/login', { email: `waown-${Date.now()}@acme.test`, tenantId })).status).toBe(201);
-    const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
-    expect(org.status).toBe(201);
-    const orgId = (org.body as { orgId: string }).orgId;
+    expect((await owner.post('/host/openwop-app/test/login', { email: `waown-${Date.now()}@acme.test` })).status).toBe(201);
+    const ws = (await owner.post('/host/openwop-app/workspaces', { name: 'Acme' })).body as { workspaceId: string };
+    expect((await owner.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.workspaceId)}/switch`)).status).toBe(200);
     const editor = client();
-    const editorUser = ((await editor.post('/host/openwop-app/test/login', { email: `waed-${Date.now()}@acme.test`, tenantId })).body as { user: { userId: string } }).user;
-    expect((await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Ed', subject: editorUser.userId, roles: ['editor'] })).status).toBe(201);
+    const editorUser = ((await editor.post('/host/openwop-app/test/login', { email: `waed-${Date.now()}@acme.test` })).body as { user: { userId: string } }).user;
+    expect((await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws.workspaceId)}/members`, { displayName: 'Ed', subject: editorUser.userId, roles: ['editor'] })).status).toBe(201);
+    expect((await editor.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.workspaceId)}/switch`)).status).toBe(200);
 
-    const path = `/host/openwop-app/whatsapp/orgs/${encodeURIComponent(orgId)}/attestation`;
+    const path = `/host/openwop-app/whatsapp/orgs/${encodeURIComponent(ws.workspaceId)}/attestation`;
     const denied = await editor.put(path, { confirmNoTraining: true });
     expect(denied.status).toBe(403);
     expect((denied.body as { error?: string }).error).toBe('forbidden_scope');
@@ -322,6 +323,7 @@ describe('attestation routes — RBAC (host:whatsapp:manage)', () => {
     expect(read.status).toBe(200);
     expect((read.body as { attested: boolean }).attested).toBe(true);
   });
+
 });
 
 describe('Phase 4 — Meta Cloud API direct adapter', () => {
@@ -380,17 +382,18 @@ describe('Phase 4 — Meta Cloud API direct adapter', () => {
   });
 
   it('extractWaInbound normalizes both envelopes; a Cloud BATCH yields every message (STOP as msg 2+ counts)', () => {
-    expect(extractWaInbound({ From: 'whatsapp:+15551230000', Body: 'hi' })).toEqual([{ from: 'whatsapp:+15551230000', text: 'hi' }]);
+    expect(extractWaInbound({ From: 'whatsapp:+15551230000', Body: 'hi', MessageSid: 'SM1' })).toEqual([{ from: 'whatsapp:+15551230000', text: 'hi', id: 'SM1', at: null }]);
     expect(extractWaInbound({ entry: [{ changes: [{ value: { statuses: [{ id: 'x' }] } }] }] })).toEqual([]);
     // GRADE-CODE pin: a batched delivery is fully processed — message 2's STOP
     // must not be dropped.
     const batch = extractWaInbound({ entry: [{ changes: [{ value: { messages: [
-      { from: '15551230000', id: 'a', text: { body: 'hello' } },
+      { from: '15551230000', id: 'a', timestamp: '1760000000', text: { body: 'hello' } },
       { from: '15551230000', id: 'b', text: { body: 'STOP' } },
     ] } }] }] });
+    // ADR 1053 D4/D6 — each message carries its provider id (the replay claim) and Meta's own time.
     expect(batch).toEqual([
-      { from: '15551230000', text: 'hello' },
-      { from: '15551230000', text: 'STOP' },
+      { from: '15551230000', text: 'hello', id: 'a', at: new Date(1760000000 * 1000) },
+      { from: '15551230000', text: 'STOP', id: 'b', at: null },
     ]);
   });
 

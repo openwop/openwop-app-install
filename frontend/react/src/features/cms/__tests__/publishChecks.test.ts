@@ -60,4 +60,31 @@ describe('publishChecks', () => {
   it('an empty title blocks', () => {
     expect(byId(publishChecks(page({ title: '  ' }), null, opts), 'title')).toMatchObject({ level: 'block', fixOn: 'page' });
   });
+
+  // ADR 1100 D3 — a shared-section reference carries `data: {}`, so the raw list
+  // hid its pictures; the check reads the resolved sections. Sabotage: ignore
+  // `resolvedSections` → the first expectation goes red.
+  it('the accessibility check reads the RESOLVED sections, so a shared section\'s pictures count', () => {
+    const p = page({ sections: [{ sectionId: 'sec:ref', type: 'image', data: {}, ref: { sharedSectionId: 'sh1' } }] });
+    const resolvedSections = [{ sectionId: 'sec:ref', type: 'image' as const, data: { token: 'tok:x', alt: '' } }];
+    expect(byId(publishChecks(p, null, { ...opts, resolvedSections }), 'a11y')).toMatchObject({ level: 'warn', sectionId: 'sec:ref' });
+    expect(byId(publishChecks(p, null, opts), 'a11y')).toMatchObject({ level: 'ok' });
+  });
+
+  it('a picture ref inside a section (`<id>#<n>`) points the fix at the section', () => {
+    const p = page({ sections: [{ sectionId: 'c1', type: 'columns', data: { columns: [{ imageToken: 't1', alt: 'ok' }, { imageToken: 't2', alt: '' }] } }] });
+    expect(byId(publishChecks(p, null, opts), 'a11y')).toMatchObject({ level: 'warn', sectionId: 'c1' });
+  });
+
+  it('an unread shared section makes the check incomplete, never passed', () => {
+    const p = page({ sections: [{ sectionId: 'sec:ref', type: 'image', data: {}, ref: { sharedSectionId: 'sh1' } }] });
+    expect(byId(publishChecks(p, null, { ...opts, sharedUnread: true }), 'a11y')).toMatchObject({ level: 'warn', key: 'checkA11yIncomplete' });
+  });
+
+  it('issues found while a shared section is unread are flagged as not all there are', () => {
+    const p = page({ sections: [{ sectionId: 'i1', type: 'image', data: { token: 't', alt: '' } }, { sectionId: 'r1', type: 'image', data: {}, ref: { sharedSectionId: 'sh' } }] });
+    const checks = publishChecks(p, null, { ...opts, sharedUnread: true });
+    expect(byId(checks, 'a11y')).toMatchObject({ level: 'warn', key: 'checkA11y' });
+    expect(byId(checks, 'a11y-incomplete')).toMatchObject({ level: 'warn', key: 'checkA11yIncomplete' });
+  });
 });

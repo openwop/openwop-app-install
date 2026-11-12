@@ -4,14 +4,21 @@
  * Until this module, `runCampaign`/`applyToListing` had ZERO production callers
  * (WORKFLOWS-ASSESSMENT § job-search): ADR 0545 P3/P4 were pinned by unit tests
  * only, and Tier-A autopilot could not be started by any user or agent. This is
- * the one caller, and it is reached ONLY through the ADR 0543 stack lane — a
- * kanban card naming the `career.campaign` chain, claimed by the heartbeat,
- * gated by agent policy + run budget + (at `autonomyLevel:'review'`) a human
- * approval. There is deliberately no direct "run it now" execution route: the
- * loop IS the executor, and every authority object stays in front of it.
+ * the one caller. The intended lane is the ADR 0543 stack — a kanban card naming
+ * the `career.campaign` chain, claimed by the heartbeat, gated by agent policy +
+ * run budget + (at `autonomyLevel:'review'`) a human approval.
  *
- * What a pass does, per ACTIVE grant (grants key on `(subjectId, campaignId)` —
- * a workspace can hold several members' grants, so "the" grant is wrong):
+ * CORRECTED (ADR 1036 D1): this header used to say "ONLY through the stack lane
+ * … there is deliberately no direct run-it-now route". False: `career.campaign`
+ * is registered same-id and gallery-visible, so any member can start it. What
+ * made that matter was the second half — a pass ran EVERY member's grants. A
+ * pass now acts for exactly ONE person (`subjectId`, resolved by the surface from
+ * the run, never from input), so a member who starts it directly acts under
+ * their own grant, which is their own ADR 0541 consent, and cannot reach a
+ * colleague's campaign.
+ *
+ * What a pass does, per ACTIVE grant OF THE SUBJECT (grants key on
+ * `(subjectId, campaignId)`, so one person may hold several):
  *
  *   listings → digest → CampaignItem → runCampaign(items, submitLane, now)
  *
@@ -241,15 +248,18 @@ const liveGrant = (g: ApplyGrant, now: number): boolean =>
  * The pass
  * ------------------------------------------------------------------------- */
 
-export async function runTenantCampaignPass(tenantId: string, now: number): Promise<CampaignPassReport> {
+export async function runTenantCampaignPass(tenantId: string, subjectId: string, now: number): Promise<CampaignPassReport> {
   // Structural replay derivation (ADR 0531): inside a node execution this is the
   // run's own flag; outside a run (a test calling directly) it is absent ⇒ live.
   const isReplay = currentEffectContext()?.replaying === true;
 
-  const steering = await getSteering(tenantId);
+  // ADR 1036 D1/D7 — ONE person's pass: their steering, their grants. Never a
+  // colleague's, whoever started the run.
+  const steering = await getSteering(tenantId, subjectId);
   const policy = steering.policy;
 
-  const grants = (await applyGrants.listByPrefix(`${tenantId}:`)).filter((g) => liveGrant(g, now));
+  const grants = (await applyGrants.listByPrefix(`${tenantId}:`))
+    .filter((g) => g.subjectId === subjectId && liveGrant(g, now));
   const listingRows = await listListings(tenantId);
 
   const report: CampaignPassReport = {

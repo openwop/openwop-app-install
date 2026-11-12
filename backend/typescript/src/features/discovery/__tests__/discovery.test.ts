@@ -5,6 +5,13 @@
  *  - faceted search returns category/tag/typed-field facet counts + filters;
  *  - a pin/hide merch-rule re-orders/removes the ranked set (post-ranking transform);
  *  - a holdout control cohort (by sessionKey) sees the UNMODIFIED order.
+ *
+ * Sabotage witnesses (w74, re-witnessed w102 after #5469; discoveryService.ts): a manual collection returning the whole
+ * catalog reds case 1; a dynamic one ignoring its predicate reds 2; dropping the
+ * no-rule refusal reds 3; a category filter that keeps everything, or a facet count
+ * stuck at 1, reds 4; a pin that appends instead of inserting, or a hide that keeps the
+ * match, reds 5; removing the holdout skip reds 6 (whose no-sessionKey control proves
+ * the rule is live and only the holdout skipped it).
  */
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import { initHostExtPersistence } from '../../../host/hostExtPersistence.js';
@@ -33,12 +40,12 @@ describe('MERCH-C discovery', () => {
   });
 
   it('resolves a dynamic collection LIVE by facet predicate', async () => {
-    await mk('Camera', 100, ['photo']);
-    await mk('Lens', 50, ['photo']);
+    const camera = await mk('Camera', 100, ['photo']);
+    const lens = await mk('Lens', 50, ['photo']);
     const mug = await mk('Mug', 10, ['home']);
     const col = await createCollection({ tenantId: T, orgId: ORG, createdBy: 'u', name: 'Photo gear', type: 'dynamic', rule: { categories: ['photo'] } });
     const products = await resolveCollection(T, ORG, col.collectionId);
-    expect(products).toHaveLength(2);
+    expect(products.map((p) => p.productId).sort()).toEqual([camera.productId, lens.productId].sort());
     expect(products.map((p) => p.productId)).not.toContain(mug.productId);
     // Adding a matching product later is reflected immediately (resolve-at-read).
     const wide = await mk('Wide lens', 80, ['photo']);
@@ -47,7 +54,7 @@ describe('MERCH-C discovery', () => {
   });
 
   it('rejects a dynamic collection with no rule', async () => {
-    await expect(createCollection({ tenantId: T, orgId: ORG, createdBy: 'u', name: 'bad', type: 'dynamic' })).rejects.toThrow();
+    await expect(createCollection({ tenantId: T, orgId: ORG, createdBy: 'u', name: 'bad', type: 'dynamic' })).rejects.toThrow(/A dynamic collection needs a rule/);
   });
 
   it('faceted search returns facet counts and filters by category', async () => {
@@ -67,21 +74,25 @@ describe('MERCH-C discovery', () => {
     const b = await mk('B', 20, ['x']);
     const c = await mk('C', 30, ['hidden']);
     const ranked = [a, b, c];
-    await createMerchRule({ tenantId: T, orgId: ORG, createdBy: 'u', name: 'pin B first', scope: 'all', actions: [{ kind: 'pin', productId: b.productId, position: 0 }] });
-    await createMerchRule({ tenantId: T, orgId: ORG, createdBy: 'u', name: 'hide hidden', scope: 'all', actions: [{ kind: 'hide', predicate: { categories: ['hidden'] } }] });
+    const pin = await createMerchRule({ tenantId: T, orgId: ORG, createdBy: 'u', name: 'pin B first', scope: 'all', actions: [{ kind: 'pin', productId: b.productId, position: 0 }] });
+    const hide = await createMerchRule({ tenantId: T, orgId: ORG, createdBy: 'u', name: 'hide hidden', scope: 'all', actions: [{ kind: 'hide', predicate: { categories: ['hidden'] } }] });
     const rules = await listMerchRules(T, ORG);
     const { products, appliedRuleIds } = applyMerchRules(ranked, rules, 'all');
-    expect(products[0]?.productId).toBe(b.productId); // pinned to front
-    expect(products.map((p) => p.productId)).not.toContain(c.productId); // hidden
-    expect(appliedRuleIds).toHaveLength(2);
+    expect(products.map((p) => p.productId)).toEqual([b.productId, a.productId]); // B pinned to front, C hidden
+    expect([...appliedRuleIds].sort()).toEqual([pin.ruleId, hide.ruleId].sort());
   });
 
   it('holdout control cohort sees the unmodified ranking', async () => {
     const a = await mk('A', 10, ['x']);
     const b = await mk('B', 20, ['x']);
     const ranked = [a, b];
-    await createMerchRule({ tenantId: T, orgId: ORG, createdBy: 'u', name: 'pin B', scope: 'all', actions: [{ kind: 'pin', productId: b.productId, position: 0 }], holdoutPct: 100 });
+    const rule = await createMerchRule({ tenantId: T, orgId: ORG, createdBy: 'u', name: 'pin B', scope: 'all', actions: [{ kind: 'pin', productId: b.productId, position: 0 }], holdoutPct: 100 });
     const rules = await listMerchRules(T, ORG);
+    // Positive control: with no sessionKey there is no cohort, so the rule applies — it is
+    // live, and below only the holdout skips it.
+    const live = applyMerchRules(ranked, rules, 'all');
+    expect(live.products.map((p) => p.productId)).toEqual([b.productId, a.productId]);
+    expect(live.appliedRuleIds).toEqual([rule.ruleId]);
     const { products, appliedRuleIds } = applyMerchRules(ranked, rules, 'all', 'sess-1');
     expect(products.map((p) => p.productId)).toEqual([a.productId, b.productId]); // untouched (100% control)
     expect(appliedRuleIds).toHaveLength(0);

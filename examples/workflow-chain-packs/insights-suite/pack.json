@@ -1,8 +1,8 @@
 {
   "name": "core.openwop.workflows.insights-suite",
-  "version": "1.3.2",
+  "version": "1.4.0",
   "kind": "workflow-chain",
-  "description": "Insights & Drafting meta-workflows as an RFC 0013 chain pack (migrated from the deprecated ADR 0082/0072 builtins, ADR 0472 Phase 2). Three real source\u2192analysis\u2192LLM\u2192draft\u2192notify pipelines over BYOK-connected sources. chainIds keep the original `openwop-app.insights.*` ids so scheduler/trigger ignition + replay are unchanged; the chains are also gallery-editable. 1.2.0 (ADR 0599 \u00a75): each hard-required value is a chain PARAMETER bound as a WHOLE-VALUE `{{params.X}}` on a top-level node `inputs` entry, and data edges are port-qualified on BOTH sides. NOTIFY AUDIENCE (1.3.0 ADR 0600 \u00a75; STATED in 1.3.1 \u00a7Correction 6): `self` resolves from the run's ACTING USER and refuses fail-closed without one, so a scheduled/webhook fire of `talent-prep` or `anniversary-draft` loses its completion notification \u2014 deliberate, since the alternative broadcasts a colleague's 9-box score or recognition draft workspace-wide. `weekly-variance` keeps `tenant`: no declared PII, and its only lane is the scheduler.",
+  "description": "Insights & Drafting workflows: a weekly Actual-vs-Plan variance with a human review step, a work-anniversary recognition draft that you approve before it is saved to your mailbox (never sent), and a talent readiness score for one person. Version history: README.md.",
   "keywords": [
     "Insights",
     "HR",
@@ -14,9 +14,9 @@
   "chains": [
     {
       "chainId": "openwop-app.insights.weekly-variance",
-      "version": "1.2.1",
+      "version": "1.3.0",
       "label": "Weekly variance (Actual vs Plan)",
-      "description": "Pull financials \u2192 compute variance \u2192 human red-team \u2192 notify. (1.1.0: the input-less render step was removed \u2014 WF-DOC-3. 1.2.0: `sql` is a declared parameter bound into the query node \u2014 ADR 0599 \u00a75; the query\u2192compute edge is port-qualified so the variance node receives `rows`, not the BigQuery envelope.)",
+      "description": "Reads your financials from BigQuery, computes Actual vs Plan for sales, margin, labor and shrink, and shows you the figures to confirm before the workspace is notified.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -26,15 +26,15 @@
         "properties": {
           "projectId": {
             "type": "string",
-            "description": "BigQuery project for the financials read. Tenant-specific \u2014 no default is possible; the scheduled lane supplies it from the suite config's `planSource.projectId`."
+            "description": "The BigQuery project your financials live in. Scheduled runs use the one set in Settings \u2192 AI \u2192 Insights & Drafting."
           },
           "businessUnit": {
             "type": "string",
-            "description": "Business unit to analyze. Labels the variance result."
+            "description": "The business unit to analyse. It labels the result."
           },
           "sql": {
             "type": "string",
-            "description": "The financials read. It MUST return one row per metric with `metric` / `actual` / `plan` columns \u2014 that is the contract `variance-compute` consumes, and a result set without them makes the node fail `insufficient_data` rather than report a verdict. Edit this to match your warehouse.",
+            "description": "The query that reads your financials. It must return one row per metric with metric, actual and plan columns. Edit it to match your warehouse.",
             "default": "SELECT metric, actual, plan FROM `finance.weekly_variance` WHERE period = 'current_week'"
           }
         }
@@ -52,7 +52,7 @@
           },
           {
             "id": "compute",
-            "typeId": "feature.insights-suite.nodes.variance-compute@1.2.0",
+            "typeId": "feature.insights-suite.nodes.variance-compute@1.3.0",
             "name": "Compute variance",
             "inputs": {
               "businessUnit": "{{params.businessUnit}}"
@@ -61,11 +61,14 @@
           {
             "id": "redteam",
             "typeId": "core.approvalGate@1.0.0",
-            "name": "Variance red-team",
+            "name": "Review variance figures",
             "config": {
-              "title": "Variance red-team",
-              "prompt": "Confirm the variance figures before surfacing.",
-              "requiredApprovals": 1
+              "title": "Review variance figures",
+              "prompt": "Check these figures before the workspace is notified.",
+              "requiredApprovals": 1,
+              "optionLabels": {
+                "summary": "Variance figures"
+              }
             }
           },
           {
@@ -87,8 +90,8 @@
             "triggerRule": "all_success"
           },
           {
-            "from": "compute",
-            "to": "redteam",
+            "from": "compute.summary",
+            "to": "redteam.summary",
             "triggerRule": "all_success"
           },
           {
@@ -101,46 +104,49 @@
     },
     {
       "chainId": "openwop-app.insights.anniversary-draft",
-      "version": "1.2.1",
+      "version": "1.3.0",
       "label": "Work-anniversary recognition draft",
-      "description": "Pull milestones \u2192 retrieve voice exemplars \u2192 LLM drafts \u2192 email DRAFT (never sends) \u2192 approval \u2192 notify. (1.1.0 \u2014 ADR 0599 \u00a75: `workdayBaseUrl`, `exemplarQuery`, `recipient` and `draftSubject` are declared parameters bound into the nodes that hard-require them; the generate\u2192emailDraft edge is port-qualified `content`\u2192`body`, because the LLM emits `content` and the draft node reads `body` \u2014 supplying only the recipient would have created an EMPTY draft and reported it a success.) 1.2.0 \u2014 ADR 0600 \u00a75: notifies at `audience:\"self\"` rather than telling the whole workspace a recognition draft was made about a named colleague and linking them to it.",
+      "description": "Drafts a work-anniversary recognition message in your voice, from the person's milestone and your past messages in the knowledge base. You approve the text before it is saved as a draft in your mailbox. Nothing is ever sent.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
         "required": [
+          "subjectId",
           "workdayBaseUrl",
           "recipient"
         ],
         "properties": {
           "subjectId": {
             "type": "string",
-            "description": "The person being recognized."
+            "description": "The Workday worker id of the person being recognized. Only their record is read.",
+            "minLength": 1,
+            "pattern": "\\S"
           },
           "milestone": {
             "type": "string",
-            "description": "The anniversary/milestone."
+            "description": "The milestone to recognize, for example 10 years. Leave it empty when their Workday record states it."
           },
           "workdayResource": {
             "type": "string",
-            "description": "Workday resource the trigger reads \u2014 defaults to serviceDates; override for other milestone types.",
+            "description": "The Workday resource to read the milestone from. Defaults to service dates.",
             "default": "serviceDates"
           },
           "workdayBaseUrl": {
             "type": "string",
-            "description": "Your Workday tenant REST base, e.g. `https://{instance}.workday.com/ccx/api/v1/{tenant}`. Tenant-specific and required \u2014 ADR 0082 named the connection `instanceUrlTemplate` as the source, and that field is read nowhere in the repo (ADR 0599 \u00a75 retires the claim)."
+            "description": "Your Workday REST address, for example https://{instance}.workday.com/ccx/api/v1/{tenant}."
           },
           "exemplarQuery": {
             "type": "string",
-            "description": "What to retrieve from the knowledge base as voice exemplars.",
+            "description": "What to search the knowledge base for as examples of your voice.",
             "default": "work anniversary recognition message exemplars in the principal's voice"
           },
           "recipient": {
             "type": "string",
-            "description": "The mailbox the recognition message is addressed TO. The draft is created in YOUR mailbox and is never sent \u2014 nothing leaves until a human sends it by hand."
+            "description": "Who the message is addressed to. The draft is saved in YOUR mailbox and is never sent."
           },
           "draftSubject": {
             "type": "string",
-            "description": "Subject line for the draft.",
+            "description": "The subject line of the draft.",
             "default": "Work anniversary recognition"
           }
         }
@@ -152,11 +158,13 @@
             "typeId": "core.workday.query@1.0.0",
             "name": "Milestones",
             "config": {
-              "resource": "serviceDates"
+              "resource": "serviceDates",
+              "requireWorkerId": true
             },
             "inputs": {
               "resource": "{{params.workdayResource}}",
-              "baseUrl": "{{params.workdayBaseUrl}}"
+              "baseUrl": "{{params.workdayBaseUrl}}",
+              "workerId": "{{params.subjectId}}"
             }
           },
           {
@@ -168,17 +176,40 @@
             }
           },
           {
+            "id": "brief",
+            "typeId": "feature.insights-suite.nodes.recognition-brief@1.3.0",
+            "name": "Draft brief",
+            "inputs": {
+              "subjectId": "{{params.subjectId}}",
+              "milestone": "{{params.milestone}}"
+            }
+          },
+          {
             "id": "generate",
             "typeId": "core.ai.chatCompletion@1.0.0",
             "name": "Draft recognition",
             "config": {
               "provider": "anthropic",
               "model": "claude-sonnet-4-6",
-              "systemPrompt": "Draft a warm, specific work-anniversary recognition message in the principal\u2019s voice, grounded in the retrieved exemplars and the milestone. Plain text, no salutation block."
-            },
-            "inputs": {
-              "subjectId": "{{params.subjectId}}",
-              "milestone": "{{params.milestone}}"
+              "systemPrompt": "Draft a warm, specific work-anniversary recognition message in the principal\u2019s voice, grounded in the exemplars and the milestone you are given. Plain text, no salutation block."
+            }
+          },
+          {
+            "id": "check",
+            "typeId": "feature.insights-suite.nodes.draft-check@1.3.0",
+            "name": "Refuse an empty draft"
+          },
+          {
+            "id": "approve",
+            "typeId": "core.approvalGate@1.0.0",
+            "name": "Approve draft",
+            "config": {
+              "title": "Approve draft",
+              "prompt": "Approve this recognition draft. On approval it is saved as a DRAFT in your mailbox \u2014 nothing is sent. To change the wording, edit the draft in your mailbox afterwards.",
+              "requiredApprovals": 1,
+              "optionLabels": {
+                "draft": "Recognition draft"
+              }
             }
           },
           {
@@ -188,16 +219,6 @@
             "inputs": {
               "to": "{{params.recipient}}",
               "subject": "{{params.draftSubject}}"
-            }
-          },
-          {
-            "id": "approve",
-            "typeId": "core.approvalGate@1.0.0",
-            "name": "Approve draft",
-            "config": {
-              "title": "Approve draft",
-              "prompt": "Review the recognition draft. It is a DRAFT only \u2014 nothing is sent.",
-              "requiredApprovals": 1
             }
           },
           {
@@ -215,26 +236,41 @@
         "edges": [
           {
             "from": "milestones.rows",
-            "to": "retrieve.milestoneRows",
+            "to": "brief.milestoneRows",
             "triggerRule": "all_success"
           },
           {
-            "from": "retrieve",
-            "to": "generate",
+            "from": "retrieve.chunks",
+            "to": "brief.exemplars",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "brief.prompt",
+            "to": "generate.prompt",
             "triggerRule": "all_success"
           },
           {
             "from": "generate.content",
+            "to": "check.draft",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "check.draft",
+            "to": "approve.draft",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "check.draft",
             "to": "emailDraft.body",
             "triggerRule": "all_success"
           },
           {
-            "from": "emailDraft",
-            "to": "approve",
+            "from": "approve",
+            "to": "emailDraft",
             "triggerRule": "all_success"
           },
           {
-            "from": "approve",
+            "from": "emailDraft",
             "to": "notify",
             "triggerRule": "all_success"
           }
@@ -243,9 +279,9 @@
     },
     {
       "chainId": "openwop-app.insights.talent-prep",
-      "version": "1.2.1",
+      "version": "1.3.0",
       "label": "Talent readiness prep",
-      "description": "Pull performance data \u2192 9-box readiness score \u2192 notify. (1.1.0 \u2014 ADR 0599 \u00a75: `workdayBaseUrl` is a declared parameter bound into the pull node, and the pull\u2192score edge is port-qualified so the score node receives the review `rows` it derives ratings from rather than the Workday envelope. 1.2.0 \u2014 ADR 0600 \u00a75: notifies at `audience:\"self\"` rather than broadcasting a link to a named person's 9-box score workspace-wide, and the score\u2192notify edge is port-qualified `score.label \u2192 notify.message` so the notification body is no longer empty \u2014 the two are one decision, since a body is only safe once the audience is one person.)",
+      "description": "Reads one person's performance reviews from Workday, places them on the 9-box grid, and notifies only you.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -256,11 +292,13 @@
         "properties": {
           "subjectId": {
             "type": "string",
-            "description": "The person to score. Required \u2014 the score node refuses without it."
+            "description": "The Workday worker id of the person to score. Only their reviews are read.",
+            "minLength": 1,
+            "pattern": "\\S"
           },
           "workdayBaseUrl": {
             "type": "string",
-            "description": "Your Workday tenant REST base, e.g. `https://{instance}.workday.com/ccx/api/v1/{tenant}`."
+            "description": "Your Workday REST address, for example https://{instance}.workday.com/ccx/api/v1/{tenant}."
           }
         }
       },
@@ -271,10 +309,12 @@
             "typeId": "core.workday.query@1.0.0",
             "name": "Pull performance",
             "config": {
-              "resource": "performanceReviews"
+              "resource": "performanceReviews",
+              "requireWorkerId": true
             },
             "inputs": {
-              "baseUrl": "{{params.workdayBaseUrl}}"
+              "baseUrl": "{{params.workdayBaseUrl}}",
+              "workerId": "{{params.subjectId}}"
             }
           },
           {

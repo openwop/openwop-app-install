@@ -14,6 +14,7 @@
  * @see docs/adr/0046-project-subject.md
  */
 
+import { registerMemoryProposalLifecycle } from './memoryProposals.js';
 import type { BackendFeature } from '../types.js';
 import { setSubjectOrgResolver } from '../../host/subjectOrgScope.js';
 import { registerSubjectAccessResolver } from '../../host/subjectAccess.js';
@@ -28,6 +29,7 @@ export const projectsFeature: BackendFeature = {
   registerRoutes: (deps) => {
     registerProjectsRoutes(deps);
     registerProjectsAgentTools(); // XCH-HOLE-2 (Wave 4) — openwop:projects.list (ADR 0308 seam)
+    registerMemoryProposalLifecycle(); // ADR 1092 D2 — proposals' eraser and project-delete cascade
     registerProjectsErasure(); // D2 (chat-first port) — DSAR anonymizes a member's ref in place
 
     // ADR 0054 § Correction (2026-06-16) — the `project-collab` toggle is RETIRED;

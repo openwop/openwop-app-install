@@ -1,6 +1,6 @@
 {
   "name": "vendor.openwop-app.campaign-studio.agents",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "kind": "node",
   "description": "Campaign Strategist agent. Turns a marketing goal into a structured multi-channel campaign rendered in the EXISTING chat artifact workbench — composes the AI chat + the feature.campaign-studio.nodes pack; no new chat surface. Pure-agent pack.",
   "author": "OpenWOP App",
@@ -55,6 +55,7 @@
         "openwop:campaign-brief.get-brief",
         "openwop:campaign-studio.get-design",
         "openwop:creative-briefs.list",
+        "openwop:creative-briefs.get",
         "openwop:media.list",
         "openwop:brand.list-brands",
         "openwop:brand.resolve-voice",

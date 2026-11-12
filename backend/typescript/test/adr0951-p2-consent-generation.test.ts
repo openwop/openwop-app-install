@@ -1,6 +1,15 @@
 /** ADR 0951 P2: a recording grant is a revocable generation, never a boolean
  * copied back over withdrawal. Two real SQLite connections exercise lost CAS
- * and withdrawal between read and write; only the interleaving is injected. */
+ * and withdrawal between read and write; only the interleaving is injected.
+ *
+ * Sabotage witnesses (w103; src/features/consent/consentService.ts):
+ * keeping a generation through withdrawal, dropping it on an unrelated write,
+ * minting a fixed id, or minting for a non-visitor write (w103-cg-*-gen);
+ * dropping generations from the history entry (w103-cg-history); checking
+ * visitor-only grants on the first attempt only (w103-cg-visitor-first-only);
+ * a wrong grant budget, reason, retry bound or refusal test (w103-cg-budget-*,
+ * w103-cg-reason, w103-cg-off-by-one, w103-cg-revokes-every); and removing the
+ * affirmation re-check on either lane or its revision clause (w103-cg-affirm-*). */
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,7 +17,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
-import { getConsent, mergeConsentCategories, recordConsent, type ConsentRecord } from '../src/features/consent/consentService.js';
+import {
+  MERGE_REVOKE_ATTEMPTS, getConsent, mergeConsentCategories, recordConsent, type ConsentRecord,
+} from '../src/features/consent/consentService.js';
 import { setReplayToggles } from './helpers/replayToggles.js';
 
 let a: Storage;
@@ -71,9 +82,13 @@ describe('ADR 0951 P2 — consent-owned recording generations', () => {
     vi.spyOn(a, 'kvSet').mockImplementation(async (...args) => { await withdraw(args[0]); return set(...args); });
     const cas = a.kvCompareAndSwap.bind(a);
     vi.spyOn(a, 'kvCompareAndSwap').mockImplementation(async (...args) => { await withdraw(args[0]); return cas(...args); });
-    await expect(recordConsent({ tenantId, subjectKey, categories: { analytics: true, 'analytics.replay': true }, source: 'operator' })).rejects.toMatchObject({ httpStatus: 400 });
+    await expect(recordConsent({ tenantId, subjectKey, categories: { analytics: true, 'analytics.replay': true }, source: 'operator' }))
+      .rejects.toMatchObject({ httpStatus: 400, details: { field: 'categories.analytics.replay' } });
     expect(withdrew).toBe(true);
-    expect((await getConsent(tenantId, subjectKey))?.categories['analytics.replay']).toBe(false);
+    const stored = await getConsent(tenantId, subjectKey);
+    expect(stored?.categories['analytics.replay']).toBe(false);
+    expect(stored?.source).toBe('public:withdrawal');
+    expect(generation(stored)).toBeUndefined();
   });
 
   it('five real CAS conflicts return a retryable conflict without a blind overwrite', async () => {
@@ -161,7 +176,6 @@ describe('ADR 0951 P2 — consent-owned recording generations', () => {
   });
 
   it('a revoke-only write that is contended on every attempt still fails explicitly', async () => {
-    const { MERGE_REVOKE_ATTEMPTS } = await import('../src/features/consent/consentService.js');
     await merge({ marketing: true });
     let collisions = 0;
     const cas = a.kvCompareAndSwap.bind(a);
@@ -173,8 +187,12 @@ describe('ADR 0951 P2 — consent-owned recording generations', () => {
       }
       return cas(...args);
     });
-    await expect(merge({ marketing: false }, 'keyword:STOP')).rejects.toMatchObject({ httpStatus: 409 });
+    await expect(merge({ marketing: false }, 'keyword:STOP')).rejects.toMatchObject({ httpStatus: 409, details: { reason: 'consent_write_contended' } });
     expect(collisions).toBe(MERGE_REVOKE_ATTEMPTS);
+    // No blind put after the budget: the last other writer's row stands.
+    const stored = await getConsent(tenantId, subjectKey);
+    expect(stored?.categories.marketing).toBe(true);
+    expect(stored?.source).toBe(`other-writer-${MERGE_REVOKE_ATTEMPTS}`);
   }, 20_000);
 
   it('a refused → granted → refused race cannot hide behind the same final boolean', async () => {
@@ -190,8 +208,9 @@ describe('ADR 0951 P2 — consent-owned recording generations', () => {
       }
       return cas(...args);
     });
-    await expect(merge({ 'analytics.replay': true })).rejects.toMatchObject({ httpStatus: 409 });
+    await expect(merge({ 'analytics.replay': true })).rejects.toMatchObject({ httpStatus: 409, details: { reason: 'consent_write_contended' } });
     expect(raced).toBe(true);
     expect((await getConsent(tenantId, subjectKey))?.categories['analytics.replay']).toBe(false);
+    expect(generation(await getConsent(tenantId, subjectKey))).toBeUndefined();
   });
 });

@@ -61,13 +61,30 @@ function client() {
 }
 const anon = client;
 
-async function fixture(): Promise<{ user: ReturnType<typeof client>; orgId: string; tenantId: string; funnelId: string; stepId: string; formId: string; slug: string }> {
+/** `formOn` (ADR 1023 D6): where the opt-in form sits — a form section on the step's
+ *  page (the normal case), the same form inside a SHARED section the page references,
+ *  or nowhere on the page (`none`: the sink must then refuse to attribute). */
+async function fixture(opts: { formOn?: 'page' | 'shared' | 'none'; publishFunnel?: boolean } = {}): Promise<{ user: ReturnType<typeof client>; orgId: string; tenantId: string; funnelId: string; stepId: string; formId: string; slug: string }> {
+  const formOn = opts.formOn ?? 'page';
   const user = client();
   const login = await user.post('/host/openwop-app/test/login', { email: `ffa-${Date.now()}-${n++}@acme.test` });
   const tenantId = login.body.user?.tenantId ?? '';
   const org = await user.post('/host/openwop-app/orgs', { name: 'Attribution Co' });
   const orgId: string = org.body.orgId!;
-  const page = await user.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, { title: 'Opt-in' });
+  const form = await user.post(`/host/openwop-app/forms/orgs/${encodeURIComponent(orgId)}/forms`, {
+    title: 'Opt-in form', fields: [{ key: 'email', label: 'Email', type: 'email', required: true }],
+  });
+  await user.patch(`/host/openwop-app/forms/orgs/${encodeURIComponent(orgId)}/forms/${form.body.formId!}/status`, { status: 'published' });
+  const formId = form.body.formId!;
+  let sections: unknown[] = [];
+  if (formOn === 'page') sections = [{ type: 'form', data: { formId } }];
+  if (formOn === 'shared') {
+    const shared = await user.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/shared-sections`, { name: 'Sign-up', type: 'form', data: { formId } });
+    expect(shared.status, JSON.stringify(shared.body)).toBe(201);
+    sections = [{ type: 'form', ref: { sharedSectionId: (shared.body as { sharedSectionId?: string }).sharedSectionId } }];
+  }
+  const page = await user.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, { title: 'Opt-in', sections });
+  expect(page.status, JSON.stringify(page.body)).toBe(201);
   const pageId = page.body.pageId!;
   await user.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${pageId}/publish`);
   const funnel = await user.post(`/host/openwop-app/funnels/orgs/${encodeURIComponent(orgId)}/funnels`, {
@@ -75,14 +92,11 @@ async function fixture(): Promise<{ user: ReturnType<typeof client>; orgId: stri
   });
   expect(funnel.status, JSON.stringify(funnel.body)).toBe(201);
   const created = funnel.body.funnel!;
-  const publish = await user.post(`/host/openwop-app/funnels/orgs/${encodeURIComponent(orgId)}/funnels/${created.funnelId}/publish`);
-  expect(publish.status, JSON.stringify(publish.body)).toBe(200);
+  if (opts.publishFunnel !== false) {
+    const publish = await user.post(`/host/openwop-app/funnels/orgs/${encodeURIComponent(orgId)}/funnels/${created.funnelId}/publish`);
+    expect(publish.status, JSON.stringify(publish.body)).toBe(200);
+  }
   const stepId = created.steps[0]!.stepId;
-  const form = await user.post(`/host/openwop-app/forms/orgs/${encodeURIComponent(orgId)}/forms`, {
-    title: 'Opt-in form', fields: [{ key: 'email', label: 'Email', type: 'email', required: true }],
-  });
-  await user.patch(`/host/openwop-app/forms/orgs/${encodeURIComponent(orgId)}/forms/${form.body.formId!}/status`, { status: 'published' });
-  const formId = form.body.formId!;
   return { user, orgId, tenantId, funnelId: created.funnelId, stepId, formId, slug: created.slug };
 }
 
@@ -202,7 +216,10 @@ describe('ADR 0332 — funnel opt-in attribution', () => {
   // submissions are still two LEADS in the forms inbox; the old
   // per-submission-only pin was double-counting the sink+/next pair too.
   it('two distinct submissions by ONE visitor count as ONE step completion (distinct-visitor semantics)', async () => {
-    const { tenantId, orgId, funnelId, stepId, formId } = await fixture();
+    const { tenantId, orgId, funnelId, stepId, formId, slug } = await fixture();
+    // ADR 1023 D5 — a completion counts toward the step only for a visitor who VIEWED it.
+    const view = await anon().get(`/host/openwop-app/public/${encodeURIComponent(orgId)}/funnels/${encodeURIComponent(slug)}?vk=vk-twice`);
+    expect(view.status, JSON.stringify(view.body)).toBe(200);
     for (const email of ['a@x.com', 'b@x.com']) {
       const r = await anon().post(`/host/openwop-app/public-forms/${encodeURIComponent(formId)}/submit`, {
         values: { email }, context: { funnelId, stepId, visitor: 'vk-twice' },
@@ -217,12 +234,14 @@ describe('ADR 0332 — funnel opt-in attribution', () => {
 
   // GC-FRM-2 — attribution idempotency: the event carries the submissionId,
   // and the day-stats rollup counts each submission exactly ONCE however
-  // often its event lands in the window (the GC-D1-1 discipline).
+  // often its event lands in the window (the GC-D1-1 discipline). ADR 1023 D5:
+  // an unconsented submission (no visitor) is UNATTRIBUTED — counted, keyed on
+  // its submissionId, and never inside a conversion rate.
   it('form-submit completions carry submissionId and the day-stats rollup dedupes on it', async () => {
     const { tenantId, orgId, funnelId, stepId, formId } = await fixture();
     const sub = await anon().post(`/host/openwop-app/public-forms/${encodeURIComponent(formId)}/submit`, {
       values: { email: 'once@x.com' },
-      context: { funnelId, stepId, visitor: 'vk-idem' },
+      context: { funnelId, stepId },
     });
     expect(sub.status).toBe(201);
     const hit = (await listCollectedEvents(tenantId)).find(
@@ -238,7 +257,44 @@ describe('ADR 0332 — funnel opt-in attribution', () => {
     await collectEvent(tenantId, 'funnel.step_completed', { ...(hit!.payload as Record<string, unknown>) }, undefined, { source: 'first-party' });
     await rebuildFunnelStats(tenantId, orgId);
     const days = await getFunnelStats(tenantId, orgId, funnelId);
-    const total = days.reduce((acc, d) => acc + (d.steps[stepId]?.completions ?? 0), 0);
-    expect(total).toBe(1);
+    const unattributed = days.reduce((acc, d) => acc + (d.steps[stepId]?.unattributed ?? 0), 0);
+    const completions = days.reduce((acc, d) => acc + (d.steps[stepId]?.completions ?? 0), 0);
+    expect(unattributed).toBe(1);
+    expect(completions).toBe(0); // no viewer to attribute it to
+  });
+
+  // ADR 1023 D6 (FN72WF-15) — `context` is visitor-supplied and the ids are public,
+  // so the sink attributes only a PUBLISHED funnel's step that actually serves the
+  // submitted form. Sabotage-witnessed: dropping the `formServedOnStep` check turns
+  // the first two red; scanning only `page.sections` (no shared-ref resolution) turns
+  // the third red.
+  const sinkEvents = async (tenantId: string) => (await listCollectedEvents(tenantId)).filter(
+    (e) => e.eventType === 'funnel.step_completed' && (e.payload as { source?: string }).source === 'form-submit',
+  );
+  it('a form that is not on the step\'s page is not attributed to that step', async () => {
+    const { tenantId, funnelId, stepId, formId } = await fixture({ formOn: 'none' });
+    const sub = await anon().post(`/host/openwop-app/public-forms/${encodeURIComponent(formId)}/submit`, {
+      values: { email: 'forged@x.com' }, context: { funnelId, stepId, visitor: 'vk-forged' },
+    });
+    expect(sub.status).toBe(201); // the capture itself never fails
+    expect(await sinkEvents(tenantId)).toHaveLength(0);
+  });
+
+  it('a step of an unpublished funnel is not attributed', async () => {
+    const { tenantId, funnelId, stepId, formId } = await fixture({ publishFunnel: false });
+    const sub = await anon().post(`/host/openwop-app/public-forms/${encodeURIComponent(formId)}/submit`, {
+      values: { email: 'draft@x.com' }, context: { funnelId, stepId, visitor: 'vk-draft' },
+    });
+    expect(sub.status).toBe(201);
+    expect(await sinkEvents(tenantId)).toHaveLength(0);
+  });
+
+  it('a form kept in a SHARED section on the step\'s page is attributed', async () => {
+    const { tenantId, funnelId, stepId, formId } = await fixture({ formOn: 'shared' });
+    const sub = await anon().post(`/host/openwop-app/public-forms/${encodeURIComponent(formId)}/submit`, {
+      values: { email: 'shared@x.com' }, context: { funnelId, stepId, visitor: 'vk-shared' },
+    });
+    expect(sub.status).toBe(201);
+    expect(await sinkEvents(tenantId)).toHaveLength(1);
   });
 });

@@ -184,6 +184,7 @@ describe('RFC 0137 §F1 — every builtin tool declares its trust', () => {
     'openwop:feature.agent-author.nodes.get',     // `roster` = existing personas
     'openwop:discovery.search',                   // storefront catalog — merchant-authored
     'openwop:tutorials.catalog',                  // "this workspace's edited copies"
+    'openwop:accessibility.alt-text.generate',    // ADR 1100 D5 — a vision model's reading of an image the user uploaded
   ])('%s is UNTRUSTED — it reads back stored, non-host-authored text', (id) => {
     const t = trustOf(id);
     expect(t, `${id} not found in source — the assertion would be vacuous`).toBeDefined();
@@ -198,7 +199,6 @@ describe('RFC 0137 §F1 — every builtin tool declares its trust', () => {
     // cheap a gate — a 16th trusted tool must fail here until someone amends this
     // list deliberately.
     const EXPECTED = [
-      'openwop:accessibility.alt-text.generate',
       'openwop:accessibility.check',
       'openwop:app-builder.catalog',
       'openwop:ask-user',        // ADR 1001 D7: returns host-authored {ok, asked}; the questions are the model's own input

@@ -33,6 +33,7 @@ import { clearTenantSecretCache } from '../byok/secretResolver.js';
 import { __runKvAgeOutOnce } from './kvAgeOut.js';
 import { reconcileTenantIndexesOnce } from './tenantIndexAdoption.js';
 import { runStorageGrowthGaugeOnce } from './storageGrowthGauge.js';
+import { runIntegrityGaugesOnce } from './integrityGauges.js';
 import { eraseTenantOwnedUsage } from '../providers/managedProvider.js';
 import { getRetentionHold } from './retentionHold.js';
 
@@ -592,6 +593,9 @@ export function startRetentionSweepDaemon(deps: RetentionSweepDeps): RetentionSw
       // ADR 0871 — storage growth, once per UTC hour across instances (read-only).
       await runStorageGrowthGaugeOnce(deps.storage).catch((err) =>
         log.warn('storage growth gauge tick error', { error: err instanceof Error ? err.message : String(err) }));
+      // ADR 1104 — feature-registered integrity probes, once per UTC day (read-only).
+      await runIntegrityGaugesOnce(deps.storage).catch((err) =>
+        log.warn('integrity gauge tick error', { error: err instanceof Error ? err.message : String(err) }));
       if (dryRun) {
         // Wins over OPENWOP_RETENTION_SWEEP_ENABLED: report, delete nothing.
         logRetentionDryRun(await reportRetentionDryRun(deps));

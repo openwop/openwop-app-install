@@ -28,10 +28,15 @@ import { createLogger } from '../../observability/logger.js';
 // WF-KB-3 / KSWF-1 — the sanctioned chain+scheduler-job seam this feature now
 // rides (replacing the retired knowledgeSyncDaemon), isomorphic to gmailSyncService.
 import { getChain, expandChain } from '../../host/workflowChainPackLoader.js';
-import { registerWorkflowDurable } from '../../host/workflowsRegistry.js';
+import { registerWorkflowDurable, getRegisteredWorkflowAsync } from '../../host/workflowsRegistry.js';
 import { recordOwnership } from '../../host/workflowOwnership.js';
 import { recordRevision } from '../../host/workflowRevisions.js';
-import { registerJob, updateJob, deleteJob } from '../../host/schedulingService.js';
+import { lifecycleOf, withHostLifecycle, withLifecycle } from '../../host/workflowLifecycle.js';
+import { registerJob, updateJob, deleteJob, getJob, type ScheduledJob, type ScheduleSkipReason } from '../../host/schedulingService.js';
+import { deleteDocument, getCollection } from '../kb/kbService.js';
+import { PREAUTHORIZED_CALLER, type SubjectCaller } from '../../host/subjectAccess.js';
+import { assertNoRetentionHold, RetentionHoldError } from '../../host/retentionHold.js';
+import { holdsOrgScope } from './knowledgeSyncAccess.js';
 
 const log = createLogger('features.knowledgeSync.service');
 
@@ -61,7 +66,30 @@ export type SyncStatus = 'active' | 'paused' | 'error';
  * ADR 0605 R2 (`KSC-21`) adds `creator-erased` — a DSAR erased the member whose
  * identity every pass acts as. See `eraseKnowledgeSyncSubject`.
  */
-export type PausedReason = 'user' | 'connection-revoked' | 'creator-erased';
+export type PausedReason = 'user' | 'connection-revoked' | 'creator-erased' | 'creator-no-access' | 'removing';
+
+/**
+ * ADR 1101 D7 — the CAUSE of the last problem, as a closed code the panel
+ * renders in the reader's language (`lastError` stays the English detail, for
+ * logs and old clients). Retry state is NOT a code: it renders from the
+ * structured `consecutiveFailures` / `nextAttemptAt` / `status`, because a cause
+ * and a retry state co-occur. A clean pass, a Resume and a Rebind clear it.
+ */
+export type SyncErrorCode =
+  | 'listing_incomplete'
+  | 'files_failed'
+  | 'connection_revoked'
+  | 'connection_unusable'
+  | 'connection_missing'
+  | 'connection_owner_changed'
+  | 'creator_erased'
+  | 'creator_no_access'
+  | 'collection_unreadable'
+  | 'removing'
+  | 'sync_failed';
+
+/** Numbers and short tokens only — never provider text (it is the English detail). */
+export type SyncErrorParams = Record<string, string | number>;
 
 /** The outcome of one sync pass, persisted so a SCHEDULED run can be reported. */
 export interface SyncRunSummary {
@@ -76,6 +104,12 @@ export interface SyncRunSummary {
   /** Present when the provider listing could not be proved complete (Tier 1), in
    *  which case `pruned` is 0 BY REFUSAL rather than because nothing was deleted. */
   listingIncomplete?: string;
+  /** ADR 1101 D1 — the prune phase stopped because the source changed under the
+   *  pass (paused, rebound, erased, re-targeted or deleted). */
+  pruneSkipped?: 'changed';
+  /** ADR 1101 D9 — the workflow run this pass ran inside (the scheduled lane);
+   *  absent for "Sync now", which is a synchronous HTTP pass, not a run. */
+  runId?: string;
 }
 
 export interface SyncSource {
@@ -99,6 +133,11 @@ export interface SyncSource {
   jobId?: string;
   lastSyncedAt?: string;
   lastError?: string;
+  /** ADR 1101 D7 — see `SyncErrorCode`. Written beside `lastError` by every writer. */
+  lastErrorCode?: SyncErrorCode;
+  lastErrorParams?: SyncErrorParams;
+  /** ADR 1101 D8 — the folder's display name as picked, shown instead of the raw id. */
+  folderName?: string;
   /**
    * ADR 0605 Tier 5 (`KSWF-2`) — consecutive whole-run failures, and the earliest
    * time the cadence may try again.
@@ -175,22 +214,8 @@ export interface SyncSource {
    * as a clean full sync.
    */
   lastRun?: SyncRunSummary;
-  /**
-   * ~~The most recent `knowledge-sync.run` (Phase 3).~~
-   *
-   * ADR 0605 Tier 7 (`KSWF-8`) — DEAD FIELD, recorded rather than removed. There is
-   * no `knowledge-sync.run` and no run of any kind, so nothing has ever written
-   * this: `git grep runId -- features/knowledge-sync` returns this declaration and
-   * nothing else. It is nevertheless serialised onto every `GET`/`POST` response as
-   * `undefined`, so a client author reading the response type reasonably concludes
-   * a run id will appear once a sync has happened. It never will.
-   *
-   * NOT deleted here because deleting it changes the shape of a shipped host-
-   * extension response, which is a behaviour change and belongs with a witness, not
-   * with a records tier. Left OPEN as `KSWF-8`; it goes away with `KSWF-1` (which
-   * would give this feature a real run id) or on its own with a response-shape test.
-   */
-  runId?: string;
+  // ADR 1101 D9 (`KS2WF-10`, closes `KSWF-8`) — the dead `runId?: string` that
+  // nothing ever wrote is gone; the run a pass ran inside is `lastRun.runId`.
   /**
    * ADR 0605 Tier 3 (`KSC-2`) — the user who created this binding, which is also
    * the identity every subsequent pass is permitted to act as.
@@ -256,6 +281,16 @@ export interface CreateSyncSourceInput {
   /** ADR 0605 Tier 3 — the creating user, recorded as the identity later passes
    *  are permitted to act as. See `SyncSource.createdBy`. */
   createdBy?: string;
+  /** ADR 1101 D8 — the folder's display name, as picked. Cleaned, ≤ 200 chars. */
+  folderName?: string;
+}
+
+/** ADR 1101 D8 — a display label, never an identifier: trimmed, control
+ *  characters dropped, bounded. Empty ⇒ absent. */
+export function cleanFolderName(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const cleaned = v.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 200);
+  return cleaned.length > 0 ? cleaned : undefined;
 }
 
 /** Validate + create a sync source. Caller MUST have already authorized
@@ -282,6 +317,7 @@ export async function createSyncSource(tenantId: string, orgId: string, input: C
     // ADR 0605 Tier 3 — omit rather than write an empty string, so "unknown owner"
     // (a legacy row) and "owned by nobody" stay the same, checkable fact.
     ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+    ...(cleanFolderName(input.folderName) ? { folderName: cleanFolderName(input.folderName) } : {}),
     status: 'active',
     // WF-KB-3 — the per-source scheduler job that fires this source's sync workflow.
     jobId: knowledgeSyncJobId(id),
@@ -355,9 +391,21 @@ function cronForCadence(cadence: SyncCadence): string {
   }
 }
 
+/** The per-source workflow's display name (ADR 1101 D4): three sources are three
+ *  distinguishable rows in run history, not three "Knowledge Sync". */
+function knowledgeSyncWorkflowName(label: string, folder: string | undefined): string {
+  return folder ? `${label} — ${folder}` : label;
+}
+
 /** Idempotently register (+ own + first-revision) the source's
- *  `knowledge-sync.run` workflow so a run resolves as-run on replay/`:fork`. */
-export async function ensureKnowledgeSyncWorkflow(tenantId: string, sourceId: string): Promise<string> {
+ *  `knowledge-sync.run` workflow so a run resolves as-run on replay/`:fork`.
+ *
+ *  ADR 1101 D4 — host MACHINERY, registered the `kb.reindex` way: TRANSIENT and
+ *  host-stamped (`withHostLifecycle`), so it is hidden from `/builder` and the `/`
+ *  picker (no member can start a run of it from there) while staying resolvable by
+ *  id for its runs, replay and `:fork`. The chain is `internal` for the same
+ *  reason. Neither is a fence — `runOnce`'s structural gate is (D3). */
+export async function ensureKnowledgeSyncWorkflow(tenantId: string, sourceId: string, folder?: string): Promise<string> {
   const workflowId = knowledgeSyncWorkflowId(sourceId);
   const found = getChain(KNOWLEDGE_SYNC_CHAIN_ID);
   if (!found) {
@@ -369,10 +417,14 @@ export async function ensureKnowledgeSyncWorkflow(tenantId: string, sourceId: st
     );
   }
   const expanded = expandChain(found.chain, { params: { sourceId } });
-  const def = { ...expanded, workflowId };
+  const name = knowledgeSyncWorkflowName(found.chain.label, folder);
+  const def = withHostLifecycle(
+    { ...expanded, workflowId, metadata: { ...(expanded.metadata ?? {}), name } },
+    { transient: true, generatedBy: KNOWLEDGE_SYNC_CHAIN_ID },
+  );
   await registerWorkflowDurable(def);
   await recordRevision(tenantId, def);
-  await recordOwnership(tenantId, workflowId, { name: found.chain.label, nodeCount: expanded.nodes.length });
+  await recordOwnership(tenantId, workflowId, { name, nodeCount: expanded.nodes.length, transient: true });
   return workflowId;
 }
 
@@ -380,14 +432,15 @@ export async function ensureKnowledgeSyncWorkflow(tenantId: string, sourceId: st
  *  scheduler fires it on cadence → `knowledge-sync.run` → the run node → the
  *  `knowledge-sync` surface's `runOnce` (WF-KB-4 gated). */
 export async function registerKnowledgeSyncJob(source: SyncSource): Promise<void> {
-  const workflowId = await ensureKnowledgeSyncWorkflow(source.tenantId, source.id);
+  const workflowId = await ensureKnowledgeSyncWorkflow(source.tenantId, source.id, source.folderName ?? source.externalFolderId);
   const res = await registerJob({
     jobId: knowledgeSyncJobId(source.id),
     tenantId: source.tenantId,
     cronExpr: cronForCadence(source.cadence),
     workflowId,
     enabled: source.status === 'active',
-    metadata: { sourceId: source.id },
+    // ADR 1101 D3 — `kind` keys the scheduler READ gate (`knowledgeSyncJobReadable`).
+    metadata: { sourceId: source.id, kind: KNOWLEDGE_SYNC_JOB_KIND },
     featureId: 'knowledge-sync',
   });
   if (!res.ok) throw new OpenwopError('validation_error', res.error.message, 400, { code: res.error.code });
@@ -408,9 +461,7 @@ async function deleteKnowledgeSyncJob(sourceId: string): Promise<void> {
 
 /** Stamp a source's `jobId` (the backfill's write-back; a point update). */
 async function setSyncJobId(tenantId: string, id: string, jobId: string): Promise<void> {
-  const current = await sources.get(`${tenantId}:${id}`);
-  if (!current || current.tenantId !== tenantId) return;
-  await sources.put({ ...current, jobId, updatedAt: new Date().toISOString() });
+  await mutateSource(tenantId, id, (cur) => ({ ...cur, jobId, updatedAt: new Date().toISOString() }));
 }
 
 /**
@@ -427,7 +478,20 @@ export async function backfillKnowledgeSyncJobs(): Promise<number> {
     try { list = await listAllSyncSourcesForTenant(tenantId); }
     catch (err) { log.warn('knowledge_sync_backfill_scan_failed', { tenantId, error: err instanceof Error ? err.message : String(err) }); continue; }
     for (const source of list) {
-      if (source.jobId) continue; // already migrated
+      // Already migrated — and (ADR 1101 D3/D4) already on the current shape: a job
+      // stamped with `kind` (the scheduler read gate keys on it) over a transient,
+      // host-stamped definition. A pre-1101 job is re-registered in place (same ids,
+      // an upsert), which also re-stamps its definition transient.
+      const job = source.jobId ? await getJob(knowledgeSyncJobId(source.id)) : null;
+      if (job?.metadata?.kind === KNOWLEDGE_SYNC_JOB_KIND) {
+        // The backstop for the status ⇔ `enabled` pairing (`reconcileJobAfterWrite`):
+        // a job that disagrees with its source is re-asserted on every boot.
+        if (job.enabled !== (source.status === 'active')) {
+          try { await updateKnowledgeSyncJob(source); }
+          catch (err) { log.warn('knowledge_sync_backfill_job_reassert_failed', { tenantId, sourceId: source.id, error: err instanceof Error ? err.message : String(err) }); }
+        }
+        continue;
+      }
       try {
         await registerKnowledgeSyncJob(source);
         await setSyncJobId(source.tenantId, source.id, knowledgeSyncJobId(source.id));
@@ -447,13 +511,104 @@ export async function getSyncSource(tenantId: string, id: string): Promise<SyncS
   return s && s.tenantId === tenantId ? s : null;
 }
 
+/** How many lost swaps `mutateSource` absorbs before it gives up. */
+const MUTATE_ATTEMPTS = 4;
+
+/**
+ * ADR 1101 D1 (`KS2CD-1`) — THE ONLY WRITER of an existing `knowledge-sync:source`
+ * row. Read → `fn` → compare-and-swap, retried on a lost swap.
+ *
+ * Every mutator here used to be read-then-`put`, so any two interleaving lost one
+ * write, and `syncNow` wrote a status it had read an hour earlier — undoing a pause
+ * made during the pass and re-arming its job (`KS2WF-1`). A legal-transition rule
+ * only rejects a write it SEES; a CAS is what makes it see the other one.
+ *
+ *  - `fn` gets a `structuredClone`: `compareAndSwap` compares the SERIALISED row,
+ *    so a callback that mutated `expected` in place would fail every swap.
+ *  - It never inserts: a missing row returns `null`, never `compareAndSwap(null, …)`
+ *    (insert-if-absent would resurrect a source being removed).
+ *  - `fn` returning `null` means "no write" (the row is reported unchanged).
+ *  - Exhaustion is `internal_error` 503 `write_contention`, NEVER a 409: the surface
+ *    reads a named 409 as a benign skip, and contention is not one.
+ *  - The scheduler job's `enabled` is reconciled AFTER the winning swap, from the row
+ *    that was written, so two racing transitions cannot leave the row `active` with
+ *    its job disabled. Best-effort, as before: the surface's own status skip is the
+ *    correctness authority.
+ */
+export async function mutateSource(
+  tenantId: string,
+  id: string,
+  fn: (current: SyncSource) => SyncSource | null,
+): Promise<{ before: SyncSource; after: SyncSource; written: boolean } | null> {
+  for (let attempt = 0; attempt < MUTATE_ATTEMPTS; attempt++) {
+    const current = await getSyncSource(tenantId, id);
+    if (!current) return null;
+    const next = fn(structuredClone(current));
+    if (!next) return { before: current, after: current, written: false };
+    if (await sources.compareAndSwap(current, next)) {
+      await reconcileJobAfterWrite(current, next);
+      return { before: current, after: next, written: true };
+    }
+  }
+  throw new OpenwopError('internal_error', 'The sync source changed repeatedly while saving. Try again.', 503, { reason: 'write_contention', id });
+}
+
+/**
+ * Keep the scheduler job's `enabled` in step with a REAL status transition.
+ *
+ * Reconciled from the FRESH row after each job write, not from the row this
+ * writer captured (grade-code #3): two racing transitions each write `enabled`
+ * from their own row, so the LAST job write could disagree with the LAST row
+ * write (row `active`, job disabled — a source that never fires again). Re-reading
+ * until the status is stable makes the last finisher converge the two. Bounded;
+ * boot backfill re-asserts the pairing for every source as the backstop.
+ */
+async function reconcileJobAfterWrite(before: SyncSource, after: SyncSource): Promise<void> {
+  if (before.status === after.status || !after.jobId) return;
+  try {
+    let row: SyncSource | null = after;
+    for (let i = 0; i < 3 && row; i++) {
+      await updateKnowledgeSyncJob(row);
+      const fresh: SyncSource | null = await getSyncSource(row.tenantId, row.id);
+      if (!fresh || fresh.status === row.status) break;
+      row = fresh;
+    }
+  } catch (err) { log.warn('knowledge_sync_job_sync_failed', { tenantId: after.tenantId, id: after.id, error: err instanceof Error ? err.message : String(err) }); }
+}
+
+/** ADR 1101 D5 — a source being REMOVED takes no other status write: a Pause would
+ *  re-label it a user pause (which "Sync now" overrides), and a Resume would re-arm
+ *  the cadence over a half-removed mirror. Only the removal itself moves it. */
+function refuseWhileRemoving(cur: SyncSource): void {
+  if (cur.status === 'paused' && cur.pausedReason === 'removing') {
+    throw new OpenwopError('conflict', 'This sync source is being removed.', 409, { reason: 'removing', id: cur.id });
+  }
+}
+
+/** ADR 1101 D7 — set the English detail and its code together, or clear both. */
+function withError(next: SyncSource, error: { message: string; code: SyncErrorCode; params?: SyncErrorParams } | null): SyncSource {
+  delete next.lastError;
+  delete next.lastErrorCode;
+  delete next.lastErrorParams;
+  if (error) {
+    next.lastError = error.message;
+    next.lastErrorCode = error.code;
+    if (error.params && Object.keys(error.params).length > 0) next.lastErrorParams = error.params;
+  }
+  return next;
+}
+
 export async function setSyncStatus(
   tenantId: string,
   id: string,
   status: SyncStatus,
   now: string,
   opts: {
+    /** `null`/`undefined` value with the key present CLEARS the error; absent key
+     *  leaves it. `code` defaults to `sync_failed` for an uncoded message. */
     lastError?: string;
+    lastErrorCode?: SyncErrorCode;
+    lastErrorParams?: SyncErrorParams;
     lastSyncedAt?: string;
     /** ADR 0605 — explicit retry bookkeeping. `null` CLEARS both fields. */
     retry?: { consecutiveFailures: number; nextAttemptAt: string } | null;
@@ -468,68 +623,153 @@ export async function setSyncStatus(
     syncStartedAt?: null;
   } = {},
 ): Promise<SyncSource | null> {
-  const s = await getSyncSource(tenantId, id);
-  if (!s) return null;
-  const next: SyncSource = {
-    ...s,
-    status,
-    updatedAt: now,
+  const out = await mutateSource(tenantId, id, (cur) => {
+    // Re-grade N3 — `removing` is entered ONLY by `removeSyncSource`, after its lease,
+    // legal-hold and collection checks; this setter can neither enter nor leave it.
+    if (opts.pausedReason === 'removing') {
+      throw new OpenwopError('validation_error', 'A sync source enters the removing state only through removal.', 400, { reason: 'removing_via_removal_only' });
+    }
+    refuseWhileRemoving(cur);
+    const next: SyncSource = { ...cur, status, updatedAt: now };
     // A run sets lastError to the message OR clears it on a clean pass; pause/resume
-    // leave it untouched (they pass no opts ⇒ lastError preserved via the spread).
-    ...('lastError' in opts ? { lastError: opts.lastError } : {}),
-    ...(opts.lastSyncedAt !== undefined ? { lastSyncedAt: opts.lastSyncedAt } : {}),
-  };
-  // Retry state is only touched when the caller says so, so pause/resume and the
-  // revocation hook cannot silently reset a backoff they know nothing about.
-  if (opts.retry === null) {
-    delete next.consecutiveFailures;
-    delete next.nextAttemptAt;
-  } else if (opts.retry) {
-    next.consecutiveFailures = opts.retry.consecutiveFailures;
-    next.nextAttemptAt = opts.retry.nextAttemptAt;
-  }
-  if (opts.pausedReason === null) delete next.pausedReason;
-  else if (opts.pausedReason) next.pausedReason = opts.pausedReason;
-  // A source that is no longer paused cannot carry a pause reason — otherwise a
-  // resumed row keeps saying "reconnect needed" forever.
-  if (status !== 'paused') delete next.pausedReason;
-  if (opts.lastRun) next.lastRun = opts.lastRun;
-  // ADR 0605 R1 — release the in-flight lease only when the caller says so.
-  if (opts.syncStartedAt === null) delete next.syncStartedAt;
-  await sources.put(next);
-  // WF-KB-3 — keep the scheduler job's `enabled` in step with the source status,
-  // but ONLY on a real transition (a per-pass status refresh that leaves the status
-  // unchanged skips this, so a normal sync does not rewrite the job). Best-effort:
-  // the surface's own `status !== 'active'` skip is the correctness authority (a
-  // disabled tenant / paused source never spends), so a job-sync failure must never
-  // fail the status write — it only trims no-op runs for a long-paused source.
-  if (s.status !== status && next.jobId) {
-    try { await updateKnowledgeSyncJob(next); }
-    catch (err) { log.warn('knowledge_sync_job_sync_failed', { tenantId, id, error: err instanceof Error ? err.message : String(err) }); }
-  }
-  return next;
+    // leave it untouched (they pass no `lastError` key).
+    if ('lastError' in opts) {
+      withError(next, opts.lastError ? { message: opts.lastError, code: opts.lastErrorCode ?? 'sync_failed', ...(opts.lastErrorParams ? { params: opts.lastErrorParams } : {}) } : null);
+    }
+    if (opts.lastSyncedAt !== undefined) next.lastSyncedAt = opts.lastSyncedAt;
+    // Retry state is only touched when the caller says so, so pause/resume and the
+    // revocation hook cannot silently reset a backoff they know nothing about.
+    if (opts.retry === null) {
+      delete next.consecutiveFailures;
+      delete next.nextAttemptAt;
+    } else if (opts.retry) {
+      next.consecutiveFailures = opts.retry.consecutiveFailures;
+      next.nextAttemptAt = opts.retry.nextAttemptAt;
+    }
+    if (opts.pausedReason === null) delete next.pausedReason;
+    else if (opts.pausedReason) next.pausedReason = opts.pausedReason;
+    // A source that is no longer paused cannot carry a pause reason — otherwise a
+    // resumed row keeps saying "reconnect needed" forever.
+    if (status !== 'paused') delete next.pausedReason;
+    if (opts.lastRun) next.lastRun = opts.lastRun;
+    // ADR 0605 R1 — release the in-flight lease only when the caller says so.
+    if (opts.syncStartedAt === null) delete next.syncStartedAt;
+    return next;
+  });
+  return out ? out.after : null;
 }
 
 /**
  * ADR 0605 R1 (review HIGH 1) — TAKE the in-flight lease, BEFORE the pass runs.
  *
- * Deliberately NOT `setSyncStatus`: this write must carry no status semantics at
- * all. A pass is an OUTCOME, not a schedule decision (see `statusAfterPass`), and
- * routing the lease through the status writer is how a "record that we started"
- * turns into a "resume this source" — the review's HIGH 3, which this file's own
- * `setSyncStatus` committed.
+ * ADR 1101 D1 — ATOMIC WITH THE CLAIM: ONE compare-and-swap against the exact row
+ * the claim key (`syncStateVersion`) was computed from, never a retrying mutator. A
+ * lost swap means another write landed since the claim — the version has rotated,
+ * so nothing wedges — and the caller answers the in-flight 409. On success the pass
+ * runs on the LEASED row, not on a read that may already be stale.
  *
- * `updatedAt` moves with it, so `syncStateVersion` — and therefore the claim key
- * — rotates the instant the pass begins. That is the whole anti-wedge property:
- * a crash between here and the terminal write leaves a claim key nothing will
- * ever compute again.
+ * Deliberately carries no status semantics: a pass is an OUTCOME, not a schedule
+ * decision (see `statusAfterPass`). `updatedAt` moves with it, so the claim key
+ * rotates the instant the pass begins — a crash between here and the terminal
+ * write leaves a key nothing will ever compute again.
  */
-export async function beginSyncAttempt(tenantId: string, id: string, now: string): Promise<SyncSource | null> {
-  const s = await getSyncSource(tenantId, id);
-  if (!s) return null;
-  const next: SyncSource = { ...s, syncStartedAt: now, updatedAt: now };
-  await sources.put(next);
-  return next;
+export async function beginSyncAttempt(claimed: SyncSource, stamp: string): Promise<SyncSource | null> {
+  const leased: SyncSource = { ...structuredClone(claimed), syncStartedAt: stamp, updatedAt: stamp };
+  return (await sources.compareAndSwap(claimed, leased)) ? leased : null;
+}
+
+/** What a pass ended as (ADR 1101 D1). `refused` is a typed authority/identity
+ *  outcome: it pauses the source and counts NO failure (D3). */
+export type PassOutcome =
+  | { kind: 'ok'; lastRun: SyncRunSummary; notice?: { message: string; code: SyncErrorCode; params?: SyncErrorParams } }
+  | { kind: 'failed'; message: string; code: SyncErrorCode; params?: SyncErrorParams; at: number }
+  | { kind: 'refused'; pausedReason: PausedReason; message: string; code: SyncErrorCode };
+
+/**
+ * ADR 1101 D1 — the TERMINAL write of a pass, decided on the FRESH row inside the
+ * CAS. Returns what happened, so `syncNow` can report it:
+ *  - `missing`    — the source was deleted during the pass (the caller sweeps what
+ *                   the pass wrote after the delete);
+ *  - `superseded` — the row's lease is no longer THIS pass's stamp: the pass outlived
+ *                   its lease and a newer pass owns the row. Write NOTHING (`KSWF-20`,
+ *                   narrowed: it can no longer clobber the newer pass's bookkeeping or
+ *                   release its lease);
+ *  - `written`    — the outcome landed.
+ *
+ * `status` is `statusAfterPass(fresh.status, …)` — a pause made by ANY lane at ANY
+ * point in the pass survives it. The failure count, the terminal decision and the
+ * backoff are computed from `fresh` too, not from the row read at the start.
+ */
+export async function recordPassOutcome(
+  tenantId: string,
+  id: string,
+  stamp: string,
+  now: string,
+  outcome: PassOutcome,
+): Promise<'missing' | 'superseded' | 'written'> {
+  let superseded = false;
+  const out = await mutateSource(tenantId, id, (fresh) => {
+    if (fresh.syncStartedAt !== stamp) { superseded = true; return null; }
+    const next: SyncSource = { ...fresh, updatedAt: now };
+    delete next.syncStartedAt; // the pass ended — release ITS lease
+    // A pause with its own instruction (revoked, erased, no access, removing) that is
+    // on the row now: neither a clean pass nor a failed one is the answer to it, so it
+    // keeps its code and message, and a failure is not counted against it (re-grade N1:
+    // a credential revoked mid-pass makes the PINNED pass fail, which used to replace
+    // "connection revoked" with the pass's own error and bump the counter).
+    const pauseSpeaks = fresh.status === 'paused' && fresh.pausedReason !== undefined && fresh.pausedReason !== 'user' && fresh.lastErrorCode !== undefined;
+    if (outcome.kind === 'ok') {
+      next.status = statusAfterPass(fresh.status, 'ok');
+      next.lastSyncedAt = now;
+      next.lastRun = outcome.lastRun;
+      delete next.consecutiveFailures; // a completed pass clears any backoff (ADR 0605 `KSWF-2`)
+      delete next.nextAttemptAt;
+      if (!pauseSpeaks) withError(next, outcome.notice ?? null);
+    } else if (outcome.kind === 'failed' && pauseSpeaks) {
+      // Paused with its own instruction: the failure is recorded nowhere but the log.
+      next.status = 'paused';
+    } else if (outcome.kind === 'failed') {
+      const failures = (fresh.consecutiveFailures ?? 0) + 1;
+      const terminal = failures >= MAX_CONSECUTIVE_FAILURES;
+      next.status = statusAfterPass(fresh.status, terminal ? 'terminal' : 'retry');
+      // Keep the counter on the terminal row too: it is the evidence for WHY the
+      // source stopped.
+      next.consecutiveFailures = failures;
+      next.nextAttemptAt = new Date(outcome.at + retryDelayMs(failures)).toISOString();
+      withError(next, {
+        message: terminal
+          ? `${outcome.message} (stopped after ${failures} consecutive failures — fix the problem, then use Sync now)`
+          : `${outcome.message} (attempt ${failures} of ${MAX_CONSECUTIVE_FAILURES}; retrying automatically)`,
+        code: outcome.code,
+        ...(outcome.params ? { params: outcome.params } : {}),
+      });
+    } else {
+      // D3 — a refusal is not a failure: pause, say why, count nothing. A source being
+      // REMOVED keeps that state (the removal is the only thing that moves it).
+      next.status = 'paused';
+      if (fresh.pausedReason !== 'removing') {
+        next.pausedReason = outcome.pausedReason;
+        withError(next, { message: outcome.message, code: outcome.code });
+      }
+    }
+    if (next.status !== 'paused') delete next.pausedReason;
+    return next;
+  });
+  if (!out) return 'missing';
+  return superseded ? 'superseded' : 'written';
+}
+
+/** ADR 1101 D1 — the fields whose change under a running pass means the pass may no
+ *  longer DESTROY anything: it was started for a binding that no longer exists.
+ *  `syncStartedAt` is one (grade-code #4): a pass that OUTLIVED its lease sees a
+ *  newer pass's stamp there and stops pruning over the cursors that pass now owns. */
+const PASS_BINDING_FIELDS = ['status', 'pausedReason', 'createdBy', 'connectionId', 'collectionId', 'externalFolderId', 'includeMedia', 'syncStartedAt'] as const;
+
+/** Did the source change, since the pass leased it, in a way that forbids pruning?
+ *  `fresh === null` (deleted) always does. PURE. */
+export function bindingChangedSinceLease(leased: SyncSource, fresh: SyncSource | null): boolean {
+  if (!fresh) return true;
+  return PASS_BINDING_FIELDS.some((k) => leased[k] !== fresh[k]);
 }
 
 /**
@@ -611,19 +851,65 @@ export async function updateSyncSource(
   patch: { includeMedia?: boolean },
   now: string,
 ): Promise<SyncSource | null> {
-  const s = await getSyncSource(tenantId, id);
-  if (!s) return null;
-  const next: SyncSource = { ...s, updatedAt: now };
-  // Persist includeMedia only when explicitly false (opt-out); true ⇒ drop the field so the
-  // row matches a default source (absent ⇒ media included). undefined ⇒ leave unchanged.
-  if (patch.includeMedia === false) next.includeMedia = false;
-  else if (patch.includeMedia === true) delete next.includeMedia;
-  await sources.put(next);
-  return next;
+  const out = await mutateSource(tenantId, id, (cur) => {
+    refuseWhileRemoving(cur);
+    const next: SyncSource = { ...cur, updatedAt: now };
+    // Persist includeMedia only when explicitly false (opt-out); true ⇒ drop the field so the
+    // row matches a default source (absent ⇒ media included). undefined ⇒ leave unchanged.
+    if (patch.includeMedia === false) next.includeMedia = false;
+    else if (patch.includeMedia === true) delete next.includeMedia;
+    return next;
+  });
+  return out ? out.after : null;
 }
 
-/** Delete a source + cascade its per-file diff state (Phase-3 ingest cleanup is
- *  separate — this only drops the cursor rows). Returns true when it existed. */
+/**
+ * ADR 1101 D5b — REBIND a stopped source to the caller's own connection, keeping
+ * its `sourceId` (so every cursor and `sync:<sourceId>:<fileId>` document id stays,
+ * and nothing is re-ingested or un-citable in between).
+ *
+ * The exit for a source whose person can no longer act (`creator-erased`,
+ * `creator-no-access`, a revoked credential, a terminal `error`). Refused on an
+ * `active` source: swapping a running colleague's credential under them changes
+ * whose view of the folder is mirrored, so it must be a deliberate stop-then-rebind.
+ * Refused while a pass holds the lease and while removing. The ROUTE has already
+ * proved the connection is the caller's own (`requireOwnConnection`) and that its
+ * provider family matches.
+ *
+ * The rebinder becomes `createdBy` — the identity every later pass acts as and is
+ * checked against — and the pause, the retry state and the error are cleared, so
+ * the cadence re-arms.
+ */
+export async function rebindSyncSource(
+  tenantId: string,
+  id: string,
+  input: { connectionId: string; createdBy: string | undefined },
+  now: string,
+): Promise<SyncSource | null> {
+  const out = await mutateSource(tenantId, id, (cur) => {
+    if (cur.status === 'active') {
+      throw new OpenwopError('conflict', 'Pause this sync source before switching it to another account.', 409, { reason: 'source_active' });
+    }
+    if (cur.pausedReason === 'removing') {
+      throw new OpenwopError('conflict', 'This sync source is being removed.', 409, { reason: 'removing' });
+    }
+    if (syncLeaseHeld(cur, Date.parse(now) || Date.now())) {
+      throw new OpenwopError('conflict', 'A sync is already running for this source. Try again once it finishes.', 409, { reason: 'in_flight' });
+    }
+    // The rebinder becomes `createdBy`. With no person there is nothing to record, and
+    // removing the field would hand the source the LEGACY shape the identity guard skips.
+    if (!input.createdBy) {
+      throw new OpenwopError('forbidden', 'Sign in as a member to switch a sync to your account.', 403, { reason: 'no_actor' });
+    }
+    const next: SyncSource = { ...cur, connectionId: input.connectionId, createdBy: input.createdBy, status: 'active', updatedAt: now };
+    delete next.pausedReason;
+    delete next.consecutiveFailures;
+    delete next.nextAttemptAt;
+    return withError(next, null);
+  });
+  return out ? out.after : null;
+}
+
 /**
  * ADR 0285 — pause (never delete) every source riding a REVOKED connection: the
  * user-authored folder→collection binding survives, visibly paused with the
@@ -645,11 +931,18 @@ export async function pauseSourcesForRevokedConnection(
   let paused = 0;
   for (const s of (await sources.listByPrefix(`${tenantId}:`)).filter((x) => x.connectionId === connectionId && x.status === 'active')) {
     // ADR 0605 Tier 6 — mark WHY, so the UI can offer "Reconnect" instead of a
-    // Resume button that cannot work.
-    await setSyncStatus(tenantId, s.id, 'paused', now, cause === 'subject-erased'
-      ? { lastError: ERASED_CREATOR_MESSAGE, pausedReason: 'creator-erased' }
-      : { lastError: 'Connection revoked — reconnect to resume syncing.', pausedReason: 'connection-revoked' });
-    paused += 1;
+    // Resume button that cannot work. ADR 1101 D1 — through the CAS, and re-checked
+    // on the fresh row: a source that stopped being `active` since the listing is
+    // left as it is.
+    const out = await mutateSource(tenantId, s.id, (cur) => {
+      if (cur.connectionId !== connectionId || cur.status !== 'active') return null;
+      const next: SyncSource = { ...cur, status: 'paused', updatedAt: now };
+      next.pausedReason = cause === 'subject-erased' ? 'creator-erased' : 'connection-revoked';
+      return withError(next, cause === 'subject-erased'
+        ? { message: ERASED_CREATOR_MESSAGE, code: 'creator_erased' }
+        : { message: 'Connection revoked — reconnect to resume syncing.', code: 'connection_revoked' });
+    });
+    if (out?.written) paused += 1;
   }
   return paused;
 }
@@ -677,9 +970,12 @@ export const ERASED_CREATOR = 'erased:subject';
 /** The `lastError` a creator-erased pause writes. It must name the EXIT: Resume
  *  flips the schedule back on but the run still refuses (the tombstone above), so
  *  the only way back is a live member binding their own connection. Saying
- *  "paused" without saying that is the wedge R1 already caught once in this batch. */
+ *  "paused" without saying that is the wedge R1 already caught once in this batch.
+ *  ADR 1101 D5b — that exit is now REBIND (`PATCH /:id { connectionId }`), which
+ *  keeps the source and its documents; "add the folder again" re-minted every
+ *  document id and re-ingested the folder. */
 const ERASED_CREATOR_MESSAGE =
-  'The member who set up this sync was erased. Add the folder again with your own connected account to resume syncing.';
+  'The member who set up this sync was erased. Switch it to your own connected account to resume syncing.';
 
 /**
  * ADR 0605 R2 (`KSC-21`) — the DSAR eraser for `knowledge-sync:source`.
@@ -766,36 +1062,274 @@ export async function eraseKnowledgeSyncSubject(tenantId: string, subjectKey: st
     } catch {
       bindsAPerson = true; // an unreadable connection is not a reason to keep syncing
     }
-    const pause = bindsAPerson && s.status !== 'paused';
-    // The TOMBSTONE is unconditional — that is the erasure, and it applies to a
-    // tenant-level binding exactly as much as to a personal one.
-    const next: SyncSource = { ...s, createdBy: ERASED_CREATOR, updatedAt: now };
-    if (pause) {
-      next.status = 'paused';
-      next.pausedReason = 'creator-erased';
-      next.lastError = ERASED_CREATOR_MESSAGE;
-    }
-    // `syncStartedAt` deliberately rides through untouched: this write knows
-    // nothing about a pass that may be in flight, and clearing the lease would let
-    // a second lane start over one diff cursor (the `setSyncStatus` contract).
-    await sources.put(next);
+    // ADR 1101 D1 — through the CAS, decided on the fresh row. A pass in flight
+    // cannot undo this pause any more (it writes its outcome on the fresh row), and
+    // its pre-prune check sees the tombstoned `createdBy` and stops destroying.
+    let pausedNow = false;
+    const out = await mutateSource(tenantId, s.id, (cur) => {
+      if (cur.createdBy !== subjectKey) return null;
+      const pause = bindsAPerson && cur.status !== 'paused';
+      // The TOMBSTONE is unconditional — that is the erasure, and it applies to a
+      // tenant-level binding exactly as much as to a personal one.
+      const next: SyncSource = { ...cur, createdBy: ERASED_CREATOR, updatedAt: now };
+      if (pause) {
+        next.status = 'paused';
+        next.pausedReason = 'creator-erased';
+        withError(next, { message: ERASED_CREATOR_MESSAGE, code: 'creator_erased' });
+      }
+      pausedNow = pause;
+      // `syncStartedAt` deliberately rides through untouched: this write knows
+      // nothing about a pass that may be in flight, and clearing the lease would let
+      // a second lane start over one diff cursor (the `setSyncStatus` contract).
+      return next;
+    });
+    if (!out?.written) continue;
     disowned += 1;
-    if (pause) paused += 1;
+    if (pausedNow) paused += 1;
   }
   if (disowned > 0) log.info('knowledge_sync_subject_erased', { tenantId, disowned, paused });
 }
 
-export async function deleteSyncSource(tenantId: string, id: string): Promise<boolean> {
+/**
+ * ADR 1101 D6 (`KS2CD-6`) — did this KB delete fail because the DOCUMENT is already
+ * gone? Only a `not_found` that names the document. `deleteDocument` throws the SAME
+ * code from its collection gate (`mustGetCollection`, details `{collectionId}`) when
+ * the caller cannot read the collection — swallowing that as "gone" is how a prune
+ * reported N removed while all N stayed, with their cursors deleted, forever.
+ */
+export function isDocumentMiss(err: unknown): boolean {
+  return err instanceof OpenwopError && err.code === 'not_found'
+    && typeof err.details?.documentId === 'string' && err.details.collectionId === undefined;
+}
+
+/**
+ * Delete one synced document, THEN its cursor (ADR 1101 D5/D6). A document-level
+ * miss counts as removed; anything else throws with the cursor KEPT, so a later
+ * pass or a retried removal still knows the document exists. Silent per document
+ * (the prune lane's posture, ADR 0643 D3).
+ */
+export async function deleteSyncedFile(
+  source: Pick<SyncSource, 'tenantId' | 'orgId' | 'collectionId'>,
+  state: SyncFileState,
+  caller: SubjectCaller,
+): Promise<void> {
+  try {
+    await deleteDocument(source.tenantId, source.orgId, source.collectionId, state.documentId, caller, { silent: true }); // KBC-1
+  } catch (err) {
+    if (!isDocumentMiss(err)) throw err;
+  }
+  await fileStates.delete(`${state.sourceId}:${state.externalFileId}`);
+}
+
+/** How many synced documents one removal request deletes (ADR 1101 D5): 1,000
+ *  inline deletes would outlive the `/api` rewrite's request timeout. */
+export const REMOVE_BATCH = 200;
+
+export type RemoveOutcome =
+  | { status: 'gone' }
+  | { status: 'removing'; removed: number; remaining: number }
+  | { status: 'removed'; removed: number };
+
+/**
+ * ADR 1101 D5 — REMOVE a source and what it synced, resumably. The collection is a
+ * one-way MIRROR of the folder (ADR 0107 OQ-1); ending the mirror ends its copies,
+ * which would otherwise stay frozen, untrusted and citable with nothing to update
+ * or prune them (`KS2WF-7` / `KSC-10`).
+ *
+ * Order, chosen so a failure part-way leaves the source safely PAUSED:
+ *  1. refuse while a pass holds the lease (it would keep writing), under a legal
+ *     hold, and when the caller cannot read the collection (cursors kept);
+ *  2. mark it `paused`/`removing` — passes, Resume and Rebind all refuse it;
+ *  3. delete up to `batch` documents, each as the deleting member, each before its
+ *     cursor; more left ⇒ `removing` (the route answers 202 and the panel calls
+ *     again; a crash leaves a `removing` source a second Remove continues);
+ *  4. the last batch hands to `deleteSyncSource`: job, archive, row, then a sweep.
+ *
+ * A collection that no longer EXISTS (deleted under the source, `KSWF-12`) has no
+ * documents left to remove: the probe below tells "deleted" from "not yours to
+ * read", and only the second refuses.
+ */
+export async function removeSyncSource(
+  tenantId: string,
+  id: string,
+  caller: SubjectCaller,
+  now: string,
+  batch: number = REMOVE_BATCH,
+): Promise<RemoveOutcome> {
+  const s = await getSyncSource(tenantId, id);
+  if (!s) return { status: 'gone' };
+  if (syncLeaseHeld(s, Date.parse(now) || Date.now())) {
+    throw new OpenwopError('conflict', 'A sync is running for this source. Remove it once the sync finishes.', 409, { reason: 'in_flight', retryAfterMs: SYNC_LEASE_MS });
+  }
+  // A new bulk-destruction cascade honours the tenant's legal hold inline, like its
+  // peers (`projectsService`, `documentsService`) — as a 409 the member can read, not
+  // the bare `RetentionHoldError` (a 500). The hold's own reason is not echoed.
+  try { await assertNoRetentionHold(tenantId); }
+  catch (err) {
+    if (err instanceof RetentionHoldError) {
+      throw new OpenwopError('conflict', 'This workspace is under a legal hold, so the documents this sync added cannot be removed. Lift the hold, then remove the source.', 409, { reason: 'legal_hold' });
+    }
+    throw err;
+  }
+  let collectionGone = false;
+  if (!(await getCollection(tenantId, s.orgId, s.collectionId, caller))) {
+    // Existence only — this reads nothing a person sees. A collection deleted under
+    // the source has no documents left; one that exists but is not the caller's to
+    // read must not be emptied by them.
+    if (await getCollection(tenantId, s.orgId, s.collectionId, PREAUTHORIZED_CALLER)) {
+      throw new OpenwopError('forbidden', 'You cannot read the collection this sync writes into, so its documents cannot be removed by you.', 403, { reason: 'collection_unreadable' });
+    }
+    collectionGone = true;
+  }
+  const marked = await mutateSource(tenantId, id, (cur) => {
+    if (cur.status === 'paused' && cur.pausedReason === 'removing') return null;
+    // Re-checked INSIDE the CAS (grade-code #1): the pre-read above is advisory, and a
+    // pass that took the lease between the two would otherwise run beside the deletions.
+    if (syncLeaseHeld(cur, Date.parse(now) || Date.now())) {
+      throw new OpenwopError('conflict', 'A sync is running for this source. Remove it once the sync finishes.', 409, { reason: 'in_flight', retryAfterMs: SYNC_LEASE_MS });
+    }
+    const next: SyncSource = { ...cur, status: 'paused', pausedReason: 'removing', updatedAt: now };
+    return withError(next, { message: 'This sync source is being removed.', code: 'removing' });
+  });
+  if (!marked) return { status: 'gone' };
+  const states = await listFileStates(id);
+  const slice = states.slice(0, batch);
+  let removed = 0;
+  for (const state of slice) {
+    // A deleted collection's documents are already gone: drop the cursor, and do NOT
+    // count it as a removal this request made (grade-code #8 — the `KS2CD-6` lesson).
+    if (collectionGone) { await fileStates.delete(`${state.sourceId}:${state.externalFileId}`); continue; }
+    await deleteSyncedFile(s, state, caller);
+    removed += 1;
+  }
+  const remaining = states.length - slice.length;
+  if (remaining > 0) return { status: 'removing', removed, remaining };
+  await deleteSyncSource(tenantId, id, collectionGone ? {} : { caller });
+  return { status: 'removed', removed };
+}
+
+/**
+ * ADR 1101 D4 — ARCHIVE, never delete, the per-source workflow (the gmail twin's
+ * `WF-CRM-1` shape, transient like `kb.reindex`). Runs re-resolve their definition
+ * by id at replay/`:fork`, so a hard delete would orphan every run this source
+ * produced; the ownership row is what tenant teardown walks; and an archived
+ * TRANSIENT definition is what `runRetentionSweeper`'s transient GC collects once
+ * its last run has aged out. Before this, every deleted source left a live,
+ * runnable "Knowledge Sync" in `/builder` and the `/` picker (`KS2WF-6`).
+ */
+async function archiveKnowledgeSyncWorkflow(tenantId: string, sourceId: string, now: string): Promise<void> {
+  const workflowId = knowledgeSyncWorkflowId(sourceId);
+  const def = await getRegisteredWorkflowAsync(workflowId);
+  if (!def || lifecycleOf(def).archivedAt) return;
+  const archived = withLifecycle(def, { transient: true, archivedAt: now });
+  await registerWorkflowDurable(archived);
+  const name = typeof archived.metadata?.name === 'string' ? archived.metadata.name : undefined;
+  await recordOwnership(tenantId, workflowId, { nodeCount: archived.nodes.length, ...(name ? { name } : {}), transient: true, archivedAt: now });
+}
+
+/** Delete a source's job, archive its workflow, drop its cursors and the row.
+ *  `opts.caller` (the removal lane) also deletes any document a cursor still names
+ *  — the post-delete sweep catches what a pass that outlived its lease wrote after
+ *  the removal listed the cursors. Without a caller only cursors are dropped (the
+ *  pre-ADR-1101 cascade, for callers that removed the documents themselves).
+ *  Returns true when it existed. */
+export async function deleteSyncSource(tenantId: string, id: string, opts: { caller?: SubjectCaller } = {}): Promise<boolean> {
   const s = await getSyncSource(tenantId, id);
   if (!s) return false;
-  // WF-KB-3 — stop the scheduler job first so it can never fire against a
-  // half-deleted source (the surface would skip it anyway, but no orphan runs).
+  const now = new Date().toISOString();
+  // Before the row goes, a document that cannot be deleted STOPS the delete with its
+  // cursor kept (grade-code #6), leaving the source `removing` for a retry. After the
+  // row goes, the sweep is best-effort: it only catches what a pass that outlived its
+  // lease wrote, and there is no row left to retry from.
+  const sweep = async (strict: boolean): Promise<void> => {
+    for (const fs of await listFileStates(id)) {
+      if (opts.caller) {
+        try { await deleteSyncedFile(s, fs, opts.caller); continue; }
+        catch (err) {
+          if (strict) throw err;
+          log.warn('knowledge_sync_remove_sweep_failed', { tenantId, id, error: err instanceof Error ? err.message : String(err) });
+          continue; // keep the cursor: it is the only record that the document exists
+        }
+      }
+      await fileStates.delete(`${fs.sourceId}:${fs.externalFileId}`);
+    }
+  };
+  await sweep(true);
+  // WF-KB-3 — stop the scheduler job so it can never fire against a half-deleted
+  // source (the surface would skip it anyway, but no orphan runs), then archive the
+  // workflow — after the strict sweep, so a refused delete leaves both intact.
   await deleteKnowledgeSyncJob(id);
-  for (const fs of await listFileStates(id)) {
-    await fileStates.delete(`${fs.sourceId}:${fs.externalFileId}`);
-  }
+  await archiveKnowledgeSyncWorkflow(tenantId, id, now);
   await sources.delete(`${tenantId}:${id}`);
+  await sweep(false);
   return true;
+}
+
+/** ADR 1101 D5 — each source with the number of documents it has synced (its
+ *  cursor count), so a confirm can say what Remove will take with it. */
+export async function withSyncedCounts(list: SyncSource[]): Promise<Array<SyncSource & { syncedDocuments: number }>> {
+  const out: Array<SyncSource & { syncedDocuments: number }> = [];
+  for (const s of list) out.push({ ...s, syncedDocuments: (await listFileStates(s.id)).length });
+  return out;
+}
+
+// ── ADR 1101 D3 — the scheduler's generic doors over a knowledge-sync job ──
+
+/** `metadata.kind` on every knowledge-sync job — keys the scheduler READ gate. */
+export const KNOWLEDGE_SYNC_JOB_KIND = 'knowledge-sync';
+/** The job-id prefix only this feature mints (`knowledgeSyncJobId`). */
+export const KNOWLEDGE_SYNC_JOB_PREFIX = 'ksync:';
+
+/** Does the fire gate own `job`? On SERVER-stamped markers only (`featureId` is
+ *  never read from a body; the id prefix is reserved). */
+export function ownsKnowledgeSyncJob(job: ScheduledJob): boolean {
+  return job.featureId === 'knowledge-sync' && job.jobId.startsWith(KNOWLEDGE_SYNC_JOB_PREFIX);
+}
+
+/**
+ * ADR 1101 D3 — FIRE-time integrity: the job fires only the definition this feature
+ * registered for it. A ksync job is reserved (the generic scheduler cannot retarget
+ * it), but its definition is an ordinary registered workflow, and a definition
+ * edited to run other nodes would run them with NO actor — tenant-trusted for the
+ * ADR 0832 org floor (`KS2WF-8`, closed for this feature only; the class is routed).
+ * So: the job's workflow is `knowledge-sync.run:<sourceId>`, and its definition is
+ * exactly one `feature.knowledge-sync.nodes.run` node bound to that source, no edges.
+ */
+export async function knowledgeSyncFireRefusal(job: ScheduledJob): Promise<ScheduleSkipReason | null> {
+  const sourceId = typeof job.metadata?.sourceId === 'string' ? job.metadata.sourceId : '';
+  const expected = sourceId ? knowledgeSyncWorkflowId(sourceId) : '';
+  if (!sourceId || job.workflowId !== expected || job.jobId !== knowledgeSyncJobId(sourceId)) {
+    log.warn('knowledge_sync_fire_refused', { jobId: job.jobId, reason: 'job_shape' });
+    return 'target-refused';
+  }
+  const def = await getRegisteredWorkflowAsync(expected);
+  const node = def?.nodes.length === 1 ? def.nodes[0] : undefined;
+  const config = node?.config as Record<string, unknown> | undefined;
+  const ok = Boolean(def && node
+    && (def.edges ?? []).length === 0
+    && node.typeId.split('@')[0] === 'feature.knowledge-sync.nodes.run'
+    && config?.sourceId === sourceId);
+  if (!ok) {
+    log.warn('knowledge_sync_fire_refused', { jobId: job.jobId, reason: 'definition_shape' });
+    return 'target-refused';
+  }
+  return null;
+}
+
+/**
+ * ADR 1101 D3 — scheduler READ narrowing (`registerScheduledJobReadGate`): a ksync
+ * job is reachable in the generic scheduler — listed, paused, deleted, "Run now" —
+ * only by someone who may WRITE the source's org. "Run now" fires the job with the
+ * clicker merely attributed, i.e. actorless, so without this any tenant writer
+ * could start another org's pass from the scheduler page (`KS2WF-4`, third door).
+ * A missing source answers false (the scheduler's uniform 404). A gate only narrows.
+ */
+export async function knowledgeSyncJobReadable(job: ScheduledJob, actingUser: string | undefined): Promise<boolean> {
+  const sourceId = typeof job.metadata?.sourceId === 'string' ? job.metadata.sourceId : '';
+  if (!sourceId) return false;
+  const source = await getSyncSource(job.tenantId, sourceId);
+  if (!source) return false;
+  return holdsOrgScope(job.tenantId, [actingUser], source.orgId, 'workspace:write');
 }
 
 // ── the diff (ADR 0107 Phase 3 core — pure, the correctness heart of the run) ──

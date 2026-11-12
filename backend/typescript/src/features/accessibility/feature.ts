@@ -17,7 +17,7 @@
  */
 
 import type { BackendFeature } from '../types.js';
-import { buildAccessibilitySurface } from './surface.js';
+import { buildAccessibilitySurface, ACCESSIBILITY_SURFACE_POLICY } from './surface.js';
 import { registerAccessibilityAgentTools } from './agentTools.js';
 
 export const accessibilityFeature: BackendFeature = {
@@ -30,7 +30,9 @@ export const accessibilityFeature: BackendFeature = {
   },
   // P3 (ADR 0014) — `ctx.features.accessibility`: checkContent (read) +
   // generateAltText (write). Auto-advertised at /.well-known as host.sample.accessibility.
-  surface: { id: 'accessibility', build: buildAccessibilitySurface },
+  // ADR 1100 D1 — before the policy, a viewer's run could spend the vision
+  // provider on an image its person may not edit (the floor's default is read).
+  surface: { id: 'accessibility', build: buildAccessibilitySurface, orgPolicy: ACCESSIBILITY_SURFACE_POLICY },
   requiredPacks: [
     'feature.accessibility.nodes',
     'vendor.openwop-app.accessibility.agents',
@@ -39,7 +41,7 @@ export const accessibilityFeature: BackendFeature = {
     id: 'accessibility',
     label: 'Accessibility',
     description:
-      'Authored-content accessibility: AI-generated alt text for image assets (Media), a shared authored-content a11y checker (missing alt, heading order, low-contrast on authored colors) surfaced in the CMS / documents / app-builder editors, and an Accessibility Reviewer agent driven from the AI chat. Composes the existing vision, contrast, and a11y-issue seams — no live-DOM auditor.',
+      'Authored-content accessibility: AI-generated alt text for image assets (Media), which fills the alt of a picture placed in a CMS page or document; and an Accessibility Reviewer agent in the AI chat that reads pages, documents and the media library and checks them (missing alt, heading order, link text, low contrast). The editor accessibility check in CMS and documents runs without this toggle. Composes the existing vision, contrast, and a11y-issue seams — no live-DOM auditor.',
     category: 'Content',
     status: 'off',
     bucketUnit: 'tenant',

@@ -12,6 +12,7 @@
  *   DELETE /host/openwop-app/connections/:id/senders/:s/pending  deny a pending request (CHAN-P0-8)
  *   GET  /host/openwop-app/messaging/relay/devices           relay devices (CHAN-P0-8)
  *   POST /host/openwop-app/messaging/relay/revoke            revoke a device (owner or workspace admin; ADR 1043 D3)
+ *   GET|PUT /host/openwop-app/messaging/relay/channels[/:ch]  the per-channel relay switch (PUT: workspace admin; CHAN-F11)
  *   GET|POST /host/openwop-app/messaging/relay/:id/senders   a device's approved + pending senders; approve (owner; ADR 1043 D9)
  *   DELETE /host/openwop-app/messaging/relay/:id/senders/:s[/pending]  revoke (owner or admin) / deny (owner)
  *
@@ -86,7 +87,12 @@ export interface RelayDevice {
   /** ADR 1043 D3 — `online` derives from this; `never` = no heartbeat yet. */
   presence?: 'online' | 'offline' | 'never';
   offlineSince?: string;
+  /** CHAN-F11 — false while a workspace admin has this device's channel switched off. */
+  channelEnabled?: boolean;
 }
+
+/** CHAN-F11 — the workspace's per-channel relay switch. */
+export interface RelayChannelSwitches { channels: Array<{ channel: string; enabled: boolean }>; canManage: boolean }
 
 /** A group approval is `group:<chatId>` (ADR 1042 D3). */
 export const isGroupSender = (senderId: string): boolean => senderId.startsWith('group:');
@@ -147,6 +153,15 @@ export async function denyPendingSender(connectionId: string, senderId: string):
 
 export async function listRelayDevices(): Promise<RelayDevice[]> {
   return (await requestJson<{ devices: RelayDevice[] }>(`${BASE}/messaging/relay/devices`, { method: 'GET' })).devices;
+}
+
+export async function getRelayChannels(): Promise<RelayChannelSwitches> {
+  return requestJson<RelayChannelSwitches>(`${BASE}/messaging/relay/channels`, { method: 'GET' });
+}
+
+/** A workspace admin's act (403 `relay_admin_required` otherwise). */
+export async function setRelayChannel(channel: string, enabled: boolean): Promise<RelayChannelSwitches['channels']> {
+  return (await requestJson<{ channels: RelayChannelSwitches['channels'] }>(`${BASE}/messaging/relay/channels/${encodeURIComponent(channel)}`, { method: 'PUT', json: { enabled } })).channels;
 }
 
 export async function revokeRelayDevice(relayId: string): Promise<void> {

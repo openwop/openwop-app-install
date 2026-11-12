@@ -48,16 +48,18 @@ vi.mock('../channelIngressClient.js', async (orig) => {
     listChannelConnections: vi.fn(), getInbound: vi.fn(), getChannelSettings: vi.fn(), putChannelSettings: vi.fn(),
     getBinding: vi.fn(), putBinding: vi.fn(), deleteBinding: vi.fn(),
     listSenders: vi.fn(), approveSender: vi.fn(), denyPendingSender: vi.fn(), setSenderSelf: vi.fn(), revokeSender: vi.fn(),
-    listRelayDevices: vi.fn(), revokeRelayDevice: vi.fn(),
+    listRelayDevices: vi.fn(), revokeRelayDevice: vi.fn(), getRelayChannels: vi.fn(), setRelayChannel: vi.fn(),
     listRelaySenders: vi.fn(), denyRelayPendingSender: vi.fn(), revokeRelaySender: vi.fn(),
   };
 });
 vi.mock('../../../client/agentsClient.js', () => ({ listAgents: vi.fn() }));
 let enabled = true;
+/** WA85UX-24 — the WhatsApp settings link follows the `whatsapp` toggle, not channel-ingress's. */
+let whatsappEnabled = true;
 let loading = false;
 vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
   ...(await orig<typeof import('../../../featureToggles/FeatureAccessContext.js')>()),
-  useFeatureAccess: () => makeFeatureAccess({ enabled, status: enabled ? 'on' : 'off', loading }),
+  useFeatureAccess: (id: string) => { const on = id === 'whatsapp' ? whatsappEnabled : enabled; return makeFeatureAccess({ enabled: on, status: on ? 'on' : 'off', loading }); },
 }));
 
 import * as api from '../channelIngressClient.js';
@@ -71,6 +73,7 @@ const m = {
   deny: vi.mocked(api.denyPendingSender), self: vi.mocked(api.setSenderSelf), revoke: vi.mocked(api.revokeSender),
   devices: vi.mocked(api.listRelayDevices), revokeDevice: vi.mocked(api.revokeRelayDevice), agents: vi.mocked(listAgents),
   relaySenders: vi.mocked(api.listRelaySenders), relayDeny: vi.mocked(api.denyRelayPendingSender), relayRevoke: vi.mocked(api.revokeRelaySender),
+  channels: vi.mocked(api.getRelayChannels), setChannel: vi.mocked(api.setRelayChannel),
 };
 const requestJsonMock = vi.hoisted(() => vi.fn());
 // Spread the real module: the tests reject with its `ApiError`, the shape production throws.
@@ -79,6 +82,7 @@ vi.mock('../../../client/requestJson.js', async (orig) => ({
   requestJson: requestJsonMock,
 }));
 
+const ALL_ON = ['whatsapp', 'signal', 'imessage', 'discord'].map((channel) => ({ channel, enabled: true }));
 const TG = { connectionId: 'c-tg', provider: 'telegram', displayName: 'Support bot', status: 'active' };
 const IRIS: AgentEntry = {
   agentId: 'iris', persona: 'assistant', label: 'Iris', modelClass: 'standard', packName: 'vendor.test.agents',
@@ -93,7 +97,7 @@ const rowOf = (text: string): HTMLElement => {
 let confirmSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
-  enabled = true; loading = false;
+  enabled = true; whatsappEnabled = true; loading = false;
   for (const fn of Object.values(m)) fn.mockReset();
   m.connections.mockResolvedValue([TG]);
   m.inbound.mockResolvedValue({ provider: 'telegram', mode: 'conversation', enabled: true });
@@ -101,6 +105,7 @@ beforeEach(() => {
   m.binding.mockResolvedValue(null);
   m.agents.mockResolvedValue([IRIS]);
   m.devices.mockResolvedValue([]);
+  m.channels.mockResolvedValue({ channels: ALL_ON, canManage: false });
   m.senders.mockResolvedValue({ approved: [], pending: [] });
   m.approve.mockResolvedValue({ senderId: 'x', ownerUserId: 'u1', approvedAt: '2026-11-03T00:00:00Z', mine: true });
   requestJsonMock.mockReset();
@@ -146,6 +151,22 @@ describe('ChannelSettingsPage — connections', () => {
     expect(within(rowOf('Support bot')).getByText('Iris')).toBeTruthy();
     await waitFor(() => expect(within(rowOf('Team Slack')).getByText('Starts a workflow')).toBeTruthy());
     expect(within(rowOf('Team Slack')).getByText('Default assistant')).toBeTruthy();
+  });
+
+  it('a WhatsApp binding links to WhatsApp settings only while the whatsapp toggle is on (WA85UX-24)', async () => {
+    const WA = { connectionId: 'c-wa', provider: 'twilio', displayName: 'Support bot', status: 'active' };
+    m.connections.mockResolvedValue([WA]);
+    m.inbound.mockResolvedValue({ provider: 'whatsapp-twilio', mode: 'conversation', enabled: true });
+    const first = page();
+    await openManage();
+    const link = await screen.findByRole('link', { name: /WhatsApp settings/ });
+    expect(link.getAttribute('href')).toBe('/access?tab=connections&view=whatsapp');
+    first.unmount();
+    whatsappEnabled = false;
+    page();
+    await openManage();
+    expect(await screen.findByText('Sender binding')).toBeTruthy();
+    expect(screen.queryByRole('link', { name: /WhatsApp settings/ })).toBeNull();
   });
 
   it('a connection the caller cannot manage says so and offers no Manage', async () => {
@@ -293,6 +314,47 @@ describe('ChannelSettingsPage — relay devices', () => {
     fireEvent.click(within(rowOf('Laptop')).getByRole('button', { name: 'Revoke Laptop' }));
     await waitFor(() => expect(m.revokeDevice).toHaveBeenCalledWith('r2'));
     expect(confirmSpy).toHaveBeenCalledWith('Revoke Laptop?');
+  });
+});
+
+describe('ChannelSettingsPage — the per-channel relay switch (CHAN-F11)', () => {
+  const offFor = (channel: string) => ALL_ON.map((c) => (c.channel === channel ? { ...c, enabled: false } : c));
+
+  it('an admin switches one channel off, and the devices reload', async () => {
+    m.channels.mockResolvedValue({ channels: ALL_ON, canManage: true });
+    m.setChannel.mockResolvedValue(offFor('whatsapp'));
+    page();
+    const wa = await screen.findByRole('switch', { name: 'WhatsApp relay' });
+    expect((wa as HTMLInputElement).checked).toBe(true);
+    const loadsBefore = m.devices.mock.calls.length;
+    fireEvent.click(wa);
+    await waitFor(() => expect(m.setChannel).toHaveBeenCalledWith('whatsapp', false));
+    await waitFor(() => expect((screen.getByRole('switch', { name: 'WhatsApp relay' }) as HTMLInputElement).checked).toBe(false));
+    expect((screen.getByRole('switch', { name: 'Signal relay' }) as HTMLInputElement).checked).toBe(true);
+    await waitFor(() => expect(m.devices.mock.calls.length).toBeGreaterThan(loadsBefore));
+  });
+
+  it('a member gets no switches, and a notice only when a channel is off', async () => {
+    m.channels.mockResolvedValue({ channels: offFor('signal'), canManage: false });
+    page();
+    expect(await screen.findByText(/switched these relay channels off: Signal/)).toBeTruthy();
+    expect(screen.queryByRole('switch')).toBeNull();
+    cleanup();
+    m.channels.mockResolvedValue({ channels: ALL_ON, canManage: false });
+    page();
+    await screen.findByText('Your devices (relay)');
+    await waitFor(() => expect(m.channels).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText(/switched these relay channels off/)).toBeNull();
+  });
+
+  it('a device on a switched-off channel shows as paused, whatever its heartbeat', async () => {
+    m.devices.mockResolvedValue([
+      { relayId: 'r9', channel: 'whatsapp', deviceName: 'Shop phone', status: 'active', registeredAt: '2026-11-01T00:00:00Z', online: true, owner: { userId: 'me', ownedByCaller: true }, canRevoke: true, channelEnabled: false },
+    ]);
+    page();
+    await screen.findByText('Shop phone');
+    expect(within(rowOf('Shop phone')).getByText('Paused (channel off)')).toBeTruthy();
+    expect(within(rowOf('Shop phone')).queryByText('Online')).toBeNull();
   });
 });
 

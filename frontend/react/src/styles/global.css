@@ -9269,6 +9269,15 @@ button.teampage-skill-chip:not(:disabled):hover { background: var(--clay-soft); 
 .fp-film { margin: 0; }
 .fp-film__frame { position: relative; overflow: hidden; border: 1px solid var(--rule-2); border-radius: calc(var(--radius-lg) + var(--space-1)); background: var(--paper-2); box-shadow: 0 40px 80px -48px var(--ink-shadow); }
 .fp-film__video { display: block; inline-size: 100%; block-size: auto; aspect-ratio: 16 / 9; }
+/* ADR 1082 — the film gallery: a grid of films, each frame shaped by its film
+   (16:9, 9:16, 1:1), with its use-case and shape tags under it. */
+.fp-film-gallery__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(18rem, 100%), 1fr)); gap: var(--space-6) var(--space-5); margin: var(--space-6) 0 0; padding: 0; list-style: none; align-items: start; }
+.fp-film-gallery__item { min-width: 0; }
+.fp-film-gallery__item--9x16 .fp-film__video { aspect-ratio: 9 / 16; }
+.fp-film-gallery__item--1x1 .fp-film__video { aspect-ratio: 1 / 1; }
+.fp-film-gallery__item--9x16 { max-inline-size: 22rem; }
+.fp-film-gallery__tags { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-2) 0 0; }
+.fp-film-gallery__tags .fp-col__badge { margin-inline-start: 0; }
 .fp-film__video:focus-visible { outline: 2px solid var(--clay-text); outline-offset: -2px; }
 .fp-film__play { position: absolute; inset-block-start: clamp(var(--space-2), 4%, var(--space-6)); inset-inline-end: clamp(var(--space-2), 3%, var(--space-6)); display: inline-flex; align-items: center; gap: var(--space-2-5); min-block-size: 44px; padding: var(--space-3) var(--space-5) var(--space-3) var(--space-4); border: 0; border-radius: var(--radius-pill); background: var(--ink); color: var(--paper); font-family: var(--sans); font-size: var(--text-body); font-weight: var(--weight-head); cursor: pointer; box-shadow: 0 16px 40px -16px var(--ink-shadow); transition: background var(--dur-ui) var(--ease-standard); }
 .fp-film__play:hover { background: var(--clay-strong); color: var(--color-on-scrim); }
@@ -12848,7 +12857,11 @@ a.dash-activity__row:hover .dash-activity__name { color: var(--clay-text); text-
 :root[dir="rtl"] .fp-hero.fp-em--underline .fp-hero__title .fp-em,
 :root[dir="rtl"] .fp-hero.fp-em--highlight .fp-hero__title .fp-em { background-position-x: right; }
 .fp-hero.fp-em--strike .fp-hero__title .fp-em { --fp-em-at: 55%; --fp-em-weight: 0.07em; color: var(--ink-3); background-image: linear-gradient(var(--clay), var(--clay)); }
-.fp-hero.fp-em--underline .fp-hero__title .fp-em { --fp-em-at: 96%; --fp-em-weight: 0.08em; background-image: linear-gradient(var(--clay), var(--clay)); }
+/* EMP-2: the line sits just under the baseline and crosses descenders like any
+   underline (the glyphs paint over it), keeping clear of the next line at this
+   title's tight line-height. The measurements are in docs/steward/
+   UX-ASSESSMENT-adr1038.md (EMP-2); re-measure there before moving 88%. */
+.fp-hero.fp-em--underline .fp-hero__title .fp-em { --fp-em-at: 88%; --fp-em-weight: 0.07em; background-image: linear-gradient(var(--clay), var(--clay)); }
 .fp-hero.fp-em--highlight .fp-hero__title .fp-em { --fp-em-at: 90%; --fp-em-weight: 0.42em; color: var(--ink); background-image: linear-gradient(color-mix(in oklab, var(--clay) 28%, transparent), color-mix(in oklab, var(--clay) 28%, transparent)); }
 /* The struck words are <s> (their meaning for assistive tech and crawlers); the
    drawn line replaces the browser's own, which comes back wherever it cannot draw. */
@@ -13376,6 +13389,15 @@ mark.fp-mark { padding: 0 0.06em; background: linear-gradient(transparent 62%, c
 .fp-col__cta { margin: auto 0 0; padding-block-start: var(--space-5); }
 .fp-cols--plans .fp-col--highlight .fp-col__cta .fp-btn { inline-size: 100%; justify-content: center; }
 @media (min-width: 900px) { .fp-cols--plans .fp-col--highlight { transform: translateY(var(--site-card-raise-lift, -12px)); } }
+/* ADR 1069 D3 — a named tier list (plan cards, no prices yet): the title is the
+   plan's name at heading size. Each badge is a status pill on its own line, in the
+   accent on a light card and in the inverse ink on the featured dark card, so it
+   reads in both themes (tokens only; the inverse tokens hold in dark mode too). */
+.fp-cols--plans-named .fp-col__title, .fp-cols--plans-named .fp-col--highlight .fp-col__title { font-size: var(--text-display); line-height: 1.1; letter-spacing: -0.02em; }
+.fp-col__status { margin: 0 0 var(--space-3); }
+.fp-col__status .fp-col__badge { margin-inline-start: 0; }
+.fp-cols--plans .fp-col__badge { background: color-mix(in oklab, var(--clay) 14%, var(--paper)); color: var(--clay-text); }
+.fp-cols--plans .fp-col--highlight .fp-col__badge { background: color-mix(in oklab, var(--tone-inverse-ink) 16%, transparent); color: var(--tone-inverse-ink); }
 /* ADR 1069 D2 — a boxed footnote with a mark: what a section does NOT include. */
 .fp-cols__note--callout { display: flex; align-items: flex-start; gap: var(--space-3); margin-block-start: var(--space-6); padding: var(--space-5); border-radius: var(--radius-lg); background: var(--paper-2); font-size: var(--text-lg); color: var(--ink-2); }
 .fp-cols__note-mark { display: grid; place-items: center; flex: none; inline-size: 28px; block-size: 28px; border-radius: var(--radius); background: color-mix(in oklab, var(--clay) 14%, var(--paper)); color: var(--clay-strong); font-weight: var(--weight-marquee); }

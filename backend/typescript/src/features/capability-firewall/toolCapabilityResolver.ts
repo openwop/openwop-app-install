@@ -21,6 +21,16 @@ const CLASSIFICATION: ReadonlyArray<readonly [string, ToolCapabilityDescriptor]>
   ['openwop:ai.research', { safetyTier: 'read', egress: 'safe-fetch' }],
   ['openwop:knowledge', { safetyTier: 'read', egress: 'none' }],
   ['core.openwop.http', { safetyTier: 'read', egress: 'safe-fetch' }],
+  // CHAN-F16 (user decision 2026-11-10, "fix the prefix") — the row above is a NODE id,
+  // so it never matched the agent tool `openwop:core.openwop.http.fetch`, which therefore
+  // fell to the treat-as-risky fallback (write / host-mediated). Classified as the node
+  // is. Deliberately the EXACT tool id, not the `openwop:core.openwop.http` prefix: the
+  // http pack also projects two pure nodes as tools (`idempotency-key`, `webhook-verify`)
+  // that were never reviewed here. This RELAXES tenant rules that matched the fallback
+  // class (a read-then-egress rule keyed on `host-mediated` no longer fires on it); a
+  // rule keyed on `safe-fetch` now does. Safe mode still asks for it by NAME
+  // (`SENSITIVE_APPROVAL_TOOLS`), and narrow channel turns still exclude it.
+  ['openwop:core.openwop.http.fetch', { safetyTier: 'read', egress: 'safe-fetch' }],
   // Off-host SENDS (the egress side of an exfil combination).
   ['core.openwop.integration.email-send', { safetyTier: 'write', egress: 'host-mediated', scopes: ['workspace:write'] }],
   ['core.openwop.integration.slack-message', { safetyTier: 'write', egress: 'host-mediated', scopes: ['workspace:write'] }],

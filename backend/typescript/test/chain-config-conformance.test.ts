@@ -289,7 +289,7 @@ describe('chain provider/model defaults track providers.json', () => {
   it('the sweep is non-vacuous (chains still DECLARE provider/model params)', () => {
     const declaring = chains.filter((c) =>
       ((c.parameters as { properties?: Record<string, unknown> } | undefined)?.properties ?? {}).provider !== undefined);
-    expect(declaring.length).toBeGreaterThan(81); // measured 87 (95 before ADR 1023 D2 removed the eight funnel blueprint + step chains' provider/model, which never reached their model in any lane)
+    expect(declaring.length).toBeGreaterThan(81); // measured 87 (95 before ADR 1023 removed the eight funnel blueprint + step chains' provider/model, which never reached their model in any lane)
   });
 });
 

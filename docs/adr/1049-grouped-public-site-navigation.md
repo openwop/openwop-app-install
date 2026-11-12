@@ -37,7 +37,7 @@ or which links appear in the header.
 
 ```ts
 siteNav?: {
-  group?: 'product' | 'audience' | 'trust' | 'company' | 'legal';
+  group?: 'product' | 'audience' | 'resources' | 'trust' | 'company' | 'legal'; // `resources`: see the 2026-11-10 addendum
   label?: string;        // ≤ 40, overrides the title in nav
   description?: string;  // ≤ 90, one line under the label in the mega menu
   order?: number;        // integer 0–999, lower first within a group
@@ -188,3 +188,21 @@ nav labels) are separate changes.
 - `frontend/react/src/chrome/__tests__/PublicShell.groupedNav.test.tsx`:
   grouped columns and order, Legal footer-only, descriptions rendered, primary
   flags, Blog in Company, ungrouped site unchanged.
+
+## Addendum (2026-11-10): the `resources` group
+
+Requested by DeckTalk (dev-c5, relaying David): a site needs a column for
+guides, help and changelog that is neither Product nor Company. `resources` joins
+the closed set in `SITE_NAV_GROUPS` (`cmsService.ts`) and in `NAV_GROUP_ORDER` /
+`AUTHORED_GROUPS` (`PublicShell.tsx`). It renders after Who it's for and before
+Trust, in the menu and the footer, with a `navGroupResources` heading in every
+locale. The footer grid is `auto-fit`, so the extra column needs no CSS.
+
+The automatic `/blog` entry moves from Company to Resources when any published
+page names that group, because a blog is a resource. A site without a Resources
+page keeps Blog in Company as before. Additive: no stored value changes, and a
+`group: 'resources'` the server refused before is now accepted.
+
+Tests: `adr1049-site-nav.test.ts` accepts the group, and
+`PublicShell.groupedNav.test.tsx` pins the column order (menu and footer) and
+Blog's move.

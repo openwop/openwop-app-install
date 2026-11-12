@@ -30,6 +30,7 @@ import { copyToClipboard } from '../../ui/copyToClipboard.js';
 import { toast } from '../../ui/toast.js';
 import { useFormat } from '../../i18n/useFormat.js';
 import { getDocsNav, docMarkdownUrl, type DocsNavItem } from './docsClient.js';
+import { brand } from '../../brand/brand.js';
 import { deriveToc, type TocEntry } from './docsToc.js';
 
 /** Below this the filter is noise — a reader can see every doc at once. */
@@ -117,6 +118,15 @@ export function DocsPublicPage({ orgId, slug }: { orgId: string; slug: string | 
   // Instance-unique, never a hard-coded DOM id (the defect class the site pass
   // caught: a duplicate id silently breaks every aria reference to it).
   const hintId = useId();
+
+  // grade-ux row 88, finding 5 (WCAG 2.4.2) — the index had no title of its own
+  // and kept the app's generic one. An article page's title is FrontPage's.
+  useEffect(() => {
+    if (slug || typeof document === 'undefined') return undefined;
+    const prev = document.title;
+    document.title = `${t('indexTitle')} — ${brand.productName}`;
+    return () => { document.title = prev; };
+  }, [slug, t]);
 
   // R2-D6 — the error states' Retry re-runs this read (the copy used to say
   // "reload the page"; the article body got a real Retry in #3041, so the nav
@@ -299,7 +309,9 @@ export function DocsPublicPage({ orgId, slug }: { orgId: string; slug: string | 
         )}
       </nav>
 
-      <main className="docs-body" ref={bodyRef}>
+      {/* grade-ux row 88, finding 4: an <article>, not a second <main> — PublicShell
+          already renders the page's one main landmark (#public-main). */}
+      <article className="docs-body" ref={bodyRef}>
         {slug ? (
           <>
             {/* D-G5 — breadcrumb: where this page sits in the tree. Rendered only
@@ -401,7 +413,7 @@ export function DocsPublicPage({ orgId, slug }: { orgId: string; slug: string | 
             ) : null}
           </section>
         )}
-      </main>
+      </article>
     </div>
   );
 }

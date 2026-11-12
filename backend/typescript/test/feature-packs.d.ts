@@ -75,10 +75,17 @@ declare module '*feature.priority-matrix.nodes/index.mjs' {
   >;
 }
 declare module '*feature.insights-suite.nodes/index.mjs' {
-  export const nodes: Record<
-    string,
-    (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } }>
-  >;
+  type InsightsNodeResult = { status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } };
+  export const nodes: Record<string, (ctx: unknown) => Promise<InsightsNodeResult>>;
+  // ADR 1102 D2/D3 — the brief, the empty-draft check and the fence copy that
+  // `insights-recognition-brief.test.ts` pins to `host/untrustedContent.ts`.
+  export function recognitionBrief(ctx: unknown): Promise<InsightsNodeResult>;
+  export function draftCheck(ctx: unknown): Promise<InsightsNodeResult>;
+  export function defangWordFence(s: string): string;
+  export function defangAngleFence(s: string): string;
+  export function fenceBlock(content: string, sourceLabel: string): string;
+  export const FENCE_PATTERNS: { ANGLE_FENCE: string; WORD_FENCE: string };
+  export function rowSubject(row: Record<string, unknown>): string;
 }
 declare module '*feature.strategy.nodes/index.mjs' {
   export const nodes: Record<

@@ -23,12 +23,13 @@
  * @see docs/adr/0035-async-durable-a2a-tasks.md
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { RunStatus } from '../types.js';
 import { DurableCollection } from './hostExtPersistence.js';
 import { assertEgressUrlAllowed, EgressUrlRejectedError } from './webhookEgressGuard.js';
 import { openPushAuthorization, pushCredentialAad, sealPushAuthorization } from './a2aPushCredential.js';
 import { createLogger } from '../observability/logger.js';
+import { taskStatusUpdateEvent10 } from './a2aCodec10.js';
 
 const log = createLogger('host.a2aTaskStore');
 
@@ -71,6 +72,15 @@ export interface A2aPushConfig {
    * never logged, and dropped when the task reaches a terminal state.
    */
   sealedAuthorization?: string;
+  /** CHAN-F7 / RFC 0214 — the config's id, for 1.0 Get/List/Delete. Never encodes a
+   *  tenant, workspace or principal: the client's own `id` when it is a plain token,
+   *  else a random `pnc_` id. Absent on configs stored before it existed. */
+  id?: string;
+  /** CHAN-F7 — the protocol the config was registered over. A `1.0` config's push
+   *  body is a 1.0 `StreamResponse` as `application/a2a+json` (RFC 0214 §C); a 0.3
+   *  (or older, unmarked) config keeps the 0.3 `TaskStatusUpdateEvent` its client
+   *  reads. */
+  protocol?: '1.0' | '0.3';
 }
 
 /** What a registration supplies: the target plus the PLAINTEXT credential, which
@@ -80,11 +90,19 @@ export interface A2aPushRegistration {
   tokenFingerprint?: string;
   /** The `Authorization` value (`pushAuthorizationFrom`), plaintext, in memory only. */
   authorization?: string;
+  /** CHAN-F7 — see {@link A2aPushConfig.id} / {@link A2aPushConfig.protocol}. */
+  id?: string;
+  protocol?: '1.0' | '0.3';
 }
 
 /** The push config as a caller may see it: the target, never the credential. */
-export function publicPushConfig(cfg: A2aPushConfig): { url: string; tokenFingerprint?: string } {
-  return { url: cfg.url, ...(cfg.tokenFingerprint !== undefined ? { tokenFingerprint: cfg.tokenFingerprint } : {}) };
+export function publicPushConfig(cfg: A2aPushConfig): Omit<A2aPushConfig, 'sealedAuthorization'> {
+  return {
+    url: cfg.url,
+    ...(cfg.tokenFingerprint !== undefined ? { tokenFingerprint: cfg.tokenFingerprint } : {}),
+    ...(cfg.id !== undefined ? { id: cfg.id } : {}),
+    ...(cfg.protocol !== undefined ? { protocol: cfg.protocol } : {}),
+  };
 }
 
 /** A record with its push credential removed — what a caller-facing read returns. */
@@ -452,6 +470,8 @@ export function assertPushUrlAllowed(url: string): void {
 export interface A2aPushTarget {
   url: string;
   authorization?: string;
+  /** CHAN-F7 — `application/a2a+json` for a 1.0 config's `StreamResponse`; absent ⇒ `application/json`. */
+  contentType?: string;
 }
 
 /**
@@ -505,9 +525,17 @@ export async function upsertA2aTask(
       const authorization = sealed !== undefined
         ? await openPushAuthorization(sealed, pushCredentialAad(rec.tenantId, rec.taskId))
         : undefined;
+      // CHAN-F7 / RFC 0214 §C — a 1.0 config gets a 1.0 `StreamResponse`
+      // (`statusUpdate` member) as `application/a2a+json`; a 0.3 config keeps the
+      // 0.3 `TaskStatusUpdateEvent` its client parses.
+      const v10 = rec.pushConfig.protocol === '1.0';
       const outcome = await pushSink(
-        { url: rec.pushConfig.url, ...(authorization !== undefined ? { authorization } : {}) },
-        taskStatusUpdateEvent(rec, terminal),
+        {
+          url: rec.pushConfig.url,
+          ...(authorization !== undefined ? { authorization } : {}),
+          ...(v10 ? { contentType: A2A_10_MEDIA_TYPE } : {}),
+        },
+        v10 ? { statusUpdate: taskStatusUpdateEvent10(rec) } : taskStatusUpdateEvent(rec, terminal),
       );
       if (outcome && !outcome.delivered) {
         log.warn('a2a_push_delivery_failed', {
@@ -544,6 +572,8 @@ export async function setA2aTaskPushConfig(taskId: string, config: A2aPushRegist
   const pushConfig: A2aPushConfig = {
     url: config.url,
     ...(config.tokenFingerprint !== undefined ? { tokenFingerprint: config.tokenFingerprint } : {}),
+    ...(config.id !== undefined ? { id: config.id } : {}),
+    ...(config.protocol !== undefined ? { protocol: config.protocol } : {}),
   };
   if (config.authorization !== undefined && !isTerminalTaskState(existing.state)) {
     pushConfig.sealedAuthorization = await sealPushAuthorization(
@@ -554,6 +584,45 @@ export async function setA2aTaskPushConfig(taskId: string, config: A2aPushRegist
   const rec: A2aTaskRecord = { ...existing, pushConfig, updatedAt: new Date().toISOString() };
   await tasks.put(rec);
   return rec;
+}
+
+/** CHAN-F7 / RFC 0214 — the A2A 1.0 media type a 1.0 push body is sent as. */
+export const A2A_10_MEDIA_TYPE = 'application/a2a+json';
+
+/** CHAN-F7 — a client-chosen config id is kept only when it is a plain token. */
+const CONFIG_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
+/** The id a new config gets: the client's own plain id, else a random one that
+ *  encodes nothing (RFC 0214: never a tenant, workspace or principal). */
+export function pushConfigIdFor(clientId: unknown): string {
+  return typeof clientId === 'string' && CONFIG_ID_RE.test(clientId) ? clientId : `pnc_${randomBytes(8).toString('hex')}`;
+}
+
+/** CHAN-F7 — the task's push config with that id, or null (no config, another id,
+ *  or a legacy config with no id, which no client could have named). */
+export async function getA2aTaskPushConfig(taskId: string, configId?: string): Promise<A2aPushConfig | null> {
+  const rec = await tasks.get(taskId);
+  const cfg = rec?.pushConfig;
+  if (!cfg) return null;
+  if (configId !== undefined && cfg.id !== configId) return null;
+  return cfg;
+}
+
+/**
+ * CHAN-F7 / RFC 0214 §A — delete the task's push config (its sealed credential
+ * goes with it: discard on delete). Idempotent: a config that is already gone, or
+ * an id that is not this task's, deletes nothing and is not an error. With no id,
+ * the task's one config is deleted. Returns whether a config was removed.
+ */
+export async function deleteA2aTaskPushConfig(taskId: string, configId?: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const rec = await tasks.get(taskId);
+    if (!rec?.pushConfig) return false;
+    if (configId !== undefined && rec.pushConfig.id !== configId) return false;
+    const { pushConfig: _dropped, ...rest } = rec;
+    void _dropped;
+    if (await tasks.compareAndSwap(rec, { ...rest, updatedAt: new Date().toISOString() })) return true;
+  }
+  return false;
 }
 
 /** Test-only: drop every persisted durable Task. */

@@ -1,7 +1,7 @@
 /**
  * feature.accessibility.nodes — Accessibility nodes (ADR 0363 P3).
- * Both role:"action" so the engine records outputs (replay/fork read the recorded
- * result rather than re-running). Pure-JS, Node-20 stdlib only. Each node composes
+ * Both role:"action"; alt-text-generate is also "side-effectful" so a replay fork
+ * serves its recorded proposal (ADR 1100 D6). Pure-JS, Node-20 stdlib. Each composes
  * ctx.features.accessibility (ADR 0014) — the host must have the accessibility
  * feature enabled + the surface registered.
  */

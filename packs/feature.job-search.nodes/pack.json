@@ -1,6 +1,6 @@
 {
   "name": "feature.job-search.nodes",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "kind": "node",
   "description": "Job-search node pack (ADR 0540) — score a posting's fit, check eligibility against a JD-stated bar, diff a proposed résumé rewrite for fabrication, and record an application's outcome. Deliberately has NO submit node: submitting is bounded by the ADR 0541 apply grant, and a node that could submit would route around the authority object that exists to bound it.",
   "author": "OpenWOP App",
@@ -57,7 +57,7 @@
       "typeId": "feature.job-search.nodes.run-campaign",
       "version": "1.0.0",
       "label": "Job Search: Run Campaign Pass",
-      "description": "Triggers the tenant's standing campaign pass via ctx.features['job-search'].runCampaignPass. Takes NO inputs by design: the pass derives targeting from the tenant's own steering, grants, listings and answer bank, and every submission inside it is bounded by the ADR 0541 apply grant (consult, pace, claim CAS, consume) plus the steering dailyCap. Output: the pass digest (per-grant applied/parked/skipped, with skip reasons). Side-effectful: a replay is served the recorded digest and never re-fires a pass (WF-JS-1).",
+      "description": "Triggers ONE person's campaign pass via ctx.features['job-search'].runCampaignPass. Takes NO inputs by design: the host resolves the person from the run (the member who started it, or the member who queued its card) and refuses a run that names nobody; the pass uses only that person's steering, grants and answer bank, and every submission inside it is bounded by the ADR 0541 apply grant (consult, pace, claim CAS, consume) plus the steering dailyCap. Output: counts only (ranGrants, listings, considered, applied, alreadyApplied, parked, skipped, skippedNoSubmitLane, skippedDailyCap) — no grant, campaign or listing ids, because run output is workspace-readable (ADR 1036 D1). Side-effectful: a replay is served the recorded digest and never re-fires a pass (WF-JS-1).",
       "category": "integration",
       "role": "action",
       "capabilities": [

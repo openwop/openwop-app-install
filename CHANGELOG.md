@@ -18,6 +18,189 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-11-11
+
+A MINOR release under ADR 0052. It adds a public trial entry, unlisted
+(quote-only) products, project health and read tools, a per-channel relay kill
+switch, WhatsApp settings inside Connections, and three CMS sections and nav
+options. It tightens who may write creative briefs, alt text, job-search
+authority objects and WhatsApp sends, makes tool approvals cover one exact call
+by default, and fixes WhatsApp double sends, knowledge-sync passes, crawlable
+`/docs`, a BYOK run-default bug and knowledge-base replaces. There is no schema change and no new app
+migration; schema stays at sqlite 52 / postgres 50 and app migrations at 26.
+It is rolling-safe. **Two new settings:** `OPENWOP_CHANNEL_APPROVAL_TTL_MIN`
+(default 1440, i.e. 24 hours) and `OPENWOP_INTEGRITY_GAUGES` (on unless
+`false`). **Hosting changes:** `firebase.json` gains
+`/docs` and `/docs/**` rewrites to the backend; see "Upgrading from 0.12.0".
+
+### Added
+
+- **Public trial entry (ADR 1097).** `/start-trial?plan=<pro|team|enterprise>`
+  or `?bundle=<id>` (optional `&cadence=year`) signs the visitor in and sends
+  them into the existing Stripe trial checkout. A new read,
+  `GET …/billing/trial-offer`, has checkout's gates (billing toggle, then
+  billing-manage) and never calls Stripe. No new env var, Stripe config or
+  webhook (#5732).
+- **Unlisted (quote-only) products (ADR 1098).** `Product.unlisted: true` hides
+  a product from the public store, checkout, UCP, the ad catalog feed,
+  discovery and recommendations. Funnel offers, campaign product links and ad
+  variant sets refuse it with `400 product_unlisted`. Quotes and operator lanes
+  keep it. Absent means listed (#5743).
+- **Project health, read tools, portfolio and tab roles (ADRs 1091–1095).**
+  `registerProjectHealthProvider`, `GET /projects/:id/health`,
+  `GET /projects/portfolio`, memory proposals an agent can raise and a person
+  approves on the Memory tab, the `openwop:projects.get`,
+  `openwop:projects.knowledge.search`, `openwop:projects.portfolio` and
+  `openwop:projects.memory.propose` tools (allowlisted for the chief-of-staff
+  assistant), and `ProjectTab.forRoles` (#5728).
+- **Relay channel kill switch (ADR 1043, CHAN-F11).** A workspace admin can
+  switch WhatsApp, Signal, iMessage or Discord relay off without revoking
+  devices. `GET …/messaging/relay/channels` (any member) and
+  `PUT …/messaging/relay/channels/:channel` (admin; `403 relay_admin_required`).
+  While off, inbound is dropped, the pull returns `paused: 'channel_disabled'`
+  and enqueue is refused with `409 relay_channel_disabled` (#5725).
+- **WhatsApp settings inside Connections (ADR 1053 D10).** Attestation,
+  connected numbers and recent delivery failures, at
+  `/access?tab=connections&view=whatsapp`, shown when the `whatsapp` toggle is
+  on (#5749, #5750).
+- **Revoke approvals; channel asks expire (CHAN-F17).**
+  `DELETE …/conversation-tools/sessions/:id/approvals/:toolName?resolvedAt=…`
+  revokes a given approval (`409 approval_changed` / `409 no_approval`). A
+  pending or approved-but-unused approval from a messaging channel expires
+  after `OPENWOP_CHANNEL_APPROVAL_TTL_MIN` minutes (default 1440); deciding it
+  after that returns `409 approval_expired`. In-app asks do not expire (#5744).
+- **CMS (ADR 1049, ADR 1069, ADR 1082).** A `resources` site-nav group (the
+  auto Blog entry moves there only when a published page uses it) (#5735);
+  named tier lists with status pills on plan cards (#5736); authored, price-less
+  `pricing.plans` (up to 8) that skip the billing fetch (#5742); and a `films`
+  section, a filterable gallery of click-to-play films with `VideoObject`
+  JSON-LD (#5737).
+- **Creative Director reads a brief (ADR 1039 P3).** A new
+  `openwop:creative-briefs.get` tool, "Ask the Creative Director" on a brief's
+  page (a deep link into the one chat), and readable version diffs (#5535).
+- **A2A 1.0 push configs (ADR 1045 D6, CHAN-F7).** A 1.0 registration gets a
+  1.0 `StreamResponse` body as `application/a2a+json`, and
+  `Get`/`List`/`DeleteTaskPushNotificationConfig` are served. 0.3
+  registrations are unchanged (#5726).
+
+- **Daily integrity gauges (ADR 1104).** Once per UTC day, under one lease,
+  the retention tick runs each feature's read-only data gauge and logs one
+  `integrity_gauge` line of counts (CMS overlay and hero-flow probes, tutorial
+  seed staleness). A failing gauge logs `integrity_gauge_failed` and the rest
+  still run. `OPENWOP_INTEGRITY_GAUGES=false` turns it off (#5759).
+- **Conformance suite 2.46.44.** The vendored schemas and fixtures move to
+  `@openwop/openwop-conformance` 2.46.44 (RFC 0258 bounded loopback, RFC 0259
+  `interrupt.resolved.resolvedVia`). The loopback fixtures are not advertised
+  yet (#5757).
+
+### Changed
+
+- **Tool approvals (ADR 0834 FW2-D1, CHAN-F2).** An approval now covers the
+  exact call shown, once (`grain: 'call'`, the default). "Allow for this
+  conversation" (`grain: 'conversation'`) is a separate, in-app-only choice;
+  asking for it on a channel request returns `400 grain_not_allowed`.
+  Approvals given before this release read as conversation-wide in-app and are
+  asked again on a channel turn (#5734).
+- **Capability firewall (ADR 0135, CHAN-F16).**
+  `openwop:core.openwop.http.fetch` is classified `read` / `safe-fetch` instead
+  of the risky fallback. A tenant rule keyed on `host-mediated` egress no longer
+  fires on it; one keyed on `safe-fetch` now does. Safe mode still asks for it
+  by name (#5731).
+- **WhatsApp (ADR 1053).** A message is paid for once (a concurrent duplicate
+  fails `send_in_flight`); the send uses the bound connection's credential;
+  delivery status comes only from verified provider callbacks; inbound is
+  replay-proof, and START applies only through an org or workspace
+  connection. `send` needs `workspace:write`. WhatsApp settings routes answer
+  only at the workspace root (`404 not_workspace_root` otherwise). New reads:
+  `…/whatsapp/orgs/:orgId/connections` and `…/delivery-failures` (admins).
+  Verified provider ingest for a connection with an enabled WhatsApp inbound
+  config no longer spends the per-IP write budget. Every WhatsApp store now
+  ages out (#5746).
+- **Knowledge sync (ADR 1101).** A pause made during a pass survives it, every
+  call pins the bound connection, and org-shared connections are refused for
+  new sources. **Removing a source now deletes the documents it synced**
+  (resumable, `202` batches, honours legal hold). A pass whose person lost
+  write on the org pauses (`creator-no-access`). The chain pack is `internal`
+  (#5752).
+- **Creative briefs (ADR 1039).** Surface writes need `workspace:write`.
+  `POST …/reel` picks a Replicate key before creating a run and returns
+  `422 credential_required` without one. The cap is checked before the paid
+  call and the aspect ratio reaches the provider (#5532). `deleteBrief` owns
+  every cascade; a failed child cascade now returns an error and keeps the
+  brief, where it used to return `204`. A DSAR eraser re-attributes brief rows
+  (#5533).
+- **Accessibility (ADR 1100).** `generateAltText` needs `workspace:write`. A
+  CMS picture with an empty alt takes the media library's description; the
+  checker looks at every image placement and warns (does not block) on a
+  file-name alt. The Accessibility Reviewer gets read tools, and the alt-text
+  node is side-effectful, so a replay fork does not pay again (#5748).
+- **Job search (ADR 1036).** A campaign pass acts for one person, deal ids and
+  steering are per person, attestations and grants are revoked only by their
+  issuer or subject, a grant unit is spent before the send, and subject erasure
+  deletes the person's application deals (#5526).
+- **Funnels (ADR 1023).** Revenue counts only paid orders, conversion is
+  cohort-based and cannot pass 100%, bad offers are refused before any draft,
+  and `PATCH` accepts `expectedUpdatedAt`. `funnels.generate` refuses
+  `provider`/`model` with `400 invalid_params` (#5453).
+- **Insights & Drafting (ADR 1102).** The recognition draft is checked and
+  approved, with its text shown at the gate, before it reaches the mailbox. A
+  talent review keeps only the subject's HR rows (`core.workday.query` with
+  `requireWorkerId` refuses a missing id with `worker_id_required`). The suite's
+  acting identity and schedule come from the caller, not the request body
+  (#5754).
+- **Docs KB (ADR 1057 P1).** Removal of a withdrawn page is no longer gated by
+  the `docs` toggle, and chat citations for the site org
+  (`OPENWOP_PUBLIC_SITE_ORG_ID`) carry a `/docs/<slug>` URL (#5580).
+
+### Fixed
+
+- A run started without `configurable.ai.credentialRef` uses the workspace
+  BYOK binding's key, instead of failing its AI step with `byok_required`. This
+  hit schedules, events, agent-offered chains and campaign stages (#5769).
+- `/docs` and `/docs/:slug` serve crawlers a prerender, a `301` or a real
+  `404`, the sitemap lists docs, and case and trailing-slash variants share one
+  canonical URL (ADR 1057 P2) (#5581).
+- A replace on a subject-bound knowledge collection no longer loses the prior
+  document when the new one is refused or fails; media-collection ingest
+  forwards its caller (#5771).
+- The docs KB backfill route reaches the system site's docs for a superadmin,
+  instead of answering `404 Organization not found` (ADR 1057) (#5767).
+- The hero underline sits under the baseline, clear of the next line (#5740).
+- Tests, grade waves, steward docs and CI tooling changed internally and are not
+  itemized.
+
+#### Upgrading from 0.12.0
+
+- **No required stop; rolling-safe.** `node scripts/upgrade-plan.mjs 0.12.0`
+  gives one step. No schema change and no new app migration.
+- **Deploy the backend before the frontend.** Several SPA changes read new
+  backend fields and codes.
+- **Hosting:** if you keep your own `firebase.json`, add the `/docs` and
+  `/docs/**` rewrites to the backend service. After the deploy, `/docs` shares
+  `/`'s brief stale-shell window.
+- **New settings:** `OPENWOP_CHANNEL_APPROVAL_TTL_MIN` (minutes, default 1440)
+  sets how long a channel tool approval stays usable. `OPENWOP_INTEGRITY_GAUGES`
+  runs the daily data gauges; set `false` to turn them off. Unset is fine for
+  both.
+- **Tool approvals** are now one call by default; existing approvals are asked
+  again on channel turns.
+- **Capability firewall rules** keyed on `host-mediated` egress no longer match
+  `openwop:core.openwop.http.fetch`; rekey them on `safe-fetch` if you relied on
+  that.
+- **Knowledge sync:** removing a source deletes its synced documents.
+  Org-shared connections are refused for new sources.
+- **WhatsApp:** address settings routes at the workspace root. A send through
+  another member's personal Twilio connection now fails `wa_not_connected`.
+- **Creative briefs and alt text** writes need `workspace:write`; reels need a
+  stored Replicate key.
+- **API callers:** `funnels.generate` refuses `provider`/`model`, and a funnel
+  offer, campaign link or ad variant set naming an unlisted product gets
+  `400 product_unlisted`.
+- **Optional:** a superadmin's `POST …/docs/orgs/<site org>/backfill` adds headings and
+  `/docs` URLs to docs indexed before this release. It is not run at boot.
+- Back up the database before upgrading. After the upgrade, check that
+  `/readiness` reports `version: 0.13.0`.
+
 ## [0.12.0] — 2026-11-10
 
 A MINOR release under ADR 0052. It adds public-site style tokens for white-label

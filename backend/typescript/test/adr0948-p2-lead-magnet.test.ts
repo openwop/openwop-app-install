@@ -8,7 +8,11 @@
  * Legs:
  *  1. Exit "shows in /builder and the / picker": the blueprint is listed by the
  *     generate lane with its own parameters (its sub-chains are not), and the
- *     gallery's from-chain instantiates it into a tenant-owned workflow.
+ *     gallery's from-chain instantiates it into a tenant-owned workflow — which
+ *     RUNS (ADR 1023 D2, FN72WF-3): before, its sub-chain children were expanded
+ *     Path-A with no params, so every child node lost `orgId`/`briefId`/`formId`
+ *     and a gallery copy could never complete. Sabotage-witnessed: restoring
+ *     `coRegisterSubChains`'s Path-A child expansion turns this leg red.
  *  2. Exit "run reaches the gate with a draft funnel": generate drafts one opt-in
  *     page (hero, bullets, the CALLER's form) and one thank-you page, submits both
  *     for review (nothing published), and creates ONE draft funnel linked to the
@@ -119,6 +123,22 @@ describe('ADR 0948 P2 — the lead-magnet blueprint', () => {
     expect(inst.body.warnings ?? [], 'every typeId in the blueprint and its sub-chains must resolve on this host').toEqual([]);
     const owned = await t.owner.get(`${H}/workflows`);
     expect(JSON.stringify(owned.body)).toContain(inst.body.workflowId as string);
+
+    // ADR 1023 D2 — the gallery copy runs end to end, in the org it was made for.
+    ai.mode = 'good';
+    const run = await t.owner.post('/runs', { workflowId: inst.body.workflowId, inputs: {} });
+    expect(run.status, JSON.stringify(run.body)).toBe(201);
+    const wire = run.body.runId as string;
+    const fin = await vi.waitFor(async () => {
+      const st = (await t.owner.get(`/runs/${wire}`)).body as { status: string; error?: unknown };
+      expect(['completed', 'failed', 'cancelled']).toContain(st.status);
+      return st;
+    }, { timeout: 20_000, interval: 100 });
+    expect(fin.status, JSON.stringify(fin.error)).toBe('completed');
+    const made = await listFunnels(t.tenantId, t.orgA);
+    expect(made.map((f) => [f.name, f.status])).toEqual([['Gallery copy', 'draft']]);
+    const optin = await getPage(t.tenantId, t.orgA, made[0]!.steps[0]!.pageId);
+    expect(optin?.sections.find((sec) => sec.type === 'form')?.data).toMatchObject({ formId: t.formA });
   });
 
   it('drafts and submits both pages and creates ONE draft funnel on them; nothing is published', async () => {
@@ -137,6 +157,13 @@ describe('ADR 0948 P2 — the lead-magnet blueprint', () => {
     const optin = await getPage(t.tenantId, t.orgA, steps[0]!.pageId);
     const thanks = await getPage(t.tenantId, t.orgA, steps[1]!.pageId);
     expect(optin?.title).toBe('Get the free watercolor starter guide');
+    // ADR 1023 D1 — the copy model read the brief, as a closed projection: its name
+    // reached the prompt; the row's bookkeeping (tenant, author, timestamps) did not.
+    const optinCall = [...ai.calls].reverse().find((c) => JSON.stringify(c).includes('opt-in page for a lead magnet'));
+    const sent = JSON.stringify(optinCall?.messages ?? []);
+    expect(sent).toContain('Watercolor guide');
+    // (A brief's `kernelReview.runId` is witnessed in funnels-packs: these fixtures never stage a kernel.)
+    for (const leak of ['tenantId', 'createdBy', 'createdAt', t.tenantId]) expect(sent, leak).not.toContain(leak);
     expect(optin?.sections.map((s) => s.type)).toEqual(['hero', 'richText', 'form']);
     expect(optin?.sections.find((s) => s.type === 'form')?.data).toMatchObject({ formId: t.formA, heading: 'Send me the guide' });
     expect(thanks?.title).toBe('You are in');

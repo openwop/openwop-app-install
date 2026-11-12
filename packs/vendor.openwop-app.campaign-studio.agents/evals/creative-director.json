@@ -1,6 +1,6 @@
 {
   "suiteId": "vendor.openwop-app.campaign-studio.evals.creative-director",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "targetAgentId": "vendor.openwop-app.campaign-studio.agents.creative-director",
   "modes": [
     "golden"
@@ -2678,6 +2678,87 @@
             "response": {
               "score": 92,
               "violations": []
+            }
+          }
+        ]
+      }
+    },
+    {
+      "taskId": "read-the-creative-brief-first",
+      "input": {
+        "request": "Give direction on creative brief cbrief:spring-hero. Which of its directions should lead?"
+      },
+      "expected": {
+        "kind": "trajectory",
+        "trajectory": {
+          "match": "in-order",
+          "calls": [
+            {
+              "tool": "openwop:creative-briefs.get"
+            }
+          ],
+          "forbidden": [
+            "openwop:campaign-brief.generate-kernel",
+            "openwop:campaign-brief.research.run",
+            "openwop:campaign-channels.generate",
+            "openwop:campaign-orchestration.run",
+            "openwop:campaign-studio.render",
+            "openwop:cms.submit-page",
+            "openwop:cms.update-section-draft",
+            "openwop:comments.post",
+            "openwop:crm.lead.capture",
+            "openwop:documents.draft",
+            "openwop:documents.revise",
+            "openwop:email.draft",
+            "openwop:email.save-draft",
+            "openwop:feature.crm.nodes.create-task",
+            "openwop:feature.crm.nodes.log-activity",
+            "openwop:feature.crm.nodes.persist-segment",
+            "openwop:funnels.draft",
+            "openwop:kanban.add-todo",
+            "openwop:notifications.notify-me",
+            "openwop:tasks.schedule-followup",
+            "openwop:tasks.schedule-recurring",
+            "openwop:walkthroughs.register-draft",
+            "openwop:workflows.propose"
+          ]
+        }
+      },
+      "fixtures": {
+        "onMiss": "fail",
+        "toolResponses": [
+          {
+            "tool": "openwop:creative-briefs.get",
+            "response": {
+              "orgId": "org_acme",
+              "brief": {
+                "briefId": "cbrief:spring-hero",
+                "title": "Spring hero",
+                "assetType": "image",
+                "status": "review",
+                "version": 3,
+                "sceneDescription": "A hiker crossing a stream at dawn, boots in focus",
+                "directions": [
+                  {
+                    "index": 0,
+                    "label": "Product in use",
+                    "rationale": "Show the outcome the buyer wants"
+                  },
+                  {
+                    "index": 1,
+                    "label": "Before / after",
+                    "rationale": "Contrast the pain with the solution"
+                  }
+                ],
+                "moodBoard": []
+              },
+              "issues": [
+                {
+                  "field": "platformSpec",
+                  "severity": "warning",
+                  "message": "No platform target selected"
+                }
+              ]
             }
           }
         ]

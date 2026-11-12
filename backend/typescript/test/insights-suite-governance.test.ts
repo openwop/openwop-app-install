@@ -127,16 +127,22 @@ describe('ADR 0078 §4 — (c) structural no-auto-side-effect', () => {
     expect(e.some((x) => x.sourceNodeId === gate && x.targetNodeId === notify)).toBe(true);
   });
 
-  it('anniversary-draft: an approvalGate exists and email is draft-only (never send)', () => {
+  it('anniversary-draft: the approvalGate stands IN FRONT of the mailbox write, and email is draft-only', () => {
     expect(hasNode(anniversaryDraftDefinition, 'core.approvalGate')).toBe(true);
     expect(hasNode(anniversaryDraftDefinition, 'core.email.draft')).toBe(true);
-    // Upstream, not merely present: draft → gate → notify (no surfacing before sign-off).
+    // ADR 1102 D3 (`INS91-3`) — CORRECTED. This used to assert draft → gate →
+    // notify, i.e. it PINNED the defect: the mailbox was written first and the
+    // gate could only approve a notification about it. The order is now
+    // check → gate → draft → notify, and the gate is fed the TEXT.
     const draft = nodeIdOf(anniversaryDraftDefinition, 'core.email.draft');
     const gate = nodeIdOf(anniversaryDraftDefinition, 'core.approvalGate');
+    const check = nodeIdOf(anniversaryDraftDefinition, 'feature.insights-suite.nodes.draft-check');
     const notify = nodeIdOf(anniversaryDraftDefinition, 'feature.notifications.nodes.notify');
     const e = edges(anniversaryDraftDefinition);
-    expect(e.some((x) => x.sourceNodeId === draft && x.targetNodeId === gate), 'the draft must feed the approval gate').toBe(true);
-    expect(e.some((x) => x.sourceNodeId === gate && x.targetNodeId === notify), 'notify must sit behind the approval gate').toBe(true);
+    expect(e.some((x) => x.sourceNodeId === check && x.targetNodeId === gate && x.targetInput === 'draft'), 'the gate must be shown the draft text').toBe(true);
+    expect(e.some((x) => x.sourceNodeId === gate && x.targetNodeId === draft), 'the mailbox write must wait for the approval').toBe(true);
+    expect(e.some((x) => x.sourceNodeId === draft && x.targetNodeId === gate), 'the mailbox is written BEFORE the approval again').toBe(false);
+    expect(e.some((x) => x.sourceNodeId === draft && x.targetNodeId === notify), 'notify must follow the draft').toBe(true);
   });
 
   /**
@@ -172,6 +178,10 @@ describe('ADR 0078 §4 — (c) structural no-auto-side-effect', () => {
     'core.approvalGate',
     'feature.insights-suite.nodes.variance-compute',
     'feature.insights-suite.nodes.talent-score',
+    // ADR 1102 D2/D3 — both pure (no host surface but the ADR 1009 taint bit), and
+    // neither can reach a mailbox: reviewed.
+    'feature.insights-suite.nodes.recognition-brief',
+    'feature.insights-suite.nodes.draft-check',
     'feature.notifications.nodes.notify',
   ]);
 

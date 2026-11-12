@@ -36,6 +36,7 @@ import type { Storage } from '../src/storage/storage.js';
 import { initHostEventDispatcher, type HostEventEnvelope } from '../src/host/hostEventDispatcher.js';
 import type { StartRunDeps } from '../src/host/runStarter.js';
 import { PREAUTHORIZED_CALLER } from '../src/host/subjectAccess.js';
+import { createMember } from '../src/host/accessControlService.js';
 import { getConnection, type Connection } from '../src/features/connections/connectionsService.js';
 import { listFolder, fetchKnowledgeSource, type FetchedSource, type SyncFolderFile, type SyncFolderListing } from '../src/host/knowledgeSourceFetch.js';
 import { runKnowledgeSyncOnce } from '../src/features/knowledge-sync/knowledgeSyncRunner.js';
@@ -110,6 +111,8 @@ describe('ADR 0643 D3 — the sync runner is a silent bulk lane', () => {
     const tenantId = `kb-sync-silent-${Date.now()}-${n++}`;
     const orgId = 'org1';
     mConn.mockResolvedValue(conn('user:owner', tenantId));
+    // ADR 1101 D3 — a pass acts only for a person who can still write the org.
+    await createMember({ orgId, tenantId, displayName: 'Owner', subject: 'user:owner', roles: ['editor'] });
     const col = await createCollection(tenantId, orgId, 'user:owner', { name: 'Synced' });
     const source = await createSyncSource(tenantId, orgId, { connectionId: 'c1', provider: 'google', externalFolderId: 'F', collectionId: col.collectionId, cadence: 'hourly' }, NOW);
 
@@ -146,7 +149,13 @@ describe('ADR 0643 D3 — the sync runner is a silent bulk lane', () => {
 describe('ADR 0643 R3 (Blocker 2) — the runner writes AS THE CONNECTION OWNER, re-resolved at use', () => {
   it('a project-BOUND target: the non-member owner\'s pass is refused (errors, 0 ingested); a member owner\'s pass ingests', async () => {
     const { tenantId, orgId, userId: member } = await realMember();
-    const intruder = 'user:intruder'; // no membership anywhere in this tenant
+    // No membership anywhere in this tenant. ADR 1101 D3 — such an owner is now refused
+    // one check EARLIER than the collection gate (the pass-time org-write check), still
+    // before any listing or fetch; the collection-gate refusal itself is witnessed in
+    // `knowledge-sync-pass-integrity.test.ts` (`collection_unreadable`). MEASURED while
+    // making this change: an org EDITOR outside the private project passes the
+    // collection read here, so an editor cannot stand in for the old intruder.
+    const intruder = 'user:intruder';
     const project = await createProject(tenantId, orgId, { name: 'Private' });
     await addProjectMember(tenantId, project.id, `user:${member}`, 'contributor');
     await setProjectVisibility(tenantId, project.id, 'private');
@@ -161,7 +170,7 @@ describe('ADR 0643 R3 (Blocker 2) — the runner writes AS THE CONNECTION OWNER,
     // toward MAX_CONSECUTIVE_FAILURES and retires the source after 5), NO folder
     // listing, NO fetch. The R3 shape listed + fetched every changed file on every pass
     // and then recorded N per-file errors, forever.
-    await expect(runKnowledgeSyncOnce({ storage }, { ...source, createdBy: intruder })).rejects.toThrow(/not readable by the connection owner/);
+    await expect(runKnowledgeSyncOnce({ storage }, { ...source, createdBy: intruder })).rejects.toThrow(/no longer has write access/);
     expect(mList, 'the folder must not be listed for a source that cannot write').not.toHaveBeenCalled();
     expect(mFetch).not.toHaveBeenCalled();
     expect(await listDocuments(tenantId, orgId, col.collectionId, PREAUTHORIZED_CALLER)).toEqual([]);

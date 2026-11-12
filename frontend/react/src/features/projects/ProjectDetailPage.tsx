@@ -19,6 +19,7 @@ import { StateCard } from '../../ui/StateCard.js';
 import { FolderIcon, TrashIcon } from '../../ui/icons/index.js';
 import { AgentBoardPanel } from '../../agents/AgentBoardPanel.js';
 import { MemoryBrowser } from '../../memory/MemoryBrowser.js';
+import { MemoryProposals } from './MemoryProposals.js';
 import { SubjectKnowledgePanel, type SubjectKnowledgeClient } from '../../knowledge/SubjectKnowledgePanel.js';
 import { ProjectSchedulesTab } from './ProjectSchedulesTab.js';
 import { ProjectWorkflowsTab } from './ProjectWorkflowsTab.js';
@@ -84,6 +85,8 @@ export function ProjectDetailPage(): JSX.Element {
   const [loadError, setLoadError] = useState<string | null>(null);
   /** An ACTION failed (delete). The project is intact and stays on screen. */
   const [actionError, setActionError] = useState<string | null>(null);
+  /** ADR 1092 D2 — bumped when a proposal is approved, so the memory list reloads. */
+  const [memoryVersion, setMemoryVersion] = useState(0);
   const [searchParams, setSearchParams] = useSearchParams();
   // ADR 0054 — Members (membership + visibility) and Chat are always-on
   // (graduated off the `project-collab` toggle 2026-06-16). ADR 0084 correction —
@@ -105,11 +108,13 @@ export function ProjectDetailPage(): JSX.Element {
     const out: typeof CONTRIBUTED_TABS = [];
     for (const c of CONTRIBUTED_TABS) {
       if (!visible(c.featureId) || seen.has(c.key)) continue;
+      // ADR 1095 — a role-limited tab: a writer always sees it, others by their project role.
+      if (c.forRoles && !(project?.canWrite || (project?.myRole && c.forRoles.includes(project.myRole)))) continue;
       seen.add(c.key);
       out.push(c);
     }
     return out;
-  }, [visible]);
+  }, [visible, project?.canWrite, project?.myRole]);
   const TABS: readonly Tab[] = [...HOST_TABS, ...contributed.map((c) => c.key)];
   const tabParam = searchParams.get('tab');
   const tab: Tab = TABS.some((id) => id === tabParam) ? (tabParam as Tab) : 'overview';
@@ -311,7 +316,10 @@ export function ProjectDetailPage(): JSX.Element {
       ) : tab === 'board' ? (
         <AgentBoardPanel boardId={project.boardId} persona={project.name} readOnly={!canWrite} />
       ) : tab === 'memory' ? (
+        <>
+        <MemoryProposals projectId={project.id} canWrite={canWrite} onApproved={() => setMemoryVersion((v) => v + 1)} />
         <MemoryBrowser
+          key={memoryVersion}
           list={list}
           add={add}
           remove={remove}
@@ -319,6 +327,7 @@ export function ProjectDetailPage(): JSX.Element {
           addPlaceholder={t('memoryAddPlaceholder')}
           emptyBody={t('memoryEmptyBody')}
         />
+        </>
       ) : tab === 'knowledge' ? (
         <SubjectKnowledgePanel
           client={knowledgeClient}

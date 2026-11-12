@@ -26,8 +26,9 @@ import type { Request } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
-import { requireFeatureEnabled } from '../featureRoute.js';
-import { getConfig, applyConfig, type InsightsSuiteConfig } from './insightsSuiteService.js';
+import { requireFeatureEnabled, callerOwnerSpellings, callerSubjectSpellings } from '../featureRoute.js';
+import { callerSubject, isAnonTenantId, personalTenantOf } from '../../host/requestSubject.js';
+import { getConfig, applyConfig, isWeeklyScheduleArmed, type InsightsSuiteConfig } from './insightsSuiteService.js';
 import { parseCron } from '../../host/cronSchedule.js';
 
 const TOGGLE_ID = 'insights-suite';
@@ -35,7 +36,95 @@ const LABEL = 'Insights & Drafting Agent Suite';
 const BASE = '/host/openwop-app/insights-suite';
 
 const tenantOf = (req: Request): string => req.tenantId ?? 'default';
-const actingUserOf = (req: Request): string | undefined => req.userId ?? req.principal?.principalId;
+/** The shared helper (`host/requestSubject.ts`), not a local copy (ADR 1102 D4). */
+const actingUserOf = callerSubject;
+
+/** ADR 1102 D5 — the closed world a PUT may carry. The last three are what a GET
+ *  returns, so a GET → edit → PUT round trip is accepted; they are ignored, and
+ *  `principalUserId` is checked rather than taken (D4). */
+const PUT_KEYS = new Set([
+  'scheduleCron', 'scheduleTimezone', 'planSource', 'businessUnit', 'businessUnits',
+  'anniversaryTriggerEnabled', 'takeOver', 'tenantId', 'principalUserId', 'updatedAt',
+]);
+/** A GCP project id (6-30 characters), or the legacy `domain:project` form. The
+ *  settings panel holds the same rule (`InsightsSuitePanel.tsx`). */
+const PROJECT_ID = /^(?:[a-z0-9.-]+:)?[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
+/** Every refusal carries `field` and a closed `reason`, so the settings panel can
+ *  show its own localized sentence instead of this developer-facing one. */
+const fieldError = (field: string, message: string, reason: string): OpenwopError =>
+  new OpenwopError('invalid_request', message, 400, { field, reason });
+
+/** ADR 1102 D4 — the spellings the caller is matched by. `callerOwnerSpellings`
+ *  adds the raw auth principal, which its own doc says is safe to compare ONLY
+ *  against rows in the caller's personal tenant (the code-review pass): in a
+ *  shared workspace two people from different IdPs can share a raw `sub`. */
+export async function configPrincipalSpellings(req: Request, tenant: string): Promise<string[]> {
+  return tenant === personalTenantOf(req) ? callerOwnerSpellings(req) : callerSubjectSpellings(req);
+}
+
+/** Parse the PUT body into the fields a save may set, refusing anything else. */
+function parseConfigBody(raw: unknown): {
+  scheduleCron?: string; scheduleTimezone?: string; planSource?: { projectId: string };
+  businessUnit?: string; anniversaryTriggerEnabled?: boolean; takeOver: boolean; principalUserId?: string;
+} {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new OpenwopError('invalid_request', 'The body must be a JSON object.', 400);
+  const body = raw as Record<string, unknown>;
+  for (const k of Object.keys(body)) {
+    if (!PUT_KEYS.has(k)) throw fieldError(k, `Unknown field: ${k}.`, 'unknown_field');
+  }
+  const str = (k: string, max: number): string | undefined => {
+    const v = body[k];
+    if (v === undefined || v === null || v === '') return undefined;
+    if (typeof v !== 'string') throw fieldError(k, `${k} must be a string.`, 'not_string');
+    const t = v.trim();
+    if (t.length > max) throw fieldError(k, `${k} is longer than ${max} characters.`, 'too_long');
+    return t || undefined;
+  };
+  const out: ReturnType<typeof parseConfigBody> = { takeOver: body.takeOver === true };
+  const cron = str('scheduleCron', 120); if (cron) out.scheduleCron = cron;
+  const tz = str('scheduleTimezone', 64); if (tz) out.scheduleTimezone = tz;
+  const principal = str('principalUserId', 256); if (principal) out.principalUserId = principal;
+  // ADR 1102 D5 (`INS91-10`) — ONE business unit, because the schedule could only
+  // ever run one. The legacy list is accepted with at most one entry.
+  const bu = str('businessUnit', 120);
+  if (body.businessUnits !== undefined) {
+    if (bu) throw fieldError('businessUnits', 'Send businessUnit or businessUnits, not both.', 'both_spellings');
+    if (!Array.isArray(body.businessUnits)) throw fieldError('businessUnits', 'businessUnits must be an array.', 'not_array');
+    if (body.businessUnits.length > 1) throw fieldError('businessUnits', 'The weekly variance analyses one business unit. Send businessUnit.', 'one_business_unit');
+    const only = body.businessUnits[0];
+    if (only !== undefined) {
+      if (typeof only !== 'string' || only.trim().length > 120) throw fieldError('businessUnits', 'A business unit is a string of at most 120 characters.', 'too_long');
+      if (only.trim()) out.businessUnit = only.trim();
+    }
+  } else if (bu) {
+    out.businessUnit = bu;
+  }
+  // ADR 1102 D5 (`INS91-11`) — `planSource` was persisted verbatim: any object, any
+  // size, and an object `projectId` passed the arm guard as "[object Object]".
+  if (body.planSource !== undefined && body.planSource !== null) {
+    const ps = body.planSource;
+    if (typeof ps !== 'object' || Array.isArray(ps)) throw fieldError('planSource', 'planSource must be an object.', 'not_object');
+    const p = ps as Record<string, unknown>;
+    // `dataset` is refused, not silently dropped: it was stored and read by
+    // nothing (the code-review pass). The dataset belongs in the chain's `sql`.
+    for (const k of Object.keys(p)) {
+      if (k !== 'projectId') throw fieldError(`planSource.${k}`, `Unknown field: planSource.${k}.`, 'unknown_field');
+    }
+    const v = p.projectId;
+    if (v !== undefined && v !== null && v !== '') {
+      if (typeof v !== 'string' || v.trim().length > 200) throw fieldError('planSource.projectId', 'planSource.projectId must be a string of at most 200 characters.', 'not_string');
+      if (!PROJECT_ID.test(v.trim())) {
+        throw fieldError('planSource.projectId', 'planSource.projectId is not a BigQuery project id (6-30 lowercase letters, digits or hyphens, starting with a letter).', 'invalid_project_id');
+      }
+      out.planSource = { projectId: v.trim() };
+    }
+  }
+  if (body.anniversaryTriggerEnabled !== undefined) {
+    if (typeof body.anniversaryTriggerEnabled !== 'boolean') throw fieldError('anniversaryTriggerEnabled', 'anniversaryTriggerEnabled must be true or false.', 'not_boolean');
+    out.anniversaryTriggerEnabled = body.anniversaryTriggerEnabled;
+  }
+  return out;
+}
 
 /**
  * ADR 0599 §7 (ISC-8) — refuse BEFORE resolving access when there is no acting
@@ -93,7 +182,18 @@ export function registerInsightsSuiteRoutes(deps: RouteDeps): void {
   app.get(`${BASE}/config`, async (req, res, next) => {
     try {
       const tenant = await requireRead(req);
-      res.json({ config: await getConfig(tenant) });
+      const config = await getConfig(tenant);
+      // ADR 1102 D10 — what the settings panel needs to say who the suite runs as
+      // and whether this caller may change it, computed with the same predicates
+      // the PUT applies (so the panel never offers a save the door refuses).
+      const access = await resolveEffectiveAccess(tenant, { subject: actingUserOf(req), orgId: tenant });
+      const mine = await configPrincipalSpellings(req, tenant);
+      res.json({
+        config,
+        runsAsYou: config ? mine.includes(config.principalUserId) : null,
+        scheduleArmed: config ? await isWeeklyScheduleArmed(config) : false,
+        canWrite: access.scopes.includes('workspace:write' as Scope) && !isAnonTenantId(personalTenantOf(req)) && !isAnonTenantId(tenant),
+      });
     } catch (err) { next(err); }
   });
 
@@ -103,57 +203,62 @@ export function registerInsightsSuiteRoutes(deps: RouteDeps): void {
   app.put(`${BASE}/config`, async (req, res, next) => {
     try {
       const tenant = await requireWrite(req);
-      const body = (req.body ?? {}) as Partial<InsightsSuiteConfig>;
-      const principalUserId = String(body.principalUserId ?? '').trim();
-      if (!principalUserId) throw new OpenwopError('invalid_request', 'principalUserId is required.', 400);
-      // ADR 0081 P6 — validate the cron at the HTTP boundary (reuse the scheduler's
-      // single parser, host/cronSchedule). Without this a malformed cron persists a
-      // silently never-firing job (ADR 0078 P2 review LOW).
-      if (body.scheduleCron && parseCron(String(body.scheduleCron)) === null) {
-        throw new OpenwopError('invalid_request', 'scheduleCron is not a valid 5-field cron expression.', 400, { field: 'scheduleCron' });
+      // ADR 1102 D4 — a weekly job runs AS its principal, so its principal is never
+      // an anonymous sandbox session (thrown away on sign-in). An API-key operator is
+      // a legitimate writer here, as on the core scheduler's shared-workspace lane.
+      if (isAnonTenantId(personalTenantOf(req)) || isAnonTenantId(tenant)) {
+        throw new OpenwopError('unauthenticated', 'A signed-in account is required to schedule the weekly variance.', 401, {});
       }
-      // ADR 0599 §6 (ISC-6/ISWF-7) — VALIDATE EVERY FIELD BEFORE ANY WRITE.
-      // The cron was validated here and the timezone was not, and the asymmetry
-      // was strictly worse than the bug the cron guard was added to eliminate:
-      // `applyConfig` persists FIRST and reconciles second, and an invalid IANA
-      // zone reaches `Intl.DateTimeFormat` inside `computeNextFire`, which throws
-      // an uncaught `RangeError` out of `registerJob`. Note the ordering that
-      // makes it bite: `parseCron` runs first, so a VALID cron with a typo'd
-      // timezone (`America/Chicgo`) is exactly the case that reaches the throw.
-      // The caller got a 500 they read as a server fault, `GET /config` then
-      // returned a cron and a timezone as if configured, and `listJobs` held
-      // nothing. A refusal that persists is worse than the bug it replaced.
+      const body = parseConfigBody(req.body);
+      // ADR 1102 D4 (`INS91-4`) — DERIVED, never supplied. This used to read
+      // `body.principalUserId` verbatim, so any workspace writer could create a weekly
+      // run owned by, and attributed to, any other user. The core scheduler forbids
+      // exactly that; this route was a second door into the same job store.
+      const caller = actingUserOf(req)!;
+      const mine = await configPrincipalSpellings(req, tenant);
+      const prior = await getConfig(tenant);
+      // A GET → PUT round trip echoes the CURRENT principal; with `takeOver` that
+      // echo is not a claim to be someone else (the code-review pass), so it is ignored.
+      const echoesPrior = prior !== null && body.principalUserId === prior.principalUserId;
+      if (body.principalUserId && !mine.includes(body.principalUserId) && !echoesPrior) {
+        throw new OpenwopError('forbidden', 'The suite runs as the person who saves it. principalUserId cannot name someone else.', 403, { reason: 'forbidden_principal' });
+      }
+      // Take-over is explicit (architect M14): a second admin fixing a cron typo must
+      // not silently move a colleague's schedule onto themselves.
+      if (prior && !mine.includes(prior.principalUserId) && !body.takeOver) {
+        throw new OpenwopError(
+          'conflict',
+          'This suite runs as someone else. Saving would make it run as you; send takeOver: true to do that.',
+          409,
+          { reason: 'principal_conflict', principalUserId: prior.principalUserId },
+        );
+      }
+      // ADR 0081 P6 — validate the cron at the HTTP boundary (the scheduler's parser).
+      if (body.scheduleCron && parseCron(body.scheduleCron) === null) {
+        throw fieldError('scheduleCron', 'scheduleCron is not a valid 5-field cron expression.', 'invalid_cron');
+      }
+      // ADR 0599 §6 (ISC-6/ISWF-7) — VALIDATE EVERY FIELD BEFORE ANY WRITE: an
+      // invalid IANA zone threw out of `registerJob` after the row was persisted.
       if (body.scheduleTimezone !== undefined) {
-        const tz = String(body.scheduleTimezone);
         try {
-          new Intl.DateTimeFormat('en-US', { timeZone: tz });
+          new Intl.DateTimeFormat('en-US', { timeZone: body.scheduleTimezone });
         } catch {
-          throw new OpenwopError('invalid_request', `scheduleTimezone is not a valid IANA time zone: ${tz}`, 400, { field: 'scheduleTimezone' });
+          throw fieldError('scheduleTimezone', `scheduleTimezone is not a valid IANA time zone: ${body.scheduleTimezone}`, 'invalid_timezone');
         }
       }
-      // ADR 0599 §6 — refuse to ARM a schedule that provably cannot run. The
-      // weekly-variance chain declares `projectId` REQUIRED and has no default
-      // (a BigQuery project is tenant-specific), and the scheduled lane's only
-      // source for it is `planSource.projectId`. Accepting a cron without one
-      // writes a job whose every fire dies `invalid_config` at node 1, forever,
-      // with no alert — this feature's original failure mode, re-created one
-      // level up. `planSource` was read by nothing before ADR 0599.
-      if (body.scheduleCron && !String(body.planSource?.projectId ?? '').trim()) {
-        throw new OpenwopError(
-          'invalid_request',
-          'planSource.projectId is required to arm a weekly variance schedule — without it every scheduled run fails at its first node.',
-          400,
-          { field: 'planSource.projectId' },
-        );
+      // ADR 0599 §6 — refuse to ARM a schedule that provably cannot run: the chain
+      // requires `projectId`, and the scheduled lane's only source is `planSource`.
+      if (body.scheduleCron && !body.planSource?.projectId) {
+        throw fieldError('planSource.projectId', 'planSource.projectId is required to arm a weekly variance schedule — without it every scheduled run fails at its first node.', 'project_required');
       }
       const config: InsightsSuiteConfig = {
         tenantId: tenant,
-        principalUserId,
-        businessUnits: Array.isArray(body.businessUnits) ? body.businessUnits.map(String) : [],
-        ...(body.scheduleCron ? { scheduleCron: String(body.scheduleCron) } : {}),
-        ...(body.scheduleTimezone ? { scheduleTimezone: String(body.scheduleTimezone) } : {}),
+        principalUserId: caller,
+        ...(body.businessUnit ? { businessUnit: body.businessUnit } : {}),
+        ...(body.scheduleCron ? { scheduleCron: body.scheduleCron } : {}),
+        ...(body.scheduleTimezone ? { scheduleTimezone: body.scheduleTimezone } : {}),
         ...(body.planSource ? { planSource: body.planSource } : {}),
-        ...(body.anniversaryTriggerEnabled !== undefined ? { anniversaryTriggerEnabled: Boolean(body.anniversaryTriggerEnabled) } : {}),
+        ...(body.anniversaryTriggerEnabled !== undefined ? { anniversaryTriggerEnabled: body.anniversaryTriggerEnabled } : {}),
         updatedAt: new Date().toISOString(),
       };
       res.json({ config: await applyConfig(config) });

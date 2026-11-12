@@ -704,3 +704,29 @@ a platform handle) of the person a relay or connector talked to. Decisions, all 
   workspace. The controls today are the `channel-ingress` toggle (every lane, every
   channel) and revoking a device. Not built; recorded by the coordinator,
   2026-11-04.
+
+  > **CORRECTED 2026-11-10 (CHAN-F11) — built.** `messaging/relayChannelSwitch.ts`
+  > holds one row per workspace: the relay channels switched off. A workspace admin
+  > switches one with `PUT /host/openwop-app/messaging/relay/channels/:channel`
+  > `{enabled}` (the H1 `requireRelayAdmin` check; any member reads
+  > `GET …/relay/channels`, which also says `canManage`). With a channel off, every
+  > device of that channel in the workspace has its inbound acknowledged and dropped
+  > (`channel_disabled`) FIRST, before admission, budget, dedup claim and delivery
+  > log, in both conversation and workflow mode; pulls nothing (`device/outbound`
+  > answers `messages: []`, `paused`); and gets nothing new queued (`enqueueOutbound`
+  > refuses `relay_channel_disabled`, which the channel reply transport reports as a
+  > typed `sent: false`). Egress already queued waits and is pulled when the channel
+  > is back on (or ages out at the token lifetime, CHAN-F12). Devices keep
+  > heartbeating and keep their token, approvals and settings, so switching back on
+  > needs no re-pairing. The read fails CLOSED on a storage error, without loss:
+  > inbound, the pull and enqueue answer a retryable `503 service_unavailable`, so
+  > the device retries the message or the pull and the sender retries the enqueue.
+  > (The first draft failed OPEN, reasoning that a hiccup must not cut every relay.
+  > The coordinator's review overturned it: a kill switch is flipped when a channel
+  > is being abused, so a blip must not re-open it, and a 503 costs only a retry
+  > because nothing is dropped.) No person is stored (who switched it is the route's log line), so the
+  > store is EXEMPT from erasure (`messaging-store-erasure-classification.test.ts`).
+  > UI: the channels settings page shows the switches to admins, a notice to members
+  > when a channel is off, and a device on an off channel as "Paused (channel off)".
+  > Tests: `adr1043-relay-channel-switch.test.ts` (real boot; case (e) is the fail-closed read) and
+  > `ChannelSettingsPage.test.tsx` (CHAN-F11 block).

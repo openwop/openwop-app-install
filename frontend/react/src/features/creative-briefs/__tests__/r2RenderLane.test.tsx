@@ -52,6 +52,8 @@ vi.mock('../../media/mediaClient.js', async (orig) => ({
   listAssets: vi.fn(async () => []),
   absoluteServeUrl: (s: string) => s,
 }));
+// ADR 1039 D8 — the brief page asks the agent catalog whether to offer "Ask the Creative Director".
+vi.mock('../../../chat/lib/agentMentions.js', () => ({ useAgentMentions: () => ({ entries: [], isLoading: false, error: null }) }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn(), info: vi.fn() } }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
   useFeatureAccess: () => ({ enabled: true, locked: false, loading: false, status: 'on' as const, isBeta: false, variant: null, entitled: true, resolutionFailed: false }),

@@ -28,7 +28,7 @@ import { listBrands, getBrand } from '../../brand/brandService.js';
 import { getBrandFont, BRAND_FONT_ROLES } from '../../brand/brandFonts.js';
 import type { Brand, BrandCreativeLocks } from '../../brand/types.js';
 import { applyBrandLocks, type RenderLockFacts } from './brandLocks.js';
-import { getBrief } from '../creativeBriefsService.js';
+import { casRewrite, getBrief } from '../creativeBriefsService.js';
 import type { CreativeBrief } from '../types.js';
 import { getTemplate, type AdLayoutTemplate, type AdLayerId, type BrandColorToken } from './templates.js';
 import {
@@ -334,16 +334,38 @@ export function compositeHashOf(input: {
   })).digest('hex');
 }
 
+const capReached = (): OpenwopError => new OpenwopError('validation_error', `Render cap reached for this brief (${renderCap}) — delete old renders first.`, 400, {});
+
+/** The per-brief render cap, checked before any work is done or paid for
+ *  (ADR 1039 D3: the reel node asks this before its video call). Advisory under
+ *  concurrency; {@link pruneOverflow} is the convergent recheck after the write. */
+export async function assertRenderCapacity(tenantId: string, orgId: string, briefId: string): Promise<void> {
+  if ((await renders.listByPrefix(`${tenantId}:${orgId}:${briefId}:`)).length >= renderCap) throw capReached();
+}
+
+/** R0399-2 — the pre-flight count check is TOCTOU: parallel writers can each pass
+ *  it and overshoot the cap. Every racing writer sorts the SAME way (createdAt,
+ *  then renderId) and prunes the SAME newest-beyond-cap overflow, keeping the
+ *  oldest MAX (matching the "delete old renders first" intent). If `record` is in
+ *  the overflow it never persists: it is pruned and the write fails typed. The
+ *  media asset stays (media owns its lifecycle), like every other render-delete.
+ *  ADR 1039 (CB82WF-8) — shared by image and reel renders; reels had no recheck. */
+async function pruneOverflow(record: CreativeRender): Promise<void> {
+  const forBrief = (await renders.listByPrefix(`${record.tenantId}:${record.orgId}:${record.briefId}:`))
+    .sort((a, b) => (a.createdAt === b.createdAt ? a.renderId.localeCompare(b.renderId) : a.createdAt.localeCompare(b.createdAt)));
+  if (forBrief.length <= renderCap) return;
+  const overflow = forBrief.slice(renderCap); // newest beyond the cap
+  for (const o of overflow) await renders.delete(`${o.tenantId}:${o.orgId}:${o.briefId}:${o.renderId}`);
+  if (overflow.some((o) => o.renderId === record.renderId)) throw capReached();
+}
+
 export async function renderForBrief(tenantId: string, orgId: string, actor: string, args: RenderBriefArgs): Promise<CreativeRender> {
   const brief = await getBrief(tenantId, orgId, args.briefId);
   if (!brief) throw new OpenwopError('not_found', 'Creative brief not found.', 404, { briefId: args.briefId });
   const template = getTemplate(args.templateId);
   if (!template) throw new OpenwopError('validation_error', `Unknown templateId — one of: ${['meta.feed.1x1', 'meta.story.9x16', 'tiktok.9x16', 'linkedin.landscape.191x1'].join(', ')} (see GET /render-templates).`, 400, { field: 'templateId' });
 
-  const existingCount = (await renders.listByPrefix(`${tenantId}:${orgId}:${brief.briefId}:`)).length;
-  if (existingCount >= renderCap) {
-    throw new OpenwopError('validation_error', `Render cap reached for this brief (${renderCap}) — delete old renders first.`, 400, {});
-  }
+  await assertRenderCapacity(tenantId, orgId, brief.briefId);
 
   const warnings: RenderWarning[] = [];
 
@@ -502,24 +524,8 @@ export async function renderForBrief(tenantId: string, orgId: string, actor: str
     createdAt: nowIso(),
   };
   await renders.put(record);
-
-  // R0399-2 — the pre-flight count check (above) is TOCTOU: parallel renders
-  // can each pass it and overshoot the cap. A deterministic post-write recheck
-  // closes it convergently — every racing writer sorts the SAME way (createdAt,
-  // then renderId) and prunes the SAME newest-beyond-cap overflow, keeping the
-  // oldest MAX (matching the "delete old renders first" intent). If OUR row is
-  // in the overflow, it never persists: prune it and fail typed BEFORE stamping
-  // usage refs. The composed media asset stays (media owns its lifecycle — a
-  // deliberate library asset), like every other render-delete.
-  const forBrief = (await renders.listByPrefix(`${tenantId}:${orgId}:${brief.briefId}:`))
-    .sort((a, b) => (a.createdAt === b.createdAt ? a.renderId.localeCompare(b.renderId) : a.createdAt.localeCompare(b.createdAt)));
-  if (forBrief.length > renderCap) {
-    const overflow = forBrief.slice(renderCap); // newest beyond the cap
-    for (const o of overflow) await renders.delete(`${o.tenantId}:${o.orgId}:${o.briefId}:${o.renderId}`);
-    if (overflow.some((o) => o.renderId === record.renderId)) {
-      throw new OpenwopError('validation_error', `Render cap reached for this brief (${renderCap}) — delete old renders first.`, 400, {});
-    }
-  }
+  // R0399-2 — convergent post-write recheck, BEFORE stamping usage refs.
+  await pruneOverflow(record);
 
   // R0399-1 — the layer assets a render CONSUMED join the "used in N" graph
   // under their OWN ref kind (the mood-board sync owns `creative-brief`; a
@@ -600,6 +606,18 @@ export async function deleteRendersForBrief(tenantId: string, orgId: string, bri
   return rows.length;
 }
 
+/** ADR 1039 D7 — tombstone the subject in render records (`createdBy`). The
+ *  record is kept (it is the provenance of a library asset); run ids and
+ *  `'workflow'` never match a subject. Compare-and-swap per row. */
+export async function tombstoneRenderActors(tenantId: string, forms: ReadonlySet<string>, tombstone: string): Promise<number> {
+  let n = 0;
+  for (const r of await renders.listByPrefix(`${tenantId}:`)) {
+    if (r.tenantId !== tenantId || !forms.has(r.createdBy)) continue;
+    if (await casRewrite(renders, `${r.tenantId}:${r.orgId}:${r.briefId}:${r.renderId}`, (row) => (forms.has(row.createdBy) ? { ...row, createdBy: tombstone } : null))) n += 1;
+  }
+  return n;
+}
+
 // Test-only.
 export async function __clearCreativeRenders(): Promise<void> {
   for (const r of await renders.list()) await renders.delete(`${r.tenantId}:${r.orgId}:${r.briefId}:${r.renderId}`);
@@ -668,10 +686,7 @@ export async function storeReelRender(args: {
     const existing = await renders.get(`${args.tenantId}:${args.orgId}:${brief.briefId}:${args.renderId}`);
     if (existing) return existing;
   }
-  const existingCount = (await renders.listByPrefix(`${args.tenantId}:${args.orgId}:${brief.briefId}:`)).length;
-  if (existingCount >= renderCap) {
-    throw new OpenwopError('validation_error', `Render cap reached for this brief (${renderCap}) — delete old renders first.`, 400, {});
-  }
+  await assertRenderCapacity(args.tenantId, args.orgId, brief.briefId);
   const warnings: RenderWarning[] = [];
   const brand = await resolveBrandTokens(args.tenantId, args.orgId, brief, args.brandId, warnings);
   const aspect = args.aspectRatio ?? '9:16';
@@ -697,5 +712,6 @@ export async function storeReelRender(args: {
     createdAt: nowIso(),
   };
   await renders.put(record);
+  await pruneOverflow(record);
   return record;
 }

@@ -86,14 +86,32 @@ export async function whatsappDispatchAllowed(tenantId: string): Promise<{ allow
  * ADR 0955 D3 — the words and the CAS merge now live in the shared ladder
  * (`consent/keywordLadder.ts`); WhatsApp's behaviour is unchanged.
  */
-export async function applyInboundKeyword(tenantId: string, from: string, body: string): Promise<'opt-out' | 'opt-in' | null> {
+export async function applyInboundKeyword(
+  tenantId: string,
+  from: string,
+  body: string,
+  opts: {
+    /** ADR 1053 D4a — false for a message that arrived on a USER-axis connection:
+     *  its inbound signer is any editor who owns it, so it cannot grant consent. */
+    optInAllowed: boolean;
+    /** ADR 1053 D4a (lead addition) — the lane the keyword arrived on, recorded on the
+     *  consent write's source so a forged mass-STOP from one lane can be found. */
+    connectionId: string;
+    axis: 'user' | 'org' | 'workspace';
+  },
+): Promise<'opt-out' | 'opt-in' | null> {
   const subject = normalizeWaNumber(from);
   if (!subject) return null;
   const kind = classifyKeyword('whatsapp', body);
   if (kind !== 'opt-out' && kind !== 'opt-in') return null;
+  if (kind === 'opt-in' && !opts.optInAllowed) {
+    log.info('whatsapp_keyword_ignored_user_connection', { tenantId, kind });
+    return null;
+  }
+
   // GRADE-DATA 2026-07-17 — CAS-merge (never latest-wins); only the whatsapp channel flips.
   // ADR 0657 D10 — an erased number's keyword cannot be written: nothing to report.
-  if ((await applyKeywordConsent(tenantId, 'whatsapp', [subject], kind === 'opt-in', `whatsapp:keyword:${kind}`)) === 0) return null;
+  if ((await applyKeywordConsent(tenantId, 'whatsapp', [subject], kind === 'opt-in', `whatsapp:keyword:${kind}:conn=${opts.connectionId}:axis=${opts.axis}`)) === 0) return null;
   log.info('whatsapp_keyword_consent', { tenantId, kind });
   await emitHostEvent({ type: `host.whatsapp.consent.${kind}`, tenantId, payload: { channel: 'whatsapp', kind } });
   return kind;

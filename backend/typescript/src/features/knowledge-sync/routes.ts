@@ -1,7 +1,12 @@
 /**
  * Knowledge-sync REST (ADR 0107 Phase 2) — `/v1/host/openwop-app/knowledge-sync/*`.
  * Toggle-gated (`knowledge-sync`, OFF) + org-scoped RBAC (workspace:read/write on
- * the source's org) + a uniform 404 on cross-tenant/no-access (no existence leak).
+ * the source's org) + a uniform 404 CROSS-TENANT (no existence leak across tenants).
+ *
+ * ADR 1101 D9 (`KS2CD-4`) correction — this used to say "a uniform 404 on
+ * cross-tenant/no-access". Inside ONE tenant a source in an org the caller cannot
+ * read answers 403 (`requireOrgScopeFor` runs after the row is found), like every
+ * sibling door; the claim was the part that was false, not the behaviour.
  * Create validates the referenced Connection + KB collection exist in the org AND
  * that the Connection belongs to the CALLER (`requireOwnConnection`), so a source
  * can't bind a colleague's credential and have the scheduler act as them.
@@ -23,14 +28,16 @@ import { callerSubject } from '../../host/requestSubject.js';
 import { createLogger } from '../../observability/logger.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { requireFeatureEnabled, tenantOf } from '../featureRoute.js';
-import { resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
+import type { Scope } from '../../host/accessControlService.js';
 import { getConnection } from '../connections/connectionsService.js';
 import { getCollection } from '../kb/kbService.js';
 import { extractDriveFolderId, browseFolders } from '../../host/knowledgeSourceFetch.js';
 import {
-  createSyncSource, listSyncSources, getSyncSource, deleteSyncSource, setSyncStatus, updateSyncSource,
+  createSyncSource, listSyncSources, getSyncSource, setSyncStatus, updateSyncSource,
+  removeSyncSource, rebindSyncSource, withSyncedCounts, cleanFolderName,
 } from './knowledgeSyncService.js';
 import { syncNow } from './knowledgeSyncRunner.js';
+import { holdsOrgScope } from './knowledgeSyncAccess.js';
 
 const log = createLogger('features.knowledgeSync.routes');
 const TOGGLE = { toggleId: 'knowledge-sync', label: 'Knowledge sync' };
@@ -39,10 +46,10 @@ const BASE = '/host/openwop-app/knowledge-sync';
 const actingUserOf = (req: Request): string | undefined => req.userId ?? req.principal?.principalId;
 const nowIso = (): string => new Date().toISOString();
 
-/** Gate `scope` on `orgId` for the caller. Throws 403 on missing scope. */
+/** Gate `scope` on `orgId` for the caller. Throws 403 on missing scope. ADR 1101
+ *  D3 — through `holdsOrgScope`, the ONE predicate the sync pass also asks. */
 async function requireOrgScopeFor(req: Request, orgId: string, scope: Scope): Promise<void> {
-  const access = await resolveEffectiveAccess(tenantOf(req), { subject: actingUserOf(req), orgId });
-  if (!access.scopes.includes(scope)) {
+  if (!(await holdsOrgScope(tenantOf(req), [actingUserOf(req)], orgId, scope))) {
     throw new OpenwopError('forbidden_scope', `Missing required scope: ${scope}`, 403, { requiredScope: scope, orgId });
   }
 }
@@ -92,6 +99,19 @@ async function requireOwnConnection(
       'The connection must belong to you. Connect your own account, then add the sync source.',
       403,
       { connectionId },
+    );
+  }
+  // ADR 1101 D2 — an ORG-shared connection (an `orgId`, no person) cannot drive a
+  // sync and never could: the pass acts as the bare tenant, which holds no
+  // `connections:use` on any org, so the broker refused it before the pin and the
+  // pinned lane refuses it now. Saying so here beats a source that fails every pass.
+  // (Browse "worked" for it only because browse acts as the requester.)
+  if (!conn.userId && conn.orgId) {
+    throw new OpenwopError(
+      'validation_error',
+      'An organization-shared connection cannot be used for a sync. Use your own connected account, or a workspace connection.',
+      400,
+      { connectionId, reason: 'org_connection' },
     );
   }
   return conn;
@@ -151,6 +171,8 @@ export function registerKnowledgeSyncRoutes(deps: RouteDeps): void {
           // equals `conn.userId`; storing it means a later change to the connection
           // cannot silently move the actor.
           ...(actingUserOf(req) ? { createdBy: actingUserOf(req) } : {}),
+          // ADR 1101 D8 — the folder's display name as picked (a label, never an id).
+          ...(cleanFolderName(body.folderName) ? { folderName: cleanFolderName(body.folderName) } : {}),
         },
         nowIso(),
       );
@@ -165,7 +187,7 @@ export function registerKnowledgeSyncRoutes(deps: RouteDeps): void {
       await requireFeatureEnabled(req, TOGGLE.toggleId, TOGGLE.label);
       const orgId = reqString(req.query.orgId, 'orgId');
       await requireOrgScopeFor(req, orgId, 'workspace:read');
-      res.json({ sources: await listSyncSources(tenantOf(req), orgId) });
+      res.json({ sources: await withSyncedCounts(await listSyncSources(tenantOf(req), orgId)) });
     } catch (err) { next(err); }
   });
 
@@ -191,7 +213,8 @@ export function registerKnowledgeSyncRoutes(deps: RouteDeps): void {
       const conn = await requireOwnConnection(req, tenantId, connectionId);
       const folderId = typeof req.query.folderId === 'string' && req.query.folderId.trim() ? req.query.folderId.trim() : 'root';
       const folders = await browseFolders(
-        { storage: deps.storage, tenantId, actingUserId: actingUserOf(req) ?? tenantId, orgId },
+        // ADR 1101 D2 — pinned to the connection just validated, like the sync lane.
+        { storage: deps.storage, tenantId, actingUserId: actingUserOf(req) ?? tenantId, orgId, connectionId },
         conn.provider,
         folderId,
       );
@@ -206,20 +229,31 @@ export function registerKnowledgeSyncRoutes(deps: RouteDeps): void {
       const source = await getSyncSource(tenantOf(req), req.params.id);
       if (!source) throw new OpenwopError('not_found', 'Sync source not found.', 404, { id: req.params.id });
       await requireOrgScopeFor(req, source.orgId, 'workspace:read');
-      res.json({ source });
+      res.json({ source: (await withSyncedCounts([source]))[0] });
     } catch (err) { next(err); }
   });
 
-  // DELETE /:id — remove a source + its diff cursor (workspace:write).
+  // DELETE /:id — REMOVE a source and the documents it synced (workspace:write).
+  //
+  // ADR 1101 D5 — the collection is a mirror of the folder; ending the mirror ends
+  // its copies (they used to stay, frozen, untrusted and citable: `KSC-10`). Resumable
+  // in bounded batches: 202 `{ removing, remaining }` means call again; 200
+  // `{ deleted, documentsRemoved }` means done. Each document is deleted as THIS
+  // member, who holds `workspace:write` on the org (checked just above).
   app.delete(`${BASE}/:id`, async (req, res, next) => {
     try {
       await requireFeatureEnabled(req, TOGGLE.toggleId, TOGGLE.label);
       const source = await getSyncSource(tenantOf(req), req.params.id);
       if (!source) throw new OpenwopError('not_found', 'Sync source not found.', 404, { id: req.params.id });
       await requireOrgScopeFor(req, source.orgId, 'workspace:write');
-      const deleted = await deleteSyncSource(tenantOf(req), req.params.id);
-      log.info('knowledge_sync_source_deleted', { tenantId: tenantOf(req), id: req.params.id, deleted });
-      res.json({ deleted });
+      const out = await removeSyncSource(tenantOf(req), req.params.id, { subject: callerSubject(req) }, nowIso());
+      if (out.status === 'gone') throw new OpenwopError('not_found', 'Sync source not found.', 404, { id: req.params.id });
+      if (out.status === 'removing') {
+        res.status(202).json({ deleted: false, removing: true, documentsRemoved: out.removed, remaining: out.remaining });
+        return;
+      }
+      log.info('knowledge_sync_source_deleted', { tenantId: tenantOf(req), id: req.params.id, documentsRemoved: out.removed });
+      res.json({ deleted: true, documentsRemoved: out.removed });
     } catch (err) { next(err); }
   });
 
@@ -234,11 +268,19 @@ export function registerKnowledgeSyncRoutes(deps: RouteDeps): void {
         // ADR 0605 Tier 6 (`KSU-3`) — record that a HUMAN paused this, so the row
         // never shows "Reconnect needed" for a pause the user performed. Resume
         // clears the reason via `setSyncStatus`'s non-paused branch.
-        const updated = await setSyncStatus(
-          tenantOf(req), req.params.id,
-          action === 'pause' ? 'paused' : 'active', nowIso(),
-          action === 'pause' ? { pausedReason: 'user' } : { pausedReason: null },
-        );
+        //
+        // ADR 1101 D8 — Resume also re-arms a STOPPED (`error`) source with a fresh
+        // retry count (a person re-arming it starts over; the next failure used to be
+        // terminal at once) and clears the stale error, which kept saying "reconnect"
+        // after the user had. A source being REMOVED cannot be resumed.
+        if (action === 'resume' && source.status === 'paused' && source.pausedReason === 'removing') {
+          throw new OpenwopError('conflict', 'This sync source is being removed.', 409, { reason: 'removing' });
+        }
+        // ADR 1101 D1 — a pause through the CAS keeps a running pass's lease, so the
+        // pass still ends, and records its outcome on the FRESH (paused) row.
+        const updated = action === 'pause'
+          ? await setSyncStatus(tenantOf(req), req.params.id, 'paused', nowIso(), { pausedReason: 'user' })
+          : await setSyncStatus(tenantOf(req), req.params.id, 'active', nowIso(), { pausedReason: null, retry: null, lastError: undefined });
         res.json({ source: updated });
       } catch (err) { next(err); }
     });
@@ -252,11 +294,35 @@ export function registerKnowledgeSyncRoutes(deps: RouteDeps): void {
       const source = await getSyncSource(tenantOf(req), req.params.id);
       if (!source) throw new OpenwopError('not_found', 'Sync source not found.', 404, { id: req.params.id });
       await requireOrgScopeFor(req, source.orgId, 'workspace:write');
-      const body = (req.body ?? {}) as { includeMedia?: unknown };
+      const body = (req.body ?? {}) as { includeMedia?: unknown; connectionId?: unknown };
       if (body.includeMedia !== undefined && typeof body.includeMedia !== 'boolean') {
         throw new OpenwopError('validation_error', '`includeMedia` must be a boolean.', 400, { field: 'includeMedia' });
       }
-      const updated = await updateSyncSource(tenantOf(req), req.params.id, { includeMedia: body.includeMedia as boolean | undefined }, nowIso());
+      // ADR 1101 D5b — REBIND to the caller's own connection, keeping the source id
+      // (so every synced document keeps its id). Same predicate as create
+      // (`requireOwnConnection`), and the same provider family: a folder id means
+      // nothing to another provider.
+      let updated = source;
+      if (body.connectionId !== undefined) {
+        // The rebinder becomes the identity every later pass acts as and is checked
+        // against; with no person there is nothing to record, and deleting `createdBy`
+        // would hand the source the legacy shape the identity guard skips (grade-code #10).
+        if (!actingUserOf(req)) throw new OpenwopError('forbidden', 'Sign in as a member to switch a sync to your account.', 403, { reason: 'no_actor' });
+        const connectionId = reqString(body.connectionId, 'connectionId');
+        const conn = await requireOwnConnection(req, tenantOf(req), connectionId);
+        const family = (p: string): string => (p === 'microsoft-sharepoint' ? 'microsoft-graph' : p);
+        if (family(conn.provider) !== family(source.provider)) {
+          throw new OpenwopError('validation_error', 'Choose a connection for the same provider as this sync source.', 400, { field: 'connectionId', reason: 'provider_mismatch' });
+        }
+        const rebound = await rebindSyncSource(tenantOf(req), req.params.id, { connectionId, createdBy: actingUserOf(req) }, nowIso());
+        if (!rebound) throw new OpenwopError('not_found', 'Sync source not found.', 404, { id: req.params.id });
+        updated = rebound;
+        log.info('knowledge_sync_source_rebound', { tenantId: tenantOf(req), id: req.params.id, provider: conn.provider });
+      }
+      if (body.includeMedia !== undefined) {
+        const patched = await updateSyncSource(tenantOf(req), req.params.id, { includeMedia: body.includeMedia as boolean }, nowIso());
+        if (patched) updated = patched;
+      }
       res.json({ source: updated });
     } catch (err) { next(err); }
   });

@@ -1,6 +1,6 @@
 {
   "name": "feature.campaign-brief.nodes",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "kind": "node",
   "description": "Personas & Campaign Brief node pack \u2014 validate a brief (compute the enabled channel set) and generate the messaging kernel (the shared strategic foundation every channel echoes), grounding it in the knowledge base (kb.rag) + brand voice (ctx.features.brand) via the run-scoped provider. Drives the Campaign Studio orchestration.",
   "author": "OpenWOP App",
@@ -19,7 +19,7 @@
   "nodes": [
     {
       "typeId": "feature.campaign-brief.nodes.get-brief",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Campaign Brief: Get",
       "description": "Read a campaign brief's full body (including the messaging kernel) so revisions ground on the real brief instead of a validate summary. Read-only.",
       "category": "data",

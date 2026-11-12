@@ -4,6 +4,7 @@
  * `knowledge-sync` toggle is off, so the panel self-hides on a failed list.
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
+import { ApiError } from '../../client/requestJson.js';
 
 const BASE = `${config.baseUrl}/host/openwop-app/knowledge-sync`;
 
@@ -23,7 +24,15 @@ export type SyncStatus = 'active' | 'paused' | 'error';
  *  A dedicated chip + four locales is a real improvement and is filed rather than
  *  smuggled in — the type is widened here so it stops claiming two values when the
  *  wire has three. */
-export type PausedReason = 'user' | 'connection-revoked' | 'creator-erased';
+export type PausedReason = 'user' | 'connection-revoked' | 'creator-erased' | 'creator-no-access' | 'removing';
+
+/** ADR 1101 D7 — the CAUSE of the last problem, rendered in the reader's language
+ *  (`lastError` is the server's English detail, kept behind a disclosure). Retry
+ *  state is not a code: it renders from `status` / `consecutiveFailures`. */
+export type SyncErrorCode =
+  | 'listing_incomplete' | 'files_failed' | 'connection_revoked' | 'connection_unusable'
+  | 'connection_missing' | 'connection_owner_changed' | 'creator_erased' | 'creator_no_access'
+  | 'collection_unreadable' | 'removing' | 'sync_failed';
 
 /** ADR 0605 Tier 6 (`KSU-1`) — what the last pass DID, persisted by the backend so
  *  a SCHEDULED run can be reported at all. `pruned` is the deletion count. */
@@ -37,6 +46,8 @@ export interface SyncRunSummary {
   /** Set when the provider listing could not be proved complete, in which case
    *  `pruned` is 0 BY REFUSAL rather than because nothing was deleted. */
   listingIncomplete?: string;
+  /** ADR 1101 D1 — the pass stopped pruning because the source changed under it. */
+  pruneSkipped?: 'changed';
 }
 
 export interface SyncSource {
@@ -52,8 +63,17 @@ export interface SyncSource {
   status: SyncStatus;
   lastSyncedAt?: string;
   lastError?: string;
+  lastErrorCode?: SyncErrorCode;
+  lastErrorParams?: Record<string, string | number>;
   pausedReason?: PausedReason;
   lastRun?: SyncRunSummary;
+  consecutiveFailures?: number;
+  /** ADR 1101 D8 — the folder's name as picked; absent ⇒ show the raw id. */
+  folderName?: string;
+  /** The member whose connected account every pass acts as. */
+  createdBy?: string;
+  /** ADR 1101 D5 — how many documents this source synced (what Remove takes with it). */
+  syncedDocuments?: number;
 }
 
 export interface SyncRunResult {
@@ -67,13 +87,18 @@ export interface SyncRunResult {
   skippedMedia: number;
   /** ADR 0605 Tier 1 — the folder could not be fully read, so NOTHING was pruned. */
   listingIncomplete?: string;
+  /** ADR 1101 D1 — the source changed during the pass, so it stopped pruning. */
+  pruneSkipped?: 'changed';
   errors: string[];
 }
 
+/** ADR 1101 D7 — a refusal keeps its STATUS and parsed body (`ApiError`, the
+ *  `CONNUX-3` shape), so the panel can say "you don't have permission" or "a sync is
+ *  already running" in the reader's language instead of toasting server English. */
 async function jsonOrThrow(res: Response): Promise<unknown> {
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { message?: string };
-    throw new Error(body.message || `request failed (${res.status})`);
+    throw new ApiError({ status: res.status, statusText: res.statusText, url: res.url, body, message: body.message || `request failed (${res.status})` });
   }
   return res.json();
 }
@@ -97,15 +122,34 @@ export async function listSyncSources(orgId: string): Promise<SyncSource[] | nul
 }
 
 export async function createSyncSource(input: {
-  orgId: string; connectionId: string; provider: string; externalFolderId: string; collectionId: string; cadence: SyncCadence; includeMedia?: boolean;
+  orgId: string; connectionId: string; provider: string; externalFolderId: string; collectionId: string; cadence: SyncCadence; includeMedia?: boolean; folderName?: string;
 }): Promise<SyncSource> {
   const res = await fetch(BASE, fetchOpts({ method: 'POST', headers: authedHeaders({ 'content-type': 'application/json' }), body: JSON.stringify(input) }));
   return ((await jsonOrThrow(res)) as { source: SyncSource }).source;
 }
 
-export async function deleteSyncSource(id: string): Promise<void> {
-  const res = await fetch(`${BASE}/${encodeURIComponent(id)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
-  await jsonOrThrow(res);
+export interface RemoveResult { deleted: boolean; removing?: boolean; remaining?: number; documentsRemoved: number }
+
+/** ADR 1101 D5 — remove a source AND the documents it synced. The server removes a
+ *  bounded batch per request and answers 202 `{ removing, remaining }` while more is
+ *  left; this calls again until it is done (bounded, so a server that never finishes
+ *  cannot spin the tab), summing what was removed. */
+export async function deleteSyncSource(id: string, maxRounds = 20): Promise<RemoveResult> {
+  let documentsRemoved = 0;
+  for (let round = 0; round < maxRounds; round++) {
+    const res = await fetch(`${BASE}/${encodeURIComponent(id)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
+    const out = (await jsonOrThrow(res)) as RemoveResult;
+    documentsRemoved += out.documentsRemoved ?? 0;
+    if (!out.removing) return { ...out, documentsRemoved };
+  }
+  return { deleted: false, removing: true, documentsRemoved };
+}
+
+/** ADR 1101 D5b — switch a stopped source to one of the caller's own connections,
+ *  keeping the source and every document it synced. */
+export async function rebindSyncSource(id: string, connectionId: string): Promise<SyncSource> {
+  const res = await fetch(`${BASE}/${encodeURIComponent(id)}`, fetchOpts({ method: 'PATCH', headers: authedHeaders({ 'content-type': 'application/json' }), body: JSON.stringify({ connectionId }) }));
+  return ((await jsonOrThrow(res)) as { source: SyncSource }).source;
 }
 
 export async function setSyncPaused(id: string, paused: boolean): Promise<SyncSource> {

@@ -44,7 +44,7 @@ import {
   type StreamIngressInput,
 } from '../../host/triggerIngestionService.js';
 import { OWNED_REF_PREFIXES } from '../../byok/refNamespaces.js';
-import { takeChannelInbound } from '../../middleware/rateLimit.js';
+import { registerIngestBudgetExemption, takeChannelInbound } from '../../middleware/rateLimit.js';
 
 /** Deps the inbound handler needs — the FULL host suite (resume needs more of it than a
  *  run-start does; a full `HostAdapterSuite` also satisfies `startWorkflowRun`'s Pick). */
@@ -154,6 +154,62 @@ export async function conversationalIngressAvailable(tenantId: string): Promise<
 }
 
 const store = new DurableCollection<InboundConfig>('connections:inbound', (c) => c.connectionId);
+
+/**
+ * ADR 1053 D8b (grade-code WA85CD-17) — the connections whose ingest POST is not
+ * charged to the per-IP write bucket: an ENABLED inbound config for a WhatsApp
+ * provider (Twilio does not retry a 429 by default, and these deliveries carry
+ * opt-outs). Kept IN MEMORY so the limiter's check, which runs before auth on every
+ * inbound POST, never reads the store: an unknown or disabled id is not exempt.
+ * Filled at boot, updated on this instance's writes, and re-listed lazily at most
+ * once a minute to see other instances' writes, so a disable elsewhere can stay
+ * exempt for up to about a minute (the per-connection budget still applies).
+ * The re-list is bounded: a stuck one is abandoned after two minutes, never left
+ * to block every later refresh (the #3056 lesson).
+ */
+const INGEST_EXEMPT_PROVIDERS: ReadonlySet<string> = new Set(['whatsapp-twilio', 'whatsapp-cloud']);
+const ingestExemptIds = new Set<string>();
+const INGEST_RELIST_MS = 60_000;
+const INGEST_RELIST_STUCK_MS = 120_000;
+let ingestListedAt = 0;
+let ingestRelistStartedAt: number | null = null;
+function noteIngestExemption(config: InboundConfig | null, connectionId: string): void {
+  if (config && config.enabled && INGEST_EXEMPT_PROVIDERS.has(config.provider)) ingestExemptIds.add(connectionId);
+  else ingestExemptIds.delete(connectionId);
+}
+/** Re-list the stored configs into the in-memory set. Exported for boot and tests. */
+export async function relistIngestExemptions(): Promise<void> {
+  const rows = await store.list();
+  ingestExemptIds.clear();
+  for (const c of rows) noteIngestExemption(c, c.connectionId);
+  ingestListedAt = Date.now();
+}
+function maybeRelist(now: number): void {
+  if (now - ingestListedAt < INGEST_RELIST_MS) return;
+  if (ingestRelistStartedAt !== null && now - ingestRelistStartedAt < INGEST_RELIST_STUCK_MS) return;
+  const startedAt = now;
+  ingestRelistStartedAt = startedAt;
+  void (ingestRelistOverride ?? relistIngestExemptions)()
+    .catch((err: unknown) => { log.warn('ingest exemption re-list failed', { error: err instanceof Error ? err.message : String(err) }); })
+    .finally(() => { if (ingestRelistStartedAt === startedAt) ingestRelistStartedAt = null; });
+}
+function cloudHasMessages(body: Record<string, unknown>): boolean {
+  const entry = Array.isArray(body.entry) ? (body.entry as Record<string, unknown>[]) : [];
+  return entry.some((e) => (Array.isArray(e.changes) ? (e.changes as Record<string, unknown>[]) : [])
+    .some((c) => Array.isArray(((c.value ?? {}) as Record<string, unknown>).messages) && (((c.value ?? {}) as Record<string, unknown>).messages as unknown[]).length > 0));
+}
+export function isIngestBudgetExempt(connectionId: string): boolean {
+  maybeRelist(Date.now());
+  return ingestExemptIds.has(connectionId);
+}
+registerIngestBudgetExemption(isIngestBudgetExempt);
+/** Test-only: replace the re-list (a hung one) and reset its clock. */
+let ingestRelistOverride: (() => Promise<void>) | null = null;
+export function __setIngestRelistForTest(fn: (() => Promise<void>) | null, opts: { listedAt?: number; startedAt?: number | null } = {}): void {
+  ingestRelistOverride = fn;
+  if (opts.listedAt !== undefined) ingestListedAt = opts.listedAt;
+  if (opts.startedAt !== undefined) ingestRelistStartedAt = opts.startedAt;
+}
 const signingSecretRef = (connectionId: string): string => `${OWNED_REF_PREFIXES.connectionInbound}${connectionId}`;
 /** The trigger-bridge subscription id for one connection's inbound stream. */
 // ADR 0726 — grammar-safe (was `host:connections:<connectionId>`, unbindable on the wire).
@@ -244,6 +300,7 @@ export async function setInboundConfig(input: {
   };
   await setSecret(signingSecretRef(input.connectionId), input.signingSecret, { tenantId: input.tenantId });
   await store.put(config);
+  noteIngestExemption(config, input.connectionId);
   // OBSERVER-ONLY providers (zoom-webinar) fire no workflow, so they register no
   // trigger-bridge subscription — the verified event is handed to a feature
   // observer inside handleInboundEvent. The messaging trio register a `webhook`
@@ -280,6 +337,7 @@ export async function disableInboundForRevokedConnection(tenantId: string, conne
   const existing = await getInboundConfig(tenantId, connectionId);
   if (!existing || !existing.enabled) return false;
   await store.put({ ...existing, enabled: false, updatedAt: new Date().toISOString() });
+  noteIngestExemption(null, connectionId);
   await setSubscriptionState(subscriptionIdFor(connectionId), 'paused').catch(() => undefined);
   return true;
 }
@@ -291,6 +349,7 @@ export async function removeInboundConfig(tenantId: string, connectionId: string
   // Pause the trigger-bridge subscription so it stops accepting deliveries —
   // leaves the delivery history queryable rather than hard-deleting it.
   await setSubscriptionState(subscriptionIdFor(connectionId), 'paused').catch(() => undefined);
+  noteIngestExemption(null, connectionId);
   return store.delete(connectionId);
 }
 
@@ -362,15 +421,36 @@ export function verifyTelegramSecret(input: { expected: string; provided: string
  */
 export interface VerifiedInboundEvent { tenantId: string; connectionId: string; body: Record<string, unknown>; now: number }
 const inboundObservers = new Map<string, Array<(event: VerifiedInboundEvent) => Promise<void>>>();
+/** ADR 1053 D5 — the observers whose failure must NOT be acked (a legal opt-out
+ *  write): they run first on the provider's branch and their error propagates. */
+const strictInboundObservers = new Map<string, Array<(event: VerifiedInboundEvent) => Promise<void>>>();
 /** ADR 0422 P2 seam upgrade — MULTIPLE observers per provider (append). The
  *  original single-slot Map silently clobbered an earlier registrant when a
  *  second feature observed the same provider (whatsapp window-ledger vs the
  *  service-desk intake). Observers stay non-blocking + fail-soft, run in
- *  registration order; re-registering the SAME fn is a no-op (idempotent boot). */
-export function registerInboundObserver(provider: InboundProvider, fn: (event: VerifiedInboundEvent) => Promise<void>): void {
-  const list = inboundObservers.get(provider) ?? [];
+ *  registration order; re-registering the SAME fn is a no-op (idempotent boot).
+ *  `{ strict: true }` (ADR 1053 D5) registers a blocking one instead. */
+export function registerInboundObserver(provider: InboundProvider, fn: (event: VerifiedInboundEvent) => Promise<void>, opts: { strict?: boolean } = {}): void {
+  const map = opts.strict ? strictInboundObservers : inboundObservers;
+  const list = map.get(provider) ?? [];
   if (!list.includes(fn)) list.push(fn);
-  inboundObservers.set(provider, list);
+  map.set(provider, list);
+}
+/** ADR 1053 D3 — observers of a verified provider DELIVERY-STATUS callback (a
+ *  Twilio `MessageStatus` post, a Meta `statuses[]` batch). Called before the
+ *  status-only `ignored` return; fail-soft (a status is evidence, not a legal act). */
+const statusObservers = new Map<string, Array<(event: VerifiedInboundEvent) => Promise<void>>>();
+export function registerInboundStatusObserver(provider: InboundProvider, fn: (event: VerifiedInboundEvent) => Promise<void>): void {
+  const list = statusObservers.get(provider) ?? [];
+  if (!list.includes(fn)) list.push(fn);
+  statusObservers.set(provider, list);
+}
+async function notifyStatusObservers(provider: string, event: VerifiedInboundEvent): Promise<void> {
+  for (const fn of statusObservers.get(provider) ?? []) {
+    await fn(event).catch((err: unknown) => {
+      log.warn('inbound status observer failed', { provider, error: err instanceof Error ? err.message : String(err) });
+    });
+  }
 }
 /**
  * ADR 0955 D3 — the BLOCKING variant, for a provider whose observer records a legal opt-out
@@ -380,7 +460,10 @@ export function registerInboundObserver(provider: InboundProvider, fn: (event: V
 async function notifyInboundObserverStrict(provider: string, event: VerifiedInboundEvent): Promise<void> {
   for (const fn of inboundObservers.get(provider) ?? []) await fn(event);
 }
+/** ADR 1053 D5 — the strict observers (error propagates: the route answers 5xx and
+ *  the provider redelivers), then the fail-soft ones. */
 async function notifyInboundObserver(provider: string, event: VerifiedInboundEvent): Promise<void> {
+  for (const fn of strictInboundObservers.get(provider) ?? []) await fn(event);
   const list = inboundObservers.get(provider) ?? [];
   for (const fn of list) {
     await fn(event).catch((err: unknown) => {
@@ -579,6 +662,10 @@ export async function handleInboundEvent(
     /** The full public URL of this delivery (ADR 0394 — Twilio signs URL+params,
      *  not the raw body). Absent for providers that sign the body. */
     requestUrl?: string;
+    /** ADR 1053 D8b (grade-code WA85CD-18) — called once the delivery's signature
+     *  verified, so the route can tell a pre-verification throw (charged to the
+     *  caller's failure budget) from a post-verification one (a strict-STOP 5xx). */
+    onVerified?: () => void;
   },
 ): Promise<InboundOutcome> {
   const config = await store.get(input.connectionId);
@@ -669,8 +756,17 @@ export async function handleInboundEvent(
     if (!input.requestUrl) { log.warn('inbound signature rejected', { connectionId: input.connectionId, provider: 'whatsapp-twilio', reason: 'missing_request_url' }); return { status: 'unauthorized' }; }
     const verdict = verifyTwilioSignature({ authToken: signingSecret, url: input.requestUrl, params: input.body, signatureHeader: input.headers.twilioSignature });
     if (!verdict.ok) { log.warn('inbound signature rejected', { connectionId: input.connectionId, provider: 'whatsapp-twilio', reason: verdict.reason }); return { status: 'unauthorized' }; }
+    input.onVerified?.();
     // Only real inbound messages fire (status callbacks ride MessageStatus and are acked).
-    if (typeof input.body.MessageStatus === 'string' && typeof input.body.Body !== 'string') return { status: 'ignored' };
+    // ADR 1053 D3 — a verified status callback first reaches the delivery-status observers.
+    // D8b (WA85CD-17) — it spends the SAME per-connection budget as a message: the
+    // per-IP exemption must never leave a WhatsApp delivery unbudgeted.
+    if (typeof input.body.MessageStatus === 'string' && typeof input.body.Body !== 'string') {
+      const statusAdmitted = takeChannelInbound(`conn:${input.connectionId}`);
+      if (!statusAdmitted.ok) return { status: 'rate_limited', retryAfterSeconds: statusAdmitted.retryAfterSeconds };
+      await notifyStatusObservers(config.provider, { tenantId: config.tenantId, connectionId: input.connectionId, body: input.body, now: input.now });
+      return { status: 'ignored' };
+    }
     // Dedup on the provider MessageSid (stable across Twilio's retries).
     eventId = typeof input.body.MessageSid === 'string' ? `wa:${input.body.MessageSid}` : undefined;
     normalizedEvent = input.body;
@@ -706,6 +802,16 @@ export async function handleInboundEvent(
     // standard json parser + rawBody capture apply.
     const verdict = verifyMetaCloudSignature({ appSecret: signingSecret, rawBody: input.rawBody, signatureHeader: input.headers.signature256 });
     if (!verdict.ok) { log.warn('inbound signature rejected', { connectionId: input.connectionId, provider: 'whatsapp-cloud', reason: verdict.reason }); return { status: 'unauthorized' }; }
+    input.onVerified?.();
+    // D8b (WA85CD-17) — a status-only batch never reaches the dispatch tail's
+    // per-connection budget, so it spends it here (a batch with messages spends it there).
+    if (!cloudHasMessages(input.body)) {
+      const statusAdmitted = takeChannelInbound(`conn:${input.connectionId}`);
+      if (!statusAdmitted.ok) return { status: 'rate_limited', retryAfterSeconds: statusAdmitted.retryAfterSeconds };
+    }
+    // ADR 1053 D3 — every verified delivery reaches the status observers, a mixed
+    // batch (messages + statuses) included; they read only `statuses[]`.
+    await notifyStatusObservers(config.provider, { tenantId: config.tenantId, connectionId: input.connectionId, body: input.body, now: input.now });
     // Cloud envelope: entry[].changes[].value.messages[] — status-only deliveries
     // (no messages) are acked without a run.
     const firstMessage = (() => {

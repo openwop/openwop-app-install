@@ -4,7 +4,19 @@
  * `{recorded:false}`. Playback: `host:analytics:replay` on the exact org, then
  * the audited store read. The replay choice is not yet offered on the public
  * consent lane, so the grant is recorded through the consent service for the
- * subject a real public-consent token names. */
+ * subject a real public-consent token names.
+ *
+ * Sabotage witnesses (w103; src/features/analytics/routes.ts, replayStore.ts):
+ * storing the client's bytes instead of the re-encoded chunk, or spreading the
+ * index row into the list response, reds the upload/playback case; answering a
+ * format error with `{recorded:false}` or decoding before the no-token refusal
+ * reds the malformed case; dropping the bot check or the 409 -> refusal mapping
+ * reds the uniform-refusal case; dropping the route's sessionKey assertion (the
+ * `42` row) or loosening its length bound reds the sessionKey case; recording
+ * past a null org-fence read reds the before-any-decoding case; gating the list
+ * or the attestation on `workspace:read` reds the refusal case; accepting a
+ * non-boolean attestation or offering replay to an unattested org reds the
+ * posture case. */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { randomUUID } from 'node:crypto';
@@ -100,8 +112,9 @@ describe('ADR 0951 — replay upload lane', () => {
     expect(gunzipSync(Buffer.from(stored.contentBase64, 'base64')).toString()).toBe(JSON.stringify(geometry()));
     const list = await owner.get<{ sessions: Array<Record<string, unknown>> }>(`/host/openwop-app/analytics/orgs/${orgId}/replay/sessions`);
     expect(list.status).toBe(200);
-    expect(list.body.sessions).toEqual([expect.objectContaining({ sessionId, chunkCount: 1 })]);
-    expect(Object.keys(list.body.sessions[0]!)).not.toContain('subjectKey');
+    // Exactly the projected fields: no subjectKey, sessionKey or pageIds leaves the host.
+    expect(list.body.sessions).toEqual([{ sessionId, startedAt: expect.any(String), updatedAt: expect.any(String),
+      durationMs: 0, bytes: expect.any(Number), chunkCount: 1, flags: {} }]);
     const played = await owner.get<{ events: unknown }>(`/host/openwop-app/analytics/orgs/${orgId}/replay/sessions/${sessionId}/chunks/0`);
     expect(played).toEqual({ status: 200, body: { chunkIndex: 0, ...geometry() } });
   });
@@ -114,8 +127,9 @@ describe('ADR 0951 — replay upload lane', () => {
     (poisoned.events[0] as { nodes: Array<Record<string, unknown>> }).nodes[1]!.text = 'PRIVATE';
     // Without a consent token the server does no decompression work at all.
     expect(await client().post(chunkUrl(orgId, randomUUID()), { index: 0, content: upload(poisoned) })).toEqual({ status: 202, body: { recorded: false } });
-    const sent = await client().post<{ message?: string }>(chunkUrl(orgId, sessionId), { index: 0, content: upload(poisoned), consentToken });
+    const sent = await client().post<{ details?: { field?: string } }>(chunkUrl(orgId, sessionId), { index: 0, content: upload(poisoned), consentToken });
     expect(sent.status).toBe(400);
+    expect(sent.body.details?.field).toBe('content');
     expect(JSON.stringify(sent.body)).not.toContain('PRIVATE');
     const stored = await buildHostSurfaceBundle({ tenantId: REPLAY_BLOB_ROOT }).storage.blob.list({ prefix: replayChunkPrefix(tenantId, orgId, sessionId) }) as { entries: unknown[] };
     expect(stored.entries).toEqual([]);
@@ -163,7 +177,8 @@ describe('ADR 0951 — replay upload lane', () => {
     (poisoned.events[0] as { nodes: Array<Record<string, unknown>> }).nodes[1]!.text = 'PRIVATE';
     delete process.env.OPENWOP_REPLAY_ALLOW_MEMORY_BLOB;
     try {
-      expect(await client().post(chunkUrl(orgId, randomUUID()), { index: 0, content: upload(geometry()), consentToken })).toEqual({ status: 202, body: { recorded: false } });
+      // A malformed chunk: a decode would answer 400, so `{recorded:false}` proves none ran.
+      expect(await client().post(chunkUrl(orgId, randomUUID()), { index: 0, content: upload(poisoned), consentToken })).toEqual({ status: 202, body: { recorded: false } });
     } finally { process.env.OPENWOP_REPLAY_ALLOW_MEMORY_BLOB = 'true'; }
     const other = await site();
     const otherToken = await consentedVisitor(other.orgId, other.tenantId);
@@ -179,10 +194,10 @@ describe('ADR 0951 — replay upload lane', () => {
     await client().post(chunkUrl(orgId, sessionId), { index: 0, content: upload(geometry()), consentToken });
     expect((await client().get(`/host/openwop-app/analytics/orgs/${orgId}/replay/sessions/${sessionId}/chunks/0`)).status).toBe(401);
     const stranger = client();
-    await stranger.post('/host/openwop-app/test/login', { email: `stranger-${Date.now()}@other.test`, tenantId: `user:stranger-${Date.now()}` });
+    expect((await stranger.post('/host/openwop-app/test/login', { email: `stranger-${Date.now()}@other.test`, tenantId: `user:stranger-${Date.now()}` })).status).toBe(201);
     const denied = await stranger.get(`/host/openwop-app/analytics/orgs/${orgId}/replay/sessions/${sessionId}/chunks/0`);
     expect([403, 404]).toContain(denied.status);
-    expect((await stranger.get(`/host/openwop-app/analytics/orgs/${orgId}/replay/sessions`)).status).not.toBe(200);
+    expect([403, 404]).toContain((await stranger.get(`/host/openwop-app/analytics/orgs/${orgId}/replay/sessions`)).status);
     // A signed-in EDITOR of this very org: a member, but not an owner/admin.
     const editor = client();
     const login = await editor.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `editor-${Date.now()}@acme.test`, tenantId });

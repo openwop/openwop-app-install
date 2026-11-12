@@ -30,12 +30,12 @@
  * @see scheduler.ts for the trigger-rule + condition evaluation.
  */
 
-import { runAiDefaultFor } from '../host/runAiDefault.js';
+import { runAiDefaultFor, runCredentialRefFor } from '../host/runAiDefault.js';
 import { multiAgentPhaseGates } from '../host/multiAgentPhases.js';
 import { NEGOTIATION_DECIDED_EVENT, type NegotiationRecorder } from '../host/negotiationDecided.js';
 import { runOption } from '../host/runOptions.js';
 import { runUnderWorkerContract } from '../storage/eventEraAdapter.js';
-import { declaredRunCredentialRefs, runAiCredentialRef } from '../host/runCredentials.js';
+import { declaredRunCredentialRefs } from '../host/runCredentials.js';
 import { trace, context as otelContext, SpanStatusCode } from '@opentelemetry/api';
 import { normaliseEmitArgs } from './normaliseEmitArgs.js';
 import { runOwner } from '../host/runOwner.js';
@@ -747,8 +747,11 @@ async function runOneNodeBody(input: {
         attempt: input.attempt ?? 1, // ADR 0326 P3a — per-attempt invocation-log keys
         ...(input.replayInvocationsFromRunId ? { replayInvocationsFromRunId: input.replayInvocationsFromRunId } : {}),
         secrets: rawSecrets,
-        // ADR 0712 — the run-level credential rung of the ladder.
-        ...(runAiCredentialRef(run.configurable) ? { runCredentialRef: runAiCredentialRef(run.configurable) } : {}),
+        // ADR 0712 — the run-level credential rung of the ladder: the wire ref, else
+        // (issue #5764) the workspace binding's ref frozen into the run default.
+        ...(runCredentialRefFor(run.configurable, run.metadata as Record<string, unknown> | undefined)
+          ? { runCredentialRef: runCredentialRefFor(run.configurable, run.metadata as Record<string, unknown> | undefined) }
+          : {}),
         // ADR 0903 — what a node that names no provider/model falls back to.
         runAiDefault: runAiDefaultFor(run.configurable as Record<string, unknown> | undefined, run.metadata as Record<string, unknown> | undefined),
         policyResolver,
@@ -3581,6 +3584,16 @@ async function prepareRunSecrets(
         { credentialRef: ref },
       );
     }
+  }
+  // Issue #5764 — the workspace binding's ref frozen into the run default, when
+  // the wire names none. Unlike a DECLARED ref it never fails the run at start:
+  // it was valid when frozen, and if the key has since gone, the step that needs
+  // it fails `byok_required`, as it did before this ref was carried.
+  const frozenRef = runCredentialRefFor(run.configurable, run.metadata as Record<string, unknown> | undefined);
+  if (frozenRef && !required.has(frozenRef) && !cfgRefs.includes(frozenRef)) {
+    const value = await resolveUserNamedSecret(frozenRef, scope);
+    if (value) required.set(frozenRef, value);
+    else log.warn('run_default_credential_unresolved', { runId: run.runId, credentialRef: frozenRef });
   }
   // A resume REPLACES whatever this instance still held (a rotation or delete is
   // honoured), including with nothing.

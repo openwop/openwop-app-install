@@ -1777,6 +1777,21 @@ Cloud Run until the rewrite changes:
    `firebase deploy --only hosting:app`. The backend UA-branches: bots get
    prerendered HTML, humans get the shell, every response carries
    `Vary: User-Agent` (cache-poisoning guard — never strip it).
+   **ADR 1057 D1 — `/docs` and `/docs/**` ride the same doors** (rewrites added
+   after `/p/**`; the predeploy checker refuses them after the catch-all). Bots get
+   the docs prerender, a `301` for a renamed slug, or an honest `404` (unknown
+   slug, a non-docs page, docs off or lapsed). `/p/<docs slug>` sends bots a `301`
+   to `/docs/<slug>`. Humans get the backend-served shell, so `/docs` now shares
+   the post-frontend-deploy stale-shell window `/` has, and a host with no shell
+   configured answers `/docs` with `no_shell_404` (the same precondition as `/`).
+   **Order: backend first, then hosting.** A rewrite that lands before the door
+   404s `/docs` for everyone. After both, check the content type, not the status:
+   ```
+   B='Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
+   curl -sS -A "$B" -o /dev/null -w '%{http_code} %{content_type}\n' "https://app.openwop.dev/docs/welcome?cb=$(date +%s)"   # 200 text/html, <title>Welcome
+   curl -sS -A "$B" -o /dev/null -w '%{http_code}\n' "https://app.openwop.dev/docs/does-not-exist?cb=$(date +%s)"          # 404
+   curl -sS "https://app.openwop.dev/sitemap.xml?cb=$(date +%s)" | grep -c '/docs/'                                          # > 0
+   ```
 3. **Rollback:** revert the rewrite (humans instantly back on the CDN shell),
    or `OPENWOP_SEO_PRERENDER_DISABLED=true` via `--update-env-vars` to disable
    all prerendering (custom-domain documents revert to 404) without a deploy.

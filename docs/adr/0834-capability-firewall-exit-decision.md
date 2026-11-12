@@ -415,6 +415,74 @@ egress population to exactly it). The FW2-UX-1 refresh is witnessed through the 
 
 - `FW2-D1` **Allow-once grain.** Server-side replay of the held call with its stored
   arguments, so an approval covers exactly what was shown.
+
+  > **CORRECTED 2026-11-10 (CHAN-F2) — done, by argument binding, not server-side
+  > replay.** The user asked for an architecture review and a UX analysis and the choice
+  > that makes most sense for users. The two agreed that the default must cover exactly
+  > what was shown, once, with a tool-wide grant as an explicit second choice (the
+  > pattern Claude Code, VS Code Copilot and the OpenAI Agents SDK use). They differed on
+  > replay. Replay was REJECTED: running the held call from the approval route would
+  > rebuild the turn's tool context against a finished run, emit tool events on it
+  > (breaking replay and fork), put a tool result in the transcript with no model call
+  > behind it, keep unscrubbed arguments at rest past the ask, and likely need an RFC
+  > 0064 / RFC 0005 change. The UX analysis's concern with binding — a model that does
+  > not repeat byte-identical arguments re-asks — is met by canonical JSON (key order
+  > does not matter) and by the Continue message telling the agent to repeat exactly the
+  > request shown.
+  >
+  > What shipped:
+  > - **Grain** on each approval: `call` (the default, and the only grain for a request
+  >   from a messaging channel) or `conversation` (in-app only, its own button). Rows
+  >   approved before this carry no grain and read as `conversation` in-app (what their
+  >   approver was told) and as unusable on a channel turn (fails closed).
+  > - **Digest.** A held call's FULL canonical input is HMAC'd with the session secret
+  >   (`toolInputDigest`; keyed, because the input is unscrubbed) and stored with the ask.
+  >   A `call` approval satisfies only a call with that digest, once; an ask with other
+  >   arguments re-opens it as `pending`. The digest never leaves the server.
+  > - **One grant per turn** (`makeApprovalGrant`) answers BOTH gates — the ADR 0132 scope
+  >   gate and the firewall — per call, so one approval satisfies both for one call and is
+  >   spent once. The firewall's `evaluate` now takes the call's input and id; the chat
+  >   loop, voice and the dispatch scope gate pass them. A spent `call` approval is
+  >   deleted after an in-app turn; channel turns keep the CHAN-F3 claim and hand-back.
+  > - **Scope-gate gap closed** (found by the architecture review, older than CHAN-F3):
+  >   the ADR 0132 fold took EVERY approval row on a channel turn, claimed or not, so an
+  >   approved tool held by a narrowed conversation scope widened it on every channel turn
+  >   and was never spent. The fold now takes denials and in-app tool-wide approvals only
+  >   (`scopeFoldRows`); everything else is answered per call by the grant.
+  > - **UI**: "Run this action" (primary), "Allow for this conversation" (in-app only, and
+  >   only when every argument was shown), Deny; a note for channel requests; a warning
+  >   when arguments were cut or a secret was masked (`inputTruncated`).
+  > Not done (follow-up): a list of tool-wide grants with Revoke, and a TTL on a pending
+  > channel ask. Tests: `adr0834-fw2d1-argument-bound-approvals.test.ts`, the FW2-D1 and
+  > CHAN-F2 blocks of `adr0834-firewall-exit-witness.test.ts` (real chat turns and voice),
+  > `adr1042-single-use-approvals.test.ts` (per-lane use and settle), and the frontend
+  > `conversationToolsControl.test.tsx`.
+  >
+  > > **UPDATED 2026-11-11 (CHAN-F17) — the "Not done" line above is done.**
+  > > - **Revoke.** The approvals panel lists every approval already given, labelled by
+  > >   grain ("one call, not used yet" or "any call, for the rest of this conversation"),
+  > >   with Revoke. `DELETE …/approvals/:toolName?resolvedAt=…` takes the owner's
+  > >   authority (the approve route's predicate, 403 otherwise) and the version shown
+  > >   (400 without it, 409 `approval_changed` if it moved, 409 `no_approval` if none is
+  > >   held). It deletes the row with a compare-and-delete, so the next call asks again.
+  > >   It takes effect from the next turn. One residual: a channel turn that has CLAIMED
+  > >   the row (CHAN-F3) holds it outside the ledger, so a revoke during that turn finds
+  > >   nothing, and the turn may hand an unspent claim back. Channel approvals are
+  > >   one-call only, and a turn lasts seconds, so this was accepted rather than adding a
+  > >   tombstone.
+  > > - **TTL on a pending channel ask.** It can be decided for 24 hours from its latest ask
+  > >   (`OPENWOP_CHANNEL_APPROVAL_TTL_MIN` overrides; a re-ask renews it). After that,
+  > >   approve or deny is a 409 `approval_expired` and the row is removed; a new ask starts
+  > >   over, without the dead ask's origin. In-app asks do not expire. The GET carries
+  > >   `expiresAt` on a pending channel ask; the panel shows an expired one without
+  > >   decision buttons, and the pending chip does not count it.
+  > > - **An approved, unused one-call channel approval expires too** (raised in the
+  > >   coordinator's review: the same "outside sender, days later" exposure). The same TTL
+  > >   counts from when it was given; after that, `makeApprovalGrant` ignores it, so the
+  > >   call is asked about again. The GET carries its `expiresAt`, and the panel labels it
+  > >   expired and keeps Revoke. In-app one-call approvals do not expire.
+  > > Tests: `adr0834-chanf17-revoke-and-channel-ttl.test.ts` (ledger, grant and routes)
+  > > and three cases in `conversationToolsControl.test.tsx`; sabotage probes in the PR.
 - `FW2-D2` **Exchange retry re-runs tools.** A dispatch error after a tool ran releases
   the idempotency claim, so a retry can repeat a side effect (`conversationExchange.ts:
   610-626`). A runs-row concern; recorded here because it was found here.

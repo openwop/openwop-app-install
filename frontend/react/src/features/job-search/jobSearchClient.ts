@@ -115,6 +115,9 @@ export interface JobApplication {
   companyName: string | null;
   stage: string | null;
   appliedAt: string | null;
+  /** ADR 1036 D10 — the list is the workspace's; only the applicant may share
+   *  a verification link for their own application. */
+  mine: boolean;
 }
 
 export async function listApplications(orgId: string): Promise<JobApplication[]> {
@@ -125,6 +128,7 @@ export async function listApplications(orgId: string): Promise<JobApplication[]>
       digest: Record<string, unknown> | null;
       stageName: string | null;
       appliedAt: string | null;
+      mine?: boolean;
     }>;
   }>(res, 'listApplications');
   // `stageName` and `appliedAt` are resolved by the ROUTE. The client used to
@@ -137,6 +141,7 @@ export async function listApplications(orgId: string): Promise<JobApplication[]>
     companyName: (r.digest?.companyName as string | undefined) ?? null,
     stage: r.stageName ?? null,
     appliedAt: r.appliedAt ?? null,
+    mine: r.mine === true,
   }));
 }
 

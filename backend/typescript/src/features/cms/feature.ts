@@ -22,6 +22,8 @@ import { buildCmsSurface } from './surface.js';
 import { registerContentApprovalGate } from './contentApproval.js';
 import { registerCmsAgentTools } from './agentTools.js';
 import { startCmsPublishSweep } from './publishSweep.js';
+import { registerIntegrityGauge } from '../../host/integrityGauges.js';
+import { cmsIntegrityGauge } from './integrityGauge.js';
 import { registerCmsPlaybookContent } from './playbookContent.js';
 
 export const cmsFeature: BackendFeature = {
@@ -72,6 +74,8 @@ export const cmsFeature: BackendFeature = {
     // ADR 0204 C2 — the scheduled-publish sweep (retention-daemon pattern;
     // idempotent start, minute tick, per-(page,time) idempotency claim).
     startCmsPublishSweep();
+    // ADR 1104 — PROBE-1038-1…3 as a daily read-only gauge.
+    registerIntegrityGauge('cms', cmsIntegrityGauge);
     // ADR 0066 — register the content-publish decision handler on the core
     // approvals hook (the inbox claim/reject path dispatches here for
     // `kind:'content-publish'` rows). Direction: feature → core only.

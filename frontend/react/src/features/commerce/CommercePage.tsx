@@ -345,7 +345,7 @@ function ProductsTab({ orgId, focusId }: { orgId: string; focusId?: string | und
             <li key={p.productId} className="u-grid u-gap-2">
               <div className="action-bar u-justify-between u-items-center u-gap-2">
                 <div className="u-flex-1">
-                  <div className="u-truncate"><strong>{p.name}</strong> <span className="chip">{t(`type_${p.type}`)}</span>{!p.active ? <span className="chip chip--warning">{t('inactive')}</span> : null}</div>
+                  <div className="u-truncate"><strong>{p.name}</strong> <span className="chip">{t(`type_${p.type}`)}</span>{!p.active ? <span className="chip chip--warning">{t('inactive')}</span> : null}{p.unlisted ? <span className="chip chip--muted">{t('unlistedChip')}</span> : null}</div>
                   <div className="u-text-sm muted">
                     {fmt.currency(p.price, p.currency)}
                     {p.inventory !== undefined ? <> · {t('inStock', { count: p.inventory })}{p.lowStockThreshold !== undefined && p.inventory < p.lowStockThreshold ? <span className="chip chip--warning u-ml-1">{t('lowStock')}</span> : null}</> : null}
@@ -457,6 +457,8 @@ export function ProductForm({ orgId, product, onDone, onCancel }: { orgId: strin
   const [subEnabled, setSubEnabled] = useState(product?.subscription?.enabled ?? false);
   const [subSave, setSubSave] = useState(product?.subscription?.savePercent !== undefined ? String(product.subscription.savePercent) : '10');
   const [subIntervals, setSubIntervals] = useState<string[]>(product?.subscription?.intervals ?? ['monthly']);
+  // ADR 1098 — quote-only: hidden from the storefront and every public lane, still quotable.
+  const [unlisted, setUnlisted] = useState(product?.unlisted === true);
   const subGroupId = useId();
   const [busy, setBusy] = useState(false);
   const setAttr = (i: number, patch: Partial<{ label: string; value: string }>): void => setAttributes((a) => a.map((r, idx) => idx === i ? { ...r, ...patch } : r));
@@ -496,6 +498,7 @@ export function ProductForm({ orgId, product, onDone, onCancel }: { orgId: strin
           attributes: cleanAttrs,
           customFields,
           subscription: subEnabled && subIntervals.length > 0 ? { enabled: true, intervals: subIntervals, ...(Number.isFinite(Number(subSave)) ? { savePercent: Number(subSave) } : {}) } : null,
+          unlisted,
         });
         toast.info(t('saved'));
       } else {
@@ -508,12 +511,13 @@ export function ProductForm({ orgId, product, onDone, onCancel }: { orgId: strin
           ...(cleanAttrs.length ? { attributes: cleanAttrs } : {}),
           ...(Object.keys(customFields).length ? { customFields } : {}),
           ...(subEnabled && subIntervals.length > 0 ? { subscription: { enabled: true, intervals: subIntervals, ...(Number.isFinite(Number(subSave)) ? { savePercent: Number(subSave) } : {}) } } : {}),
+          ...(unlisted ? { unlisted: true } : {}),
         });
         toast.info(t('created'));
       }
       onDone();
     } catch (e) { actionError(e, t); } finally { setBusy(false); }
-  }, [orgId, product, name, type, currency, price, inventory, threshold, weight, tags, attributes, cf, subEnabled, subSave, subIntervals, fieldsFailed, onDone, t]);
+  }, [orgId, product, name, type, currency, price, inventory, threshold, weight, tags, attributes, cf, subEnabled, subSave, subIntervals, unlisted, fieldsFailed, onDone, t]);
 
   return (
     <div className="surface-card u-p-3 u-grid u-gap-3">
@@ -584,6 +588,8 @@ export function ProductForm({ orgId, product, onDone, onCancel }: { orgId: strin
         ))}
         {attributes.length < 20 ? <div><Button variant="secondary" onClick={() => setAttributes((a) => [...a, { label: '', value: '' }])}>{t('attributeAdd')}</Button></div> : null}
       </div>
+      {/* ADR 1098 — quote-only products. */}
+      <CheckboxField label={t('unlistedLabel')} help={t('unlistedHint')} checked={unlisted} onChange={(e) => setUnlisted(e.target.checked)} />
       {/* MERCH-E (ADR 0279) — subscribe-and-save opt-in. */}
       <div className="u-grid u-gap-1">
         <CheckboxField label={t('subEnable')} checked={subEnabled} onChange={(e) => setSubEnabled(e.target.checked)} />

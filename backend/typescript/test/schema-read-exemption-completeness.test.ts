@@ -105,6 +105,8 @@ const HOST_CLASSIFICATION: ReadonlyArray<readonly [string, boolean]> = [
   ['openwop:core.rag.retriever-basic', false],
   ['openwop:core.rag.retriever-contextual-compression', false],
   ['openwop:creative-briefs.list', false],
+  // ADR 1039 D8 — `directions[]` order is what a render/reel `directionIndex` cites back.
+  ['openwop:creative-briefs.get', true],
   ['openwop:crm.lead.capture', false],
   ['openwop:crm.lead.qualify', false], // ADR 0954 P4: write acknowledgement, no schema/catalog output
   ['openwop:dealers.list-dealers', false],
@@ -206,6 +208,10 @@ const HOST_CLASSIFICATION: ReadonlyArray<readonly [string, boolean]> = [
   ['openwop:production.get-vendors', false],
   ['openwop:production.plan', false],
   ['openwop:projects.list', false],
+  ['openwop:projects.get', false],
+  ['openwop:projects.knowledge.search', false],
+  ['openwop:projects.portfolio', false],
+  ['openwop:projects.memory.propose', false],
   ['openwop:promotions.apply-preview', false],
   ['openwop:promotions.draft', false],
   ['openwop:promotions.list', false],

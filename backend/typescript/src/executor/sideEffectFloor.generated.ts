@@ -29,15 +29,15 @@
  * ADR 0572, not here: a build-only invariant forbids `src/` from referencing
  * it, and that guard matches the filename in ANY spelling, comments included.)
  *
- * Manifest census at generation time (760 distinct typeIds):
+ * Manifest census at generation time (765 distinct typeIds):
  *    314  side-effect
- *    271  action
- *    112  pure
- *     37  read
+ *    273  action
+ *    114  pure
+ *     38  read
  *     16  streaming-output
  *     10  gate
  *
- * Floor 389 = served 321 + held 68:
+ * Floor 390 = served 322 + held 68:
  *     34  held: ai-invocation-log
  *      9  held: ai-opaque-not-logged
  *     24  held: deferred-role-semantics
@@ -276,6 +276,7 @@ export const MANIFEST_SIDE_EFFECT_FLOOR: ReadonlySet<string> = new Set([
   'data.transform.fetchUrls',
   'data.variable.compute',
   'data.variable.fetch',
+  'feature.accessibility.nodes.alt-text-generate',
   'feature.agent-knowledge.nodes.ingest',
   'feature.app-builder.nodes.apply-repair',
   'feature.app-builder.nodes.deploy-app',
@@ -630,6 +631,7 @@ export const MANIFEST_FAST_PATH_SERVED: ReadonlySet<string> = new Set([
   'data.transform.fetchUrls',
   'data.variable.compute',
   'data.variable.fetch',
+  'feature.accessibility.nodes.alt-text-generate',
   'feature.agent-knowledge.nodes.ingest',
   'feature.app-builder.nodes.apply-repair',
   'feature.app-builder.nodes.deploy-app',
@@ -1389,15 +1391,19 @@ export const MANIFEST_DECLARED_TYPE_IDS: ReadonlySet<string> = new Set([
   'feature.forms.nodes.get-submission',
   'feature.forms.nodes.list-forms',
   'feature.forms.nodes.list-submissions',
+  'feature.funnels.nodes.check-offers',
   'feature.funnels.nodes.collect-steps',
   'feature.funnels.nodes.compose-step-page',
   'feature.funnels.nodes.create',
   'feature.funnels.nodes.get',
   'feature.funnels.nodes.list',
+  'feature.funnels.nodes.offer-context',
   'feature.funnels.nodes.request-publish',
   'feature.funnels.nodes.set-steps',
   'feature.funnels.nodes.step-result',
   'feature.funnels.nodes.step-stats',
+  'feature.insights-suite.nodes.draft-check',
+  'feature.insights-suite.nodes.recognition-brief',
   'feature.insights-suite.nodes.talent-score',
   'feature.insights-suite.nodes.variance-compute',
   'feature.interactive-artifacts.nodes.render',
@@ -1500,6 +1506,7 @@ export const MANIFEST_DECLARED_TYPE_IDS: ReadonlySet<string> = new Set([
   'feature.walkthroughs.nodes.progress',
   'feature.webinars.nodes.register',
   'feature.webinars.nodes.sync',
+  'feature.whatsapp.nodes.delivery-status',
   'feature.whatsapp.nodes.send',
   'feature.work-selection.nodes.preview',
   'feature.workflow-author.nodes.draft',

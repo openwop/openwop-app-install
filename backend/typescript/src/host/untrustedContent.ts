@@ -67,6 +67,11 @@ const LIVE_ANGLE_FENCE = `${LIVE_OPEN}${GAP}(?:${SLASH}${GAP})?${tolerantWord('U
 // No leading word boundary: see defangUntrustedFence (TOC2CD-11).
 const WORD_FENCE = `(${tolerantWord('BEGIN')}|${tolerantWord('END')})[\\s${FMT}]+${tolerantWord('UNTRUSTED')}[\\s${FMT}]+${tolerantWord('CONTENT')}${WORD_END}`;
 
+/** The two defang matchers, exported for ONE reader: the byte-parity test that pins
+ *  the copy `packs/feature.insights-suite.nodes` must carry (a pack cannot import
+ *  this module; ADR 1102 D2). Not a second API: defang through the functions below. */
+export const UNTRUSTED_FENCE_PATTERNS_FOR_PARITY = { ANGLE_FENCE, WORD_FENCE } as const;
+
 /** Fold a matched marker fragment to its plain spelling, keeping case and whitespace. */
 function foldMarker(s: string): string {
   return s

@@ -102,6 +102,16 @@ describe('funnels Phase 1 — entity + lifecycle over HTTP', () => {
     const upd = await user.patch<FunnelBody>(f(orgId, `/${id}`), { steps: [{ kind: 'landing', pageId: landing }, { kind: 'thankyou', pageId: thanks }] });
     expect(upd.status).toBe(200);
     expect(upd.body.funnel.steps).toHaveLength(2);
+    // ADR 1023 D7 (FN72WF-19) — a funnel whose step pages are drafts would go live
+    // as a 404, so the direct publish refuses it (the approval lane's rule), and
+    // publishing a funnel never publishes its pages. Sabotage-witnessed: dropping
+    // `requirePublishedPages` from the route turns this red.
+    const dark = await user.post<{ error?: { details?: { reason?: string } } }>(f(orgId, `/${id}/publish`));
+    expect(dark.status).toBe(409);
+    expect(JSON.stringify(dark.body)).toContain('step_pages_unpublished');
+    for (const pageId of [landing, thanks]) {
+      expect((await user.post(`/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${pageId}/publish`)).status).toBe(200);
+    }
     const pub = await user.post<FunnelBody>(f(orgId, `/${id}/publish`));
     expect(pub.status).toBe(200);
     expect(pub.body.funnel.status).toBe('published');

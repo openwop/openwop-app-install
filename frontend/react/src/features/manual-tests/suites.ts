@@ -1134,13 +1134,13 @@ const HOST_SUITES: TestSuite[] = [
   // working feature. The cases below name what each chain actually NEEDS, so a
   // tester who cannot supply it reports "blocked on a Workday connection" rather
   // than a false negative.
-  { key: 'insights-suite', feature: 'Insights & Drafting', route: '/', description: 'Insight/draft generation (chat / Builder gallery / runs / notifications — no page of its own).',
-    toggle: offVia('insights-suite', { hasPage: false }), updatedAt: '2026-08-23', sourceCommit: '07c1b2e8', sourceFiles: ['backend/typescript/src/features/insights-suite', 'examples/workflow-chain-packs/insights-suite'],
+  { key: 'insights-suite', feature: 'Insights & Drafting', route: '/settings#ai', description: 'Insight/draft generation through the chat, the Builder gallery, runs and notifications, with its weekly schedule in Settings → AI → Insights & Drafting (no nav entry of its own).',
+    toggle: offVia('insights-suite', { hasPage: false }), updatedAt: '2026-11-11', sourceCommit: '24183cc7', sourceFiles: ['backend/typescript/src/features/insights-suite', 'examples/workflow-chain-packs/insights-suite', 'packs/feature.insights-suite.nodes'],
     cases: [
       { id: 'INS-01', title: 'Weekly variance runs and reports a verdict it computed', priority: 'P2',
         preconditions: ['insights-suite enabled', 'A BigQuery connection', 'A `sql` returning metric/actual/plan rows'],
         steps: [
-          { action: 'Open the Builder gallery, use the "Weekly variance (Actual vs Plan)" template, and run it with a real projectId + sql', expect: 'The run reaches the red-team approval gate. The gate card shows the VARIANCE FIGURES, not just a prompt (ADR 0600 §2).' },
+          { action: 'Open the Builder gallery, use the "Weekly variance (Actual vs Plan)" template, and run it with a real projectId + sql', expect: 'The run reaches the red-team approval gate. The gate card shows the variance summary: each metric\u2019s actual, plan, delta and %, which ones are FLAGGED, and the verdict (ADR 1102 D9). A card showing only a business unit and a verdict word is the defect.' },
           { action: 'Approve the gate', expect: 'A tenant-wide notification arrives, titled "Weekly variance (Actual vs Plan)", with a working link to the run. Its BODY IS EMPTY — that is expected, not a bug: this chain’s notify is fed by a resumed approval gate, which completes `{output: …}` with no top-level string to bind (ADR 0600 §5 / ISU-7, still open). A MISSING LINK is the defect this step is for.' },
           { action: 'Point `sql` at a table with NO rows and re-run', expect: 'The run FAILS `insufficient_data`. It must NOT report "on_plan" (ADR 0599 §3 — the defect this case exists for).' },
         ] },
@@ -1151,12 +1151,26 @@ const HOST_SUITES: TestSuite[] = [
           { action: 'Check YOUR inbox', expect: 'One notification, body carries the 9-box label, and its link opens the run.' },
           { action: 'Sign in as the second user and check THEIR inbox', expect: 'NOTHING. A named colleague\u2019s readiness score must not be broadcast workspace-wide (ADR 0600 §5 / ISU-6).' },
         ] },
-      { id: 'INS-03', title: 'The anniversary draft is a DRAFT — nothing is ever sent', priority: 'P1',
-        preconditions: ['insights-suite enabled', 'A Workday connection', 'A connected Gmail or Outlook mailbox'],
+      { id: 'INS-03', title: 'The anniversary draft is approved BEFORE it reaches your mailbox, and nothing is ever sent', priority: 'P1',
+        preconditions: ['insights-suite enabled', 'A Workday connection', 'A connected Gmail or Outlook mailbox', 'A few of your past recognition messages in the knowledge base'],
         steps: [
-          { action: 'Run "Work-anniversary recognition draft" from chat', expect: 'A draft appears in your own mailbox Drafts folder, carrying the AI-written body (not an empty draft).' },
-          { action: 'REJECT the approval gate — do it TWICE, once on the chat card and once from /inbox (start a second run for the second half)', expect: 'BOTH surfaces ask first with a confirm dialog, and cancelling it sends nothing (ADR 0600 §7 / ISU-12 + §Correction 5 — the confirm shipped on the inbox card only). After confirming, the run fails and no notification is sent.' },
+          { action: 'Run "Work-anniversary recognition draft" from chat with a real subjectId and milestone', expect: 'The run stops at the approval gate, and the card shows the DRAFT TEXT. Your mailbox Drafts folder is still EMPTY at this point (ADR 1102 D3 — the draft used to be written first and approved after).' },
+          { action: 'Read the draft on the card', expect: 'It names the milestone and reads like your exemplars. A generic message, or one about an employee id, is the defect (ADR 1102 D2).' },
+          { action: 'Approve the gate', expect: 'Now a draft appears in your Drafts folder, carrying the same text.' },
+          { action: 'REJECT the gate on a second run — once on the chat card and once from /inbox (a third run)', expect: 'BOTH surfaces ask first with a confirm dialog, and cancelling it changes nothing (ADR 0600 §7 / ISU-12). After confirming, the run fails, NO draft is created and no notification is sent.' },
+          { action: 'Run it again with an empty knowledge base (or a query that finds nothing)', expect: 'The run fails at "Draft brief" with a message saying to add past messages. No model call, no gate, no draft.' },
           { action: 'Check the mailbox Sent folder', expect: 'Empty. Nothing was sent at any point.' },
+        ] },
+      { id: 'INS-04', title: 'Schedule the weekly variance from Settings, as yourself', priority: 'P2',
+        preconditions: ['insights-suite enabled', 'A BigQuery connection', 'A second workspace editor'],
+        steps: [
+          { action: 'Open Settings → AI → Insights & Drafting (it is hidden while the feature is off)', expect: 'The panel loads, says "This schedule runs as you." once saved, and shows the anniversary trigger DISABLED with the reason (ADR 1102 D6).' },
+          { action: 'Turn the schedule on with no BigQuery project and Save', expect: 'Refused on the project field. Nothing is saved.' },
+          { action: 'Enter a project, a day, a time and a time zone, and Save', expect: 'Saved. Your profile\u2019s Schedules tab shows ONE "Weekly variance (Actual vs Plan)" schedule, at that day and time.' },
+          { action: 'Sign in as the second editor and open the same panel', expect: 'A warning that the schedule runs as someone else, and the button reads "Take over and save".' },
+          { action: 'Take over and save', expect: 'A confirm dialog asks first. After confirming: still exactly ONE weekly job, now yours. The first editor\u2019s job is gone, not left running (ADR 1102 D5 / INS91-5).' },
+          { action: 'As the second editor again, untick the schedule on the first editor\u2019s saved suite instead, and save', expect: 'The dialog and button talk about TURNING IT OFF ("Turn off and save"), not taking it over. Afterwards there is no weekly job.' },
+          { action: 'Pause the job from your profile\u2019s Schedules tab, then reopen the panel', expect: 'The panel says the schedule is saved but not running. A read-only member sees the same line without being told to save.' },
         ] },
     ] },
   { key: 'knowledge-sync', feature: 'Knowledge Sync', route: '/kb', description: 'Keep a KB collection synced from an external source (folder). ADR 0107.',

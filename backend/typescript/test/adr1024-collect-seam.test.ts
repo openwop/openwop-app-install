@@ -4,7 +4,8 @@
  * `CDP2WF-1/-2/-3/-11/-12/-21`).
  *
  * One describe per decision, each written so removing its mechanism fails it:
- *  D1   a Viewer can no longer collect or register schemas; a schema needs host:org:manage;
+ *  D1   a Viewer can no longer collect or register schemas; a schema needs host:org:manage
+ *       (each refusal asserted by its `requiredScope`, since the schema route has both gates);
  *  D4.2 `funnel.`/`kicktodo.`/`forms.` are refused over HTTP (after the trim), and an
  *       in-process `first-party` caller still writes them;
  *  D4.3 the five consent witnesses the lead set (user decision Q1, N1 resolved
@@ -33,6 +34,7 @@ import { setPolicy, recordConsent, writeErasureTombstone } from '../src/features
 import { collectEvent, listCollectedEvents, __resetCollectDenialWindows, DENIAL_WINDOW_MS } from '../src/features/cdp/collectService.js';
 import { listGovernanceDecisions } from '../src/host/governanceDecisionLog.js';
 import { registerEventSchema, validateEvent, MAX_SCHEMA_VERSIONS } from '../src/features/cdp/eventSchemaService.js';
+import { OpenwopError } from '../src/types.js';
 
 let server: Server;
 let BASE = '';
@@ -67,10 +69,12 @@ async function call(auth: { cookie?: string; bearer?: string }, method: string, 
   });
   return { status: res.status, body: (await res.json().catch(() => ({}))) as Record<string, unknown> };
 }
-async function codeOf(p: Promise<unknown>): Promise<{ status?: number; reason?: string; code?: string }> {
+/** The refusal a service call threw: `{}` when it resolved. Anything that is not the
+ *  product's typed error is rethrown, so a crash never reads as a refusal. */
+async function codeOf(p: Promise<unknown>): Promise<{ status?: number; reason?: unknown; code?: string; field?: unknown }> {
   try { await p; return {}; } catch (e) {
-    const err = e as { httpStatus?: number; code?: string; details?: { reason?: string } };
-    return { status: err.httpStatus, code: err.code, reason: err.details?.reason };
+    if (!(e instanceof OpenwopError)) throw e;
+    return { status: e.httpStatus, code: e.code, reason: e.details?.reason, field: e.details?.field };
   }
 }
 
@@ -87,7 +91,7 @@ beforeAll(async () => {
   WS = ws.orgId ?? ws.tenantId;
   await createMember({ orgId: WS, tenantId: WS, displayName: 'Editor', subject: userIdFor(WS, EDITOR), roles: ['editor'] });
   await createMember({ orgId: WS, tenantId: WS, displayName: 'Viewer', subject: userIdFor(WS, VIEWER), roles: ['viewer'] });
-});
+}, 120_000);
 afterAll(async () => {
   await setToggle('consent', 'off');
   await new Promise<void>((r) => server.close(() => r()));
@@ -99,16 +103,19 @@ describe('D1 — writes need workspace:write; a schema needs host:org:manage', (
     const editor = { cookie: await login(EDITOR) };
     const owner = { cookie: await login(OWNER) };
     const ev = { eventType: 'page_view', payload: { page: '/a' } };
-    expect((await call(viewer, 'POST', '/cdp/collect', ev)).status).toBe(403);
-    expect((await call(viewer, 'POST', '/cdp/collect/batch', { events: [ev] })).status).toBe(403);
-    expect((await call(viewer, 'POST', '/cdp/collect/import', { csv: 'page\n/a', eventType: 'page_view' })).status).toBe(403);
-    expect((await call(viewer, 'POST', '/cdp/event-schemas', { eventType: 'page_view', schema: { type: 'object' } })).status).toBe(403);
+    // The refusal NAMES the scope: the schema route has two gates (workspace:write, then
+    // host:org:manage), so a bare 403 for the viewer would survive losing the first one.
+    const writeRefusal = { status: 403, body: { details: { requiredScope: 'workspace:write' } } };
+    expect(await call(viewer, 'POST', '/cdp/collect', ev)).toMatchObject(writeRefusal);
+    expect(await call(viewer, 'POST', '/cdp/collect/batch', { events: [ev] })).toMatchObject(writeRefusal);
+    expect(await call(viewer, 'POST', '/cdp/collect/import', { csv: 'page\n/a', eventType: 'page_view' })).toMatchObject(writeRefusal);
+    expect(await call(viewer, 'POST', '/cdp/event-schemas', { eventType: 'page_view', schema: { type: 'object' } })).toMatchObject(writeRefusal);
     expect((await call(viewer, 'GET', '/cdp/collected-events')).status, 'reads stay open').toBe(200);
 
     const collected = await call(editor, 'POST', '/cdp/collect', ev);
     expect(collected.status, JSON.stringify(collected.body)).toBe(201);
     expect(collected.body.purpose).toBe('analytics');
-    expect((await call(editor, 'POST', '/cdp/event-schemas', { eventType: 'page_view', schema: { type: 'object' } })).status).toBe(403);
+    expect(await call(editor, 'POST', '/cdp/event-schemas', { eventType: 'page_view', schema: { type: 'object' } })).toMatchObject({ status: 403, body: { details: { requiredScope: 'host:org:manage' } } });
     expect((await call(owner, 'POST', '/cdp/event-schemas', { eventType: 'page_view', schema: { type: 'object' } })).status).toBe(201);
   });
 });
@@ -120,9 +127,10 @@ describe('D4.2 — in-process event families are not writable over HTTP', () => 
       expect(await codeOf(collectEvent(t, et, { stepId: 's' })), et).toMatchObject({ status: 422, reason: 'reserved_event_type' });
     }
     const editor = { cookie: await login(EDITOR) };
-    expect((await call(editor, 'POST', '/cdp/collect', { eventType: 'funnel.step_completed', payload: { stepId: 's' } })).status).toBe(422);
+    // 422 is also a schema mismatch: assert the reserved-type refusal itself.
+    expect(await call(editor, 'POST', '/cdp/collect', { eventType: 'funnel.step_completed', payload: { stepId: 's' } })).toMatchObject({ status: 422, body: { details: { reason: 'reserved_event_type' } } });
     const batch = await call(editor, 'POST', '/cdp/collect/batch', { events: [{ eventType: 'kicktodo.x', payload: {} }] });
-    expect(batch.body.rejected, JSON.stringify(batch.body)).toBe(1);
+    expect(batch.body, JSON.stringify(batch.body)).toMatchObject({ accepted: 0, rejected: 1, results: [{ ok: false, error: { message: expect.stringContaining('written only by their own feature') } }] });
     const ok = await collectEvent(t, 'funnel.step_completed', { stepId: 's' }, undefined, { source: 'first-party' });
     expect(ok.eventId).toMatch(/^evt:/);
   });
@@ -182,27 +190,26 @@ describe('D4.3 — consent for every identifier, on the tenant policy default (Q
     __resetCollectDenialWindows();
     const t = tenant();
     await setPolicy(t, { defaultMode: 'opt-in' });
-    const settle = () => new Promise((r) => setTimeout(r, 50));
-    const rows = async () => (await listGovernanceDecisions(t, { kind: 'consent' })).map((r) => (r.payload as { reason?: string; suppressed?: number }));
+    const rows = async (): Promise<unknown[]> => (await listGovernanceDecisions(t, { kind: 'consent' })).map((r) => r.payload);
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
       vi.setSystemTime(new Date('2026-11-02T10:00:00Z'));
-      for (let i = 0; i < 50; i++) await codeOf(collectEvent(t, 'page_view', { anonymousId: `anon-${i}` }));
-      await settle();
-      expect((await rows()).length, 'fifty refusals, one durable row').toBe(1);
+      for (let i = 0; i < 50; i++) expect(await codeOf(collectEvent(t, 'page_view', { anonymousId: `anon-${i}` }))).toMatchObject({ status: 403, reason: 'consent_required' });
+      // The audit write is fire-and-forget (no hook to await): wait for the row count
+      // itself. Without the rollup it is ~50 and never 1, so the wait fails, not hangs.
+      await vi.waitFor(async () => expect((await rows()).length, 'fifty refusals, one durable row').toBe(1));
       vi.setSystemTime(new Date(Date.parse('2026-11-02T10:00:00Z') + DENIAL_WINDOW_MS + 1));
       await codeOf(collectEvent(t, 'page_view', { anonymousId: 'anon-late' }));
-      await settle();
+      await vi.waitFor(async () => expect((await rows()).length).toBe(3));
       const after = await rows();
-      expect(after.length).toBe(3);
-      expect(after.find((r) => r.reason === 'collect-denials-suppressed')).toMatchObject({ suppressed: 49 });
+      expect(after).toContainEqual(expect.objectContaining({ reason: 'collect-denials-suppressed', suppressed: 49 }));
     } finally { vi.useRealTimers(); }
   });
 
   it('refuses `transactional` (it would skip the consent module and the erasure tombstone) and unknown purposes', async () => {
     const t = tenant();
     for (const purpose of ['transactional', 'whatever']) {
-      expect(await codeOf(collectEvent(t, 'page_view', { anonymousId: 'a' }, undefined, { purpose }))).toMatchObject({ status: 400 });
+      expect(await codeOf(collectEvent(t, 'page_view', { anonymousId: 'a' }, undefined, { purpose })), purpose).toMatchObject({ status: 400, field: 'purpose' });
     }
   });
 });
@@ -266,8 +273,14 @@ describe('D4.5 — an API-key reader gets masked collected and merge events', ()
     expect(merges.body.masked).toBe(true);
     expect((merges.body.events as unknown[]).length).toBeGreaterThan(0);
     expect(JSON.stringify(merges.body.events)).not.toContain('mia.b@example.test');
+    // Positive controls: the same rows read by a session carry every value clear, so each
+    // "not present" above is masking, not a value that was never there.
     const viaSession = await call(owner, 'GET', '/cdp/collected-events');
+    expect(viaSession.body.masked).toBe(false);
     expect(JSON.stringify(viaSession.body.events)).toContain('buyer@example.test');
+    expect(JSON.stringify(viaSession.body.events)).toContain('nested@example.test');
+    const mergesViaSession = await call(owner, 'GET', '/cdp/merge-events');
+    expect(JSON.stringify(mergesViaSession.body.events), 'the merge absorbed the source email').toContain('mia.b@example.test');
   });
 });
 
@@ -276,7 +289,8 @@ describe('D4.6 — an email under any key is tagged, so the erasure barrier sees
     await setToggle('consent', 'off');
     const t = tenant();
     const r = await collectEvent(t, 'notify', { to: 'someone@example.test', note: 'x' });
-    expect(r.piiFields).toContain('to');
+    // `to` and `note` are not PII NAMES: only the value shape can tag `to`, and leave `note`.
+    expect(r.piiFields).toEqual(['to']);
     await writeErasureTombstone(t, 'gone@example.test');
     expect(await codeOf(collectEvent(t, 'notify', { to: 'gone@example.test' }))).toMatchObject({ code: 'subject_erased' });
   });

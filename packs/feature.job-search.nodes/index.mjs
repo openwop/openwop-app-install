@@ -1,7 +1,7 @@
 /**
  * feature.job-search.nodes — ADR 0540 P4.
  *
- * Four nodes, all role:"action" so the engine records their outputs. That is a
+ * Five nodes, all role:"action" so the engine records their outputs. That is a
  * determinism requirement, not bookkeeping: replay and fork must read the
  * recorded verdict rather than re-deciding against a profile or a rule table
  * that has since changed (ADR 0540 matrix row 9 — a re-scored application would
@@ -9,8 +9,8 @@
  *
  * There is deliberately NO node that takes a submission target. The law's
  * substance (ADR 0543 §D3 correction note, WF-JS-1): no node may route AROUND
- * the ADR 0541 apply grant. `run-campaign` below triggers the tenant's standing
- * campaign — it carries no listing/answers/target, and every submission inside
+ * the ADR 0541 apply grant. `run-campaign` below triggers the run's person's
+ * standing campaign — it carries no listing/answers/target, and every submission inside
  * the pass goes through the grant's consult → pace → claim-CAS → consume
  * machinery. What stays forbidden is an op a workflow could aim.
  *
@@ -85,7 +85,8 @@ export async function recordOutcome(ctx) {
  *
  * This is NOT a submit node in the sense the header forbids: it takes no
  * listing, no answers, no target — nothing a workflow could use to choose or
- * widen a submission. It asks the host to run the tenant's OWN campaign, and
+ * widen a submission. It asks the host to run the RUN'S PERSON's own campaign
+ * (ADR 1036 D1 — resolved by the host from the run, never from input), and
  * every submission inside that pass is bounded by the ADR 0541 grant (consult →
  * pace → claim CAS → consume), the steering dailyCap, and the board's submit
  * lane. Declared `side-effectful` in pack.json AND classified in the executor's
@@ -95,14 +96,23 @@ export async function recordOutcome(ctx) {
 export async function runCampaignPass(ctx) {
   const js = surface(ctx, 'runCampaignPass');
   const out = await js.runCampaignPass({});
+  // ADR 1036 D1 — COUNTS ONLY. The pass is one person's, and run output is
+  // readable across the workspace, so no grant id, campaign id or listing id
+  // leaves the host here. A count the host did not report is absent from the
+  // surface's reply only on a contract break; it surfaces as 0, never invented.
+  const n = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
   return {
     status: 'success',
     outputs: {
-      ranGrants: out.ranGrants ?? 0,
-      listings: out.listings ?? 0,
-      skippedNoSubmitLane: out.skippedNoSubmitLane ?? 0,
-      skippedDailyCap: out.skippedDailyCap ?? 0,
-      results: Array.isArray(out.results) ? out.results : [],
+      ranGrants: n(out.ranGrants),
+      listings: n(out.listings),
+      skippedNoSubmitLane: n(out.skippedNoSubmitLane),
+      skippedDailyCap: n(out.skippedDailyCap),
+      considered: n(out.considered),
+      applied: n(out.applied),
+      alreadyApplied: n(out.alreadyApplied),
+      parked: n(out.parked),
+      skipped: n(out.skipped),
     },
   };
 }

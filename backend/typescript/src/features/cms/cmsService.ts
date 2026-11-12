@@ -23,7 +23,7 @@ import { registerFieldKindValidator } from '../../host/customFields/index.js';
 // engine) for page storage. A DECLARED one-directional feature dependency
 // (cms → entities): the kernel is the app's single content store and never
 // imports cms back (guard-tested in cms-kernel-pages.test.ts).
-import { mintSystemType } from '../entities/entitiesService.js';
+import { listAllSystemRowsBounded, mintSystemType } from '../entities/entitiesService.js';
 import { makeKernelAdapter } from '../entities/kernelAdapter.js';
 import { clearUsageForRef, syncUsageRefs } from '../media/mediaService.js';
 // ADR 0592 §4 (CMSLWF-1) — CMS lifecycle events ride the ADR 0208 dispatcher
@@ -44,7 +44,8 @@ import { eraseContentLanguageSettingsSubject } from '../../host/contentLocales.j
 import { createLogger } from '../../observability/logger.js';
 import { isFragmentHref, isInternalHref } from '../../host/internalHref.js';
 import { cleanAllHeroArt, ITEM_BASE_KEYS } from './heroArt.js';
-import { buildDesignSectionData, cleanHeroQueue, cleanRichTextCard, DESIGN_SECTION_TYPES, type DesignSectionType } from './designSections.js';
+import { buildDesignSectionData, cleanHeroQueue, cleanRichTextCard, DESIGN_SECTION_TYPES, VIDEO_LENGTH_RE, type DesignSectionType } from './designSections.js';
+export { VIDEO_LENGTH_RE };
 
 const log = createLogger('feature.cms');
 
@@ -105,6 +106,10 @@ const MAX = {
   flowText: 120,        // a node's line of text
   flowCaption: 80,      // the hero flow's accessible caption
   perOrgPages: 2000,
+  // ADR 1069 D4 — authored `pricing.plans` (named plans, no prices).
+  plans: 8,         // plans one pricing section may name
+  planName: 80,     // a plan's name, e.g. "Pilot"
+  planBlurb: 600,   // a plan's one-paragraph description
 } as const;
 
 /** Section layout for `columns` — how the public renderer lays the items out. */
@@ -620,6 +625,16 @@ function kernelToPage(rec: { ext?: Record<string, unknown> }): Page {
   return { ...base, sections } as Page;
 }
 
+/** ADR 1104 — every tenant's pages (at most `perTenantCap` each), for the daily
+ *  integrity gauge ONLY; never a request path. */
+export async function listAllPagesForIntegrityGauge(perTenantCap: number): Promise<{ pages: Page[]; truncatedTenants: number }> {
+  const { rows, truncatedTenants } = await listAllSystemRowsBounded(CMS_PAGE_TYPE, perTenantCap);
+  return { pages: rows.map((rec) => kernelToPage(rec)), truncatedTenants };
+}
+
+/** ADR 1038 D8 — the most steps a flow holds (the validator's cap, for the gauge). */
+export const FLOW_MAX_NODES: number = MAX.flowNodes;
+
 /** The kernel-backed page store (KERNEL-5 shared factory). `toKernel` forwards
  *  a concrete `status` ('draft' when the page isn't published, else 'live') —
  *  reproducing the previous `mapped.status ?? 'live'` default. Top-level
@@ -826,11 +841,9 @@ function safeLink(v: unknown, max: number): string {
   return /^(https?:|mailto:)/i.test(u) ? u : '';
 }
 
-/** ADR 0843 — a `video` section's play-button length: `m:ss` (minutes may run
- *  to three digits). The prerender turns it into an ISO 8601 `PT#M#S`. */
 /** A `comparison` section's optional `style` (absent = the mark matrix). */
 export const COMPARISON_STYLES: ReadonlySet<string> = new Set(['text']);
-export const VIDEO_LENGTH_RE = /^\d{1,3}:[0-5]\d$/;
+// `VIDEO_LENGTH_RE` (ADR 0843) now lives in designSections.ts, shared with `films`.
 /** ADR 0843 — the hosts a `youtubeUrl` may name (the link reads "Watch on YouTube"). */
 const YOUTUBE_HOSTS = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be']);
 
@@ -845,15 +858,15 @@ const YOUTUBE_HOSTS = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com'
  * the translate path logs a dropped key, and a model echoing a mangled URL must
  * not fail the whole overlay.
  */
-function httpsMediaUrl(v: unknown, field: string, partial: boolean, hosts?: ReadonlySet<string>): string | undefined {
+function httpsMediaUrl(v: unknown, field: string, partial: boolean, hosts?: ReadonlySet<string>, section = 'video'): string | undefined {
   if (v === undefined || v === null || (typeof v === 'string' && v.trim() === '')) return undefined;
   const reject = (why: string): undefined => {
     if (partial) return undefined;
-    throw new OpenwopError('validation_error', `video.${field} ${why}`, 400, { field });
+    throw new OpenwopError('validation_error', `${section}.${field} ${why}`, 400, { field });
   };
   if (typeof v !== 'string') return reject('must be a URL string.');
   if (v.trim().length > MAX.url) return reject(`must be at most ${MAX.url} characters.`);
-  const u = contentUrl(v, MAX.url, `video.${field}`);
+  const u = contentUrl(v, MAX.url, `${section}.${field}`);
   let parsed: URL;
   try { parsed = new URL(u); } catch { return reject('must be an absolute https:// URL.'); }
   if (parsed.protocol !== 'https:' || !/^https:\/\//i.test(u)) return reject('must be an absolute https:// URL.');
@@ -1356,11 +1369,37 @@ function buildTypedSectionData(type: SectionType, d: Record<string, unknown>, pa
         ? [...new Set((d.tiers as unknown[]).filter((t): t is typeof PRICING_TIER_IDS[number] => PRICING_TIER_IDS.includes(t as typeof PRICING_TIER_IDS[number])))]
         : [];
       const ctaLabel = optionalCleanContent(d.ctaLabel, MAX.label, 'ctaLabel');
+      // ADR 1069 D4 — `plans`: AUTHORED named plans for a site with no billing
+      // tiers yet (DeckTalk: "Pilot · Open now"). Present ⇒ it REPLACES the live
+      // billing read, and still carries no price: there is no price field, and
+      // nothing renders a number. A new field, because `tiers` already means
+      // billing tier ids and an overlay must never read one field two ways.
+      // A locale overlay (partial) drops a nameless plan instead of failing,
+      // like every other overlay field; a saved section refuses it.
+      const plans = (Array.isArray(d.plans) ? d.plans : []).slice(0, MAX.plans).flatMap((p, i) => {
+        const pp = (p ?? {}) as Record<string, unknown>;
+        const name = optionalCleanContent(pp.name, MAX.planName, 'name');
+        if (!name) {
+          if (partial) return [];
+          throw new OpenwopError('validation_error', `pricing.plans[${i}].name is required.`, 400, {});
+        }
+        const status = optionalCleanContent(pp.status, MAX.badge, 'status');
+        const blurb = optionalCleanContent(pp.blurb, MAX.planBlurb, 'blurb');
+        const planCta = optionalCleanContent(pp.ctaLabel, MAX.label, 'ctaLabel');
+        return [{
+          name,
+          ...(status ? { status } : {}),
+          ...(blurb ? { blurb } : {}),
+          ...(planCta ? { ctaLabel: planCta, ctaUrl: safeLink(pp.ctaUrl, MAX.url) } : {}),
+          ...(pp.highlight === true ? { highlight: true } : {}),
+        }];
+      });
       return {
         ...opt('eyebrow', MAX.eyebrow),
         ...opt('heading', MAX.heading),
         ...(optionalCleanContent(d.blurb, MAX.text, 'blurb') ? { blurb: optionalCleanContent(d.blurb, MAX.text, 'blurb') } : {}),
         ...(tiers.length > 0 ? { tiers } : {}),
+        ...(plans.length > 0 ? { plans } : {}),
         ...(ctaLabel ? { ctaLabel, ctaUrl: safeLink(d.ctaUrl, MAX.url) } : {}),
         // ADR 0820 §7 — where an UNPRICED plan's "Contact us" goes (same link guard).
         ...(safeLink(d.contactUrl, MAX.url) ? { contactUrl: safeLink(d.contactUrl, MAX.url) } : {}),
@@ -1458,9 +1497,10 @@ function buildTypedSectionData(type: SectionType, d: Record<string, unknown>, pa
         ...headStyle(),
       };
     }
-    case 'statusTable': case 'dateCalc': case 'conversation': case 'featureIndex': case 'decisionTree': case 'scheduleSim':
-      // ADR 1080 D1–D4, D15, D16.
-      return { ...opt('eyebrow', MAX.eyebrow), ...opt('heading', MAX.heading), ...opt('lede', MAX.lede), ...tone(), ...headStyle(), ...buildDesignSectionData(type, d, partial) };
+    case 'statusTable': case 'dateCalc': case 'conversation': case 'featureIndex': case 'decisionTree': case 'scheduleSim': case 'films':
+      // ADR 1080 D1–D4, D15, D16; ADR 1082 `films` (held to the `video` URL rule).
+      return { ...opt('eyebrow', MAX.eyebrow), ...opt('heading', MAX.heading), ...opt('lede', MAX.lede), ...tone(), ...headStyle(),
+        ...buildDesignSectionData(type, d, partial, (v, field) => httpsMediaUrl(v, field, partial, undefined, 'films')) };
     case 'quotes': {
       // R2-G10 — attributed social proof (testimonials). Every 2026 leader puts
       // quantified, ATTRIBUTED quotes near the hero; the fields push authors
@@ -1927,8 +1967,9 @@ export function cleanPageTags(raw: unknown): string[] {
   return cleanTagList(raw, { maxTags: MAX.tags, maxLen: MAX.tag });
 }
 
-/** ADR 1049 — the closed set of public-site nav groups a page may join. */
-export const SITE_NAV_GROUPS = ['product', 'audience', 'trust', 'company', 'legal'] as const;
+/** ADR 1049 — the closed set of public-site nav groups a page may join.
+ *  `resources` (guides, help, changelog) added 2026-11-10 for DeckTalk. */
+export const SITE_NAV_GROUPS = ['product', 'audience', 'resources', 'trust', 'company', 'legal'] as const;
 export type SiteNavGroup = (typeof SITE_NAV_GROUPS)[number];
 
 /** ADR 1049 — a page's public-site nav placement (every field optional). */

@@ -21,7 +21,7 @@ import { optionalCleanString } from '../../host/boundedStrings.js';
 import { bucketOf } from '../../host/variantAssignment.js';
 import { rankByPriority } from '../priority-matrix/scoring.js';
 import type { CriteriaSet } from '../priority-matrix/types.js';
-import { listProducts, getProduct, listOrders, type Product } from '../commerce/commerceService.js';
+import { listProducts, getProduct, listOrders, isPubliclyListed, type Product } from '../commerce/commerceService.js';
 import { resolveSegmentMembers } from '../crm/segmentsService.js';
 import { createLogger } from '../../observability/logger.js';
 import { tenantFeatureCheck } from '../../host/tenantFeatureGate.js';
@@ -361,7 +361,7 @@ export async function resolveRecommendations(input: ResolveInput): Promise<Resol
   };
 
   const anchor = input.productId ? await getProduct(tenantId, orgId, input.productId) : null;
-  const all = (await listProducts(tenantId, orgId)).filter((p) => p.active !== false);
+  const all = (await listProducts(tenantId, orgId)).filter(isPubliclyListed); // ADR 1098 — never recommend a quote-only product
   const byId = new Map(all.map((p) => [p.productId, p]));
   const aff = anchor ? await affinity.get(affKey(tenantId, orgId, anchor.productId)) : null;
   const affScore = new Map<string, number>((aff?.related ?? []).map((r) => [r.relatedId, r.coScore]));

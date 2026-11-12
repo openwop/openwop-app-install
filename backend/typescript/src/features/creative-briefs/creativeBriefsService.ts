@@ -249,38 +249,71 @@ export async function transitionBrief(tenantId: string, orgId: string, briefId: 
 export async function deleteBrief(tenantId: string, orgId: string, briefId: string): Promise<boolean> {
   const existing = await getBrief(tenantId, orgId, briefId);
   if (!existing) return false;
-  // Versions first — a mid-way failure leaves no orphans reachable from a parent.
+  // ADR 1039 D6 (CB82WF-6) — this function owns EVERY child cascade, and the
+  // brief row goes LAST. Children first is the "a mid-way failure leaves no
+  // orphans reachable from a parent" rule the versions loop always followed,
+  // extended to every child: a failed cascade throws while the brief still
+  // exists, so the delete fails visibly and a retry finishes it. (Before, the
+  // render and comment cascades lived on the DELETE route only, so the demo
+  // clear in `host/campaignShowcaseSeed.ts` orphaned both; WF-SHARE-3 moved the
+  // share-link cascade here for the same reason.)
+  //
+  // Dynamic imports: `sharing/sharingService.ts`, `render/renderService.ts` and
+  // `comments/commentsService.ts` all import THIS module, so a static edge back
+  // would cycle. Every step is idempotent, so a retried delete is safe.
   for (const v of await versions.listByPrefix(`${tenantId}:${orgId}:${briefId}:`)) await versions.delete(`${v.tenantId}:${v.orgId}:${v.versionId}`);
-  await briefs.delete(`${tenantId}:${orgId}:${briefId}`);
-  // CB-CODE-2 / CS-DATA-2 — the mood board's media usage-refs die with the
-  // brief (media owns the rows). Best-effort like the stamping that wrote them:
-  // bookkeeping never blocks the delete, but a failure is visible.
+  const { deleteRendersForBrief } = await import('./render/renderService.js');
+  await deleteRendersForBrief(tenantId, orgId, briefId);
+  const { pruneThreadsForResourceAndComposites } = await import('../comments/commentsService.js');
+  await pruneThreadsForResourceAndComposites(tenantId, 'creative_brief', briefId);
+  const { purgeLinksForResource } = await import('../sharing/sharingService.js');
+  await purgeLinksForResource(tenantId, 'creative_brief', briefId);
+  // CB-CODE-2 / CS-DATA-2 — the mood board's media usage-refs are bookkeeping
+  // media owns: best-effort like the stamping that wrote them, never blocking.
   try {
     await clearUsageForRef(tenantId, orgId, 'creative-brief', briefId);
   } catch (err) {
     log.warn('usage-ref cascade failed on brief delete', { briefId, error: err instanceof Error ? err.message : String(err) });
   }
-  // WF-SHARE-3 (R2 review, F8) — the share-link cascade belongs on the DELETE
-  // OWNER, not on the route. It lived in `routes.ts` only, so the two callers
-  // that reach this function directly — `host/campaignShowcaseSeed.ts`'s
-  // demo-clear and the bulk delete above it — orphaned every `creative_brief`
-  // link they killed: a live public URL to a brief that no longer exists, which
-  // the retention sweep never reclaims (an orphaned link is neither revoked nor
-  // expired). That is the identical non-route-deleter defect WF-SHARE-3 fixed
-  // for canvases and documents, so `creative_brief` was being counted in the
-  // "eleven of twelve" on the strength of a cascade half its callers skipped.
-  //
-  // Dynamic import: `sharing/sharingService.ts` statically imports THIS module
-  // for its `creative_brief` resolver, so a static edge back would cycle — the
-  // same shape `crm/bookingService.ts` and `commerce/commerceService.ts` use.
-  // Idempotent, so the route-level calls that remain are harmless no-ops.
-  try {
-    const { purgeLinksForResource } = await import('../sharing/sharingService.js');
-    await purgeLinksForResource(tenantId, 'creative_brief', briefId);
-  } catch (err) {
-    log.warn('share-link cascade failed on brief delete', { briefId, error: err instanceof Error ? err.message : String(err) });
-  }
+  await briefs.delete(`${tenantId}:${orgId}:${briefId}`);
   return true;
+}
+
+/** One compare-and-swap rewrite of a row's actor fields (ADR 1039 D7). `fix`
+ *  returns null when the FRESH row no longer names the subject; a lost race
+ *  re-reads, and three lost races throw. Never through `mutateBrief`: an erasure is not a content edit, so it
+ *  must not bump `version`, snapshot, or demote an approved brief. */
+export async function casRewrite<T extends object>(col: DurableCollection<T>, key: string, fix: (row: T) => T | null): Promise<boolean> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const current = await col.get(key);
+    if (!current) return false;
+    const next = fix(current);
+    if (!next) return false;
+    if (await col.compareAndSwap(current, next)) return true;
+  }
+  // CB-P2-M1 — a row the eraser could not rewrite still names the subject: that
+  // is an incomplete erasure, so it fails the eraser (counted, retryable) rather
+  // than being reported as a smaller success.
+  throw new Error(`erasure could not rewrite ${key} after three compare-and-swap attempts`);
+}
+
+/** ADR 1039 D7 — tombstone the subject in briefs (`createdBy`, `updatedBy`) and
+ *  version snapshots (`capturedBy`). Rows are kept: they are the org's creative
+ *  record. Returns the rows rewritten. */
+export async function tombstoneBriefActors(tenantId: string, forms: ReadonlySet<string>, tombstone: string): Promise<number> {
+  let n = 0;
+  for (const b of await briefs.listByPrefix(`${tenantId}:`)) {
+    if (b.tenantId !== tenantId || !(forms.has(b.createdBy) || forms.has(b.updatedBy))) continue;
+    const ok = await casRewrite(briefs, `${b.tenantId}:${b.orgId}:${b.briefId}`, (row) => (forms.has(row.createdBy) || forms.has(row.updatedBy)
+      ? { ...row, ...(forms.has(row.createdBy) ? { createdBy: tombstone } : {}), ...(forms.has(row.updatedBy) ? { updatedBy: tombstone } : {}) }
+      : null));
+    if (ok) n += 1;
+  }
+  for (const v of await versions.listByPrefix(`${tenantId}:`)) {
+    if (v.tenantId !== tenantId || !forms.has(v.capturedBy)) continue;
+    if (await casRewrite(versions, `${v.tenantId}:${v.orgId}:${v.versionId}`, (row) => (forms.has(row.capturedBy) ? { ...row, capturedBy: tombstone } : null))) n += 1;
+  }
+  return n;
 }
 
 export async function listVersions(tenantId: string, orgId: string, briefId: string): Promise<CreativeBriefVersion[]> {

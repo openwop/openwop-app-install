@@ -109,6 +109,19 @@ describe('PublicShell grouped site navigation (ADR 1049)', () => {
     expect(footer.querySelector('ul.app-footer__links')).toBeNull();
   });
 
+  it('a Resources page adds the Resources group after Who it’s for, and Blog joins it (DeckTalk, 2026-11-10)', async () => {
+    const site = [...GROUPED_SITE, { slug: 'guides', title: 'Guides', nav: { group: 'resources', label: 'Guides', description: 'How-tos', order: 10 } }];
+    const panel = await renderWith(site);
+    expect(await within(panel).findByRole('link', { name: /^Guides/ })).toBeTruthy();
+    expect(headingsIn(panel, '.public-menu__heading')).toEqual(['Product', 'Who it’s for', 'Resources', 'Trust', 'Company', 'Pages']);
+    // Blog is a resource: with a Resources group it moves there, out of Company.
+    expect(groupLinks(panel, '.public-menu__group', '.public-menu__heading', 'Resources')).toEqual(['/p/guides', '/blog']);
+    expect(groupLinks(panel, '.public-menu__group', '.public-menu__heading', 'Company')).toEqual(['/p/about']);
+    const footer = screen.getByRole('navigation', { name: 'Footer' });
+    expect(headingsIn(footer, 'h2.app-footer__heading')).toEqual(['Product', 'Who it’s for', 'Resources', 'Trust', 'Company', 'Pages', 'Legal']);
+    expect(groupLinks(footer, '.app-footer__group', '.app-footer__heading', 'Resources')).toEqual(['/p/guides', '/blog']);
+  });
+
   it('keeps an ungrouped site exactly on the ADR 0486 menu and flat footer', async () => {
     const panel = await renderWith([
       { slug: 'about', title: 'About Us' },

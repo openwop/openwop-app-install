@@ -27,6 +27,8 @@ import {
   publishFunnel, unpublishFunnel, archiveFunnel,
   type Org, type Funnel,
 } from './funnelsClient.js';
+import { funnelsErrorText, isNotFound } from './funnelsErrors.js';
+import { useFunnelsOrgAccess } from './useFunnelsOrgAccess.js';
 
 const statusChip = (status: Funnel['status']): string =>
   status === 'published' ? 'chip chip--success' : status === 'archived' ? 'chip chip--muted' : 'chip chip--warning';
@@ -63,6 +65,8 @@ export function FunnelsPage(): JSX.Element {
   // (the raw `.catch(() => setOrgs([]))` it replaces could not).
   const { orgs, orgId, setOrgId, orgsFailed, retry: retryOrgs } =
     useOrgSelection<Org>(listOrgs, access.enabled, deepLinkOrg ?? '');
+  // ADR 1023 — a Viewer is not offered add/publish/unpublish/archive (each a 403).
+  const orgAccess = useFunnelsOrgAccess(orgId);
   /** A table cell's href. The funnel opens at its OWN URL (ADR 0522) — the
    *  `?funnel=` mirror this page used to keep is gone with the stacked editor,
    *  and with it `setSelectedId` / `editSteps`, which moved to the detail page. */
@@ -91,7 +95,7 @@ export function FunnelsPage(): JSX.Element {
       // The CMS page list moved with the step editor (ADR 0522) — the table
       // needs only the funnels.
       setRows(await listFunnels(org)); setError(null);
-    } catch (e) { setError(e instanceof Error ? e.message : t('loadFailed')); setRows([]); setRowsFailed(true); }
+    } catch (e) { setError(funnelsErrorText(e, t, 'loadFailed', 'read')); setRows([]); setRowsFailed(true); }
   }, [t]);
   useEffect(() => { if (orgId) void load(orgId); }, [orgId, load]);
   // Selection validity: an org switch or a delete leaves `?funnel=` naming a
@@ -108,7 +112,7 @@ export function FunnelsPage(): JSX.Element {
       // Land on the new funnel's OWN URL — creating and staying on the table
       // would hide the thing you just made among the rows.
       navigate(funnelHref(funnel.funnelId));
-    } catch (e) { toast.error(e instanceof Error ? e.message : t('addFailed')); }
+    } catch (e) { toast.error(funnelsErrorText(e, t, 'addFailed')); }
     finally { setBusy(false); }
   }, [orgId, newName, navigate, funnelHref, t]);
 
@@ -125,7 +129,12 @@ export function FunnelsPage(): JSX.Element {
         await archiveFunnel(orgId, f.funnelId);
       }
       await refresh();
-    } catch (e) { toast.error(e instanceof Error ? e.message : t('updateFailed')); }
+    } catch (e) {
+      // A row that is gone (deleted elsewhere) says so in LIST words and the table
+      // catches up, instead of the editor's "no longer exists in this workspace".
+      if (isNotFound(e)) { toast.error(t('errRowGone', { name: f.name })); await refresh(); return; }
+      toast.error(funnelsErrorText(e, t, 'updateFailed'));
+    }
   }, [orgId, refresh, t]);
 
   const columns = useMemo<DataColumn<Funnel>[]>(() => [
@@ -137,7 +146,7 @@ export function FunnelsPage(): JSX.Element {
     { key: 'status', header: t('colStatus'), render: (f) => <span className={statusChip(f.status)}>{t(`status_${f.status}`)}</span>, sortValue: (f) => f.status },
     { key: 'steps', header: t('colSteps'), render: (f) => fmt.number(f.steps.length), sortValue: (f) => f.steps.length },
     { key: 'actions', header: '', render: (f) => (
-      <span className="action-bar">
+      orgAccess.canWrite ? <span className="action-bar">
         {f.status === 'draft' ? <Button variant="quiet" aria-disabled={f.steps.length === 0} onClick={() => { if (f.steps.length === 0) { toast.error(t('publishNeedsSteps')); return; } void lifecycle(f, 'publish'); }}>{t('publish')}</Button> : null}
         {f.status === 'published' ? <Button variant="quiet" onClick={() => void lifecycle(f, 'unpublish')}>{t('unpublish')}</Button> : null}
         {f.status !== 'archived' ? <Button variant="quiet" onClick={() => void lifecycle(f, 'archive')}>{t('archive')}</Button> : null}
@@ -145,9 +154,9 @@ export function FunnelsPage(): JSX.Element {
             entity's own surface, beside the name that says which funnel is
             about to go. Lifecycle stays: those are operate-surface actions you
             take while scanning the table (the rule-11 `<DataTable>` lane). */}
-      </span>
+      </span> : null
     ) },
-  ], [t, fmt, lifecycle, funnelHref]);
+  ], [t, fmt, lifecycle, funnelHref, orgAccess.canWrite]);
 
   // The toggle has not resolved yet — a shape-matched skeleton UNDER the real
   // header, not a `StateCard`: the card's only text would be the page title, so
@@ -211,10 +220,17 @@ export function FunnelsPage(): JSX.Element {
         </label>
         <label className="u-grid u-gap-1">
           <span className="u-label-sm">{t('fieldName')}</span>
-          <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder={t('namePlaceholder')} />
+          <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder={t('namePlaceholder')} disabled={!orgAccess.canWrite} />
         </label>
-        <Button variant="primary" type="submit" disabled={busy || !orgId || !newName.trim()}>{t('addFunnel')}</Button>
+        <Button variant="primary" type="submit" disabled={busy || !orgId || !newName.trim() || !orgAccess.canWrite}>{t('addFunnel')}</Button>
       </form>
+      {orgAccess.known && !orgAccess.canWrite ? <Notice variant="info">{t('readOnlyNotice')}</Notice> : null}
+      {orgAccess.failed ? (
+        <Notice variant="warning" announce={t('accessCheckFailed')}>
+          {t('accessCheckFailed')}{' '}
+          <Button variant="quiet" size="sm" onClick={orgAccess.retry}>{tc('retry')}</Button>
+        </Notice>
+      ) : null}
 
             {rows === null ? <SkeletonRows rows={4} columns={["40%","20%","15%","10%"]} /> : rowsFailed ? (
         <StateCard announce title={tc('loadFailedTitle')} body={tc('loadFailedBody')} action={<Button variant="secondary" onClick={() => void refresh()}>{tc('retry')}</Button>} />
@@ -253,7 +269,9 @@ export function FunnelsPage(): JSX.Element {
       )}
       {/* ADR 0948 P3a — the Funnel Architect: a pocket over the page (bounded, keyed by
           org, open by default only when there is no funnel yet; refreshes the list). */}
-      {orgId && rows !== null && !rowsFailed ? (
+      {/* ADR 1023 (grade-ux FN72UX-4) — the Architect DRAFTS funnels; a Viewer's
+          every suggested action would end in forbidden_scope, so it is not offered. */}
+      {orgId && rows !== null && !rowsFailed && orgAccess.canWrite ? (
         <FunnelArchitectPocket key={orgId} orgId={orgId} orgName={orgs?.find((o) => o.orgId === orgId)?.name}
           defaultOpen={rows.length === 0} onTurnSettled={() => void refresh()} />
       ) : null}

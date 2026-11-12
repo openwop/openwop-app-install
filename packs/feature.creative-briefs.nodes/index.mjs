@@ -55,7 +55,19 @@ export async function listRenderTemplates(ctx) {
  * (crender:${runId}:${nodeId}) ⇒ a re-run/:fork/replay converges, never
  * duplicates. Rides ctx.callVideoGenerator — no 4th video generator (ADR 0411
  * P3 architect ruling).
+ *
+ * ADR 1039 D3/D4 — nothing is paid for that cannot be kept: `reelPrompt` hands
+ * back an already-stored render for this id (a retry pays nothing) and refuses a
+ * brief at its render cap, both BEFORE the video call. The ratio is sent as the
+ * width/height the host actually reads (it has no `aspectRatio` input), and the
+ * render records the ratio of the dimensions requested; an unknown ratio is
+ * refused before any spend.
  */
+const REEL_DIMENSIONS = { '9:16': [1080, 1920], '16:9': [1920, 1080], '1:1': [1080, 1080] };
+function reelAspect(w, h) {
+  for (const [ratio, [rw, rh]] of Object.entries(REEL_DIMENSIONS)) if (rw * h === rh * w) return ratio;
+  return undefined;
+}
 export async function generateReel(ctx) {
   if (typeof ctx.callVideoGenerator !== 'function') {
     throw Object.assign(
@@ -64,13 +76,32 @@ export async function generateReel(ctx) {
     );
   }
   const i = ctx.inputs ?? {};
-  // 1. Derive the prompt closed-world from the brief.
+  // An unset {{params.aspectRatio}} arrives empty: keep the portrait default.
+  const aspectRatio = typeof i.aspectRatio === 'string' && i.aspectRatio ? i.aspectRatio : '9:16';
+  const dims = REEL_DIMENSIONS[aspectRatio];
+  if (!dims) {
+    throw Object.assign(new Error(`Unsupported reel aspect ratio "${aspectRatio}". Use one of: ${Object.keys(REEL_DIMENSIONS).join(', ')}.`), { code: 'validation_error' });
+  }
+  // Video is BYOK-only on this host: with no key the call can only fail, so say
+  // so before any host call (a `/` or gallery launch has no route pre-flight).
+  const provider = typeof i.provider === 'string' && i.provider ? i.provider : 'replicate';
+  if (provider !== 'mock' && !i.credentialRef) {
+    throw Object.assign(new Error('Reels need a Replicate key: pass credentialRef, or start the reel from the brief\'s page, which picks the workspace\'s key.'), { code: 'credential_required' });
+  }
+  const renderId = `crender:${ctx.runId}:${ctx.nodeId}`;
+  // 1. Derive the prompt closed-world from the brief; returns the stored render
+  //    instead when this run already made it.
   const cb = ensure(ctx, 'creative-briefs', 'reelPrompt');
-  const { prompt } = await cb.reelPrompt({ orgId: i.orgId, briefId: i.briefId, ...(i.directionIndex != null ? { directionIndex: i.directionIndex } : {}) });
+  const derived = await cb.reelPrompt({ orgId: i.orgId, briefId: i.briefId, renderId, ...(i.directionIndex != null ? { directionIndex: i.directionIndex } : {}) });
+  if (derived.existing) {
+    return { status: 'success', outputs: { render: derived.existing, mediaAssetId: derived.existing.mediaAssetId } };
+  }
+  const { prompt } = derived;
   // 2. Generate the video (recorded → replay reads the result verbatim, never re-calls).
   const gen = await ctx.callVideoGenerator({
     prompt,
-    ...(i.aspectRatio ? { aspectRatio: i.aspectRatio } : {}),
+    width: dims[0],
+    height: dims[1],
     ...(i.durationSeconds != null ? { durationSeconds: i.durationSeconds } : {}),
     ...(i.credentialRef ? { credentialRef: i.credentialRef } : {}),
     ...(i.provider ? { provider: i.provider } : {}),
@@ -83,14 +114,16 @@ export async function generateReel(ctx) {
   //    an arbitrary URL) + hash-deduped + capacity-gated.
   const media = ensure(ctx, 'media', 'createAssetFromServeUrl');
   const asset = await media.createAssetFromServeUrl({ orgId: i.orgId, url: video.url, name: `reel-${i.briefId}.mp4` });
-  // 4. Store the reel render, id-preserving for replay/fork.
+  // 4. Store the reel render, id-preserving for replay/fork. The ratio recorded
+  //    is the one the dimensions say, never the one asked for by name alone.
+  const recorded = typeof video.width === 'number' && typeof video.height === 'number' ? reelAspect(video.width, video.height) : aspectRatio;
   const store = ensure(ctx, 'creative-briefs', 'storeReel');
   const { render } = await store.storeReel({
     orgId: i.orgId, briefId: i.briefId,
     videoAssetId: asset.assetId,
     prompt,
-    renderId: `crender:${ctx.runId}:${ctx.nodeId}`,
-    ...(i.aspectRatio ? { aspectRatio: i.aspectRatio } : {}),
+    renderId,
+    ...(recorded ? { aspectRatio: recorded } : {}),
     ...(video.durationSeconds != null ? { durationSeconds: video.durationSeconds } : {}),
     ...(i.directionIndex != null ? { directionIndex: i.directionIndex } : {}),
     ...(video.metadata && video.metadata.provider ? { provider: video.metadata.provider } : {}),

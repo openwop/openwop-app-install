@@ -19,6 +19,10 @@ export interface SettingsPanel {
   order: number;
   /** i18n key in the `settings-shell` namespace — never a literal. */
   titleKey: string;
+  /** ADR 1102 D10 — a panel that belongs to a toggled feature shows only while
+   *  that feature is visible to the caller. The panel's component and data
+   *  belong to the feature (the rule above); the registry holds the lazy import. */
+  featureId?: string;
   component: LazyExoticComponent<ComponentType>;
 }
 
@@ -27,6 +31,7 @@ export const SETTINGS_PANELS: readonly SettingsPanel[] = [
   { id: 'a11y', group: 'accessibility', order: 0, titleKey: 'panelAccessibility', component: lazy(() => import('./AccessibilityPanel.js').then((m) => ({ default: m.AccessibilityPanel }))) },
   { id: 'budget', group: 'ai', order: 0, titleKey: 'panelBudget', component: lazy(() => import('./BudgetPanel.js').then((m) => ({ default: m.BudgetPanel }))) },
   { id: 'escalation', group: 'ai', order: 1, titleKey: 'panelEscalation', component: lazy(() => import('./EscalationPanel.js').then((m) => ({ default: m.EscalationPanel }))) },
+  { id: 'insights', group: 'ai', order: 2, titleKey: 'panelInsights', featureId: 'insights-suite', component: lazy(() => import('./InsightsSuitePanel.js').then((m) => ({ default: m.InsightsSuitePanel }))) },
   { id: 'privacy', group: 'privacy', order: 0, titleKey: 'panelPrivacy', component: lazy(() => import('./PrivacyPanel.js').then((m) => ({ default: m.PrivacyPanel }))) },
   // ADR 0389 P1 — Firebase-delegated two-factor auth (`/settings#security`).
   { id: 'security', group: 'security', order: 0, titleKey: 'panelSecurity', component: lazy(() => import('./SecurityPanel.js').then((m) => ({ default: m.SecurityPanel }))) },

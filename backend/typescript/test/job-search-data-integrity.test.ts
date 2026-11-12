@@ -135,7 +135,7 @@ describe('JS-DATA-3 / JS-RI-2 — hash index vs erasure vs revocation', () => {
   it('REVOCATION keeps the index row (revoked ≠ unknown); ERASURE deletes it (tokens stop resolving)', async () => {
     const a = await issuedAttestation('deal:att');
     expect(await __hashIndexCountForTest(T)).toBe(1);
-    await revokeAttestation(T, a.attestationId, Date.now());
+    await revokeAttestation(T, a.attestationId, Date.now(), ME);
     // The revoked record must stay REACHABLE through the same lookup.
     expect(await __hashIndexCountForTest(T)).toBe(1);
     await eraseSubjectAttestations(T, ME);

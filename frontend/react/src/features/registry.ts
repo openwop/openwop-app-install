@@ -235,6 +235,10 @@ export interface ProjectTab {
   labelNamespace?: string;
   /** Ascending among contributed tabs; ties by key. */
   order?: number;
+  /** ADR 1095 — show only to callers whose project role is listed (a caller with
+   *  write access always sees it). PRESENTATION ONLY: a role is a label, never a
+   *  scope (ADR 0054 D2); the tab's own reads keep their backend checks. */
+  forRoles?: readonly ('lead' | 'contributor' | 'observer')[];
   render: (p: { project: Project; canWrite: boolean }) => ReactNode;
 }
 

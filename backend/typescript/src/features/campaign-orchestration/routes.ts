@@ -20,7 +20,7 @@ import {
   listCampaignVersions, setCampaignParent, setCampaignGoal,
 } from './campaignService.js';
 import { MAX_PRODUCT_REFS, readCampaignLinks, setCampaignLinks, type CampaignLinksPatch } from './campaignLinks.js';
-import { getProduct } from '../commerce/commerceService.js';
+import { getProduct, refuseUnlistedProduct } from '../commerce/commerceService.js';
 import { listCampaignDispatchRecords } from '../../host/adsAdapter.js';
 import { cleanString } from '../../host/boundedStrings.js';
 import type { CampaignGoal, CampaignProductRef, CampaignStatus, MarketingCampaign } from './types.js';
@@ -249,9 +249,11 @@ export function registerCampaignStudioRoutes(deps: RouteDeps): void {
         const refs = parseProductRefs(body.productRefs);
         if (refs.length > 0) await requireFeatureEnabled(req, 'commerce', 'Commerce');
         for (const ref of refs) {
-          if (!(await getProduct(tenantOf(req), campaign.orgId, ref.productId))) {
+          const product = await getProduct(tenantOf(req), campaign.orgId, ref.productId);
+          if (!product) {
             throw new OpenwopError('not_found', 'Product not found.', 404, { reason: 'product_not_found', productId: ref.productId });
           }
+          refuseUnlistedProduct(product, 'Campaign product'); // ADR 1098
         }
         links.productRefs = refs;
       }

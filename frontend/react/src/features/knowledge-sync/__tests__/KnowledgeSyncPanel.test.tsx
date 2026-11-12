@@ -20,14 +20,15 @@ import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/re
 
 vi.mock('../knowledgeSyncClient.js', () => ({
   listSyncSources: vi.fn(), createSyncSource: vi.fn(), deleteSyncSource: vi.fn(),
-  setSyncPaused: vi.fn(), setSyncIncludeMedia: vi.fn(), syncNow: vi.fn(),
+  setSyncPaused: vi.fn(), setSyncIncludeMedia: vi.fn(), syncNow: vi.fn(), rebindSyncSource: vi.fn(),
 }));
 vi.mock('../../connections/connectionsClient.js', () => ({ listConnections: vi.fn() }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn(), info: vi.fn() } }));
 vi.mock('../../../ui/confirm.js', () => ({ confirm: vi.fn() }));
 
 import { KnowledgeSyncPanel } from '../KnowledgeSyncPanel.js';
-import { listSyncSources, createSyncSource, syncNow, setSyncIncludeMedia, setSyncPaused } from '../knowledgeSyncClient.js';
+import { listSyncSources, createSyncSource, syncNow, setSyncIncludeMedia, setSyncPaused, deleteSyncSource, rebindSyncSource } from '../knowledgeSyncClient.js';
+import { ApiError } from '../../../client/requestJson.js';
 import type { SyncSource, SyncRunResult } from '../knowledgeSyncClient.js';
 import { listConnections } from '../../connections/connectionsClient.js';
 import type { Connection } from '../../connections/connectionsClient.js';
@@ -91,7 +92,9 @@ describe('KnowledgeSyncPanel (ADR 0107)', () => {
     render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
     await waitFor(() => expect(screen.getByText(/Could not load this collection/i)).toBeTruthy());
     expect(screen.getByText('Drive sync')).toBeTruthy(); // the panel itself stays
+    // ADR 1101 D7 — the raw detail stays readable, behind "Details", not as the sentence.
     expect(screen.getByText(/upstream unavailable/)).toBeTruthy();
+    expect(screen.getByText('Details')).toBeTruthy();
   });
 
   it('a FAILED connections read does not tell you to connect an account', async () => {
@@ -104,7 +107,7 @@ describe('KnowledgeSyncPanel (ADR 0107)', () => {
     // evaluated — the file went red on the wait, not on the claim.
     await waitFor(() => expect(screen.getByText('Drive sync')).toBeTruthy());
     // The instructive empty state must NOT appear on a failed read — checked FIRST.
-    expect(screen.queryByText(/Connect a Google Drive or OneDrive account first/i)).toBeNull();
+    expect(screen.queryByText(/Connect a Google Drive, OneDrive, Dropbox or Box account first/i)).toBeNull();
     expect(screen.getByText(/Could not load your connected accounts/i)).toBeTruthy();
   });
 
@@ -113,7 +116,7 @@ describe('KnowledgeSyncPanel (ADR 0107)', () => {
     mList.mockResolvedValue([]);
     mConns.mockResolvedValue([]);
     render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
-    await waitFor(() => expect(screen.getByText(/Connect a Google Drive or OneDrive account first/i)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/Connect a Google Drive, OneDrive, Dropbox or Box account first/i)).toBeTruthy());
   });
 
   it('lists the collection’s sources and the add form', async () => {
@@ -132,14 +135,14 @@ describe('KnowledgeSyncPanel (ADR 0107)', () => {
     render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
     await waitFor(() => expect(screen.getByText('My Drive')).toBeTruthy());
     fireEvent.change(screen.getByLabelText('Drive account'), { target: { value: 'c1' } });
-    fireEvent.change(screen.getByLabelText('Folder ID'), { target: { value: 'FOLDER42' } });
+    fireEvent.change(screen.getByLabelText('Folder'), { target: { value: 'FOLDER42' } });
     fireEvent.click(screen.getByRole('button', { name: /Add sync/ }));
     await waitFor(() => expect(mCreate).toHaveBeenCalledWith(expect.objectContaining({
       orgId: 'o1', collectionId: 'col1', connectionId: 'c1', externalFolderId: 'FOLDER42', provider: 'google', cadence: 'daily',
     })));
     // …and the user SEES it: the list reloads with the new source and the field clears
     await waitFor(() => expect(screen.getByText('FOLDER42')).toBeTruthy());
-    expect((screen.getByLabelText('Folder ID') as HTMLInputElement).value).toBe('');
+    expect((screen.getByLabelText('Folder') as HTMLInputElement).value).toBe('');
   });
 
   it('a Microsoft connection shows a Source selector; choosing SharePoint sends microsoft-sharepoint', async () => {
@@ -151,7 +154,7 @@ describe('KnowledgeSyncPanel (ADR 0107)', () => {
     fireEvent.change(screen.getByLabelText('Drive account'), { target: { value: 'ms' } });
     // the OneDrive/SharePoint selector appears only for a Microsoft connection
     fireEvent.change(screen.getByLabelText('Source'), { target: { value: 'sharepoint' } });
-    fireEvent.change(screen.getByLabelText('Folder ID'), { target: { value: 'DRIVEID:ITEM' } });
+    fireEvent.change(screen.getByLabelText('Folder'), { target: { value: 'DRIVEID:ITEM' } });
     fireEvent.click(screen.getByRole('button', { name: /Add sync/ }));
     await waitFor(() => expect(mCreate).toHaveBeenCalledWith(expect.objectContaining({
       connectionId: 'ms', provider: 'microsoft-sharepoint', externalFolderId: 'DRIVEID:ITEM',
@@ -213,8 +216,10 @@ describe('ADR 0605 R1 — the Tier 6 deliverables, ratcheted', () => {
     render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
     await waitFor(() => expect(screen.getByText('Reconnect needed')).toBeTruthy());
     expect(screen.queryByText('Paused')).toBeNull();
-    // the reason is READABLE TEXT with a deep link, not a hover-only title
-    expect(screen.getByText(/Connection revoked/)).toBeTruthy();
+    // the reason is READABLE TEXT with a deep link, not a hover-only title — and
+    // (ADR 1101 D7) a row written before codes existed derives its cause from the
+    // pause reason, so the instruction is the visible sentence, not a closed Details.
+    expect(screen.getByText(/The connection was revoked/)).toBeTruthy();
     expect(screen.getByRole('link', { name: /Reconnect this account/i }).getAttribute('href')).toBe('/access?tab=connections');
     // ADR 0605 R1 — Sync now is refused server-side here, so it is not offered…
     expect(screen.getByRole('button', { name: /Reconnect the account/i }).hasAttribute('disabled')).toBe(true);
@@ -265,7 +270,9 @@ describe('ADR 0605 R1 — the Tier 6 deliverables, ratcheted', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Sync now' }));
     await waitFor(() => expect(mToast.warning).toHaveBeenCalled());
     expect(mToast.success).not.toHaveBeenCalled();
-    expect(String(mToast.warning.mock.calls[0]![0])).toContain('ingest x: boom');
+    // ADR 1101 D7 — a sentence in the reader's language, not the server's English.
+    expect(String(mToast.warning.mock.calls[0]![0])).toContain('Some files could not be synced');
+    expect(String(mToast.warning.mock.calls[0]![0])).not.toContain('ingest x: boom');
   });
 
   it('LOW 7: exactly ONE row announces, and it is not the raw server blob', async () => {
@@ -287,5 +294,144 @@ describe('ADR 0605 R1 — the Tier 6 deliverables, ratcheted', () => {
     // and both raw blobs are still READABLE — the fix moved them out of the
     // announcement, not out of the page.
     expect(screen.getByText('RAW-BLOB-B')).toBeTruthy();
+  });
+});
+
+describe('ADR 1101 — the panel offers only what the host will do', () => {
+  it('D8 (`KS2UX-1`): a READER sees the sources and no write control at all', async () => {
+    mList.mockResolvedValue([source({ lastRun: { at: '2026-08-20T10:00:00.000Z', ingested: 1, pruned: 0, unchanged: 0, failed: 0, skippedMedia: 0 } })]);
+    render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" showWrites={false} />);
+    await waitFor(() => expect(screen.getByText('FOLDER')).toBeTruthy());
+    expect(screen.getByText(/Last run/)).toBeTruthy();
+    for (const name of ['Sync now', 'Pause', 'Remove', /Media on/]) {
+      expect(screen.queryByRole('button', { name }), `a reader was offered ${String(name)}`).toBeNull();
+    }
+    expect(screen.queryByRole('button', { name: /Add sync/ })).toBeNull();
+  });
+
+  it('D8: while access loads (writesDisabled) the controls render DISABLED, not absent', async () => {
+    mList.mockResolvedValue([source()]);
+    render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" writesDisabled />);
+    await waitFor(() => expect(screen.getByText('FOLDER')).toBeTruthy());
+    expect(screen.getByRole('button', { name: 'Sync now' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Remove' }).hasAttribute('disabled')).toBe(true);
+  });
+
+  it('D8 (`KSC-6`): a STOPPED source offers Resume, not Pause', async () => {
+    mList.mockResolvedValue([source({ status: 'error', lastErrorCode: 'sync_failed', lastError: 'x', consecutiveFailures: 5 })]);
+    render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
+    await waitFor(() => expect(screen.getByText('FOLDER')).toBeTruthy());
+    expect(screen.queryByRole('button', { name: 'Pause' }), 'clicking Pause on a stopped source paused it').toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Resume' }));
+    await waitFor(() => expect(mPaused).toHaveBeenCalledWith('s1', false));
+    expect(screen.getByText(/Stopped after 5 failed attempts/)).toBeTruthy();
+  });
+
+  it('D7 (`KS2UX-2`): the cause renders from its CODE in the reader\'s language; the English detail is behind Details', async () => {
+    mList.mockResolvedValue([source({ lastErrorCode: 'listing_incomplete', lastErrorParams: { reason: 'file_cap', max: 1000 }, lastError: 'SERVER-ENGLISH' })]);
+    render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
+    await waitFor(() => expect(screen.getByText(/more than 1000 files/)).toBeTruthy());
+    expect(screen.getByText('SERVER-ENGLISH').closest('details'), 'the server sentence is the detail, not the message').not.toBeNull();
+  });
+
+  it('D7: a refused action says WHY in the reader\'s language (403 → permission), not the server sentence', async () => {
+    mList.mockResolvedValue([source()]);
+    mSync.mockRejectedValue(new ApiError({ status: 403, statusText: 'Forbidden', url: '/x', body: { error: 'forbidden_scope', message: 'Missing required scope: workspace:write' }, message: 'Missing required scope: workspace:write' }));
+    render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
+    await waitFor(() => expect(screen.getByText('FOLDER')).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'Sync now' }));
+    await waitFor(() => expect(mToast.error).toHaveBeenCalled());
+    expect(String(mToast.error.mock.calls[0]![0])).toMatch(/permission/i);
+    expect(String(mToast.error.mock.calls[0]![0])).not.toMatch(/workspace:write/);
+  });
+
+  it('D5 (`KS2UX-3`): Remove says how many synced documents go with it', async () => {
+    mList.mockResolvedValue([source({ syncedDocuments: 7 })]);
+    mConfirm.mockResolvedValue(true);
+    vi.mocked(deleteSyncSource).mockResolvedValue({ deleted: true, documentsRemoved: 7 });
+    render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
+    await waitFor(() => expect(screen.getByText('FOLDER')).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(mConfirm).toHaveBeenCalled());
+    expect(String(mConfirm.mock.calls[0]![0].body)).toMatch(/7 documents/);
+    await waitFor(() => expect(vi.mocked(deleteSyncSource)).toHaveBeenCalledWith('s1'));
+  });
+
+  it('D5b: a source whose creator lost access offers "Use <my account>", not Resume-that-fails', async () => {
+    mConns.mockResolvedValue([conn(), conn({ connectionId: 'c2', displayName: 'My other Drive', userId: 'user:me' })]);
+    mList.mockResolvedValue([source({ status: 'paused', pausedReason: 'creator-erased', lastErrorCode: 'creator_erased', lastError: 'x' })]);
+    mConfirm.mockResolvedValue(true);
+    vi.mocked(rebindSyncSource).mockResolvedValue(source());
+    render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
+    await waitFor(() => expect(screen.getByText('FOLDER')).toBeTruthy());
+    expect(screen.queryByRole('button', { name: 'Resume' }), 'Resume cannot work for an erased creator').toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Use My other Drive/ }));
+    await waitFor(() => expect(vi.mocked(rebindSyncSource)).toHaveBeenCalledWith('s1', 'c2'));
+  });
+
+  it('D2: an ORG-shared connection is not offered for a new sync (the server refuses it)', async () => {
+    mList.mockResolvedValue([]);
+    mConns.mockResolvedValue([conn({ connectionId: 'org-shared', displayName: 'Org Drive', orgId: 'o1' }), conn()]);
+    render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
+    await waitFor(() => expect(screen.getByText('My Drive')).toBeTruthy());
+    expect(screen.queryByText('Org Drive')).toBeNull();
+  });
+});
+
+describe('ADR 1101 — closing-grade witnesses', () => {
+  it('busy is PER ROW: syncing row A leaves row B usable, and B finishing does not un-busy A', async () => {
+    mList.mockResolvedValue([source({ id: 'a', externalFolderId: 'FOLDER-A' }), source({ id: 'b', externalFolderId: 'FOLDER-B' })]);
+    let finishA: (v: { result: SyncRunResult; source: SyncSource }) => void = () => undefined;
+    mSync.mockImplementation((id: string) => (id === 'a'
+      ? new Promise<{ result: SyncRunResult; source: SyncSource }>((res) => { finishA = res; })
+      : Promise.resolve({ result: runResult(), source: source({ id: 'b' }) })));
+    render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
+    await waitFor(() => expect(screen.getByText('FOLDER-A')).toBeTruthy());
+    const [syncA, syncB] = screen.getAllByRole('button', { name: 'Sync now' });
+    fireEvent.click(syncA!);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Syncing…' })).toBeTruthy());
+    fireEvent.click(syncB!);
+    await waitFor(() => expect(mSync).toHaveBeenCalledWith('b'));
+    await waitFor(() => expect(mToast.success).toHaveBeenCalled());
+    // B is done; A's pass is still running and still shows as running.
+    expect(screen.getByRole('button', { name: 'Syncing…' })).toBeTruthy();
+    finishA({ result: runResult(), source: source({ id: 'a' }) });
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Syncing…' })).toBeNull());
+  });
+
+  it('a source being REMOVED offers only "Finish removing" — no Sync now, no Resume', async () => {
+    mList.mockResolvedValue([source({ status: 'paused', pausedReason: 'removing' })]);
+    render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
+    await waitFor(() => expect(screen.getByText('Removing')).toBeTruthy());
+    expect(screen.getByRole('button', { name: 'Finish removing' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Resume' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Sync now' }).hasAttribute('disabled')).toBe(true);
+  });
+
+  it('`creator-no-access` offers Resume (restored access works) AND a rebind, and Sync now is withheld', async () => {
+    mConns.mockResolvedValue([conn(), conn({ connectionId: 'c2', displayName: 'Mine', userId: 'user:me' })]);
+    mList.mockResolvedValue([source({ status: 'paused', pausedReason: 'creator-no-access' })]);
+    render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
+    await waitFor(() => expect(screen.getByText(/no longer edit here/)).toBeTruthy());
+    expect(screen.getByRole('button', { name: 'Resume' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Use Mine/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Sync now' }).hasAttribute('disabled')).toBe(true);
+  });
+
+  it('a READER is offered no rebind either, and sees the read-only note', async () => {
+    mConns.mockResolvedValue([conn(), conn({ connectionId: 'c2', displayName: 'Mine', userId: 'user:me' })]);
+    mList.mockResolvedValue([source({ status: 'paused', pausedReason: 'creator-erased' })]);
+    render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" showWrites={false} />);
+    await waitFor(() => expect(screen.getByText(/was erased/)).toBeTruthy());
+    expect(screen.queryByRole('button', { name: /Use Mine/ })).toBeNull();
+    expect(screen.getByText(/Only members who can edit this workspace/)).toBeTruthy();
+  });
+
+  it('a transient `sync_failed` stop does NOT offer a rebind (the exit is not another account)', async () => {
+    mConns.mockResolvedValue([conn(), conn({ connectionId: 'c2', displayName: 'Mine', userId: 'user:me' })]);
+    mList.mockResolvedValue([source({ status: 'error', lastErrorCode: 'sync_failed', consecutiveFailures: 5 })]);
+    render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
+    await waitFor(() => expect(screen.getByText(/The last sync failed/)).toBeTruthy());
+    expect(screen.queryByRole('button', { name: /Use Mine/ })).toBeNull();
   });
 });

@@ -206,6 +206,26 @@ user's decision, tracked below.
 > discard-on-delete (§A) has no Delete to hang on. Neither is measured today:
 > the v2 `a2a` record is withheld (`V2_PROJECT_A2A = false`), so the suite's
 > `v2-a2a-push-delivery` rows are `inapplicable` here.
+>
+> > **CORRECTED 2026-11-10 (CHAN-F7) — both RFC 0214 obligations are now host
+> > work done; the v2 `a2a` record stays withheld.** A config registered over 1.0
+> > (`CreateTaskPushNotificationConfig`) is marked `protocol: '1.0'` and its pushes
+> > carry a 1.0 `StreamResponse` (`{statusUpdate: <1.0 TaskStatusUpdateEvent>}`, no
+> > `final`) as `application/a2a+json` (§C). A 0.3 registration
+> > (`tasks/pushNotificationConfig/set`) keeps the 0.3 `TaskStatusUpdateEvent` as
+> > `application/json`, which is what a 0.3 client parses. Each 1.0 config has an
+> > id: the client's own when it is a plain token, else a random `pnc_` id that
+> > encodes no tenant, workspace or principal. `GetTaskPushNotificationConfig`,
+> > `ListTaskPushNotificationConfigs` and `DeleteTaskPushNotificationConfig` are
+> > implemented: authorization of the task first, then the same `TASK_NOT_FOUND`
+> > for an unknown task, a task the caller cannot read, or (Get) another config's
+> > id; the credential is never returned; Delete is idempotent and takes the sealed
+> > credential with the config, so no push follows a Delete (§A discard on delete).
+> > This host still holds ONE config per task (a new Create replaces it), so List
+> > has at most one entry. Projecting the v2 `a2a` record (`V2_PROJECT_A2A`) is a
+> > separate decision this change does not make. Tests:
+> > `adr1045-a2a-push-delivery.test.ts` (body and media type for both protocols;
+> > the Get/List/Delete lifecycle and discard-on-delete) and `a2a-1-0-server.test.ts`.
 
 ### D7. The mount log tells the truth
 

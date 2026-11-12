@@ -31,6 +31,7 @@ import { getCampaign } from '../campaign-orchestration/campaignService.js';
 import { stampCampaignRun } from '../campaign-orchestration/campaignRunTag.js';
 import { CAMPAIGN_RUN_TAG_KEY, campaignRunTagForBrief } from '../../host/campaignRefs.js';
 import { FILLED_BY_GENERATE, FUNNEL_ARCHITECT_AGENT_ID, getRunnableBlueprint, runnableBlueprints } from './blueprints.js';
+import { assertOfferProducts } from './funnelsService.js';
 
 export interface GenerateFunnelInput {
   tenantId: string;
@@ -90,6 +91,14 @@ export async function generateFunnelFromBlueprint(deps: StartRunDeps, input: Gen
   if (errors && errors.length > 0) {
     refuse('invalid_params', 'The blueprint parameters are invalid.', 400, { errors: errors.slice(0, 10) });
   }
+  // ADR 1023 D3 (FN72WF-4) — closed-world offers BEFORE the run: every
+  // `…ProductId` parameter must name an ACTIVE product of this org (THE offer rule,
+  // `assertOfferProducts`). Before, a bad id was caught only by the parent's last
+  // node, after each step sub-chain had drafted its page and queued it for review.
+  const productIds = Object.entries(inputs)
+    .filter(([k, v]) => /(^p|P)roductId$/.test(k) && typeof v === 'string' && v.trim() !== '')
+    .map(([, v]) => (v as string).trim());
+  if (productIds.length > 0) await assertOfferProducts(input.tenantId, input.orgId, productIds);
 
   // A repeated identical request inside the window reuses the run already started.
   // Canonical (deep, key-sorted) params: an array replacer would drop nested keys and

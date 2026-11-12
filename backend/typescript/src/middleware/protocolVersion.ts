@@ -161,7 +161,7 @@ export const VERSION_RESPONSE_HEADER = 'OpenWOP-Version';
 // manifest segments explicitly, so it cannot collide. `/` likewise — a
 // one-character segment never matches.
 export const HOST_OWN_UNVERSIONED_MOUNTS: readonly string[] = [
-  '/api', '/blog', '/conformance', '/health', '/llms.txt', '/p',
+  '/api', '/blog', '/conformance', '/docs', '/health', '/llms.txt', '/p',
   '/pod', '/pricing', '/readiness', '/robots.txt', '/schemas', '/scim', '/sitemap.xml',
   // ADR 0812 P3b final batch 1 — the test seams now register unversioned.
   '/packs-test', '/test',

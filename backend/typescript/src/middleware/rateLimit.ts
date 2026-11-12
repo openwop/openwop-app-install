@@ -431,6 +431,30 @@ export function sendChannelInboundRateLimited(res: import('express').Response, r
   rejectRateLimited(res, 'channel_inbound_rate', retryAfterSeconds);
 }
 
+/** ADR 1053 D8b — the public provider-ingest POST (`…/connections-inbound/:id`),
+ *  exempt from the per-IP write bucket only for a connection the owning feature
+ *  declares exempt (grade-code WA85CD-17). Returns the connection id, or null. */
+function providerIngestConnection(req: Request): string | null {
+  if (req.method !== 'POST') return null;
+  const m = /\/connections-inbound\/([^/]+)$/.exec(req.path);
+  return m ? decodeURIComponent(m[1]!) : null;
+}
+/** The predicate is a SYNCHRONOUS in-memory lookup the connections feature keeps
+ *  (no DB read per request, before auth). Nothing registered ⇒ nothing exempt. */
+let ingestBudgetExempt: ((connectionId: string) => boolean) | null = null;
+export function registerIngestBudgetExemption(fn: ((connectionId: string) => boolean) | null): void {
+  ingestBudgetExempt = fn;
+}
+const ingestFailureTimes = new Map<string, number[]>();
+/** ADR 1053 D8b — charge one FAILED-verification ingest to the caller's address. */
+export function chargeIngestFailure(req: Request): void {
+  const now = Date.now();
+  const ip = clientIp(req);
+  const times = pruneWindow(ingestFailureTimes.get(ip) ?? [], 60_000, now);
+  times.push(now);
+  ingestFailureTimes.set(ip, times);
+}
+
 /** `/.well-known/openwop` read — see the exemption in `ipRateLimitMiddleware`.
  *  GET/HEAD only, exact path only: the method gate is what stops a caller
  *  spending an unbounded budget by POSTing to the same URL. */
@@ -512,6 +536,28 @@ export function ipRateLimitMiddleware(): RequestHandler {
     const forced = process.env.OPENWOP_FORCE_RATE_LIMIT === 'true';
     if (!forced && isDiscoveryRead(req)) { next(); return; }
     const limits = loadLimits();
+    // ADR 1053 D8b (WA85WF-19) — a WhatsApp provider's signed delivery (an inbound
+    // STOP, a status callback) is not charged to the per-IP write bucket: Twilio sends from a
+    // few addresses and, by default, does NOT retry a 429 (its retry policy covers
+    // connect timeouts only), so a burst of callbacks used to drop an opt-out for good.
+    // Only deliveries that FAIL verification are charged (`chargeIngestFailure`, from
+    // the route), against the same write budget, so an unsigned flood from one address
+    // is still cut off before it reaches the verifier. Each connection keeps its own
+    // budget (ADR 1042 D6) on the verified path.
+    const ingestConnection = forced ? null : providerIngestConnection(req);
+    if (ingestConnection !== null && ingestBudgetExempt?.(ingestConnection) === true) {
+      if (limits.ipReqsPerMin === 0) { next(); return; }
+      const now = Date.now();
+      const failures = pruneWindow(ingestFailureTimes.get(clientIp(req)) ?? [], 60_000, now);
+      ingestFailureTimes.set(clientIp(req), failures);
+      if (failures.length >= limits.ipReqsPerMin) {
+        log.warn('ip rate limit hit', { ip: clientIp(req), tier: 'ingest-unverified', recentReqs: failures.length, limit: limits.ipReqsPerMin });
+        rejectRateLimited(res, 'ip_request_rate', (failures[0]! + 60_000 - now) / 1000);
+        return;
+      }
+      next();
+      return;
+    }
     // ADR 0640 — two tiers, one key. Reads are cheap, already authenticated
     // (this middleware sits after auth) and fan out 20+ per SPA page load; the
     // write bucket keeps the tight budget the limiter was built for.
@@ -733,6 +779,7 @@ export function _resetRateLimitState(): void {
   mcpPrincipalReqTimes.clear();
   a2aPrincipalReqTimes.clear();
   channelInboundTimes.clear();
+  ingestFailureTimes.clear();
   runWindowEpoch += 1;
   _resetSharedRateLimitLocal();
   _resetAdmissionRefusals();

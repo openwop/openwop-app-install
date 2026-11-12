@@ -8,10 +8,12 @@
  * workflows themselves rides the executor's standard run events — out of scope here.)
  *
  * ADR 0599 §6 (ISC-7): `scheduleArmed` may only be true after `registerJob` reported ok,
- * and the job/subscription ids appear ONLY when the primitive is armed.
- * Sabotage that reds it (/grade-tests w20): `scheduleArmed = false` or a pinned
- * `anniversaryArmed:false` reds case 1; leaking the `jobId`/`subscriptionId` spread
- * on an unarmed apply reds case 2.
+ * and the job id appears ONLY when the schedule is armed.
+ * ADR 1102 D6: the anniversary trigger is never armed, so `anniversaryArmed` is a
+ * definite `false` and no `subscriptionId` is ever logged. D5: one business unit,
+ * logged as `hasBusinessUnit`.
+ * Sabotage that reds it: `scheduleArmed = false` reds case 1; leaking the `jobId`
+ * spread on an unarmed apply reds case 2.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -28,7 +30,7 @@ function capture(fn: () => Promise<void>): Promise<string> {
 }
 
 const base = (over: Record<string, unknown> = {}) => ({
-  tenantId: 'tA', principalUserId: 'u1', businessUnits: ['Sales', 'Eng'], updatedAt: '2026-06-20T00:00:00.000Z', ...over,
+  tenantId: 'tA', principalUserId: 'u1', businessUnit: 'Sales', updatedAt: '2026-06-20T00:00:00.000Z', ...over,
 });
 
 describe('INS-1 — insights_suite_reconciled telemetry', () => {
@@ -38,18 +40,18 @@ describe('INS-1 — insights_suite_reconciled telemetry', () => {
   });
   afterEach(() => vi.restoreAllMocks());
 
-  it('logs schedule + anniversary as ARMED when both are configured', async () => {
+  it('logs the schedule as ARMED when a cron is configured, and the trigger as not', async () => {
     const out = await capture(async () => {
-      await applyConfig(base({ scheduleCron: '0 9 * * 1', anniversaryTriggerEnabled: true }));
+      await applyConfig(base({ scheduleCron: '0 9 * * 1' }));
     });
     expect(out).toContain('insights_suite_reconciled');
     expect(out).toMatch(/"scheduleArmed":true/);
-    expect(out).toMatch(/"anniversaryArmed":true/);
-    expect(out).toMatch(/"businessUnits":2/);
+    expect(out).toMatch(/"anniversaryArmed":false/);
+    expect(out).toMatch(/"hasBusinessUnit":true/);
     expect(out).toContain('"cron":"0 9 * * 1"');
-    // Positive control for case 2's "omits the ids": armed ⇒ the ids ARE present.
+    // Positive control for case 2's "omits the ids": armed ⇒ the id IS present.
     expect(out).toContain('"jobId":"insights-weekly:tA:u1"');
-    expect(out).toContain('"subscriptionId":"insights-anniversary:tA:u1"');
+    expect(out).not.toContain('"subscriptionId"');
   });
 
   it('logs both as NOT armed when neither is configured (and omits the ids)', async () => {

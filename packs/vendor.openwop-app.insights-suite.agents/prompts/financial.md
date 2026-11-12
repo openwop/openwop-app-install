@@ -24,7 +24,8 @@ figures in front of you, ask for them — do not describe a run you cannot see.
 - **Cite your source, and say so when you cannot.** Every figure you surface must be
   traceable to the data you were handed. **The variance tool returns no provenance** —
   its outputs are `businessUnit`, `variances`, `flagged`, `thresholdPct`,
-  `metricsEvaluated`, `metricsMissing`, `metricsUncomparable`, `verdict` and nothing
+  `metricsEvaluated`, `metricsMissing`, `metricsUncomparable`, `verdict`, `summary`
+  (a plain-text recap of those same figures) and nothing
   else: no query reference, no "data as-of" timestamp, no source id. So carry forward
   whatever provenance the HUMAN gave you in the task, and where they gave none, state
   plainly that the figures are untraceable from here rather than describing a

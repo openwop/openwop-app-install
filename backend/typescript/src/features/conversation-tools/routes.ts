@@ -4,6 +4,7 @@
  *   GET  /v1/host/openwop-app/conversation-tools/sessions/:sessionId/capability-scope
  *   PUT  /v1/host/openwop-app/conversation-tools/sessions/:sessionId/capability-scope
  *   POST /v1/host/openwop-app/conversation-tools/sessions/:sessionId/approvals/:toolName
+ *   DELETE /v1/host/openwop-app/conversation-tools/sessions/:sessionId/approvals/:toolName?resolvedAt=…
  *
  * Namespaced under the FEATURE (not core `/chat/sessions/*`) so the feature stays
  * self-contained with no route shadowing (ADR 0132 §Phase-4 path note). RBAC mirrors
@@ -20,9 +21,26 @@ import { OpenwopError } from '../../types.js';
 import { tenantOf } from '../featureRoute.js';
 import { getConversationMeta, setConversationCapabilityScope, type ConversationCapabilityScope, type ConversationMeta } from '../../host/conversationStore.js';
 import { isVisibleToAsync, toolAuthorityHolds } from '../../host/conversationVisibility.js';
-import { listToolApprovals, resolveToolApproval } from './approvalLedger.js';
+import { listToolApprovals, approvalExpiresAt, resolveToolApproval, revokeToolApproval, type ToolApprovalRecord } from './approvalLedger.js';
 
 const MAX_TOOLS = 200; // cap each scope list to bound payload (abuse guard)
+
+/** What a client sees of a ledger row: never the digest (FW2-D1); a channel row that can
+ *  expire (a pending ask, an unused one-call approval) carries when it does (CHAN-F17). */
+function approvalView(r: ToolApprovalRecord): Omit<ToolApprovalRecord, 'inputDigest'> & { expiresAt?: string } {
+  const { inputDigest: _d, ...view } = r;
+  const expiresAt = approvalExpiresAt(r);
+  return expiresAt ? { ...view, expiresAt } : view;
+}
+
+/** The approve/revoke authority: the principal the conversation's tools act as (ADR 0834 D3). */
+function requireToolAuthority(req: Request, meta: ConversationMeta, action: string): string {
+  const approver = actingUserOf(req);
+  if (!approver || !toolAuthorityHolds(approver, meta.ownerUserId)) {
+    throw new OpenwopError('forbidden', `Only the conversation owner may ${action} its tool calls.`, 403);
+  }
+  return approver;
+}
 
 /** The acting user's stable subject (ADR 0005) — the chatSessions precedent
  *  (`req.userId ?? req.principal?.principalId`); a trivial req accessor, not a
@@ -99,7 +117,8 @@ export function registerConversationToolsRoutes(deps: RouteDeps): void {
       const meta = await requireVisibleMeta(req, tenantId, sessionId);
       res.json({
         scope: meta?.capabilityScope ?? { mode: 'agent-default' },
-        approvals: await listToolApprovals(tenantId, sessionId),
+        // FW2-D1 — the digest stays server-side (the client never needs it).
+        approvals: (await listToolApprovals(tenantId, sessionId)).map(approvalView),
         // ADR 0834 D3 — what THIS viewer may do with the conversation's tool asks, so the
         // client stops offering controls the server would refuse or silently ignore.
         // `mayApprove` is the approvals route's own predicate. `mayBypass` is a hint: the
@@ -145,11 +164,8 @@ export function registerConversationToolsRoutes(deps: RouteDeps): void {
       const tenantId = tenantOf(req);
       const sessionId = req.params.sessionId;
       const meta = await requireVisibleMeta(req, tenantId, sessionId);
-      const approver = actingUserOf(req);
-      if (!approver || !toolAuthorityHolds(approver, meta.ownerUserId)) {
-        throw new OpenwopError('forbidden', 'Only the conversation owner may approve its tool calls.', 403);
-      }
-      const body = (req.body ?? {}) as { decision?: unknown; requestedAt?: unknown };
+      const approver = requireToolAuthority(req, meta, 'approve');
+      const body = (req.body ?? {}) as { decision?: unknown; requestedAt?: unknown; grain?: unknown };
       const decision = body.decision;
       if (decision !== 'approved' && decision !== 'denied') {
         throw new OpenwopError('validation_error', "decision MUST be 'approved' or 'denied'.", 400);
@@ -159,13 +175,49 @@ export function registerConversationToolsRoutes(deps: RouteDeps): void {
       if (typeof body.requestedAt !== 'string' || body.requestedAt.length === 0) {
         throw new OpenwopError('validation_error', 'requestedAt (the pending request version you reviewed) is required.', 400);
       }
-      const out = await resolveToolApproval(tenantId, sessionId, req.params.toolName, decision, approver, body.requestedAt);
+      // ADR 0834 FW2-D1 — what the approval covers: `call` (default) = this exact call,
+      // once; `conversation` = any call of this tool for the rest of the conversation
+      // (in-app asks only).
+      const grain = body.grain === undefined ? 'call' : body.grain;
+      if (grain !== 'call' && grain !== 'conversation') {
+        throw new OpenwopError('validation_error', "grain MUST be 'call' or 'conversation'.", 400);
+      }
+      const out = await resolveToolApproval(tenantId, sessionId, req.params.toolName, decision, approver, body.requestedAt, grain);
       if (!out.ok) {
+        if (out.reason === 'grain_not_allowed') {
+          throw new OpenwopError('validation_error', 'A request from a messaging channel can only be approved for this one call.', 400, { reason: 'grain_not_allowed' });
+        }
+        if (out.reason === 'approval_expired') {
+          throw new OpenwopError('conflict', 'This request from a messaging channel expired. It will be asked again if the agent retries.', 409, { reason: 'approval_expired' });
+        }
         throw out.reason === 'no_pending_approval'
           ? new OpenwopError('conflict', 'No approval is pending for this tool in this conversation.', 409, { reason: 'no_pending_approval' })
           : new OpenwopError('conflict', 'This request changed since you reviewed it — review it again.', 409, { reason: 'approval_changed' });
       }
-      res.json({ approval: out.record });
+      res.json({ approval: approvalView(out.record) });
+    } catch (err) { next(err); }
+  });
+
+  // REVOKE — CHAN-F17: withdraw an approval (a tool-wide grant, or a one-call approval not
+  // yet used). Same authority as approving. `resolvedAt` (the version the owner saw) is
+  // required, as `requestedAt` is for a decision: no caller revokes a row it never read.
+  app.delete(`${BASE}/approvals/:toolName`, async (req, res, next) => {
+    try {
+      const tenantId = tenantOf(req);
+      const sessionId = req.params.sessionId;
+      const meta = await requireVisibleMeta(req, tenantId, sessionId);
+      requireToolAuthority(req, meta, 'revoke');
+      const resolvedAt = req.query.resolvedAt;
+      if (typeof resolvedAt !== 'string' || resolvedAt.length === 0) {
+        throw new OpenwopError('validation_error', 'resolvedAt (the approval version you reviewed) is required.', 400);
+      }
+      const out = await revokeToolApproval(tenantId, sessionId, req.params.toolName, resolvedAt);
+      if (!out.ok) {
+        throw out.reason === 'no_approval'
+          ? new OpenwopError('conflict', 'No approval is held for this tool in this conversation.', 409, { reason: 'no_approval' })
+          : new OpenwopError('conflict', 'This approval changed since you reviewed it — review it again.', 409, { reason: 'approval_changed' });
+      }
+      res.status(204).end();
     } catch (err) { next(err); }
   });
 }

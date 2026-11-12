@@ -93,7 +93,10 @@ export function FunnelCheckoutPanel({ orgId, funnelId, stepId, offer, onDemoDone
       });
       if (r.status === 201 && typeof r.body.checkoutUrl === 'string') { window.location.assign(r.body.checkoutUrl); return; }
       if (r.status === 201) { setDemo(true); return; }
-      setError(typeof r.body.message === 'string' ? r.body.message : t('offerPayFailed'));
+      // ADR 1023 (grade-ux FN72UX-5) — a shopper reads OUR sentence in their language,
+      // never the server's English refusal.
+      const details = (r.body.details ?? {}) as { code?: unknown };
+      setError(details.code === 'client_settlement_unconfirmed' ? t('offerNotTakingPayments') : t('offerPayFailed'));
     } catch {
       setError(t('offerPayFailed'));
     } finally {

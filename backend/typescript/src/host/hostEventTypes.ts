@@ -152,7 +152,8 @@ const EMITTED: readonly string[] = [
   // features/service-desk/tickets.ts — `ticketMutated(verb: 'created' | 'message-appended' | 'status-changed' | 'assigned')`.
   ...family('host.servicedesk', { ticket: ['created', 'message-appended', 'status-changed', 'priority-changed', 'assigned'] }),
   // features/whatsapp/compliance.ts — `kind` is 'opt-in' | 'opt-out'.
-  ...family('host.whatsapp', { consent: ['opt-in', 'opt-out'] }),
+  // features/whatsapp/whatsappService.ts (ADR 1053 D3) — a provider-reported failed delivery.
+  ...family('host.whatsapp', { consent: ['opt-in', 'opt-out'], delivery: ['failed'] }),
   // features/crm/smsInbound.ts (ADR 0955 P1) — `KeywordKind`; HELP writes nothing but is still emitted.
   ...family('host.sms', { consent: ['opt-out', 'opt-out-all', 'opt-in', 'help'] }),
   // features/app-builder/syncWebhook.ts — every outcome `conclude()` is called with, `_` → `-`.

@@ -46,8 +46,16 @@ const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type'
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
   if (!res.ok) {
     let detail = '';
-    try { detail = ((await res.json()) as { message?: string })?.message ?? ''; } catch { /* non-JSON */ }
-    throw new Error(detail || `${ctx} returned ${res.status}`);
+    let code: string | undefined;
+    try {
+      // The host error envelope: `{ error: <code>, message, details? }`.
+      const body = (await res.json()) as { message?: string; error?: unknown };
+      detail = body?.message ?? '';
+      if (typeof body?.error === 'string') code = body.error;
+    } catch { /* non-JSON */ }
+    // ADR 1039 D2 — the server's error code rides along, so a caller can show a
+    // designed state for a refusal it understands (no Replicate key).
+    throw Object.assign(new Error(detail || `${ctx} returned ${res.status}`), code ? { code } : {});
   }
   return (await res.json()) as T;
 }

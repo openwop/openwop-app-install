@@ -6,6 +6,16 @@
  *  - PD2-3  the search reports the MATCH count, not the page cap
  *  - PD2-6  `boost.factor` is read (1.05 and 10 are no longer identical)
  *  - PD2-5  a broken vector store degrades to lexical instead of 500ing
+ *
+ * Sabotage witnesses (w74, re-witnessed w102 after #5469; discoveryService.ts): comparing a bound across currencies reds
+ * both PD2-1 selection cases; accepting a bound with no currency reds the intake case;
+ * capping `total` at the page reds PD2-3 case 1, and a `truncated` that fires on any
+ * match reds case 2; skipping the degraded-rule report reds B2; accepting factor 0 reds
+ * I1 (refuse), storing the raw factor reds I1 (clamp); reading `p.currency` without a
+ * fallback reds I4; ranking a boost hit at 0 (teleport) reds the gentle case, and
+ * ignoring the factor reds gentle + large (+ the exact-order determinism case);
+ * re-throwing the embedding failure reds PD2-5 (whose spy is asserted to have fired).
+ * One cast remains (I4): the claim IS a row the `Product` type forbids (TST-DXF-3).
  */
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
 import { initHostExtPersistence } from '../../../host/hostExtPersistence.js';
@@ -84,15 +94,17 @@ describe('review fold-ins — defects the independent pass found in the fix', ()
     // A rule stored before R2 carries a bound with no currency. "Matches nothing" is
     // NOT fail-closed for a HIDE rule — it means hide nothing, so suppressed inventory
     // silently returns to the public storefront.
-    const legacy = {
+    // Type-legal: `FacetPredicate.currency` is optional, which is exactly what a pre-R2 row looks like.
+    const legacy: MerchRule = {
       ruleId: 'r-legacy', tenantId: T, orgId: ORG, name: 'Hide cheap', scope: 'all',
       actions: [{ kind: 'hide', predicate: { maxPrice: 50 } }],
       active: true, createdBy: 'u', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
-    } as unknown as MerchRule;
+    };
 
     const out = applyMerchRules([cheap], [legacy], 'all');
     expect(out.degradedRuleIds).toEqual(['r-legacy']); // reported, not silent
     expect(out.appliedRuleIds).toEqual([]);
+    expect(out.products.map((p) => p.productId)).toEqual([cheap.productId]); // skipped, not applied
   });
 
   it('I1: a boost factor of 0 or below is REFUSED at intake, not stored and clamped later', async () => {
@@ -115,11 +127,16 @@ describe('review fold-ins — defects the independent pass found in the fix', ()
     const noCurrency = { ...p, currency: undefined } as unknown as Product;
     // The predicate path used to call `p.currency.toUpperCase()` — a 500 on the
     // unauthenticated storefront, the exact failure mode PD2-5 was fixed to prevent.
-    expect(() => applyMerchRules([noCurrency], [{
+    const hideCheap: MerchRule = {
       ruleId: 'r-x', tenantId: T, orgId: ORG, name: 'Hide cheap', scope: 'all',
       actions: [{ kind: 'hide', predicate: { maxPrice: 50, currency: 'USD' } }],
       active: true, createdBy: 'u', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
-    } as unknown as MerchRule], 'all')).not.toThrow();
+    };
+    const out = applyMerchRules([noCurrency], [hideCheap], 'all');
+    // A row with no currency is not comparable to a USD bound, so it is NOT hidden.
+    expect(out.products.map((x) => x.productId)).toEqual([p.productId]);
+    expect(out.appliedRuleIds).toEqual([]);
+    expect(out.degradedRuleIds).toEqual([]);
   });
 });
 
@@ -129,36 +146,42 @@ describe('PD2-6 — boost.factor is actually read', () => {
     actions: [{ kind: 'boost', predicate: { categories: ['promo'] }, factor }],
     active: true, createdBy: 'u', createdAt: '2026-08-10T00:00:00.000Z', updatedAt: '2026-08-10T00:00:00.000Z',
   });
-  const list = (): Product[] => ([
-    { productId: 'a', categories: ['plain'] }, { productId: 'b', categories: ['plain'] },
-    { productId: 'c', categories: ['plain'] }, { productId: 'd', categories: ['plain'] },
-    { productId: 'e', categories: ['promo'] },
-  ] as unknown as Product[]);
+  // Real product rows (one created product, re-keyed) — no cast. Ranks are 1-based: a..d
+  // are 1..4, the promo row `e` is rank 5, and a boost moves it to rank 5 / factor.
+  const list = (base: Product): Product[] => [
+    ...['a', 'b', 'c', 'd'].map((productId) => ({ ...base, productId, categories: ['plain'] })),
+    { ...base, productId: 'e', categories: ['promo'] },
+  ];
 
   it('a gentle factor NUDGES; it does not teleport the match to the front', async () => {
-    const out = applyMerchRules(list(), [rule(1.5)], 'all').products.map((p) => p.productId);
-    expect(out[0]).not.toBe('e');   // a 1.5× nudge must not win the top slot outright
-    expect(out.indexOf('e')).toBeLessThan(4); // …but it does move up
+    const base = await mk('base', 10, 'USD');
+    const out = applyMerchRules(list(base), [rule(1.5)], 'all').products.map((p) => p.productId);
+    // 5 / 1.5 = 3.33 — past c (3), before d (4): it moves up, but does not win the top slot.
+    expect(out).toEqual(['a', 'b', 'c', 'e', 'd']);
   });
 
   it('a large factor DOES promote to the front — the two are distinguishable', async () => {
-    const out = applyMerchRules(list(), [rule(10)], 'all').products.map((p) => p.productId);
-    expect(out[0]).toBe('e');
+    const base = await mk('base', 10, 'USD');
+    const out = applyMerchRules(list(base), [rule(10)], 'all').products.map((p) => p.productId);
+    expect(out).toEqual(['e', 'a', 'b', 'c', 'd']); // 5 / 10 = 0.5
   });
 
   it('the transform is deterministic (the holdout cohort depends on it)', async () => {
-    const once = applyMerchRules(list(), [rule(2)], 'all').products.map((p) => p.productId);
-    const twice = applyMerchRules(list(), [rule(2)], 'all').products.map((p) => p.productId);
-    expect(once).toEqual(twice);
+    const base = await mk('base', 10, 'USD');
+    const once = applyMerchRules(list(base), [rule(2)], 'all').products.map((p) => p.productId);
+    const twice = applyMerchRules(list(base), [rule(2)], 'all').products.map((p) => p.productId);
+    expect(once).toEqual(['a', 'b', 'e', 'c', 'd']); // 5 / 2 = 2.5 — a fixed, stated order
+    expect(twice).toEqual(once);
   });
 });
 
 describe('PD2-5 — a broken vector store must not take down keyword search', () => {
   it('degrades to lexical instead of rejecting the search', async () => {
     await mk('Findable', 10, 'USD');
-    vi.spyOn(embeddings, 'ensureProductEmbeddingsFresh').mockRejectedValue(new Error('vector store down'));
+    const spy = vi.spyOn(embeddings, 'ensureProductEmbeddingsFresh').mockRejectedValue(new Error('vector store down'));
 
     const res = await searchProducts({ tenantId: T, orgId: ORG, q: 'Findable' });
-    expect(res.products.map((p) => p.name)).toContain('Findable');
+    expect(spy).toHaveBeenCalledTimes(1); // the failure was really injected
+    expect(res.products.map((p) => p.name)).toEqual(['Findable']);
   });
 });

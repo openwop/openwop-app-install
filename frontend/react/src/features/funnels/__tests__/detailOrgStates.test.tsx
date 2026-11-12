@@ -49,6 +49,12 @@ const api = vi.hoisted(() => ({
   deleteFunnel: vi.fn<typeof FC.deleteFunnel>(),
   updateFunnel: vi.fn<typeof FC.updateFunnel>(),
 }));
+// ADR 1023 — the page asks the effective-access answer before offering writes;
+// these cases are about an editor, so the caller may write.
+vi.mock('../../../client/accessClient.js', async (importOriginal) => {
+  const orig = await importOriginal<Record<string, unknown>>();
+  return { ...orig, getEffectiveAccess: vi.fn(async () => ({ roles: ['member'], scopes: ['workspace:read', 'workspace:write'], basis: 'member' as const })) };
+});
 vi.mock('../funnelsClient.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
   return { ...orig, ...api };
@@ -66,6 +72,7 @@ vi.mock('../../custom-domains/domainsClient.js', async (importOriginal) => {
 });
 
 import { FunnelDetailPage } from '../FunnelDetailPage.js';
+import { FunnelsError } from '../funnelsClient.js';
 
 const FUNNEL: Funnel = {
   funnelId: 'f1', orgId: 'o1', name: 'Summer launch', slug: 'summer-launch',
@@ -153,7 +160,7 @@ describe('funnel detail — the three organization states', () => {
     // wins. Asserting "no request at all" here would be asserting a different
     // design; asserting the terminal state is asserting this one.
     api.listOrgs.mockResolvedValue([]);
-    api.getFunnel.mockRejectedValue(new Error('404 Not Found'));
+    api.getFunnel.mockRejectedValue(new FunnelsError('Funnel not found.', 404));
     view('?org=gone');
     expect(await screen.findByText('No organizations')).toBeTruthy();
     expect(screen.getByText('A funnel belongs to an organization.')).toBeTruthy();
@@ -175,7 +182,7 @@ describe('funnel detail — the three organization states', () => {
   it('an organization with genuinely no funnel of that id still reads as not-found', async () => {
     // The failure mode of this fix: a real per-funnel state replaced by an org
     // claim, because the wrapper now sits above every branch of this page.
-    api.getFunnel.mockRejectedValue(new Error('404 Not Found'));
+    api.getFunnel.mockRejectedValue(new FunnelsError('Funnel not found.', 404));
     // An EXPLICIT `?org=` — with none, the copy correctly switches to the
     // guessed-workspace variant (see the next case), which would test a
     // different branch than this one is about.
@@ -192,7 +199,7 @@ describe('funnel detail — the three organization states', () => {
     // workspace: the funnel was deleted, or we looked in the wrong place. The
     // generic copy hedged between them; a multi-org tenant could not tell which
     // had happened, and the recovery differs.
-    api.getFunnel.mockRejectedValue(new Error('404 Not Found'));
+    api.getFunnel.mockRejectedValue(new FunnelsError('Funnel not found.', 404));
     view();
     expect((await screen.findAllByText('Funnel not found')).length).toBeGreaterThan(0);
     expect(screen.getByText(/looked in .*Acme.*/)).toBeTruthy();

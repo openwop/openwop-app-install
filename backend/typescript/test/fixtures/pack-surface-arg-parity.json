@@ -1,14 +1,14 @@
 {
   "callSites": {
-    "literalNoSpread": 277,
+    "literalNoSpread": 279,
     "spread": 100,
     "nonLiteral": 18
   },
   "methods": {
-    "readable": 357,
+    "readable": 359,
     "opaque": 16
   },
-  "assertedPairs": 265,
+  "assertedPairs": 267,
   "opaqueMethods": [
     "accessibility.checkContent",
     "bi.runMetric",
@@ -53,8 +53,8 @@
     "feature.campaign-channels.nodes/index.mjs:236 spread → brand.resolveVoice",
     "feature.campaign-channels.nodes/index.mjs:257 spread → kb.rag",
     "feature.campaign-channels.nodes/index.mjs:481 spread → creative-briefs.create",
-    "feature.campaign-channels.nodes/index.mjs:712 spread → email.createDraftCampaign",
-    "feature.campaign-channels.nodes/index.mjs:873 spread → campaign-brief.trackedUrl",
+    "feature.campaign-channels.nodes/index.mjs:718 spread → email.createDraftCampaign",
+    "feature.campaign-channels.nodes/index.mjs:879 spread → campaign-brief.trackedUrl",
     "feature.campaign-connectors.nodes/index.mjs:31 spread → campaign-connectors.importCsv",
     "feature.campaign-intel.nodes/index.mjs:100 spread → campaign-intel.adMap",
     "feature.campaign-intel.nodes/index.mjs:165 spread → campaign-intel.proposeReallocation",
@@ -78,15 +78,15 @@
     "feature.commerce.nodes/index.mjs:29 spread → commerce.listProducts",
     "feature.commerce.nodes/index.mjs:78 spread → commerce.createQuote",
     "feature.commerce.nodes/index.mjs:94 spread → commerce.resolvePrice",
-    "feature.creative-briefs.nodes/index.mjs:126 spread → creative-briefs.productShotSource",
-    "feature.creative-briefs.nodes/index.mjs:158 spread → creative-briefs.composeProductShot",
-    "feature.creative-briefs.nodes/index.mjs:177 spread → creative-briefs.checkFidelity",
+    "feature.creative-briefs.nodes/index.mjs:121 spread → creative-briefs.storeReel",
+    "feature.creative-briefs.nodes/index.mjs:159 spread → creative-briefs.productShotSource",
     "feature.creative-briefs.nodes/index.mjs:18 spread → creative-briefs.create",
-    "feature.creative-briefs.nodes/index.mjs:208 spread → creative-briefs.productShotSource",
+    "feature.creative-briefs.nodes/index.mjs:191 spread → creative-briefs.composeProductShot",
+    "feature.creative-briefs.nodes/index.mjs:210 spread → creative-briefs.checkFidelity",
+    "feature.creative-briefs.nodes/index.mjs:241 spread → creative-briefs.productShotSource",
     "feature.creative-briefs.nodes/index.mjs:37 spread → creative-briefs.render",
     "feature.creative-briefs.nodes/index.mjs:42 spread → creative-briefs.renderVariants",
-    "feature.creative-briefs.nodes/index.mjs:69 spread → creative-briefs.reelPrompt",
-    "feature.creative-briefs.nodes/index.mjs:88 spread → creative-briefs.storeReel",
+    "feature.creative-briefs.nodes/index.mjs:95 spread → creative-briefs.reelPrompt",
     "feature.creative-video.nodes/index.mjs:47 spread → creative-video.generateVideo",
     "feature.creative-video.nodes/index.mjs:70 spread → creative-video.textToVideo",
     "feature.creative-video.nodes/index.mjs:99 spread → creative-video.imageToVideo",
@@ -112,11 +112,11 @@
     "feature.documents.nodes/index.mjs:120 spread → documents.createDocument",
     "feature.documents.nodes/index.mjs:54 spread → documents.listDocuments",
     "feature.documents.nodes/index.mjs:61 spread → documents.listTemplates",
+    "feature.funnels.nodes/index.mjs:107 nonLiteral → funnels.stepStats",
     "feature.funnels.nodes/index.mjs:29 nonLiteral → funnels.list",
     "feature.funnels.nodes/index.mjs:35 nonLiteral → funnels.get",
-    "feature.funnels.nodes/index.mjs:46 spread → funnels.create",
-    "feature.funnels.nodes/index.mjs:54 nonLiteral → funnels.setSteps",
-    "feature.funnels.nodes/index.mjs:79 nonLiteral → funnels.stepStats",
+    "feature.funnels.nodes/index.mjs:73 spread → funnels.create",
+    "feature.funnels.nodes/index.mjs:81 nonLiteral → funnels.setSteps",
     "feature.media.nodes/index.mjs:26 spread → media.select",
     "feature.notebooks.nodes/index.mjs:269 spread → documents.createDocument",
     "feature.orgs.nodes/index.mjs:70 spread → orgs.invite",
@@ -145,7 +145,7 @@
     "feature.territories.nodes/index.mjs:62 spread → territories.listQuotas",
     "feature.territories.nodes/index.mjs:76 spread → territories.attainment",
     "feature.webinars.nodes/index.mjs:30 spread → webinars.registerRegistrant",
-    "feature.whatsapp.nodes/index.mjs:27 spread → whatsapp.send"
+    "feature.whatsapp.nodes/index.mjs:31 spread → whatsapp.send"
   ],
   "knownDrift": []
 }

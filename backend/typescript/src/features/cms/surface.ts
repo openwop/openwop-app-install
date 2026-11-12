@@ -73,6 +73,9 @@ export function buildCmsSurface(scope: BundleScope): FeatureSurface {
             sectionType: s.type,
             data: s.data,
             locales: Object.keys(s.localizations ?? {}),
+            // ADR 1100 — a shared-section reference carries `data: {}`; say so, so a
+            // reader (the Accessibility Reviewer) never mistakes it for empty content.
+            ...(s.ref ? { shared: true } : {}),
             ...(status.sections[s.sectionId] ? { translationStatus: status.sections[s.sectionId] } : {}),
           })),
         },

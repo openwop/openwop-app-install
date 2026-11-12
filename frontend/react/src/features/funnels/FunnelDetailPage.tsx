@@ -49,6 +49,8 @@ import {
   type Funnel, type FunnelStep, type FunnelStepKind, type StepRule,
   type FunnelStats, type ExperimentResults, type Org,
 } from './funnelsClient.js';
+import { funnelsErrorText, isForbidden, isNotFound, isStaleEdit } from './funnelsErrors.js';
+import { useFunnelsOrgAccess } from './useFunnelsOrgAccess.js';
 
 interface EditStep { stepId?: string; kind: FunnelStepKind; pageId: string; name?: string; routing?: StepRule[]; webinar?: { marketingEventId: string } | null; application?: { formId: string } | null }
 
@@ -83,6 +85,9 @@ export function FunnelDetailPage(): JSX.Element {
    *  workspace. A not-found then has two very different meanings (deleted vs.
    *  looked in the wrong place), and only this can tell them apart, so the copy
    *  names the workspace actually checked instead of hedging. */
+  // ADR 1023 — a Viewer (no `workspace:write`) is not offered write controls the
+  // server can only refuse with a 403.
+  const orgAccess = useFunnelsOrgAccess(orgId);
   const guessedOrgName = searchParams.get('org')
     ? ''
     : (orgs?.find((o) => o.orgId === orgId)?.name ?? '');
@@ -92,6 +97,8 @@ export function FunnelDetailPage(): JSX.Element {
    *  Distinct from `null` (still loading), which must not render "not found". */
   const [notFound, setNotFound] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
+  /** The read was REFUSED (403): retrying cannot help, so no Retry is offered. */
+  const [loadForbidden, setLoadForbidden] = useState(false);
   const [pages, setPages] = useState<Page[]>([]);
   /** The CMS page read FAILED — the picker says so rather than reading as "this
    *  workspace has no pages", which is a claim the failed read did not earn. */
@@ -139,9 +146,11 @@ export function FunnelDetailPage(): JSX.Element {
       setPrimaryHost(f.primaryHostname ?? '');
       setCtaUrl(f.completionCta?.url ?? '');
     } catch (e) {
-      // A 404 IS the answer ("no such funnel here"), not a failure to read.
-      if (e instanceof Error && /\b404\b/.test(e.message)) setNotFound(true);
-      else { setError(e instanceof Error ? e.message : t('loadFailed')); setLoadFailed(true); }
+      // A 404 IS the answer ("no such funnel here"), not a failure to read. ADR 1023:
+      // decided on the typed status — the old `/\b404\b/` test read the MESSAGE,
+      // which is "Funnel not found.", so this branch could never be reached.
+      if (isNotFound(e)) setNotFound(true);
+      else { setError(funnelsErrorText(e, t, 'loadFailed', 'read')); setLoadForbidden(isForbidden(e)); setLoadFailed(true); }
     }
   }, [orgId, funnelId, t]);
 
@@ -150,10 +159,14 @@ export function FunnelDetailPage(): JSX.Element {
     setBusy(true);
     try {
       const clearing = !ctaLabel.trim() && !ctaUrl.trim();
-      await updateFunnel(orgId, funnel.funnelId, { completionCta: clearing ? null : { label: ctaLabel.trim(), url: ctaUrl.trim() } });
+      await updateFunnel(orgId, funnel.funnelId, { completionCta: clearing ? null : { label: ctaLabel.trim(), url: ctaUrl.trim() }, expectedUpdatedAt: funnel.updatedAt });
       toast.success(t(clearing ? 'completionCtaCleared' : 'completionCtaSaved'));
       await reload();
-    } catch (e) { toast.error(e instanceof Error ? e.message : t('updateFailed')); }
+    } catch (e) {
+      toast.error(funnelsErrorText(e, t, 'updateFailed'));
+      // ADR 1023 D8 — another tab or person saved first: show their version.
+      if (isStaleEdit(e)) await reload();
+    }
     finally { setBusy(false); }
   }, [funnel, orgId, ctaLabel, ctaUrl, reload, t]);
 
@@ -180,10 +193,14 @@ export function FunnelDetailPage(): JSX.Element {
     if (!funnel || !orgId) return;
     setBusy(true);
     try {
-      await updateFunnel(orgId, funnel.funnelId, { primaryHostname: primaryHost || null });
+      await updateFunnel(orgId, funnel.funnelId, { primaryHostname: primaryHost || null, expectedUpdatedAt: funnel.updatedAt });
       toast.success(t('primaryDomainSaved'));
       await reload();
-    } catch (e) { toast.error(e instanceof Error ? e.message : t('updateFailed')); }
+    } catch (e) {
+      toast.error(funnelsErrorText(e, t, 'updateFailed'));
+      // ADR 1023 D8 — another tab or person saved first: show their version.
+      if (isStaleEdit(e)) await reload();
+    }
     finally { setBusy(false); }
   }, [funnel, orgId, primaryHost, reload, t]);
 
@@ -229,7 +246,7 @@ export function FunnelDetailPage(): JSX.Element {
       await deleteFunnel(orgId, funnel.funnelId);
       toast.success(t('funnelDeleted'));
       navigate(orgId ? `/funnels?org=${encodeURIComponent(orgId)}` : '/funnels');
-    } catch (e) { toast.error(e instanceof Error ? e.message : t('deleteFailed')); }
+    } catch (e) { toast.error(funnelsErrorText(e, t, 'deleteFailed')); }
   }, [funnel, orgId, navigate, t]);
 
   const saveSteps = useCallback(async () => {
@@ -243,10 +260,14 @@ export function FunnelDetailPage(): JSX.Element {
     if (dangling) { toast.error(t('ruleTargetGone', { step: dangling.name || t(`kind_${dangling.kind}`) })); return; }
     setBusy(true);
     try {
-      await updateFunnel(orgId, funnel.funnelId, { steps: editSteps });
+      await updateFunnel(orgId, funnel.funnelId, { steps: editSteps, expectedUpdatedAt: funnel.updatedAt });
       toast.success(t('stepsSaved'));
       await reload();
-    } catch (e) { toast.error(e instanceof Error ? e.message : t('updateFailed')); }
+    } catch (e) {
+      toast.error(funnelsErrorText(e, t, 'updateFailed'));
+      // ADR 1023 D8 — another tab or person saved first: show their version.
+      if (isStaleEdit(e)) await reload();
+    }
     finally { setBusy(false); }
   }, [funnel, orgId, editSteps, reload, t]);
 
@@ -260,7 +281,7 @@ export function FunnelDetailPage(): JSX.Element {
       ]);
       toast.success(t('experimentStarted'));
       await reload();
-    } catch (e) { toast.error(e instanceof Error ? e.message : t('updateFailed')); }
+    } catch (e) { toast.error(funnelsErrorText(e, t, 'updateFailed')); }
     finally { setBusy(false); }
   }, [funnel, orgId, expStepId, expChallenger, reload, t]);
 
@@ -270,7 +291,7 @@ export function FunnelDetailPage(): JSX.Element {
       await stopStepExperiment(orgId, funnel.funnelId, expStepId);
       toast.success(t('experimentStopped'));
       await reload();
-    } catch (e) { toast.error(e instanceof Error ? e.message : t('updateFailed')); }
+    } catch (e) { toast.error(funnelsErrorText(e, t, 'updateFailed')); }
   }, [funnel, orgId, expStepId, reload, t]);
 
   const [rebuilding, setRebuilding] = useState(false);
@@ -281,7 +302,7 @@ export function FunnelDetailPage(): JSX.Element {
       await rebuildFunnelStats(orgId, funnel.funnelId);
       await loadStats(); // R2R F7 — clears statsFailed; fresh stats were hidden behind the failure card
       toast.success(t('statsRebuilt'));
-    } catch (e) { toast.error(e instanceof Error ? e.message : t('updateFailed')); }
+    } catch (e) { toast.error(funnelsErrorText(e, t, 'updateFailed')); }
     finally { setRebuilding(false); }
   }, [funnel, orgId, rebuilding, loadStats, t]);
 
@@ -309,6 +330,10 @@ export function FunnelDetailPage(): JSX.Element {
     if (codes.length === 1) return fmt.currency(s.revenue, codes[0]!);
     return fmt.number(s.revenue);
   }, [fmt]);
+  const unattributedTotal = useMemo(
+    () => (stats?.steps ?? []).reduce((sum, s) => sum + (s.unattributed ?? 0), 0),
+    [stats],
+  );
   const revenueMixed = useMemo(
     () => (stats?.steps ?? []).some((s) => Object.keys(s.revenueByCurrency ?? {}).length > 1),
     [stats],
@@ -348,6 +373,7 @@ export function FunnelDetailPage(): JSX.Element {
       .map((s) => s.name || t(`kind_${s.kind}`));
   }, [funnel, pages, pagesFailed, t]);
 
+  const locked = !funnel || funnel.status === 'archived' || !orgAccess.canWrite;
   const backLink = <Link to={orgId ? `/funnels?org=${encodeURIComponent(orgId)}` : '/funnels'} className="btn-ghost">{t('backToFunnels')}</Link>;
 
   // Toggle unresolved — the header stays and the body is a shape-matched
@@ -389,7 +415,9 @@ export function FunnelDetailPage(): JSX.Element {
             read is gated on `orgId` + `funnelId`, both still in hand, so there
             is nothing to navigate away and back for. */}
         <StateCard announce title={tc('loadFailedTitle')} body={tc('loadFailedBody')}
-          action={<Button variant="secondary" onClick={() => { setLoadFailed(false); setError(null); void reload(); }}>{tc('retry')}</Button>} />
+          action={loadForbidden
+            ? <Link to={orgId ? `/funnels?org=${encodeURIComponent(orgId)}` : '/funnels'} className="btn-accent-solid">{t('backToFunnels')}</Link>
+            : <Button variant="secondary" onClick={() => { setLoadFailed(false); setError(null); void reload(); }}>{tc('retry')}</Button>} />
       </section>
     ) : !funnel ? (
       <section className="u-grid u-gap-4">
@@ -406,11 +434,18 @@ export function FunnelDetailPage(): JSX.Element {
           <>
             {backLink}
             <span className={statusChip(funnel.status)}>{t(`status_${funnel.status}`)}</span>
-            <Button variant="danger" onClick={() => void remove()}><TrashIcon size={14} /> {t('common:delete')}</Button>
+            {orgAccess.canWrite ? <Button variant="danger" onClick={() => void remove()}><TrashIcon size={14} /> {t('common:delete')}</Button> : null}
           </>
         }
       />
       {error ? <Notice variant="error">{error}</Notice> : null}
+      {orgAccess.known && !orgAccess.canWrite ? <Notice variant="info">{t('readOnlyNotice')}</Notice> : null}
+      {orgAccess.failed ? (
+        <Notice variant="warning" announce={t('accessCheckFailed')}>
+          {t('accessCheckFailed')}{' '}
+          <Button variant="quiet" size="sm" onClick={orgAccess.retry}>{tc('retry')}</Button>
+        </Notice>
+      ) : null}
       {/* FN-B-1 — a Published funnel whose bound page is UNPUBLISHED is
           silently dead: the live link 404s for every visitor while this page
           shows Published + share URLs. Warn loudly, naming the steps. Never
@@ -448,7 +483,7 @@ export function FunnelDetailPage(): JSX.Element {
                 // A binding belongs to its own kind only; switching kind drops it (the server refuses a mismatch).
                 const { webinar: _w, application: _a, ...rest } = p;
                 return { ...rest, kind, ...(kind === 'webinar' && p.webinar ? { webinar: p.webinar } : {}), ...(kind === 'application' && p.application ? { application: p.application } : {}) };
-              })); }} disabled={funnel.status === 'archived'}>
+              })); }} disabled={locked}>
                 {FUNNEL_STEP_KINDS.map((k) => <option key={k} value={k}>{t(`kind_${k}`)}</option>)}
               </select>
               {/* ADR 0332 — an opt-in step captures via a `form` section on its
@@ -472,7 +507,7 @@ export function FunnelDetailPage(): JSX.Element {
                 maxLength={120}
                 placeholder={t(`kind_${s.kind}`)}
                 aria-label={t('fieldStepNameAria', { index: ix + 1 })}
-                disabled={funnel.status === 'archived'}
+                disabled={locked}
                 onChange={(e) => {
                   const v = e.target.value;
                   setEditSteps((prev) => prev.map((p, i) => i === ix ? (v.trim() ? { ...p, name: v } : (({ name: _drop, ...rest }) => rest)(p)) : p));
@@ -481,7 +516,7 @@ export function FunnelDetailPage(): JSX.Element {
             </label>
             <label className="u-grid u-gap-1">
               <span className="u-label-sm">{t('fieldPage')}</span>
-              <select value={s.pageId} onChange={(e) => setEditSteps((prev) => prev.map((p, i) => i === ix ? { ...p, pageId: e.target.value } : p))} disabled={funnel.status === 'archived'}>
+              <select value={s.pageId} onChange={(e) => setEditSteps((prev) => prev.map((p, i) => i === ix ? { ...p, pageId: e.target.value } : p))} disabled={locked}>
                 <option value="">{t('pickPage')}</option>
                 {pages.map((p) => <option key={p.pageId} value={p.pageId}>{p.title}{p.status !== 'published' ? ` (${t('pageUnpublished')})` : ''}</option>)}
               </select>
@@ -493,7 +528,7 @@ export function FunnelDetailPage(): JSX.Element {
             {s.kind === 'webinar' ? (
               <label className="u-grid u-gap-1">
                 <span className="u-label-sm">{t('fieldWebinar')}</span>
-                <select value={s.webinar?.marketingEventId ?? ''} disabled={funnel.status === 'archived'}
+                <select value={s.webinar?.marketingEventId ?? ''} disabled={locked}
                   onChange={(e) => { const v = e.target.value; setEditSteps((prev) => prev.map((p, i) => i === ix ? { ...p, webinar: v ? { marketingEventId: v } : null } : p)); }}>
                   <option value="">{t('pickWebinar')}</option>
                   {(webinarEvents ?? []).map((ev) => <option key={ev.eventId} value={ev.eventId}>{ev.title}</option>)}
@@ -504,7 +539,7 @@ export function FunnelDetailPage(): JSX.Element {
             {s.kind === 'application' ? (
               <label className="u-grid u-gap-1">
                 <span className="u-label-sm">{t('fieldApplicationForm')}</span>
-                <select value={s.application?.formId ?? ''} disabled={funnel.status === 'archived'}
+                <select value={s.application?.formId ?? ''} disabled={locked}
                   onChange={(e) => { const v = e.target.value; setEditSteps((prev) => prev.map((p, i) => i === ix ? { ...p, application: v ? { formId: v } : null } : p)); }}>
                   <option value="">{t('pickApplicationForm')}</option>
                   {(forms ?? []).map((f) => <option key={f.formId} value={f.formId}>{f.title}</option>)}
@@ -524,7 +559,7 @@ export function FunnelDetailPage(): JSX.Element {
                       else setRule(ix, rIx, (prev) => ({ goto: prev.goto, when: { outcome: v as 'accepted' | 'declined' } }));
                     }}
                     aria-label={t('ruleConditionLabel', { ix: rIx + 1 })}
-                    disabled={funnel.status === 'archived'}
+                    disabled={locked}
                   >
                     <option value="always">{t('ruleAlways')}</option>
                     <option value="accepted">{t('ruleAccepted')}</option>
@@ -533,33 +568,33 @@ export function FunnelDetailPage(): JSX.Element {
                   </select>
                   {rule.when?.utm ? (
                     <>
-                      <input value={rule.when.utm.key} onChange={(e) => setRule(ix, rIx, (prev) => ({ goto: prev.goto, when: { utm: { key: e.target.value, value: prev.when?.utm?.value ?? '' } } }))} placeholder={t('ruleUtmKey')} aria-label={t('ruleUtmKey')} disabled={funnel.status === 'archived'} />
-                      <input value={rule.when.utm.value} onChange={(e) => setRule(ix, rIx, (prev) => ({ goto: prev.goto, when: { utm: { key: prev.when?.utm?.key ?? '', value: e.target.value } } }))} placeholder={t('ruleUtmValue')} aria-label={t('ruleUtmValue')} disabled={funnel.status === 'archived'} />
+                      <input value={rule.when.utm.key} onChange={(e) => setRule(ix, rIx, (prev) => ({ goto: prev.goto, when: { utm: { key: e.target.value, value: prev.when?.utm?.value ?? '' } } }))} placeholder={t('ruleUtmKey')} aria-label={t('ruleUtmKey')} disabled={locked} />
+                      <input value={rule.when.utm.value} onChange={(e) => setRule(ix, rIx, (prev) => ({ goto: prev.goto, when: { utm: { key: prev.when?.utm?.key ?? '', value: e.target.value } } }))} placeholder={t('ruleUtmValue')} aria-label={t('ruleUtmValue')} disabled={locked} />
                     </>
                   ) : null}
                   <span>→</span>
-                  <select value={rule.goto} onChange={(e) => setRule(ix, rIx, (prev) => ({ ...prev, goto: e.target.value }))} aria-label={t('ruleGotoLabel', { ix: rIx + 1 })} disabled={funnel.status === 'archived'}>
+                  <select value={rule.goto} onChange={(e) => setRule(ix, rIx, (prev) => ({ ...prev, goto: e.target.value }))} aria-label={t('ruleGotoLabel', { ix: rIx + 1 })} disabled={locked}>
                     <option value="">{t('pickStep')}</option>
                     {editSteps.filter((_, i2) => i2 !== ix).map((st2, i2) => <option key={st2.stepId ?? i2} value={st2.stepId ?? ''}>{st2.name ?? t(`kind_${st2.kind}`)}</option>)}
                   </select>
-                  <Button variant="quiet" onClick={() => setRule(ix, rIx, null)} disabled={funnel.status === 'archived'} aria-label={t('removeRuleLabel', { ix: rIx + 1 })}>{t('common:delete')}</Button>
+                  <Button variant="quiet" onClick={() => setRule(ix, rIx, null)} disabled={locked} aria-label={t('removeRuleLabel', { ix: rIx + 1 })}>{t('common:delete')}</Button>
                 </span>
               ))}
               <span className="action-bar">
-                <Button variant="quiet" onClick={() => setRule(ix, (s.routing ?? []).length, { goto: '' })} disabled={funnel.status === 'archived' || !s.stepId}>{t('addRule')}</Button>
+                <Button variant="quiet" onClick={() => setRule(ix, (s.routing ?? []).length, { goto: '' })} disabled={locked || !s.stepId}>{t('addRule')}</Button>
               </span>
             </div>
             <span className="action-bar">
-              <Button variant="quiet" onClick={() => setEditSteps((prev) => { const next = prev.slice(); [next[ix - 1], next[ix]] = [next[ix]!, next[ix - 1]!]; return next; })} disabled={ix === 0 || funnel.status === 'archived'} aria-label={t('moveStepUpLabel', { ix: ix + 1 })}><ArrowUpIcon /></Button>
-              <Button variant="quiet" onClick={() => setEditSteps((prev) => { const next = prev.slice(); [next[ix], next[ix + 1]] = [next[ix + 1]!, next[ix]!]; return next; })} disabled={ix === editSteps.length - 1 || funnel.status === 'archived'} aria-label={t('moveStepDownLabel', { ix: ix + 1 })}><ArrowDownIcon /></Button>
+              <Button variant="quiet" onClick={() => setEditSteps((prev) => { const next = prev.slice(); [next[ix - 1], next[ix]] = [next[ix]!, next[ix - 1]!]; return next; })} disabled={ix === 0 || locked} aria-label={t('moveStepUpLabel', { ix: ix + 1 })}><ArrowUpIcon /></Button>
+              <Button variant="quiet" onClick={() => setEditSteps((prev) => { const next = prev.slice(); [next[ix], next[ix + 1]] = [next[ix + 1]!, next[ix]!]; return next; })} disabled={ix === editSteps.length - 1 || locked} aria-label={t('moveStepDownLabel', { ix: ix + 1 })}><ArrowDownIcon /></Button>
               {s.pageId ? <Link className="btn-ghost" to={`/cms/p/${encodeURIComponent(orgId)}/${encodeURIComponent(s.pageId)}`}>{t('editPage')}</Link> : null}
-              <Button variant="quiet" onClick={() => setEditSteps((prev) => prev.filter((_, i) => i !== ix))} disabled={funnel.status === 'archived'} aria-label={t('removeStepLabel', { ix: ix + 1 })}>{t('common:delete')}</Button>
+              <Button variant="quiet" onClick={() => setEditSteps((prev) => prev.filter((_, i) => i !== ix))} disabled={locked} aria-label={t('removeStepLabel', { ix: ix + 1 })}>{t('common:delete')}</Button>
             </span>
           </div>
         ))}
         <span className="action-bar">
-          <Button variant="quiet" onClick={() => setEditSteps((prev) => [...prev, { kind: 'landing', pageId: '' }])} disabled={funnel.status === 'archived'}>{t('addStep')}</Button>
-          <Button variant="primary" onClick={() => void saveSteps()} disabled={busy || funnel.status === 'archived' || editSteps.some((s) => !s.pageId)}>{t('saveSteps')}</Button>
+          <Button variant="quiet" onClick={() => setEditSteps((prev) => [...prev, { kind: 'landing', pageId: '' }])} disabled={locked}>{t('addStep')}</Button>
+          <Button variant="primary" onClick={() => void saveSteps()} disabled={busy || locked || editSteps.some((s) => !s.pageId)}>{t('saveSteps')}</Button>
         </span>
       </section>
 
@@ -571,12 +606,12 @@ export function FunnelDetailPage(): JSX.Element {
         <p className="u-label-sm muted u-m-0">{t('completionLede')}</p>
         <div className="u-flex u-gap-2 u-wrap u-items-end">
           <label className="u-label-sm u-flex-1">{t('completionCtaLabel')}
-            <input value={ctaLabel} maxLength={80} onChange={(e) => setCtaLabel(e.target.value)} placeholder={t('completionCtaLabelPlaceholder')} />
+            <input value={ctaLabel} maxLength={80} onChange={(e) => setCtaLabel(e.target.value)} placeholder={t('completionCtaLabelPlaceholder')} disabled={locked} />
           </label>
           <label className="u-label-sm u-flex-1">{t('completionCtaUrl')}
-            <input value={ctaUrl} onChange={(e) => setCtaUrl(e.target.value)} placeholder={t('completionCtaUrlPlaceholder')} />
+            <input value={ctaUrl} onChange={(e) => setCtaUrl(e.target.value)} placeholder={t('completionCtaUrlPlaceholder')} disabled={locked} />
           </label>
-          <Button variant="secondary" disabled={busy || (Boolean(ctaLabel.trim()) !== Boolean(ctaUrl.trim()))} onClick={() => void saveCta()}>{t('saveCompletionCta')}</Button>
+          <Button variant="secondary" disabled={busy || locked || (Boolean(ctaLabel.trim()) !== Boolean(ctaUrl.trim()))} onClick={() => void saveCta()}>{t('saveCompletionCta')}</Button>
         </div>
       </section>
 
@@ -591,12 +626,12 @@ export function FunnelDetailPage(): JSX.Element {
           <p className="u-label-sm muted u-m-0">{t('primaryDomainLede')}</p>
           <div className="u-flex u-gap-2 u-wrap u-items-end">
             <label className="u-label-sm u-flex-1">{t('primaryDomainField')}
-              <select value={primaryHost} onChange={(e) => setPrimaryHost(e.target.value)} disabled={funnel.status === 'archived'}>
+              <select value={primaryHost} onChange={(e) => setPrimaryHost(e.target.value)} disabled={locked}>
                 <option value="">{t('primaryDomainNone')}</option>
                 {liveDomains.map((h) => <option key={h} value={h}>{h}</option>)}
               </select>
             </label>
-            <Button variant="secondary" disabled={busy || primaryHost === (funnel.primaryHostname ?? '')} onClick={() => void savePrimaryHost()}>{t('primaryDomainSave')}</Button>
+            <Button variant="secondary" disabled={busy || locked || primaryHost === (funnel.primaryHostname ?? '')} onClick={() => void savePrimaryHost()}>{t('primaryDomainSave')}</Button>
           </div>
         </section>
       ) : null}
@@ -604,7 +639,7 @@ export function FunnelDetailPage(): JSX.Element {
       <section className="u-grid u-gap-2">
         <header className="u-flex u-items-center u-gap-2">
           <h3 className="u-m-0">{t('statsHeading')}</h3>
-          <Button variant="quiet" disabled={rebuilding} loading={rebuilding} onClick={() => void rebuild()}>{t('rebuildStats')}</Button>
+          {orgAccess.canWrite ? <Button variant="quiet" disabled={rebuilding} loading={rebuilding} onClick={() => void rebuild()}>{t('rebuildStats')}</Button> : null}
         </header>
         {statsLoading ? <Skeleton /> : statsFailed ? (
           <div role="alert" className="u-grid u-gap-1 u-justify-start">
@@ -615,6 +650,10 @@ export function FunnelDetailPage(): JSX.Element {
           <>
             <DataTable caption={t('captionStats')} columns={statColumns} rows={statRows} rowKey={(s) => s.stepId} />
             {revenueMixed ? <p className="u-label-sm muted u-m-0">{t('revenueMixedNote')}</p> : null}
+            {/* ADR 1023 D5 — completions no tracked visitor viewed (an unconsented
+                form submission, a view older than the window): counted, but never
+                inside a conversion rate, so a rate cannot pass 100%. */}
+            {unattributedTotal > 0 ? <p className="u-label-sm muted u-m-0">{t('unattributedNote', { count: unattributedTotal })}</p> : null}
             {/* FN-B-6 — the freshness the payload always carried: when the
                 rollup last ran, and that views/completions age out of the
                 event window while revenue joins all orders. */}
@@ -670,13 +709,13 @@ export function FunnelDetailPage(): JSX.Element {
                   {pages.filter((p) => p.status === 'published' && p.pageId !== expStep.pageId).map((p) => <option key={p.pageId} value={p.pageId}>{p.title}</option>)}
                 </select>
               </label>
-              <Button variant="primary" onClick={() => void startExperiment()} disabled={busy || !expChallenger}>{t('startExperiment')}</Button>
+              <Button variant="primary" onClick={() => void startExperiment()} disabled={busy || locked || !expChallenger}>{t('startExperiment')}</Button>
             </>
           ) : null}
           {expStep?.experiment ? (
             <span className="action-bar">
               <span className={expStep.experiment.status === 'running' ? 'chip chip--success' : 'chip chip--muted'}>{t(`exp_${expStep.experiment.status}`)}</span>
-              {expStep.experiment.status === 'running' ? <Button variant="quiet" onClick={() => void stopExperiment()}>{t('stopExperiment')}</Button> : null}
+              {expStep.experiment.status === 'running' && orgAccess.canWrite ? <Button variant="quiet" onClick={() => void stopExperiment()}>{t('stopExperiment')}</Button> : null}
             </span>
           ) : null}
         </div>

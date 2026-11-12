@@ -299,6 +299,13 @@
  *      replies; matched on the OWNER's key forms or EXACTLY on an external
  *      person's `senderId`/`chatId`. All deleted.
  *    + `eraseRelayOwnerSubject` — `messaging:relay-owner`, a device's owner. Deleted.
+ *  +1 (2026-11-03, ADR 1039 D7, feature loop row 82):
+ *    + `eraseCreativeBriefsSubject` — `creative-briefs:brief` (`createdBy`,
+ *      `updatedBy`), `:version` (`capturedBy`), `:render` (`createdBy`) and
+ *      `:grounding-settings` (`updatedBy`) named their authors and had no eraser;
+ *      two of them sat on the actor-attribution debt ledger. The rows are the org's
+ *      creative record and are kept; each actor field is tombstoned by CAS, never
+ *      through the content writer (no version bump, no approval demotion).
  */
 import { featureSubjectErasers } from './featureContributions.js';
 
@@ -311,6 +318,14 @@ import { featureSubjectErasers } from './featureContributions.js';
  *  Widened, no new id (2026-11-04, same item): `eraseRelayOwnerSubject` now also
  *    deletes `messaging:inbound-claim` rows: the owner's devices' claims and the
  *    claims whose conversation id EQUALS the key. It is that store's one eraser.
+ */
+/*
+ *  +1 (2026-11-11, ADR 1102 D8, feature loop row 91):
+ *    + `eraseInsightsSuiteSubject` — `insights:config` sat in RECORDED_DEBT ("delete
+ *      vs re-point is the insights-suite owner's call"). Decided: delete. The suite
+ *      runs AS its principal (ADR 1102 D4), so the eraser removes the tenant's weekly
+ *      job(s), deletes the anniversary subscription(s) (whose id carries the raw
+ *      principal) with their delivery rows, and deletes the config row.
  */
 export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseChannelIngressSubject', // ADR 1042 D8
@@ -336,6 +351,7 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseCampaignPlaybooksSubject',
   'eraseCdpCollectedEvents',
   'eraseCampaignVariantSetSubject',
+  'eraseCreativeBriefsSubject', // ADR 1039 D7
   'eraseClaudeCodeSubjectKey',
   'eraseDeveloperKeysForSubject',
   'eraseExternalCollaboratorSubject',
@@ -420,6 +436,8 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseSubjectSchedules',
   'eraseSubjectSiteBrand',
   'eraseSubjectSteering',
+  'eraseSubjectApplications', // ADR 1036 D6 — job-search application deals
+  'eraseSubjectCampaignQueue', // ADR 1036 D1 — job-search campaign queue rows
   'eraseSubjectStrategy',
   'eraseSubjectTerritories',
   'eraseSubjectTickets',
@@ -454,6 +472,10 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseJourneyEnrollmentSubject',
   // ADR 1051 D8 — video jobs (re-attributed) and likeness-consent records (deleted).
   'eraseCreativeVideoSubject',
+  // ADR 1092 D2 — a project-memory proposal's proposer and creator.
+  'eraseMemoryProposals',
+  // ADR 1102 D8 — the Insights & Drafting suite config and the job and trigger it arms.
+  'eraseInsightsSuiteSubject',
 ]);
 
 /** ADR 1031 P2 — the host manifest plus every composed feature's declared

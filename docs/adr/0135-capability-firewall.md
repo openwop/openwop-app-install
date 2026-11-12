@@ -307,3 +307,21 @@ e.g. `seen.read && next.egress:host-mediated` (equivalent to today's seed rule e
 
 1. **OQ-6a — Grammar growth pressure.** Once operators can write `count.X >= N && seen.Y`, will real usage want arithmetic on counts, string matching on scope names, or time-of-day facts? Recommend: ship the minimal grammar above; only grow it in response to an actual operator request, not speculatively — the closed-grammar-over-fixed-facts design is a deliberate security boundary, and growing it casually erodes that boundary.
 2. **OQ-6b — Relationship to `sameDataTaint`.** `sameDataTaint` (Phase 1, deferred to a later phase per the original ADR) is itself a fact that could become an expression-grammar boolean (`taint.matches`) once implemented — sequence this addendum's grammar design to anticipate that fact name without over-building for it now.
+
+> **CORRECTED 2026-11-10 (CHAN-F16, user decision "fix the prefix") — the http fetch
+> agent tool is classified.** The classification table keys on NODE ids
+> (`core.openwop.http`), and every agent tool id is `openwop:`-prefixed (ADR 0724 §D0),
+> so `openwop:core.openwop.http.fetch` matched nothing and fell to the `treat-as-risky`
+> fallback (write / host-mediated). Found by the CHAN-F8 review (ADR 1042). It now has
+> an EXACT row: `read` / `safe-fetch`, the node's class. Not a prefix row: the http pack
+> also projects two pure nodes as tools (`idempotency-key`, `webhook-verify`) that this
+> review did not cover, and they stay unclassified.
+>
+> **This relaxes tenant rules, on purpose.** A rule keyed on `host-mediated` egress (a
+> read-then-egress rule) no longer fires on a fetch; a rule keyed on `safe-fetch` now
+> does. The user chose the accurate class over the accidental strict one. Unchanged:
+> safe mode still asks for it by name (`SENSITIVE_APPROVAL_TOOLS`), and narrow channel
+> turns still exclude it (not on the reviewed list; classified egress). The rest of the
+> agent-tool population is still unclassified (`FW2-D4`, ADR 0834). Witness:
+> `safe-mode-egress-gate-implied.test.ts` R5 (the exact class, and the other http tools
+> still null).

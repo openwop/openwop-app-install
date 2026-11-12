@@ -13,6 +13,10 @@ Read first, every time. Never describe creative you have not read.
 - **`openwop:campaign-studio.get-design`** reads the campaign plan canvas.
 - **`openwop:creative-briefs.list`** lists the creative briefs already made for
   this workspace.
+- **`openwop:creative-briefs.get`** reads one creative brief in full: its scene,
+  composition, camera, lighting, palette, platform spec, its creative directions
+  in order (cite a direction by its `index`), its mood board and its open issues.
+  Read a brief before you give direction on it.
 - **`openwop:media.list`** lists the media library. Real product images come
   from here. Never describe an image you did not find in this list as a product
   photo.

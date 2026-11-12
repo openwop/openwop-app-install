@@ -39,6 +39,9 @@ const EXPECTED_NODE_IDS = [
   'feature.funnels.nodes.compose-step-page',
   'feature.funnels.nodes.step-result',
   'feature.funnels.nodes.collect-steps',
+  // ADR 1023 — the blueprint's offer check and the copy model's one input.
+  'feature.funnels.nodes.check-offers',
+  'feature.funnels.nodes.offer-context',
 ];
 
 beforeAll(async () => {
@@ -51,7 +54,7 @@ describe('feature.funnels.nodes', () => {
     expect(m.nodes.map((n) => n.typeId).sort()).toEqual([...EXPECTED_NODE_IDS].sort());
     const role = new Map(m.nodes.map((n) => [n.typeId, n.role]));
     for (const w of ['create', 'set-steps', 'request-publish']) expect(role.get(`feature.funnels.nodes.${w}`), w).toBe('side-effect');
-    for (const r of ['list', 'get', 'step-stats', 'compose-step-page', 'step-result', 'collect-steps']) expect(role.get(`feature.funnels.nodes.${r}`), r).toBe('action');
+    for (const r of ['list', 'get', 'step-stats', 'compose-step-page', 'step-result', 'collect-steps', 'check-offers', 'offer-context']) expect(role.get(`feature.funnels.nodes.${r}`), r).toBe('action');
     expect(Object.keys(funnelNodes).sort()).toEqual([...EXPECTED_NODE_IDS].sort());
   });
 
@@ -88,6 +91,40 @@ describe('feature.funnels.nodes', () => {
       inputs: { orgId, funnelId: out.outputs.funnelId },
     });
     expect(stats.outputs.steps).toEqual({});
+  });
+
+  // ADR 1023 FN72WF-5 — an unknown funnel is a typed failure on BOTH reads, never a
+  // recorded `{funnel:null}` / `{steps:{}}` success a model would read as "no traffic".
+  // Sabotage-witnessed: `get` returning the null row as success turns this red.
+  it('get and step-stats fail not_found for an unknown funnel', async () => {
+    const surface = buildFunnelsSurface({ tenantId: 'pack-t' } as never);
+    for (const id of ['feature.funnels.nodes.get', 'feature.funnels.nodes.step-stats']) {
+      const r = await funnelNodes[id]({ features: { funnels: surface }, inputs: { orgId: 'pack-org', funnelId: 'funnel:missing' } }) as { status: string; error?: { code?: string } };
+      expect(r.status, id).toBe('failed');
+      expect(r.error?.code, id).toBe('not_found');
+    }
+  });
+
+  // ADR 1023 D1 — the copy model's ONE input: closed projections, never raw rows.
+  // Sabotage-witnessed: returning the raw product row turns the leak check red.
+  it('offer-context projects the brief and the ONE active offered product, and refuses anything else', async () => {
+    const brief = { brief: { id: 'b1', tenantId: 'ten', orgId: 'o', name: 'Spring launch', objective: 'Sell', productName: 'Course', productDescription: 'A course', industryVertical: 'edu', personaIds: [], channels: [], messaging: { primaryValueProp: 'Learn fast', toneOverride: '', proofPoints: ['p'], ctaStrategy: 'buy' }, budget: { total: 900 }, kernelReview: { runId: 'run-secret', requestedAt: 'x' }, createdBy: 'u', createdAt: 'x', updatedAt: 'y', status: 'confirmed' } };
+    const products = { products: [
+      { productId: 'p1', orgId: 'o', type: 'digital', name: 'Starter', description: 'Five lessons', price: 7, currency: 'USD', cost: 2, downloadAssetTokens: ['tok'], inventory: 3, tags: ['art'], categories: [], active: true, updatedAt: 'z' },
+      { productId: 'p2', orgId: 'o', type: 'digital', name: 'Old', price: 9, currency: 'USD', active: false, tags: [], categories: [] },
+    ] };
+    const ok = await funnelNodes['feature.funnels.nodes.offer-context']({ inputs: { brief, products, productId: 'p1' } }) as { status: string; outputs: { context: Record<string, Record<string, unknown>> } };
+    expect(ok.status).toBe('success');
+    expect(ok.outputs.context.brief).toMatchObject({ name: 'Spring launch', objective: 'Sell', messaging: { primaryValueProp: 'Learn fast' } });
+    expect(ok.outputs.context.product).toEqual({ name: 'Starter', description: 'Five lessons', type: 'digital', tags: ['art'] });
+    const sent = JSON.stringify(ok.outputs);
+    for (const leak of ['run-secret', 'tenantId', '"cost"', 'tok', '"price"', '"inventory"', 'updatedAt', 'createdBy', 'budget']) expect(sent, leak).not.toContain(leak);
+    const inactive = await funnelNodes['feature.funnels.nodes.offer-context']({ inputs: { brief, products, productId: 'p2' } }) as { status: string; error?: { code?: string } };
+    expect(inactive).toMatchObject({ status: 'failed', error: { code: 'offer_not_found' } });
+    const foreign = await funnelNodes['feature.funnels.nodes.offer-context']({ inputs: { brief, products, productId: 'p9' } }) as { status: string; error?: { code?: string } };
+    expect(foreign).toMatchObject({ status: 'failed', error: { code: 'offer_not_found' } });
+    const noBrief = await funnelNodes['feature.funnels.nodes.offer-context']({ inputs: { products, productId: 'p1' } }) as { status: string; error?: { code?: string } };
+    expect(noBrief).toMatchObject({ status: 'failed', error: { code: 'brief_not_found' } });
   });
 });
 

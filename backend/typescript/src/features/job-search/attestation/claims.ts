@@ -61,6 +61,39 @@ export interface ClaimSet {
 /** Audit kinds this reads. Narrow on purpose: a claim derived from a kind
  *  nobody writes would be a claim about nothing. */
 const GRANT_CONSUMED = 'job-search.grant.consumed';
+/** ADR 1036 D4 — the board refused the submission (written first), and the
+ *  unit returned for it (written after, and may be missing). Either voids. */
+const SUBMISSION_REJECTED = 'job-search.submission.rejected';
+const GRANT_REFUNDED = 'job-search.grant.refunded';
+
+type ChainEntry = Awaited<ReturnType<typeof listChain>>[number];
+
+/**
+ * The consumptions that stand for an application actually sent.
+ *
+ * Since ADR 1036 D4 the pipeline spends the unit BEFORE calling the board, so a
+ * board that refuses leaves a consumption behind; `refundSubmit` then writes a
+ * `submission.rejected` row (and, when its CAS wins, a `refunded` row) naming
+ * the same `(grantId, dealId)`. A consumption is void when either follows it
+ * before any newer consumption of the same pair — the
+ * audit log is seq-ordered and hash-linked, so "follows" is a fact of the chain.
+ * Without this, an application the employer never received would count in
+ * `applications-in-window` and could be attested as sent.
+ */
+export function sentConsumptions(chain: readonly ChainEntry[]): ChainEntry[] {
+  const pending = new Map<string, ChainEntry>();
+  const voided = new Set<number>();
+  for (const e of chain) {
+    if (e.kind !== GRANT_CONSUMED && e.kind !== GRANT_REFUNDED && e.kind !== SUBMISSION_REJECTED) continue;
+    const p = e.payload as { grantId?: string; dealId?: string };
+    if (!p.dealId || !p.grantId) continue;
+    const k = `${p.grantId}|${p.dealId}`;
+    if (e.kind === GRANT_CONSUMED) { pending.set(k, e); continue; }
+    const c = pending.get(k);
+    if (c) { voided.add(c.seq); pending.delete(k); }
+  }
+  return chain.filter((e) => e.kind === GRANT_CONSUMED && !voided.has(e.seq));
+}
 
 /**
  * Derive the claim set for a campaign from records.
@@ -76,8 +109,8 @@ export async function buildClaimSet(
   now: number,
 ): Promise<ClaimSet> {
   const chain = await listChain(tenantId);
-  const consumptions = chain.filter(
-    (e) => e.kind === GRANT_CONSUMED && (e.payload as { campaignId?: string }).campaignId === campaignId,
+  const consumptions = sentConsumptions(chain).filter(
+    (e) => (e.payload as { campaignId?: string }).campaignId === campaignId,
   );
 
   const claims: Claim[] = [];
@@ -169,8 +202,7 @@ export async function findAttestableApplication(
   const chain = await listChain(tenantId);
   // The FIRST consumption naming this deal. A deal appears once; if a retry ever
   // wrote a second row, the earliest is the submission that actually happened.
-  for (const e of chain) {
-    if (e.kind !== GRANT_CONSUMED) continue;
+  for (const e of sentConsumptions(chain)) {
     const p = e.payload as { dealId?: string; campaignId?: string; subjectId?: string };
     if (p.dealId !== dealId) continue;
     if (!p.campaignId || !p.subjectId) return null;

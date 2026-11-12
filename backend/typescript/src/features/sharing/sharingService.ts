@@ -10,6 +10,7 @@
  */
 
 import { designSectionMarkdown } from '../cms/designSections.js';
+import { pricingPlans } from '../cms/pricingPlans.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { createLogger } from '../../observability/logger.js';
 import { hashToken, isTokenHash, mintToken } from '../../host/capabilityToken.js';
@@ -1663,23 +1664,34 @@ function cmsSectionsToMarkdown(sections: Section[]): string {
         // Media tokens have no public URL on this surface — render the words.
         if (str('caption') || str('alt')) parts.push(`*${str('caption') || str('alt')}*`);
         break;
-      case 'statusTable': case 'dateCalc': case 'conversation': case 'featureIndex': case 'decisionTree': case 'scheduleSim': {
-        // ADR 1080 — the design section types, through the same markdown projection.
+      case 'statusTable': case 'dateCalc': case 'conversation': case 'featureIndex': case 'decisionTree': case 'scheduleSim': case 'films': {
+        // ADR 1080 (+ ADR 1082 `films`) — the design section types, through the same markdown projection.
         const md = designSectionMarkdown(s.type, d, head().join('\n'));
         if (md) parts.push(md);
         break;
       }
+      case 'pricing':
       case 'productGrid':
       case 'form':
       case 'entityList':
-      case 'entityDetail':
-      case 'pricing':
+      case 'entityDetail': {
+        // ADR 1069 D4 — a pricing section's authored plans are its own words, so
+        // a static share carries them. Without plans it is the live billing read.
+        const plans = s.type === 'pricing' ? pricingPlans(d) : [];
+        if (plans.length > 0) {
+          parts.push([
+            ...head(),
+            ...plans.flatMap((p) => [`**${p.name}**${p.status ? ` · ${p.status}` : ''}`, ...(p.blurb ? [p.blurb] : []), '']),
+          ].join('\n').trim());
+          break;
+        }
         // Live-resolved at delivery time; a static share cannot carry them.
         parts.push([
           ...head(),
           '*This section shows live content on the published page and isn’t included in this shared view.*',
         ].join('\n'));
         break;
+      }
       default:
         break;
     }

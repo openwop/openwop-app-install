@@ -153,11 +153,16 @@ describe('ADR 0082 — no mock-ai; real source/analysis/LLM nodes', () => {
       const targets = new Set(edges.map((e) => e.targetNodeId));
       const sources = new Set(edges.map((e) => e.sourceNodeId));
       const entries = def.nodes.filter((n) => !targets.has(n.nodeId));
-      expect(entries, `${def.workflowId} must have exactly one entry node`).toHaveLength(1);
+      // ADR 1102 D2 — CORRECTED from "exactly one entry node". `anniversary-draft`
+      // now has two sources (the Workday read and the knowledge search), because the
+      // edge that used to join them carried rows into a port `knowledge.retrieve`
+      // never reads: a connected graph made of a dead edge. The orphan guarantee is
+      // the inbound/outbound pair below, which still holds for every node.
+      expect(entries.length, `${def.workflowId} has no entry node`).toBeGreaterThanOrEqual(1);
       // Every non-entry node is an edge target, and every non-terminal node is an edge source
       // → no node is stranded off the source→notify chain.
       for (const n of def.nodes) {
-        const isEntry = entries[0]!.nodeId === n.nodeId;
+        const isEntry = entries.some((x) => x.nodeId === n.nodeId);
         const isTerminal = n.typeId === 'feature.notifications.nodes.notify';
         if (!isEntry) expect(targets.has(n.nodeId), `${def.workflowId}.${n.nodeId} has no inbound edge (orphan)`).toBe(true);
         if (!isTerminal) expect(sources.has(n.nodeId), `${def.workflowId}.${n.nodeId} has no outbound edge (dead end)`).toBe(true);

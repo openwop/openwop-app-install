@@ -2900,7 +2900,9 @@ const bigqueryQueryNode: NodeModule = {
  * The apiHosts pin guarantees egress can only reach *.workday.com regardless of the base.
  *
  * Output carries `{ rows, rowCount, resource, baseUrl }` — deterministic "Verify Source"
- * provenance, mirroring core.bigquery.query.
+ * provenance, mirroring core.bigquery.query. With the optional `inputs.workerId`
+ * (ADR 1102 D1) `rows` holds only that person's rows and `scannedCount` says how
+ * many were fetched.
  */
 const WORKDAY_RESOURCES = ['workers', 'performanceReviews', 'serviceDates'] as const;
 
@@ -2908,8 +2910,19 @@ const workdayQueryNode: NodeModule = {
   typeId: 'core.workday.query',
   version: '1.0.0',
   async execute(ctx) {
-    const cfg = (ctx.config ?? {}) as { baseUrl?: unknown; resource?: unknown; connectorId?: unknown; params?: unknown; maxRows?: unknown };
+    const cfg = (ctx.config ?? {}) as { baseUrl?: unknown; resource?: unknown; connectorId?: unknown; params?: unknown; maxRows?: unknown; requireWorkerId?: unknown };
     const inputs = (ctx.inputs ?? {}) as Record<string, unknown>;
+    // ADR 1102 D1 — `workerId` narrows the read to one person. A chain that reads
+    // about ONE person sets `config.requireWorkerId`, so an omitted or blank id is
+    // a refusal BEFORE any fetch, never the unfiltered read that persists the
+    // whole workforce (the round-3 code re-grade: an omitted `{{params.subjectId}}`
+    // resolves to undefined, and chain params are not validated at launch).
+    const workerId = typeof inputs.workerId === 'string' ? inputs.workerId.trim()
+      : typeof inputs.workerId === 'number' && Number.isFinite(inputs.workerId) ? String(inputs.workerId) : '';
+    const askedForOne = cfg.requireWorkerId === true || (inputs.workerId !== undefined && inputs.workerId !== null);
+    if (askedForOne && !workerId) {
+      return { status: 'failure', error: { code: 'worker_id_required', message: 'core.workday.query was asked for one person\'s rows and given no workerId. Refusing to read every worker\'s rows instead.' } };
+    }
     const baseUrl = String(cfg.baseUrl ?? inputs.baseUrl ?? '').trim().replace(/\/+$/, '');
     // INS-4 — a run INPUT overrides the authored `config.resource` default (so a workflow can
     // parameterize the resource via a variable, e.g. `promotionDates` instead of the baked-in
@@ -2953,14 +2966,28 @@ const workdayQueryNode: NodeModule = {
 
     // Workday REST collections return `{ data: [...], total }`; tolerate a bare array too.
     const data = (r.data ?? {}) as { data?: unknown };
-    const rows = Array.isArray(data.data) ? data.data as Array<Record<string, unknown>>
+    const fetched = Array.isArray(data.data) ? data.data as Array<Record<string, unknown>>
       : Array.isArray(r.data) ? r.data as Array<Record<string, unknown>>
       : [];
+    // ADR 1102 D1 (`INS91-1`) — an optional `inputs.workerId` keeps only that
+    // person's rows, BEFORE the node returns, because the executor persists node
+    // outputs on `node.completed` with a secret scrub only. Without it a talent
+    // review of one person stored the whole workforce's performance reviews in a
+    // run every `runs:read` member can open. The match is the EXACT expression
+    // `feature.insights-suite.nodes.talent-score` uses, so the filter and the
+    // scorer cannot disagree about whose row a row is (pinned by a parity leg).
+    const rows = workerId
+      ? fetched.filter((row) => row && typeof row === 'object'
+        && String(row.subjectId ?? row.workerId ?? row.employeeId ?? row.id ?? '').trim() === workerId)
+      : fetched;
     return {
       status: 'success',
       outputs: {
         rows,
         rowCount: rows.length,
+        // Fetched vs kept, so a filter that matched nobody reads as "fetched N,
+        // kept 0", not as an empty source.
+        ...(workerId ? { scannedCount: fetched.length } : {}),
         resource, // Provenance (deterministic — "Verify Source"):
         baseUrl,
       },
@@ -3103,7 +3130,9 @@ const emailDraftNode: NodeModule = {
   // written rationale for staying unclassified: a fork mints a new runId, so its ledger does
   // not suppress the send, and the forked run correctly re-hits its mandatory approval
   // interrupt. `draft` has no such interrupt in front of it; `send` does. The asymmetry is
-  // adopted, not overlooked.
+  // adopted, not overlooked. (ADR 1102 D3: a CHAIN can put one in front. The insights
+  // anniversary chain now approves the text before this node runs; the node itself
+  // still carries no interrupt, and the other chains that bind it are ungated.)
   sideEffecting: true,
   async execute(ctx) {
     const { recipients, subject, body, html, connectorId } = parseEmailConfig(ctx);

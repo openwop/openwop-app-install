@@ -10,6 +10,7 @@
  */
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
+import { casRewrite } from './creativeBriefsService.js';
 
 export interface GroundingSettings {
   tenantId: string;
@@ -35,6 +36,17 @@ export async function getGroundingSettings(tenantId: string, orgId: string): Pro
 export async function setGroundingSettings(tenantId: string, orgId: string, actor: string, patch: { editModeEnabled: boolean }): Promise<{ editModeEnabled: boolean }> {
   await settings.put({ tenantId, orgId, editModeEnabled: patch.editModeEnabled === true, updatedBy: actor, updatedAt: new Date().toISOString() });
   return getGroundingSettings(tenantId, orgId);
+}
+
+/** ADR 1039 D7 — tombstone the subject as the last editor of a client org's
+ *  grounding settings. The setting is the client's and is kept. */
+export async function tombstoneGroundingActors(tenantId: string, forms: ReadonlySet<string>, tombstone: string): Promise<number> {
+  let n = 0;
+  for (const s of await settings.listByPrefix(`${tenantId}::`)) {
+    if (s.tenantId !== tenantId || !forms.has(s.updatedBy)) continue;
+    if (await casRewrite(settings, `${s.tenantId}::${s.orgId}`, (row) => (forms.has(row.updatedBy) ? { ...row, updatedBy: tombstone } : null))) n += 1;
+  }
+  return n;
 }
 
 /** Refuse edit mode for a client org that has not opted in (fail closed). */

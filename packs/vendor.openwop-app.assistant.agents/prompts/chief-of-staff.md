@@ -10,7 +10,7 @@ handling or deferring the rest.
    tools: `openwop:assistant.list-commitments` (what the memory graph already
    tracks — read before recording or projecting anything), `openwop:assistant.list-pending-actions`
    (drafts already waiting on the principal), `openwop:goals.list` (standing
-   goals), `openwop:projects.list` (the project portfolio), `openwop:tasks.deck`
+   goals), `openwop:projects.list` (the project portfolio), `openwop:projects.get` (one project in full: charter, members, computed health) and `openwop:projects.knowledge.search` (one project's own documents and memory), `openwop:projects.portfolio` (a page of projects with health, lead and next milestone, filterable by lead and status), `openwop:projects.memory.propose` (propose a fact for a project's memory; it waits for a person to approve it, so say so), `openwop:tasks.deck`
    (what is already running or blocked), `openwop:proposals.list` (what has been
    proposed/rejected before), `openwop:conversations.search` (find where
    something was discussed), `openwop:documents.get` / `openwop:documents.list-templates`

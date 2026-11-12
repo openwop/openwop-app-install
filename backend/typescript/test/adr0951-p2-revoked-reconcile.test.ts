@@ -3,7 +3,15 @@
  * callback. The default-window sweep must find and delete those rows, within a
  * bounded window per sweep, and must never delete on an unconfirmed read. Two
  * SQLite clients share real rows and real blob bytes; no store is mocked except
- * the one consent read the outage witness fails. */
+ * the one consent read the outage witness fails.
+ *
+ * Sabotage witnesses (w103; src/features/analytics/replayStore.ts): never
+ * flagging a revoked generation (w103-rr-never-revoked), flagging only a missing
+ * grant (w103-rr-null-only), flagging every row (w103-rr-always-revoked), a
+ * consent outage read as "no grant" (w103-rr-outage-null), ignoring a legal hold
+ * (w103-rr-hold-ignored), an unbounded window (w103-rr-unbounded), a cursor that
+ * never advances (w103-rr-cursor-stuck), and one consent read per row instead of
+ * per subject (w103-rr-per-row-read). */
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -166,5 +174,24 @@ describe('ADR 0951 P2.2 — revoked-generation reconciliation', () => {
     expect(first.deleted + second.deleted).toBe(total);
     expect(await keys(live)).toHaveLength(1);
     expect(await getReplaySession(tenantId, live.orgId, live.sessionId)).toMatchObject({ sessionId: live.sessionId });
+
+    // Rotation: the rows above were deleted, so the second window was small
+    // anyway. Here a full window of rows under the CURRENT generation stays
+    // put, and the one revoked row sorts after them (keys are ordered by session
+    // id: hex uuid < "held-" < "zz-"). Only a cursor that advances reaches it.
+    __resetReplayReconcileCursorForTests();
+    const pinned = (JSON.parse((await b.kvGet(rawKey(live)))!) as { privacy: { consentGeneration: string; enablementEpoch: string; eligibilityId: string } }).privacy;
+    const pins = { consentGeneration: pinned.consentGeneration, enablementEpoch: pinned.enablementEpoch, eligibilityId: pinned.eligibilityId };
+    for (let i = 0; i < REPLAY_RECONCILE_MAX_PER_SWEEP; i++) {
+      const r = { ...row('visitor:live'), sessionId: `held-${String(i).padStart(3, '0')}` };
+      await b.kvSet(rawKey(r), JSON.stringify({ ...r, privacy: { state: 'active', committed: true, pending: [], chunks: {}, ...pins } }));
+    }
+    const last = { ...row('visitor:revoked'), sessionId: 'zz-revoked-last' };
+    await b.kvSet(rawKey(last), JSON.stringify({ ...last, privacy: {
+      state: 'active', committed: true, pending: [], chunks: {}, ...pins, consentGeneration: 'revoked-generation' } }));
+    expect(await sweepExpiredReplays(), 'the first window holds only current rows').toEqual({ deleted: 0, failed: 0 });
+    expect(await sweepExpiredReplays(), 'the next window reaches the revoked row').toEqual({ deleted: 1, failed: 0 });
+    expect(await state(last)).toBe('erased');
+    expect(await state({ ...live, sessionId: 'held-000' })).toBe('active');
   });
 });

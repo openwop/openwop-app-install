@@ -24,6 +24,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { buildFunnelReport } from '../src/features/job-search/lifecycle/funnel.js';
 import { createApplication, advanceApplication, ensureApplicationPipeline, APPLICATION_PIPELINE_NAME } from '../src/features/job-search/domain/applications.js';
 import { listPipelines, updatePipeline } from '../src/features/crm/crmEntitiesService.js';
+import { subjectDealTag } from '../src/features/job-search/domain/applications.js';
 import { createApplyGrant, consultApplyGrant, revokeApplyGrant, claimSubmission, releaseSubmission } from '../src/host/applyGrant.js';
 import { runCampaign, type CampaignItem } from '../src/features/job-search/autopilot/campaign.js';
 import type { JobDigest } from '../src/features/job-search/domain/digest.js';
@@ -131,7 +132,7 @@ describe('JS-LANE-1 — the hoisted discovery scan reads rows FRESH', () => {
     const g = await createApplyGrant(grantInput('subj-1'));
     const ids = [g.grantId];
     expect((await consult('subj-1', ids)).allowed).toBe(true);
-    await revokeApplyGrant(T, ORG, g.grantId, Date.now());
+    await revokeApplyGrant(T, ORG, g.grantId, Date.now(), 'subj-1');
     // The ids are stale; the ROWS are not — consult re-reads at decision time.
     const after = await consult('subj-1', ids);
     expect(after.allowed).toBe(false);
@@ -202,6 +203,7 @@ describe('grade-trio finding 2 — the discovery memo is per (tenant, subject, c
     });
     const run = await runCampaign([item('mix-a', 'subj-A'), item('mix-b', 'subj-B')], async () => ({ ok: true }), Date.now());
     expect(run.skipped).toEqual([]);
-    expect(run.applied).toEqual(['deal:mix-a', 'deal:mix-b']);
+    // ADR 1036 D3 — per-person deal ids.
+    expect(run.applied).toEqual([`deal:${subjectDealTag('subj-A')}:mix-a`, `deal:${subjectDealTag('subj-B')}:mix-b`]);
   });
 });

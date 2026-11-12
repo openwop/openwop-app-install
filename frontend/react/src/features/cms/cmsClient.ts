@@ -18,13 +18,13 @@ export interface Org { orgId: string; name: string }
 export { SYSTEM_SITE_ORG } from './siteOrg.js';
 export type PageStatus = 'draft' | 'in_review' | 'published' | 'archived';
 export const PAGE_STATUSES: readonly PageStatus[] = ['draft', 'in_review', 'published', 'archived'];
-export type SectionType = 'hero' | 'richText' | 'image' | 'cta' | 'columns' | 'productGrid' | 'form' | 'pricing' | 'entityList' | 'entityDetail' | 'comparison' | 'faq' | 'quotes' | 'fields' | 'video' | 'statusTable' | 'dateCalc' | 'conversation' | 'featureIndex' | 'decisionTree' | 'scheduleSim'; // ADR 1080
+export type SectionType = 'hero' | 'richText' | 'image' | 'cta' | 'columns' | 'productGrid' | 'form' | 'pricing' | 'entityList' | 'entityDetail' | 'comparison' | 'faq' | 'quotes' | 'fields' | 'video' | 'statusTable' | 'dateCalc' | 'conversation' | 'featureIndex' | 'decisionTree' | 'scheduleSim' | 'films'; // ADR 1080
 // The `comparison` matrix (ADR 0485) is HOST-AUTHORED (seeded via code), not built
 // through the visual editor — so it is a member of the type union (the renderer
 // handles it) but deliberately absent from the editor's add-section picker below.
 // `fields` (ADR 0748) is the same: created through the RFC 0103 content API,
 // editable here once it exists, not offered as a blank block.
-export const SECTION_TYPES: readonly SectionType[] = ['hero', 'richText', 'image', 'cta', 'columns', 'productGrid', 'form', 'pricing', 'entityList', 'entityDetail', 'faq', 'quotes', 'video', 'statusTable', 'dateCalc', 'conversation', 'featureIndex', 'decisionTree', 'scheduleSim'];
+export const SECTION_TYPES: readonly SectionType[] = ['hero', 'richText', 'image', 'cta', 'columns', 'productGrid', 'form', 'pricing', 'entityList', 'entityDetail', 'faq', 'quotes', 'video', 'statusTable', 'dateCalc', 'conversation', 'featureIndex', 'decisionTree', 'scheduleSim', 'films'];
 export interface Section {
   sectionId: string;
   type: SectionType;
@@ -121,7 +121,9 @@ export type AutoTranslated = Record<string, number>;
  *  call cap hit / provider failed mid-sweep / N unusable translations. Absent
  *  = the sweep completed (or never ran). */
 export interface AutoTranslateDegraded { capped?: boolean; errored?: boolean; invalid?: number; conflict?: boolean }
-export interface MediaAssetRef { assetId: string; name: string; serveUrl: string; serveToken?: string }
+/** ADR 1100 D2 — `altText`/`altTextSource` (media's ADR 0363 fields) let a
+ *  placed picture take the library's description. */
+export interface MediaAssetRef { assetId: string; name: string; serveUrl: string; serveToken?: string; altText?: string; altTextSource?: 'human' | 'ai' | 'decorative' }
 export type WorkflowAction = 'submit' | 'approve' | 'reject' | 'publish' | 'archive' | 'unpublish';
 
 const root = `${config.baseUrl}/host/openwop-app`;

@@ -1,8 +1,8 @@
 {
   "name": "feature.funnels.nodes",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "kind": "node",
-  "description": "Funnels feature node pack (Funnel A chat-drivability) — nodes over the ctx.features.funnels surface. Reads (role:action): `list` / `get` / `step-stats` (per-step views/completions/revenue totals). Writes (role:side-effect, ADR 0948 P1 — a replay fork is served the recorded output, never re-executed): `create` and `set-steps` author DRAFT state only; `set-steps` refuses a published funnel (editing a live funnel is publishing its new steps). `request-publish` (ADR 0948 P1b) queues a `funnel-publish` review and returns; a human's approve publishes. Blueprint plumbing (ADR 0948 P2, pure, role:action): `compose-step-page` builds a step page's sections from schema-validated copy (closed-world; the opt-in form must be one of the org's own forms), `step-result` returns a step sub-chain's step through the run variable bag, `collect-steps` orders the steps a blueprint's sub-chains returned. No node and no ctx.funnels method publishes ('agent proposes, human disposes').",
+  "description": "Funnels feature node pack (Funnel A chat-drivability) — nodes over the ctx.features.funnels surface. Reads (role:action): `list` / `get` / `step-stats` (per-step visitor-cohort views/completions, unattributed completions, paid orders and revenue per currency); `get` and `step-stats` fail typed `not_found` for an unknown funnel (ADR 1023). Writes (role:side-effect, ADR 0948 P1 — a replay fork is served the recorded output, never re-executed): `create` and `set-steps` author DRAFT state only; `set-steps` refuses a published funnel (editing a live funnel is publishing its new steps). `request-publish` (ADR 0948 P1b) queues a `funnel-publish` review and returns; a human's approve publishes. Blueprint plumbing (ADR 0948 P2, pure, role:action): `compose-step-page` builds a step page's sections from schema-validated copy (closed-world; the opt-in form must be one of the org's own forms), `step-result` returns a step sub-chain's step through the run variable bag, `collect-steps` orders the steps a blueprint's sub-chains returned. No node and no ctx.funnels method publishes ('agent proposes, human disposes'). ADR 1023: `check-offers` refuses (offer_not_found) any offer product that is not an active product of the org, as a blueprint's first node; `offer-context` gives a step's copy model its ONE input — closed projections of the brief and the offered product(s), never raw rows.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "funnels", "marketing", "conversion", "landing-pages"],
@@ -19,10 +19,28 @@
     },
     {
       "typeId": "feature.funnels.nodes.get",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Funnel Get",
-      "description": "Reads one funnel (steps, status, slug). Inputs: orgId, funnelId.",
+      "description": "Reads one funnel (steps, status, slug). Inputs: orgId, funnelId. An unknown funnel is a typed failure (`not_found`), never `{funnel:null}` (ADR 1023).",
       "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.funnels.nodes.check-offers",
+      "version": "1.0.0",
+      "label": "Funnel Check Offers",
+      "description": "ADR 1023 D3. A blueprint's FIRST node: every offer product id — each `…ProductId` input (productId, bumpProductId, upsellProductId, …) and `productIds`, empty entries skipped — must be an ACTIVE product of the org (the host's one offer rule), so no step page is drafted for an offer the funnel would later refuse. Inputs: orgId, …ProductId (string), productIds? (string[]). Output: { productIds }. Typed failure: offer_not_found. Read-only.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.funnels.nodes.offer-context",
+      "version": "1.0.0",
+      "label": "Funnel Offer Context",
+      "description": "ADR 1023 D1. The ONE input of a step's copy model: closed projections of the campaign brief (name, objective, product name/description, vertical, competitors, messaging, kernel content) and, for a money step, the active catalog product it sells (name, description, type, categories, tags, attributes) and the checkout's bump product. Never a raw row: no run id, price, cost, stock, token or timestamp reaches the model. Inputs: brief (port: a get-brief output or a brief), products (port: a list-products output; needed when a product id is given), productId?, bumpProductId?. Output: { context: { brief, product?, bumpProduct? } }. Typed failures: brief_not_found, offer_check_missing, offer_not_found. Pure.",
+      "category": "data",
       "role": "action",
       "capabilities": []
     },
@@ -46,9 +64,9 @@
     },
     {
       "typeId": "feature.funnels.nodes.step-stats",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Funnel Step Stats",
-      "description": "Per-step totals (views/completions/revenue/orders) from the derived rollups — the planning read for optimization proposals. Inputs: orgId, funnelId.",
+      "description": "Per-step totals (views/completions/revenue/orders) from the derived rollups — the planning read for optimization proposals. Inputs: orgId, funnelId. ADR 1023: views are distinct visitors (first view), completions count only those viewers, `unattributed` holds completions with no tracked view, orders and revenue count paid orders only, and `revenue` is null when more than one currency is present (use `revenueByCurrency`). An unknown funnel fails `not_found`.",
       "category": "integration",
       "role": "action",
       "capabilities": []

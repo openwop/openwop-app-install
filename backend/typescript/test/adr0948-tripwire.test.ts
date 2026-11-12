@@ -10,11 +10,20 @@
  *     the offers built from the caller's product ids (checkout: product + bump; upsell
  *     and downsell: one-click), and the blueprint's routing (upsell accepted → thank
  *     you) — so the P2c viewer sells it and routes on the buyer's decision.
- *  3. Another client's product is refused when the funnel is written: the run fails
- *     and no funnel exists (offers are org-checked by the funnels write, not trusted).
+ *  3. Another client's product is refused BEFORE anything is drafted (ADR 1023 D3):
+ *     the generate route answers `offer_not_found`, no run, no page, no funnel. In a
+ *     gallery copy (no generate route on the path) the blueprint's first node,
+ *     `check-offers`, fails the run before the first step drafts its page.
+ *  4. ADR 1023 D1 (FN72WF-1) — each step's copy model reads the brief AND the product
+ *     it sells, as closed projections: before, two bare edges into `copy` overwrote
+ *     each other and `toMessages` sent the product id string as the whole prompt.
+ *     No row bookkeeping (cost, tenant, author, run ids, timestamps) reaches it.
+ *  5. ADR 1023 D2 — a gallery (from-chain) copy runs to completion.
  *
  * Sabotage-witnessed: collect-steps dropping `offer` or `routing`, step-result
- * dropping `stepId`, and the bump wired to the upsell each turn leg 2 red.
+ * dropping `stepId`, and the bump wired to the upsell each turn leg 2 red; restoring
+ * the bare `brief→copy` / `products→copy` edges turns leg 4 red; dropping the
+ * generate pre-check turns leg 3 red (pages are drafted).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AiCallRequest, AiCallResult } from '../src/executor/types.js';
@@ -48,7 +57,7 @@ vi.mock('../src/aiProviders/aiProvidersHost.js', async (importOriginal) => {
 import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client } from './planningHarness.js';
 import { createBrief, updateBrief } from '../src/features/campaign-brief/briefService.js';
 import { listFunnels } from '../src/features/funnels/funnelsService.js';
-import { getPage } from '../src/features/cms/cmsService.js';
+import { getPage, listPages } from '../src/features/cms/cmsService.js';
 import { toWireRunId } from '../src/host/v2Ids.js';
 
 let BASE = '';
@@ -70,15 +79,15 @@ async function team() {
   const ownerId = (await owner.post(`${H}/test/login`, { email: uniqEmail('tw-o'), tenantId })).body.user.userId as string;
   const orgA = (await owner.post(`${H}/orgs`, { name: 'Client A' })).body.orgId as string;
   const orgB = (await owner.post(`${H}/orgs`, { name: 'Client B' })).body.orgId as string;
-  const brief = await createBrief(tenantId, orgA, ownerId, { name: 'Landscape course', productName: 'Course' } as never);
+  const brief = await createBrief(tenantId, orgA, ownerId, { name: 'Landscape course', productName: 'Course', objective: 'Sell the starter course to beginners' } as never);
   await updateBrief(tenantId, brief.id, { status: 'confirmed' } as never);
   const product = async (orgId: string, name: string, price: number): Promise<string> => {
-    const r = await owner.post(`${H}/commerce/orgs/${encodeURIComponent(orgId)}/products`, { type: 'digital', name, price, currency: 'USD' });
+    const r = await owner.post(`${H}/commerce/orgs/${encodeURIComponent(orgId)}/products`, { type: 'digital', name, price, currency: 'USD', description: `${name} — the description`, cost: 1 });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
     return r.body.productId as string;
   };
   const p = { entry: await product(orgA, 'Starter course', 7), bump: await product(orgA, 'Palette', 3), up: await product(orgA, 'Full course', 97), down: await product(orgA, 'Mini course', 27), foreign: await product(orgB, 'Other client', 9) };
-  return { tenantId, owner, orgA, briefId: brief.id, p };
+  return { tenantId, owner, orgA, orgB, briefId: brief.id, p };
 }
 const gen = (c: Client, orgId: string, body: Record<string, unknown>) => c.post(`${H}/funnels/orgs/${encodeURIComponent(orgId)}/generate`, body);
 async function settle(c: Client, tenantId: string, runId: string): Promise<{ status: string; error?: unknown }> {
@@ -122,12 +131,75 @@ describe('ADR 0948 — the tripwire blueprint', () => {
     }
   });
 
-  it('another client\'s product is refused when the funnel is written: the run fails, no funnel', async () => {
+  it('another client\'s product is refused BEFORE anything is drafted: no run, no page, no funnel', async () => {
     const t = await team();
-    const r = await gen(t.owner, t.orgA, { blueprintId: BLUEPRINT, briefId: t.briefId, params: { name: 'Wrong product', productId: t.p.entry, upsellProductId: t.p.foreign, downsellProductId: t.p.down } });
-    expect(r.status, JSON.stringify(r.body)).toBe(201);
-    const fin = await settle(t.owner, t.tenantId, r.body.runId as string); expect(fin.status).toBe('failed'); // The funnels write refuses it (coerceOffer: an offered product must be this org's).
-    expect(JSON.stringify(fin.error)).toMatch(/not_found.*Offer/);
+    const r = await gen(t.owner, t.orgA, { blueprintId: BLUEPRINT, briefId: t.briefId, params: { name: 'Wrong product', productId: t.p.entry, upsellProductId: t.p.up, downsellProductId: t.p.foreign } });
+    expect(r.status, JSON.stringify(r.body)).toBe(404);
+    expect(JSON.stringify(r.body)).toContain('offer_not_found');
     expect(await listFunnels(t.tenantId, t.orgA)).toEqual([]);
+    expect(await listPages(t.tenantId, t.orgA)).toEqual([]);
+  });
+
+  it('a gallery copy with another client\'s product fails at check-offers before any page is drafted', async () => {
+    const t = await team();
+    const inst = await t.owner.post(`${H}/workflows/from-chain`, { chainId: BLUEPRINT, params: { orgId: t.orgA, briefId: t.briefId, name: 'Gallery wrong', productId: t.p.entry, upsellProductId: t.p.up, downsellProductId: t.p.foreign } });
+    expect(inst.status, JSON.stringify(inst.body)).toBe(201);
+    const run = await t.owner.post('/runs', { workflowId: inst.body.workflowId, inputs: {} });
+    expect(run.status, JSON.stringify(run.body)).toBe(201);
+    const fin = await vi.waitFor(async () => {
+      const st = (await t.owner.get(`/runs/${run.body.runId as string}`)).body as { status: string; error?: unknown };
+      expect(['completed', 'failed', 'cancelled']).toContain(st.status);
+      return st;
+    }, { timeout: 30_000, interval: 100 });
+    expect(fin.status).toBe('failed');
+    expect(JSON.stringify(fin.error)).toContain('offer_not_found');
+    expect(await listPages(t.tenantId, t.orgA)).toEqual([]);
+  });
+
+  it('each copy model reads the brief and the product it sells, as closed projections', async () => {
+    const t = await team();
+    const before = ai.calls.length;
+    const r = await gen(t.owner, t.orgA, { blueprintId: BLUEPRINT, briefId: t.briefId, params: { name: 'Read check', productId: t.p.entry, bumpProductId: t.p.bump, upsellProductId: t.p.up, downsellProductId: t.p.down } });
+    expect(r.status, JSON.stringify(r.body)).toBe(201);
+    expect((await settle(t.owner, t.tenantId, r.body.runId as string)).status).toBe('completed');
+    const calls = ai.calls.slice(before);
+    const sentFor = (marker: string): string => {
+      const c = calls.find((x) => JSON.stringify(x).includes(marker));
+      expect(c, marker).toBeTruthy();
+      return JSON.stringify(c!.messages);
+    };
+    const expected: Array<[string, string]> = [
+      ['short sales page', 'Starter course'],
+      ['copy above a checkout form', 'Starter course'],
+      ['one-time offer page', 'Full course'],
+      ['lighter, lower-commitment alternative', 'Mini course'],
+    ];
+    for (const [marker, productName] of expected) {
+      const sent = sentFor(marker);
+      expect(sent, marker).toContain('Landscape course'); // the brief
+      expect(sent, marker).toContain(productName); // the product this step sells
+      expect(sent, marker).toContain(`${productName} — the description`);
+      for (const leak of ['"cost"', 'tenantId', 'createdBy', 'updatedAt', 'downloadAssetTokens', '"price"', t.tenantId]) {
+        expect(sent, `${marker}: ${leak}`).not.toContain(leak);
+      }
+    }
+    expect(sentFor('copy above a checkout form')).toContain('Palette'); // the bump
+  });
+
+  it('a gallery (from-chain) copy runs to completion', async () => {
+    const t = await team();
+    const inst = await t.owner.post(`${H}/workflows/from-chain`, { chainId: BLUEPRINT, params: { orgId: t.orgA, briefId: t.briefId, name: 'Gallery run', productId: t.p.entry, upsellProductId: t.p.up, downsellProductId: t.p.down } });
+    expect(inst.status, JSON.stringify(inst.body)).toBe(201);
+    const run = await t.owner.post('/runs', { workflowId: inst.body.workflowId, inputs: {} });
+    expect(run.status, JSON.stringify(run.body)).toBe(201);
+    const fin = await vi.waitFor(async () => {
+      const st = (await t.owner.get(`/runs/${run.body.runId as string}`)).body as { status: string; error?: unknown };
+      expect(['completed', 'failed', 'cancelled']).toContain(st.status);
+      return st;
+    }, { timeout: 30_000, interval: 100 });
+    expect(fin.status, JSON.stringify(fin.error)).toBe('completed');
+    const made = await listFunnels(t.tenantId, t.orgA);
+    expect(made.map((f) => f.name)).toEqual(['Gallery run']);
+    expect(made[0]!.steps[2]!.offer).toEqual({ productIds: [t.p.up], oneClickProductId: t.p.up });
   });
 });

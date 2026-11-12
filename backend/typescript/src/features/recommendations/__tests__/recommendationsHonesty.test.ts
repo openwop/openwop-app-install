@@ -10,6 +10,13 @@
  *  - REC2-M7  an agent-authored holdout is a DRAFT, per ADR 0273
  *  - REC2-M8  an unknown slot is refused, not coerced to `home`
  *  - REC2-M9  `upsertPlacement` upserts instead of minting duplicates
+ *
+ * Sabotage that turns it red (w74 probes, re-witnessed w102 after #5469): counting pending orders; a recompute that
+ * skips removal, or counts a removal it never made; dropping each reason flag
+ * (segmentTargetedSkipped / segmentNotMatched / unresolvedSegmentIds / holdoutInert);
+ * a holdoutInert that ignores the sessionKey; evaluating the generic placement first;
+ * the workflow lane adopting a human's row, activating an agent holdout, returning two
+ * shapes, coercing an unknown slot, or minting a duplicate.
  */
 import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
 import { initHostExtPersistence } from '../../../host/hostExtPersistence.js';
@@ -43,11 +50,27 @@ async function pendingOrder(ps: Product[]): Promise<void> {
   await createOrder({ tenantId: T, orgId: ORG, createdBy: 'u', lines: ps.map((p) => ({ productId: p.productId, quantity: 1 })) });
 }
 
-const surface = (): ReturnType<typeof buildRecommendationsSurface> =>
-  buildRecommendationsSurface({ tenantId: T } as Parameters<typeof buildRecommendationsSurface>[0]);
+/** Call one workflow-surface method; a missing method is a test failure, not a skip. */
+async function call(name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const fn = buildRecommendationsSurface({ tenantId: T })[name];
+  if (typeof fn !== 'function') throw new Error(`recommendations surface has no '${name}'`);
+  return fn(args);
+}
+/** The `placement` projection a surface write returns (narrowed, never cast). */
+function placementOf(result: Record<string, unknown>): Record<string, unknown> {
+  const p = result.placement;
+  if (typeof p !== 'object' || p === null) throw new Error('surface result carries no placement');
+  return Object.fromEntries(Object.entries(p));
+}
+/** Run `fn` with only `Date` faked at `at` (ms), restoring the real clock after —
+ *  so two placements authored back to back cannot tie on a millisecond stamp. */
+async function at<R>(ms: number, fn: () => Promise<R>): Promise<R> {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  try { vi.setSystemTime(ms); return await fn(); } finally { vi.useRealTimers(); }
+}
 
 beforeAll(async () => { initHostExtPersistence(await openStorage('memory://')); });
-beforeEach(async () => { await __resetCommerce(); await __resetRecommendations(); vi.restoreAllMocks(); });
+beforeEach(async () => { vi.useRealTimers(); await __resetCommerce(); await __resetRecommendations(); vi.restoreAllMocks(); });
 
 describe('REC2-M3 — only settled revenue shapes recommendations', () => {
   it('an unpaid cart does not become the store\'s trending product', async () => {
@@ -81,6 +104,9 @@ describe('REC2-B3 — a full recompute removes what no longer qualifies', () => 
     const second = await rebuildAffinity(T, ORG);
     expect(second.written).toBe(0);
     expect(second.removed).toBeGreaterThan(0);
+    // Read back: the rows are really GONE. A pass that counted `removed` without the
+    // delete would find them again here (w74 probe rech-recompute-nodelete).
+    expect(await rebuildAffinity(T, ORG)).toEqual({ written: 0, removed: 0 });
   });
 });
 
@@ -117,8 +143,16 @@ describe('REC2-B2 / M2 — the resolver says WHY nothing matched', () => {
     await rebuildAffinity(T, ORG);
     await createPlacement({ tenantId: T, orgId: ORG, createdBy: 'u', slot: 'home', source: 'trending', holdoutPct: 20 });
 
-    const r = await resolveRecommendations({ tenantId: T, orgId: ORG, slot: 'home', sessionKey: 'sess-1' });
-    expect(r.holdoutInert).toBeUndefined();
+    // The placementId is random, so any fixed key lands in CONTROL ~20% of the time,
+    // and the control return carries no notes at all: the case then passed for the
+    // wrong reason (w74 probe rech-inert-always). Assert on a TREATMENT resolve.
+    let treated: Awaited<ReturnType<typeof resolveRecommendations>> | undefined;
+    for (let i = 0; i < 50 && !treated; i++) {
+      const r = await resolveRecommendations({ tenantId: T, orgId: ORG, slot: 'home', sessionKey: `sess-${i}` });
+      if (r.variant === 'treatment') treated = r;
+    }
+    expect(treated?.products.length).toBeGreaterThan(0); // a treatment resolve was found
+    expect(treated?.holdoutInert).toBeUndefined();
   });
 });
 
@@ -149,8 +183,10 @@ describe('review fold-ins — defects the independent pass found in the fix', ()
     // targeting. It is also the order under which this assertion can FAIL, which the
     // previous arrangement could not: with the targeted placement created first, the
     // case passed whether or not the resolver preferred targeting.
-    await createPlacement({ tenantId: T, orgId: ORG_M1, createdBy: 'u', slot: 'home', source: 'trending' }); // the generic fallback
-    await createPlacement({ tenantId: T, orgId: ORG_M1, createdBy: 'u', slot: 'home', source: 'trending', segmentId: 'seg-deleted' });
+    // Stamped 1 ms apart with a faked Date, so the generic row is REALLY the earlier one.
+    const base = Date.now();
+    await at(base, () => createPlacement({ tenantId: T, orgId: ORG_M1, createdBy: 'u', slot: 'home', source: 'trending' })); // the generic fallback
+    await at(base + 1, () => createPlacement({ tenantId: T, orgId: ORG_M1, createdBy: 'u', slot: 'home', source: 'trending', segmentId: 'seg-deleted' }));
 
     // The ROOT CAUSE this flake was hiding (reproduced 2026-08-11): the resolver takes
     // the first matching placement, so a generic one authored earlier shadowed every
@@ -179,8 +215,10 @@ describe('review fold-ins — defects the independent pass found in the fix', ()
     const ORG_S = `${ORG}-shadow`;
     await segments.createSegment({ tenantId: T, name: 'VIP', filters: [], createdBy: 'u', segmentId: 'seg:vip' });
     await createContact({ tenantId: T, name: 'VIP Shopper' });
-    const generic = await createPlacement({ tenantId: T, orgId: ORG_S, createdBy: 'u', slot: 'home', source: 'trending' });
-    const targeted = await createPlacement({ tenantId: T, orgId: ORG_S, createdBy: 'u', slot: 'home', source: 'upsell', segmentId: 'seg:vip' });
+    const base = Date.now();
+    const generic = await at(base, () => createPlacement({ tenantId: T, orgId: ORG_S, createdBy: 'u', slot: 'home', source: 'trending' }));
+    const targeted = await at(base + 1, () => createPlacement({ tenantId: T, orgId: ORG_S, createdBy: 'u', slot: 'home', source: 'upsell', segmentId: 'seg:vip' }));
+    expect(generic.createdAt < targeted.createdAt).toBe(true); // the adverse order is real
     const members = await segments.resolveSegmentMembers(T, 'seg:vip');
     const r = await resolveRecommendations({ tenantId: T, orgId: ORG_S, slot: 'home', contactId: members[0]!.contactId });
     expect(r.placementId).toBe(targeted.placementId);
@@ -202,7 +240,7 @@ describe('review fold-ins — defects the independent pass found in the fix', ()
 
   it('BL-2: the workflow lane never adopts (or re-drafts) a human\'s placement', async () => {
     const human = await createPlacement({ tenantId: T, orgId: ORG, createdBy: 'merchandiser@example.com', slot: 'checkout', source: 'upsell' });
-    await surface().upsertPlacement!({ orgId: ORG, slot: 'checkout', source: 'upsell', holdoutPct: 20 });
+    await call('upsertPlacement', { orgId: ORG, slot: 'checkout', source: 'upsell', holdoutPct: 20 });
 
     const rows = await listPlacements(T, ORG);
     const theirs = rows.find((p) => p.placementId === human.placementId)!;
@@ -212,16 +250,16 @@ describe('review fold-ins — defects the independent pass found in the fix', ()
   });
 
   it('BL-2/M7: an agent holdout lands INACTIVE from the workflow lane too', async () => {
-    await surface().upsertPlacement!({ orgId: ORG, slot: 'cart', source: 'cross_sell', holdoutPct: 20 });
+    await call('upsertPlacement', { orgId: ORG, slot: 'cart', source: 'cross_sell', holdoutPct: 20 });
     const [row] = await listPlacements(T, ORG);
     expect(row!.active).toBe(false); // a human activates it (ADR 0273)
   });
 
   it('BL-1: create and update return the SAME shape (the node records it verbatim)', async () => {
-    const created = await surface().upsertPlacement!({ orgId: ORG, slot: 'pdp', source: 'similar' }) as { placement: Record<string, unknown> };
-    const updated = await surface().upsertPlacement!({ orgId: ORG, slot: 'pdp', source: 'similar' }) as { placement: Record<string, unknown> };
-    expect(Object.keys(created.placement).sort()).toEqual(Object.keys(updated.placement).sort());
-    expect(created.placement.placementId).toBe(updated.placement.placementId);
+    const created = placementOf(await call('upsertPlacement', { orgId: ORG, slot: 'pdp', source: 'similar' }));
+    const updated = placementOf(await call('upsertPlacement', { orgId: ORG, slot: 'pdp', source: 'similar' }));
+    expect(Object.keys(created).sort()).toEqual(Object.keys(updated).sort());
+    expect(created.placementId).toBe(updated.placementId);
   });
 });
 
@@ -230,13 +268,16 @@ describe('REC2-M8 / M9 — the workflow lane', () => {
   it('an unknown slot is REFUSED, not silently swapped for `home`', async () => {
     // Coercion meant a chain configured `slot: "PDP"` succeeded and inserted the HOME
     // slot's products into a post-purchase email — recorded, and replayed forever.
-    await expect(surface().resolve!({ orgId: ORG, slot: 'PDP' })).rejects.toThrow(/Unknown recommendation slot/i);
+    await expect(call('resolve', { orgId: ORG, slot: 'PDP' })).rejects.toMatchObject({
+      code: 'validation_error',
+      message: expect.stringMatching(/^Unknown recommendation slot 'PDP'/),
+    });
   });
 
   it('upsertPlacement UPSERTS — a daily chain does not mint a duplicate every run', async () => {
-    await surface().upsertPlacement!({ orgId: ORG, slot: 'pdp', source: 'similar' });
-    await surface().upsertPlacement!({ orgId: ORG, slot: 'pdp', source: 'similar' });
-    await surface().upsertPlacement!({ orgId: ORG, slot: 'pdp', source: 'similar' });
+    await call('upsertPlacement', { orgId: ORG, slot: 'pdp', source: 'similar' });
+    await call('upsertPlacement', { orgId: ORG, slot: 'pdp', source: 'similar' });
+    await call('upsertPlacement', { orgId: ORG, slot: 'pdp', source: 'similar' });
 
     // The resolver takes the FIRST by createdAt, so duplicates also meant editing the
     // newest row (the one an operator reaches for) changed nothing on the storefront.

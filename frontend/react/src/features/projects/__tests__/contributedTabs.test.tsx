@@ -30,6 +30,7 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
 vi.mock('../../registry.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   featureProjectTabs: () => [
+    { featureId: 'demo', key: 'client-view', label: 'Client view', forRoles: ['observer'], render: () => <p>client</p> },
     { featureId: 'demo', key: 'home', label: 'Studio home', order: 1, render: (p: { project: { name: string }; canWrite: boolean }) => <p>Home for {p.project.name}, {p.canWrite ? 'writable' : 'read only'}</p> },
     { featureId: 'demo', key: 'members', label: 'Shadow members', render: () => <p>shadow</p> },
   ],
@@ -46,6 +47,25 @@ beforeEach(() => {
   visible.ids = new Set(['demo']);
 });
 afterEach(cleanup);
+
+describe('ADR 1095 — role-limited tabs', () => {
+  const base = { id: 'p1', tenantId: 't', orgId: 'org-1', name: 'Atlas', workflows: [], boardId: 'b1' };
+  it('shows to a listed role, hides from others, and always shows to a writer', async () => {
+    getProject.mockResolvedValue({ ...base, canWrite: false, myRole: 'observer' });
+    show('/projects/p1'); await settle();
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Client view' })).toBeTruthy());
+    cleanup();
+    getProject.mockResolvedValue({ ...base, canWrite: false, myRole: 'contributor' });
+    show('/projects/p1?tab=client-view'); await settle();
+    await waitFor(() => expect(screen.getAllByRole('tab').length).toBeGreaterThan(0));
+    expect(screen.queryByRole('tab', { name: 'Client view' })).toBeNull();
+    expect(screen.getByRole('tab', { selected: true }).textContent).toMatch(/overview/i);
+    cleanup();
+    getProject.mockResolvedValue({ ...base, canWrite: true });
+    show('/projects/p1'); await settle();
+    await waitFor(() => expect(screen.getByRole('tab', { name: 'Client view' })).toBeTruthy());
+  });
+});
 
 describe('ADR 1090 — contributed project tabs', () => {
   it('adds the tab after the host tabs and deep-links to it', async () => {

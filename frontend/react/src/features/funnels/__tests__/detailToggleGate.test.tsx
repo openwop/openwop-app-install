@@ -46,6 +46,12 @@ const api = vi.hoisted(() => ({
   deleteFunnel: vi.fn<typeof FC.deleteFunnel>(),
   updateFunnel: vi.fn<typeof FC.updateFunnel>(),
 }));
+// ADR 1023 — the page asks the effective-access answer before offering writes;
+// these cases are about an editor, so the caller may write.
+vi.mock('../../../client/accessClient.js', async (importOriginal) => {
+  const orig = await importOriginal<Record<string, unknown>>();
+  return { ...orig, getEffectiveAccess: vi.fn(async () => ({ roles: ['member'], scopes: ['workspace:read', 'workspace:write'], basis: 'member' as const })) };
+});
 vi.mock('../funnelsClient.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
   return { ...orig, ...api };

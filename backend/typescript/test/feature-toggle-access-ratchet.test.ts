@@ -66,7 +66,9 @@ const ALLOWED: Record<string, number> = {
   'features/podcasts/publicRoutes.ts': 1,
   'features/podcasts/podcastsService.ts': 1,
   'features/recommendations/routes.ts': 1,
-  'features/docs/docsService.ts': 1,
+  // ADR 1057 D1 — the docs public-lane gate moved to core so the crawler doors and
+  // the sitemap share it (was `features/docs/docsService.ts`).
+  'host/publicDocsLane.ts': 1,
   // Every anonymous share-link entry gates here first (booking manage, e-sign, frames).
   'features/sharing/sharingService.ts': 1,
   // Public form-submission sinks.

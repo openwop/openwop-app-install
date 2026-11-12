@@ -2,6 +2,20 @@
  * consume durable capacity. The second SQLite connection sees the actual CAS
  * reservation while the first writer is paused before its real blob PUT.
  * This does not qualify public admission, consent generation or a cloud provider.
+ *
+ * Sabotage witnesses (w103; src/features/analytics/replayStore.ts): taking the
+ * reservation's or the finalize's `startedAt` from the client reds the server-time
+ * cases and the server-start expiry; `updatedAt: now` without the max reds "does
+ * not move either clock"; spreading the late writer's row over a higher sequence
+ * reds "preserves the first reservation"; dropping the identical-retry return reds
+ * the retry cases; comparing only byte counts at a committed sequence reds "refuses
+ * different bytes" (the replacement is the same length on purpose); counting
+ * supplied bytes, or dropping the prior receipts on finalize, reds the counts and
+ * both-receipts cases; leaving reserved or committed bytes out of the ceiling, or
+ * `>=` at it, reds the two ceiling cases; dropping the base64 round trip, `>` at
+ * the chunk-index bound, `< -1`, or a chunk one byte over reds the malformed-chunk
+ * table; skipping the no-receipts refusal reds the legacy case (its pinned row);
+ * expiring by `updatedAt` reds the server-start expiry.
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -13,7 +27,7 @@ import type { Storage } from '../src/storage/storage.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { buildHostSurfaceBundle, initInMemorySurfaces, type BlobSurface } from '../src/host/inMemorySurfaces.js';
 import { registerSurfaceAdapter } from '../src/host/surfaceBackends.js';
-import { mergeConsentCategories } from '../src/features/consent/consentService.js';
+import { getStrictGrantGeneration, mergeConsentCategories } from '../src/features/consent/consentService.js';
 import {
   REPLAY_BLOB_ROOT, REPLAY_MAX_CHUNK_BYTES, REPLAY_MAX_SESSION_BYTES, REPLAY_MAX_SESSION_CHUNKS,
   getReplaySession, putReplayChunk, replayChunkPrefix, sweepExpiredReplays, type ReplaySession,
@@ -164,7 +178,8 @@ describe('ADR 0951 P2.3 — immutable replay chunks and durable byte ceilings', 
     const before = await stored(r, 0);
     expect(before).toMatchObject({ contentBase64: SMALL });
     initHostExtPersistence(b);
-    await expect(putReplayChunk(r, 0, Buffer.from('replacement').toString('base64'))).rejects.toMatchObject({ httpStatus: 409 });
+    // Same length as the original (15 bytes), so only the digest tells them apart.
+    await expect(putReplayChunk(r, 0, Buffer.from('masked-geometry').toString('base64'))).rejects.toMatchObject({ httpStatus: 409 });
     expect(writes).toBe(1);
     expect(await stored(r, 0)).toEqual(before);
     expect(await read(r)).toMatchObject({ bytes: 15, chunkCount: 1 });
@@ -261,5 +276,17 @@ describe('ADR 0951 P2.3 — immutable replay chunks and durable byte ceilings', 
     // getReplaySession, so the fenced reader would answer null either way.
     expect(JSON.parse((await b.kvGet(rawKey(r)))!)).toEqual(r);
     expect(await read(r)).toBeNull();
+    // The unpinned row above is refused by the generation fence before the
+    // receipt check is reached. A row with every fence pin but no receipts
+    // reaches the receipt check itself, and is refused there.
+    const generation = await getStrictGrantGeneration(tenantId, 'visitor:budget', 'analytics.replay');
+    expect(generation).toBeTypeOf('string');
+    const pinned = row();
+    const legacy = { ...pinned, bytes: 2048, chunkCount: 1,
+      privacy: { state: 'active', committed: true, pending: [], consentGeneration: generation, eligibilityId: `test-${tenantId}-client-a` } };
+    await b.kvSet(rawKey(pinned), JSON.stringify(legacy));
+    await expect(putReplayChunk(pinned, 0, SMALL)).rejects.toMatchObject({ httpStatus: 409 });
+    expect(writes).toBe(0);
+    expect(JSON.parse((await b.kvGet(rawKey(pinned)))!)).toEqual(legacy);
   });
 });

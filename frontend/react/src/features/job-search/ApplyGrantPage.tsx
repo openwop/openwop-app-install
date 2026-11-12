@@ -40,9 +40,12 @@ import { listOrgs, listGrants, createGrant, revokeGrant, queueCampaign, type App
  *  product does not start them high and hope. */
 const DEFAULTS = { maxSubmits: 25, maxPrepared: 10, ratePerHour: 4 };
 
-function statusOf(g: ApplyGrantView, now: number): 'active' | 'revoked' | 'expired' {
+function statusOf(g: ApplyGrantView, now: number): 'active' | 'revoked' | 'expired' | 'exhausted' {
   if (g.revokedAt) return 'revoked';
   if (Date.parse(g.expiresAt) <= now) return 'expired';
+  // Every submission spent: the server refuses to queue a pass on it, so it is
+  // not "Active" (grade-ux row 81).
+  if (g.submitsUsed >= g.maxSubmits) return 'exhausted';
   return 'active';
 }
 
@@ -123,12 +126,15 @@ export function ApplyGrantPage(): JSX.Element {
       key: 'status', header: t('colStatus'),
       render: (g) => {
         const s = statusOf(g, now);
-        return <StatusBadge status={s === 'active' ? 'success' : 'neutral'} label={t(s === 'active' ? 'statusActive' : s === 'revoked' ? 'statusRevoked' : 'statusExpired')} />;
+        return <StatusBadge status={s === 'active' ? 'success' : 'neutral'} label={t(s === 'active' ? 'statusActive' : s === 'revoked' ? 'statusRevoked' : s === 'exhausted' ? 'statusExhausted' : 'statusExpired')} />;
       },
     },
     {
       key: 'actions', header: '',
-      render: (g) => (statusOf(g, now) === 'active'
+      render: (g) => (statusOf(g, now) === 'exhausted'
+        // Used up: nothing left to queue, but still revocable.
+        ? <Button variant="quiet" size="sm" onClick={() => setConfirming(g)}>{t('revokeAction')}</Button>
+        : statusOf(g, now) === 'active'
         ? (
           <span className="u-flex u-gap-2">
             {/* WF-JS-1 — queue ONE campaign pass as a card on the career agent's
@@ -213,6 +219,11 @@ export function ApplyGrantPage(): JSX.Element {
         orgs={orgs} orgsFailed={orgsFailed} retry={retryOrgs}
         emptyBody={t('orgsEmptyClause')} failedBody={t('orgsFailedClause')} icon={<ShieldIcon />}
       >
+        {/* ADR 1036 D10 — applications are workspace-visible (ADR 0546); say so where a
+            candidate starts or reviews a search, so nobody learns it by surprise.
+            Inside the org gate: with no workspace there is nothing to disclose.
+            Static text, not a Notice: a permanent fact is not a live announcement. */}
+        <p className="muted u-m-0">{t('workspaceVisibility')}</p>
         {/* JSUX-Q-1 — the queued card's DESTINATION survives the toast. */}
         {queuedBoardId ? (
           <Notice variant="info">

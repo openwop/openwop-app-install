@@ -9,17 +9,26 @@ import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { surfaceStr as str, type FeatureSurface } from '../../host/featureSurfaces.js';
 import { OpenwopError } from '../../types.js';
 import { createBrief, listBriefs, getBrief } from './creativeBriefsService.js';
-import { renderForBrief, renderVariantsForBrief, reelPromptForBrief, storeReelRender } from './render/renderService.js';
+import { assertRenderCapacity, getRender, renderForBrief, renderVariantsForBrief, reelPromptForBrief, storeReelRender } from './render/renderService.js';
 import { listTemplates } from './render/templates.js';
 import { assertEditModeEnabled } from './groundingSettings.js';
 import { assertProductGroundedEnabled, productShotSource, composeProductShot, checkFidelity, protectionMask } from './fidelityService.js';
 import type { FeatureSurfaceOrgPolicy } from '../../host/featureSurfaces.js';
 
-/** ADR 0945 P1 — the product-grounded methods ask the HTTP door's write scope
- *  (they write assets and verdicts, and read the catalog's bytes). The older
- *  methods keep the membership floor (a pre-existing gap, filed in ADR 0945). */
+/** Every method that writes, or that a paid call follows, asks what its HTTP
+ *  door asks (`workspace:write`). ADR 0945 P1 named the product-grounded four;
+ *  ADR 1039 D1 (CB82WF-1) closed the gap it filed for the older ones, which let
+ *  a Viewer's run create, render and reach the paid reel lane. `reelPrompt` is
+ *  the reel node's first host call, so it is where a Viewer is refused before
+ *  the video is paid for. Only `list`, `get` and `listRenderTemplates` keep the
+ *  membership floor; `adr1039-creative-briefs-write-floor.test.ts` fails on any
+ *  method that is neither. */
 export const CREATIVE_BRIEFS_SURFACE_POLICY: FeatureSurfaceOrgPolicy = {
-  methodScopes: { productShotSource: 'workspace:write', composeProductShot: 'workspace:write', checkFidelity: 'workspace:write', protectionMask: 'workspace:write' },
+  methodScopes: {
+    create: 'workspace:write', render: 'workspace:write', renderVariants: 'workspace:write',
+    reelPrompt: 'workspace:write', storeReel: 'workspace:write',
+    productShotSource: 'workspace:write', composeProductShot: 'workspace:write', checkFidelity: 'workspace:write', protectionMask: 'workspace:write',
+  },
 };
 
 function requireOrg(args: Record<string, unknown>): string {
@@ -34,7 +43,9 @@ export function buildCreativeBriefsSurface(scope: BundleScope): FeatureSurface {
     create: async (args) => {
       const orgId = str(args.orgId);
       if (!orgId) throw new OpenwopError('validation_error', 'Field `orgId` is required.', 400, { field: 'orgId' });
-      const brief = await createBrief(tenantId, orgId, str(args.actor) || 'workflow', {
+      // ADR 1039 D5 (CB82WF-5) — the surface's one attribution rule, never a
+      // caller-supplied `args.actor` (any workflow could write any member's id).
+      const brief = await createBrief(tenantId, orgId, scope.actingUserId ?? scope.runId ?? 'workflow', {
         title: args.title, assetType: args.assetType, sceneDescription: args.sceneDescription,
         composition: args.composition, cameraAngle: args.cameraAngle, lighting: args.lighting,
         brandPalette: args.brandPalette, messagingIntent: args.messagingIntent,
@@ -75,11 +86,21 @@ export function buildCreativeBriefsSurface(scope: BundleScope): FeatureSurface {
     },
     // ADR 0411 P3 — the reel (video) legs, split so the generate-reel node can
     // gate video generation between them (derive → generate → store).
+    // ADR 1039 D3 — the last host call before the paid video, so it also decides
+    // whether the video may be paid for: a retried node whose render already
+    // exists gets it back (no second video), and a brief at its cap is refused.
     reelPrompt: async (args) => {
       const orgId = str(args.orgId);
       if (!orgId) throw new OpenwopError('validation_error', 'Field `orgId` is required.', 400, { field: 'orgId' });
       const brief = await getBrief(tenantId, orgId, str(args.briefId));
       if (!brief) throw new OpenwopError('not_found', 'Creative brief not found.', 404, { briefId: str(args.briefId) });
+      const renderId = str(args.renderId);
+      if (renderId) {
+        // Only a stored REEL under the deterministic `crender:` id (storeReelRender's own rule).
+        const existing = renderId.startsWith('crender:') ? await getRender(tenantId, orgId, brief.briefId, renderId) : null;
+        if (existing?.reel) return { prompt: existing.reel.prompt, existing };
+      }
+      await assertRenderCapacity(tenantId, orgId, brief.briefId);
       return { prompt: reelPromptForBrief(brief, typeof args.directionIndex === 'number' ? args.directionIndex : undefined) };
     },
     storeReel: async (args) => {

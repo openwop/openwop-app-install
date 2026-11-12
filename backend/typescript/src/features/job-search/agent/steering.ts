@@ -18,8 +18,22 @@
  * precisely so a past pick can be explained. A stamp that cannot reproduce its
  * own decision explains nothing.
  *
- * So the split is: prose steers the HUMAN's editing of the policy and gives the
- * agent context to talk about; the POLICY ranks, deterministically.
+ * So the split is: prose steers the HUMAN's editing of the policy; the POLICY
+ * ranks, deterministically. (This header used to add "and gives the agent
+ * context to talk about". Nothing composes `goals` into any model context —
+ * ADR 1036 D9 — so that half was a promise, not a property.)
+ *
+ * ## One row per PERSON (ADR 1036 D7)
+ *
+ * This store was one row per TENANT, so in a workspace with several members any
+ * org's writer read a colleague's career goals and overwrote the policy their
+ * campaign ran under. A job search is one person's: the row is keyed
+ * `<tenantId>:<subjectId>`, the routes read and write the caller's own, and the
+ * campaign pass reads the pass subject's. A legacy tenant-keyed row is NEVER
+ * served as a shared fallback — its `roles`/`locations`/`goals` are one
+ * member's, and serving them as everyone's defaults would be the same leak by
+ * another door. Its last author adopts it on their first read; any erasure in
+ * the tenant deletes it.
  *
  * ## Why one store and not two
  *
@@ -49,10 +63,13 @@ export interface AutopilotPolicy {
 
 export interface AgentSteering {
   tenantId: string;
+  /** The person this steering belongs to. Absent only on a legacy tenant-keyed
+   *  row, which nothing reads (D7) and erasure removes. */
+  subjectId?: string;
   /**
-   * Free prose. Read by a human and available to the agent as CONTEXT; never a
-   * ranking input, and never parsed into behaviour. Bounded because it is
-   * user-authored text that will be composed into a model context.
+   * Free prose, read by a human; never a ranking input, never parsed into
+   * behaviour, and not composed into any model context today. Bounded because it
+   * is user-authored text.
    */
   goals: string;
   policy: AutopilotPolicy;
@@ -74,20 +91,41 @@ export const DEFAULT_POLICY: AutopilotPolicy = {
   tiers: ['A'],
 };
 
+// A legacy row (pre-D7) has no `subjectId` and was keyed by the tenant alone.
+const steeringKey = (s: AgentSteering): string => (s.subjectId ? `${s.tenantId}:${s.subjectId}` : s.tenantId);
 const steering = new DurableCollection<AgentSteering>(
   'job-search:steering',
-  (s) => s.tenantId,
+  steeringKey,
   undefined,
   (s) => s.tenantId,
 );
 
-export async function getSteering(tenantId: string): Promise<AgentSteering> {
-  const row = await steering.get(tenantId);
+export async function getSteering(tenantId: string, subjectId: string): Promise<AgentSteering> {
+  const row = subjectId ? await steering.get(`${tenantId}:${subjectId}`) : null;
   if (row) return row;
-  // A tenant that has never steered gets the DEFAULTS rather than null, so every
+  // A legacy tenant row (pre-D7) is ADOPTED by the one person it names as its
+  // last author, never served to anyone else: a tenant that had tightened its
+  // policy would otherwise fall back to looser defaults without being told
+  // (grade-code row 81). Anyone else still reads defaults (see the header).
+  //
+  // NOTE: this READ performs a WRITE, once per legacy row — the adoption moves
+  // the row to its author's key and deletes the tenant key. Deliberate: a
+  // one-time lazy migration needs no migration step, and production held 0
+  // steering rows when it shipped. Idempotent (the second read finds the
+  // per-person row first); a lost race between two reads by the same person
+  // writes the same row twice.
+  const legacy = subjectId ? await steering.get(tenantId) : null;
+  if (legacy && !legacy.subjectId && legacy.updatedBy === subjectId) {
+    const adopted: AgentSteering = { ...legacy, subjectId };
+    await steering.put(adopted);
+    await steering.delete(tenantId);
+    return adopted;
+  }
+  // A person who has never steered gets the DEFAULTS rather than null, so every
   // caller reads a complete policy and none has to invent one locally.
   return {
     tenantId,
+    subjectId,
     goals: '',
     policy: { ...DEFAULT_POLICY },
     updatedBy: '',
@@ -117,10 +155,12 @@ export async function putSteering(
   input: { goals?: unknown; policy?: unknown },
   actor: string,
 ): Promise<AgentSteering> {
-  const current = await getSteering(tenantId);
+  // The actor IS the subject: a person steers only their own search (D7).
+  const current = await getSteering(tenantId, actor);
   const p = (input.policy ?? {}) as Record<string, unknown>;
   const next: AgentSteering = {
     tenantId,
+    subjectId: actor,
     goals: typeof input.goals === 'string' ? input.goals.slice(0, MAX_GOALS_CHARS) : current.goals,
     policy: {
       roles: input.policy ? strArr(p.roles, 50) : current.policy.roles,
@@ -146,31 +186,21 @@ export async function putSteering(
 /**
  * ADR 0464 — subject erasure.
  *
- * The ADR 0464 ratchet scans HOST-owned stores and did not flag this one, which
- * lives in a feature. That is a gap in coverage, not a licence: `goals` is a
- * person's career aspirations and `updatedBy` names them.
- *
- * REDACTED rather than deleted, and the distinction matters. Steering is
- * TENANT-scoped — one row governs the whole workspace — so deleting it because
- * one member was erased would silently reset the campaign policy for everyone
- * else. What must go is the person: the author attribution, and the prose they
- * wrote about their own search.
+ * DELETED, not redacted (ADR 1036 D7). The row used to be tenant-scoped, so it
+ * was redacted to keep the workspace's policy alive; it is now the person's own
+ * row, and nothing in it outlives them. A legacy tenant-keyed row that names the
+ * subject is deleted too — nothing reads it any more, and it holds their prose.
  */
-const ERASED = '[erased]';
-
 export async function eraseSubjectSteering(tenantId: string, subjectKey: string): Promise<void> {
   if (!tenantId || !subjectKey) return;
   const { forms } = subjectKeyForms(subjectKey);
-  const row = await steering.get(tenantId);
-  if (!row || !forms.has(row.updatedBy)) return;
-  await steering.put({
-    ...row,
-    // The prose is theirs and describes their own job search; the POLICY is the
-    // workspace's operating configuration and survives.
-    goals: '',
-    updatedBy: ERASED,
-    updatedAt: new Date().toISOString(),
-  });
+  for (const form of forms) await steering.delete(`${tenantId}:${form}`);
+  // The legacy tenant row (pre-D7) is deleted on ANY member's erasure: it may
+  // hold prose an earlier author wrote under a later author's `updatedBy`
+  // (JS81D-2), and only its last author can still adopt it, so nothing else
+  // can lose by its going.
+  const legacy = await steering.get(tenantId);
+  if (legacy && !legacy.subjectId) await steering.delete(tenantId);
 }
 
 registerSubjectEraser(eraseSubjectSteering);

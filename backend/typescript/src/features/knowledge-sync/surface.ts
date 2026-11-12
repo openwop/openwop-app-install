@@ -22,10 +22,21 @@ import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
 import { createLogger } from '../../observability/logger.js';
 import { syncNow } from './knowledgeSyncRunner.js';
-import { getSyncSource, pruneStaleKnowledgeSyncClaims } from './knowledgeSyncService.js';
+import { getSyncSource, pruneStaleKnowledgeSyncClaims, knowledgeSyncWorkflowId } from './knowledgeSyncService.js';
 import { syncEnabledFor } from './knowledgeSyncGate.js';
 
 const log = createLogger('knowledge-sync.surface');
+
+/** The `syncNow` refusals that are a benign no-op for a scheduled fire (ADR 1101
+ *  D1) — matched on `details.reason`, never on the status code alone: the broker's
+ *  `credential_required` is ALSO a 409, and it is a real failure. */
+const BENIGN_SKIPS: Readonly<Record<string, string>> = {
+  in_flight: 'in-flight',
+  paused_revoked: 'status-paused',
+  removing: 'status-paused',
+  creator_no_access: 'creator-no-access',
+  creator_erased: 'creator-erased',
+};
 
 export function buildKnowledgeSyncSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
@@ -41,13 +52,34 @@ export function buildKnowledgeSyncSurface(scope: BundleScope): FeatureSurface {
       if (!sourceId) throw new OpenwopError('validation_error', 'sourceId is required.', 400, { field: 'sourceId' });
       const actingAt = surfaceStr(args.actingAt) || new Date().toISOString();
 
-      // Claim-table hygiene (the belt the retired daemon ran per tick; the pre-run
-      // lease is the load-bearing recovery). Best-effort — never blocks the run.
-      await pruneStaleKnowledgeSyncClaims({ storage: hostExtStorage() });
+      // ADR 1101 D3 (`KS2WF-4`) — STRUCTURAL GATE, the `kb.reindex` shape
+      // (`features/kb/surface.ts` `assertReindexWorkflow`). This verb runs a real pass
+      // — egress, embedding spend, DELETIONS — on a source of ANY org in the tenant,
+      // and it takes a row id, so the ADR 0832 seam floor cannot see the org. It is
+      // therefore callable only (a) from the host-minted workflow for THIS source and
+      // (b) by a run with no acting user: the scheduler. A builder run, a `/`-picker
+      // run, a gallery copy or a re-executing `:fork` carries a person or the wrong id
+      // and is refused; "Sync now" (`workspace:write` on the source's org) is the one
+      // person lane. The refusal names neither the expected id nor the source. The
+      // scheduler's own "Run now" fires actorless — its door is narrowed by
+      // `knowledgeSyncJobReadable` instead.
+      // `orgScopeSubject` too (grade-code #5): an actorless run a PERSON caused (a
+      // channel post, a kanban dispatch) is not the scheduler either.
+      if (scope.workflowId !== knowledgeSyncWorkflowId(sourceId) || scope.actingUserId || scope.orgScopeSubject) {
+        return {
+          status: 'failure',
+          error: { code: 'forbidden', message: 'This verb runs only inside the scheduled workflow a knowledge-sync source registers. Use "Sync now" on the collection to run a pass.' },
+        };
+      }
 
       // WF-KB-4 spend gate, at the spend site (defence-in-depth beyond the seam's
       // toggle gate — this half also covers plan entitlement). Fail-CLOSED skip.
       if (!(await syncEnabledFor(tenantId))) return { status: 'skipped', reason: 'feature-disabled' };
+
+      // Claim-table hygiene (the belt the retired daemon ran per tick; the pre-run
+      // lease is the load-bearing recovery). Best-effort — never blocks the run.
+      // ADR 1101 D9 (`KS2CD-5`) — behind the spend gate: a disabled tenant writes nothing.
+      await pruneStaleKnowledgeSyncClaims({ storage: hostExtStorage() });
 
       const source = await getSyncSource(tenantId, sourceId);
       if (!source) return { status: 'skipped', reason: 'not-found' };
@@ -64,7 +96,7 @@ export function buildKnowledgeSyncSurface(scope: BundleScope): FeatureSurface {
       }
 
       try {
-        const result = await syncNow({ storage: hostExtStorage() }, tenantId, sourceId, actingAt);
+        const result = await syncNow({ storage: hostExtStorage() }, tenantId, sourceId, actingAt, scope.runId ? { runId: scope.runId } : {});
         return {
           status: 'success',
           ingested: result.ingested,
@@ -74,16 +106,20 @@ export function buildKnowledgeSyncSurface(scope: BundleScope): FeatureSurface {
           ...(result.listingIncomplete ? { listingIncomplete: result.listingIncomplete } : {}),
         };
       } catch (err) {
-        // `syncNow` throws 409 when another lane holds the lease (multi-instance) or
-        // the source is revoked-paused — a benign no-op for a scheduled fire, not a
-        // run failure. Everything else is a real failure `syncNow` already recorded
-        // on the source (status/lastError); surface it as a typed failure.
-        if (err instanceof OpenwopError && err.httpStatus === 409) {
-          return { status: 'skipped', reason: 'in-flight-or-paused' };
-        }
+        // `syncNow` throws a NAMED 409 when another lane holds the lease, the source
+        // is revoked-paused or being removed, or the pass was refused and the source
+        // paused (D3) — a benign no-op for a scheduled fire, not a run failure.
+        // Everything else is a real failure `syncNow` already recorded on the source
+        // (status/lastError/lastErrorCode); surface it as a typed failure.
+        const reason = err instanceof OpenwopError && err.httpStatus === 409 && typeof err.details?.reason === 'string'
+          ? BENIGN_SKIPS[err.details.reason] : undefined;
+        if (reason) return { status: 'skipped', reason };
         const message = err instanceof Error ? err.message : String(err);
-        log.warn('knowledge_sync_run_failed', { tenantId, sourceId, error: message });
-        return { status: 'failure', error: { code: 'sync_failed', message } };
+        // A bookkeeping write that lost every swap is NOT a failed sync (grade-code #7):
+        // say what it was, so the run history does not report a pass that ran as failed.
+        const code = err instanceof OpenwopError && err.details?.reason === 'write_contention' ? 'write_contention' : 'sync_failed';
+        log.warn('knowledge_sync_run_failed', { tenantId, sourceId, error: message, code });
+        return { status: 'failure', error: { code, message } };
       }
     },
   };

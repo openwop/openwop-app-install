@@ -24,7 +24,7 @@
 
 import { DurableCollection } from './hostExtPersistence.js';
 import { OpenwopError } from '../types.js';
-import { listSecretRefs, type SecretScope } from '../byok/secretResolver.js';
+import type { SecretScope } from '../byok/secretResolver.js';
 import { resolveUserNamedSecret } from '../byok/userNamedSecret.js';
 import {
   dispatchManagedChat, managedProviderIdFromRef, managedUnderlyingProvider, MANAGED_FREE_REF, isManagedCredentialRef,
@@ -36,6 +36,7 @@ import { createLogger } from '../observability/logger.js';
 import { assertEffectAllowed } from './runEffectContext.js';
 import { nativeSearchSatisfies, nativeSearchSuitability } from './webSearchCapability.js';
 import { registerCredentialRefConsumer } from './credentialRefRegistry.js';
+import { tenantRefStatus } from './runCredentials.js';
 import { checkByokChatBudget, recordByokChatUsage } from '../aiProviders/byokChatBudget.js';
 import { explicitRefNamesOtherProvider } from '../aiProviders/credentialRefLadder.js';
 import type { ServedModel } from './turnAttribution.js';
@@ -201,11 +202,11 @@ async function validateHeadlessSpec(
   }
   // The ref must be one of THIS tenant's stored secrets (scope-bounded) and must resolve now
   // (rejects ephemeral/expired refs up front rather than failing silently at dispatch).
-  const refs = await listSecretRefs(scope);
-  if (!refs.includes(input.credentialRef)) {
+  const status = await tenantRefStatus(scope, input.credentialRef);
+  if (status === 'not_stored') {
     throw new OpenwopError('validation_error', 'credentialRef is not a stored BYOK secret for this workspace.', 400, { field: 'credentialRef' });
   }
-  if (!(await resolveUserNamedSecret(input.credentialRef, scope))) {
+  if (status === 'unresolved') {
     throw new OpenwopError('validation_error', 'credentialRef does not currently resolve to a usable key.', 400, { field: 'credentialRef' });
   }
   return { provider: input.provider as HeadlessProvider, model: input.model.trim(), credentialRef: input.credentialRef };

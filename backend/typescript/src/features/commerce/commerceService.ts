@@ -283,7 +283,35 @@ export interface Product {
    *  (additive, no migration). */
   customFields?: Record<string, string | number | boolean>;
   active: boolean;
+  /** ADR 1098 — quote-only. An unlisted product is on sale only through a quote
+   *  (and operator lanes): every public lane hides it, and every outward-facing
+   *  reference refuses it. Absent ⇒ listed (additive, no migration). Read it only
+   *  through `isPubliclyListed`. */
+  unlisted?: boolean;
   createdBy: string; createdAt: string; updatedAt: string;
+}
+
+/** ADR 1098 — the ONE public-visibility predicate: active AND not unlisted. Every
+ *  public or outward-facing product lane filters through this (pinned by
+ *  `adr1098-unlisted-product-lanes.test.ts`); quotes and operator lanes use
+ *  `active` alone. */
+export function isPubliclyListed(p: Pick<Product, 'active' | 'unlisted'>): boolean {
+  return p.active !== false && p.unlisted !== true;
+}
+
+/** ADR 1098 — `unlisted` is closed-world: a boolean or absent. */
+function cleanUnlisted(v: unknown): boolean | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== 'boolean') throw new OpenwopError('validation_error', '`unlisted` must be true or false.', 400, { field: 'unlisted' });
+  return v;
+}
+
+/** ADR 1098 — the typed refusal for an outward-facing reference (a funnel offer, a
+ *  campaign link, an ad variant) to a quote-only product. */
+export function refuseUnlistedProduct(p: Pick<Product, 'productId' | 'unlisted'>, where: string): void {
+  if (p.unlisted === true) {
+    throw new OpenwopError('validation_error', `${where}: this product is unlisted (quote only), so it cannot be offered publicly.`, 400, { productId: p.productId, reason: 'product_unlisted' });
+  }
 }
 // ── commerce.product kernel adapter (ADR 0410 Phase 1) ──────────────────────
 // The product CATALOG lives in the content kernel (the cms.page/CRM façade
@@ -466,7 +494,7 @@ export async function getProductInTenant(tenantId: string, productId: string): P
   const p = await products.get(tenantId, productId);
   return p && p.tenantId === tenantId ? p : null;
 }
-export async function createProduct(input: { tenantId: string; orgId: string; createdBy: string; type: unknown; name: unknown; description?: unknown; price?: unknown; cost?: unknown; kind?: unknown; components?: unknown; subscription?: unknown; currency?: unknown; imageAssetTokens?: unknown; downloadAssetTokens?: unknown; inventory?: unknown; lowStockThreshold?: unknown; variants?: unknown; categories?: unknown; tags?: unknown; attributes?: unknown; weightGrams?: unknown; dims?: unknown; customFields?: unknown }): Promise<Product> {
+export async function createProduct(input: { tenantId: string; orgId: string; createdBy: string; type: unknown; name: unknown; description?: unknown; price?: unknown; cost?: unknown; kind?: unknown; components?: unknown; subscription?: unknown; currency?: unknown; imageAssetTokens?: unknown; downloadAssetTokens?: unknown; inventory?: unknown; lowStockThreshold?: unknown; variants?: unknown; categories?: unknown; tags?: unknown; attributes?: unknown; weightGrams?: unknown; dims?: unknown; customFields?: unknown; unlisted?: unknown }): Promise<Product> {
   assertCap((await listProducts(input.tenantId, input.orgId)).length, 'products');
   const ts = nowIso();
   const type: ProductType = (PRODUCT_TYPES as readonly string[]).includes(String(input.type)) ? (input.type as ProductType) : 'physical';
@@ -475,6 +503,7 @@ export async function createProduct(input: { tenantId: string; orgId: string; cr
   // ADR 0257 — validate typed custom fields against the org's ProductFieldDefs (throws on
   // an unknown key / type mismatch / missing required field).
   const customFields = await validateProductCustomFields(input.tenantId, input.orgId, input.customFields, true);
+  const unlisted = cleanUnlisted(input.unlisted);
   const p: Product = {
     productId: `prod:${randomUUID()}`, tenantId: input.tenantId, orgId: input.orgId,
     type, name: cleanContent(input.name, MAX.name, 'name', 'Untitled product'),
@@ -494,13 +523,14 @@ export async function createProduct(input: { tenantId: string; orgId: string; cr
     ...(parcel.dims ? { dims: parcel.dims } : {}),
     ...(customFields ? { customFields } : {}),
     active: true,
+    ...(unlisted ? { unlisted: true as const } : {}),
     createdBy: input.createdBy, createdAt: ts, updatedAt: ts,
   };
   await products.put(p);
   recordCommerceAction('product.created', p, input.createdBy, { productId: p.productId, name: p.name, type: p.type });
   return p;
 }
-export interface ProductPatch { name?: string; description?: string | null; price?: number; cost?: number | null; kind?: unknown; components?: unknown; subscription?: unknown; currency?: string; imageAssetTokens?: unknown; downloadAssetTokens?: unknown; inventory?: number | null; lowStockThreshold?: number | null; variants?: unknown; categories?: unknown; tags?: unknown; attributes?: unknown; weightGrams?: number | null; dims?: unknown; customFields?: unknown; active?: boolean }
+export interface ProductPatch { name?: string; description?: string | null; price?: number; cost?: number | null; kind?: unknown; components?: unknown; subscription?: unknown; currency?: string; imageAssetTokens?: unknown; downloadAssetTokens?: unknown; inventory?: number | null; lowStockThreshold?: number | null; variants?: unknown; categories?: unknown; tags?: unknown; attributes?: unknown; weightGrams?: number | null; dims?: unknown; customFields?: unknown; active?: boolean; unlisted?: unknown }
 export async function updateProduct(tenantId: string, orgId: string, productId: string, patch: ProductPatch, opts: { actor?: string } = {}): Promise<Product | null> {
   const p = await getProduct(tenantId, orgId, productId);
   if (!p) return null;
@@ -546,6 +576,7 @@ export async function updateProduct(tenantId: string, orgId: string, productId: 
     if (cf) next.customFields = cf; else delete next.customFields;
   }
   if (typeof patch.active === 'boolean') next.active = patch.active;
+  if (patch.unlisted !== undefined) { if (cleanUnlisted(patch.unlisted)) next.unlisted = true; else delete next.unlisted; }
   // R2 CM-P2-M7 (review B-1) — the metadata write must NEVER carry a stock count. `next`
   // is spread from the row we read, so a plain `put` blind-writes that stale `inventory`
   // over anything a concurrent reserve landed in the read→write window — which oversells
@@ -902,7 +933,7 @@ async function createOrderInner(input: Parameters<typeof createOrderCore>[0]): P
   return order;
 }
 
-async function createOrderCore(input: { tenantId: string; orgId: string; createdBy: string; contactId?: string; /** ADR 0875 D1 — `false` on the PUBLIC lanes: the contact came from a typed email nobody verified, so it is LINKED (CRM, receipt) but never used to price, to unlock an exclusive assortment, or to target a promotion. Default `true` (every authenticated lane). */ buyerVerified?: boolean; /** ADR 0875 D7 — the public storefront sells only ACTIVE products (operator lanes may still order an archived one). */ activeOnly?: boolean; couponCode?: string; affiliateCode?: string; funnelRef?: { funnelId?: unknown; stepId?: unknown }; parentOrderId?: string; pmSaveRequested?: boolean; /** ADR 0877 M5 — ROUTE-derived from `resolveStorefrontSettlement`, never client input. */ settlement?: OrderSettlementStamp; lines: { productId: string; quantity: number; /** INTERNAL (quote conversion, C3): honor a negotiated snapshot price instead of resolving. Route callers never populate this. */ unitPriceOverride?: number; /** ADR 0296 — line provenance; ROUTE-derived (from the separate `bumps` array / the one-click path), never client-marked. */ origin?: 'bump' | 'upsell' }[]; requireApprovalOverThreshold?: boolean; shippingAddress?: { name?: unknown; line1?: unknown; line2?: unknown; city?: unknown; region?: unknown; postalCode?: unknown; country?: unknown } }, holds: { ids: string[] } = { ids: [] }): Promise<Order> {
+async function createOrderCore(input: { tenantId: string; orgId: string; createdBy: string; contactId?: string; /** ADR 0875 D1 — `false` on the PUBLIC lanes: the contact came from a typed email nobody verified, so it is LINKED (CRM, receipt) but never used to price, to unlock an exclusive assortment, or to target a promotion. Default `true` (every authenticated lane). */ buyerVerified?: boolean; /** ADR 0875 D7 — the public storefront sells only ACTIVE, LISTED products (ADR 1098; operator lanes may still order an archived or unlisted one, and a quote converts without it). */ activeOnly?: boolean; couponCode?: string; affiliateCode?: string; funnelRef?: { funnelId?: unknown; stepId?: unknown }; parentOrderId?: string; pmSaveRequested?: boolean; /** ADR 0877 M5 — ROUTE-derived from `resolveStorefrontSettlement`, never client input. */ settlement?: OrderSettlementStamp; lines: { productId: string; quantity: number; /** INTERNAL (quote conversion, C3): honor a negotiated snapshot price instead of resolving. Route callers never populate this. */ unitPriceOverride?: number; /** ADR 0296 — line provenance; ROUTE-derived (from the separate `bumps` array / the one-click path), never client-marked. */ origin?: 'bump' | 'upsell' }[]; requireApprovalOverThreshold?: boolean; shippingAddress?: { name?: unknown; line1?: unknown; line2?: unknown; city?: unknown; region?: unknown; postalCode?: unknown; country?: unknown } }, holds: { ids: string[] } = { ids: [] }): Promise<Order> {
   // ADR 0875 D7 — the cap counts LIVE orders. Counting canceled rows let ~5000
   // abandoned public checkouts disable a store for good.
   assertCap((await listOrders(input.tenantId, input.orgId)).filter((o) => o.status !== 'canceled').length, 'orders');
@@ -929,7 +960,9 @@ async function createOrderCore(input: { tenantId: string; orgId: string; created
     }
     const product = await getProduct(input.tenantId, input.orgId, String(line.productId));
     if (!product) throw new OpenwopError('validation_error', `Product not found: ${line.productId}`, 400, { productId: line.productId });
-    if (input.activeOnly && product.active === false) throw new OpenwopError('validation_error', `Product not found: ${line.productId}`, 400, { productId: line.productId });
+    // ADR 1098 — the public lanes also refuse an unlisted (quote-only) product, with
+    // the same not-found answer so a public caller learns nothing about it.
+    if (input.activeOnly && !isPubliclyListed(product)) throw new OpenwopError('validation_error', `Product not found: ${line.productId}`, 400, { productId: line.productId });
     // Multi-currency polish: an order is single-currency — reject a mixed-currency cart
     // rather than silently coercing (there's no FX in Phase 1; that's an operator concern).
     if (items.length > 0 && product.currency !== currency) {

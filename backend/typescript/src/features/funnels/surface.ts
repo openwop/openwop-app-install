@@ -10,11 +10,11 @@
  */
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { surfaceStr as str, type FeatureSurface } from '../../host/featureSurfaces.js';
-import { listFunnels, getFunnel, createFunnelReporting, updateFunnel, runFunnelId } from './funnelsService.js';
+import { listFunnels, getFunnel, createFunnelReporting, updateFunnel, runFunnelId, assertOfferProducts } from './funnelsService.js';
 import { OpenwopError } from '../../types.js';
 import { requestFunnelPublish } from './funnelPublishApproval.js';
 import { runOrgScopeSubject } from '../../host/accessControlService.js';
-import { getFunnelStats } from './funnelStats.js';
+import { getFunnelStats, projectStepTotals } from './funnelStats.js';
 
 const INTERNAL = new Set(['tenantId', 'createdBy']);
 function project(o: object): Record<string, unknown> {
@@ -77,16 +77,18 @@ export function buildFunnelsSurface(scope: BundleScope): FeatureSurface {
       return out ? { status: out.status, approvalId: out.approvalId, created: out.created } : { status: 'not_found', approvalId: null };
     },
     stepStats: async (args) => {
-      const days = await getFunnelStats(tenantId, str(args.orgId), str(args.funnelId));
-      // totals per step — the compact projection a planning agent needs
-      const totals: Record<string, { views: number; completions: number; revenue: number; orders: number }> = {};
-      for (const row of days) {
-        for (const [stepId, cell] of Object.entries(row.steps)) {
-          const t = (totals[stepId] ??= { views: 0, completions: 0, revenue: 0, orders: 0 });
-          t.views += cell.views; t.completions += cell.completions; t.revenue += cell.revenue; t.orders += cell.orders;
-        }
-      }
-      return { steps: totals, days: days.length };
+      // ADR 1023 FN72WF-5 — an unknown funnel is a typed failure, never an empty
+      // success the optimize chain would hand to the model as "no traffic".
+      const funnel = await getFunnel(tenantId, str(args.orgId), str(args.funnelId));
+      if (!funnel) throw new OpenwopError('not_found', 'Funnel not found.', 404, { code: 'not_found', funnelId: str(args.funnelId) });
+      return projectStepTotals(await getFunnelStats(tenantId, str(args.orgId), funnel.funnelId));
+    },
+    // ADR 1023 D3 — the blueprint `check-offers` node: every id must name an ACTIVE
+    // product of this org (THE offer rule), checked before any step page is drafted.
+    checkOffers: async (args) => {
+      const ids = Array.isArray(args.productIds) ? args.productIds.filter((x): x is string => typeof x === 'string' && x.trim() !== '').map((x) => x.trim()) : [];
+      await assertOfferProducts(tenantId, str(args.orgId), ids);
+      return { productIds: ids };
     },
   };
 }

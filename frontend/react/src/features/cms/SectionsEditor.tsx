@@ -4,9 +4,9 @@
  * page editor AND the host-level home-page editor (Admin → Content → Front page)
  * use ONE editor. It's a controlled component: give it `sections` + `onChange`.
  */
-import { DesignJsonFields } from './DesignJsonFields.js';
+import { DesignJsonFields, JsonArrayField } from './DesignJsonFields.js';
 import { Button } from '../../ui/Button.js';
-import { useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useTranslation, Trans } from 'react-i18next';
 import { config, fetchOpts, authedHeaders } from '../../client/config.js';
 import { formatNumber } from '../../i18n/format.js';
@@ -14,6 +14,8 @@ import { ArrowDownIcon, ArrowUpIcon, ImageIcon, PlusIcon, TrashIcon } from '../.
 import { handleTablistKeyDown } from '../../ui/rovingTabs.js';
 import { FIELD_NAME_RE, FIELDS_MAX_KEYS } from './fieldsSection.js';
 import { HeroArtFields } from './HeroArtFields.js';
+import { altCount, fillAltFromLibrary, libraryAltOf, type LibraryAlt } from './altFromLibrary.js';
+import { announce } from '../../ui/announce.js';
 import { isHeroArtVisual, type HeroArtVisual } from './heroArtSpec.js';
 import { SECTION_TYPES, type MediaAssetRef, type Section, type SectionType, type SharedSection, type TranslationStatus } from './cmsClient.js';
 
@@ -43,6 +45,7 @@ export function blankSection(type: SectionType): Section {
                     : type === 'featureIndex' ? { groups: [] }
                     : type === 'decisionTree' ? { trees: [] }
                     : type === 'scheduleSim' ? { milestones: [], decisions: [] }
+                    : type === 'films' ? { films: [] }
                     : { columns: [{ text: '' }] };
   return { sectionId: `new:${Math.random().toString(36).slice(2)}`, type, data };
 }
@@ -234,15 +237,41 @@ function FieldsEditor({ data, baseData, onChange }: { data: Record<string, unkno
 /** The section's editor fields. Wrapped in `.cms-section-fields` so its prose
  *  textareas use the SANS register the public page renders them in (the app-wide
  *  `textarea` default is mono, which suits code, not copy — RFCW-UX-10). */
-export function SectionFields(props: { section: Section; assets: MediaAssetRef[]; onChange: (data: Record<string, unknown>) => void; onPickMedia?: (() => Promise<string | null>) | undefined; /** The base layer, when `section.data` is a locale overlay (ADR 0748 — `fields` needs it). */ baseData?: Record<string, unknown> | undefined }): JSX.Element {
+export function SectionFields(props: { section: Section; assets: MediaAssetRef[]; onChange: (data: Record<string, unknown>) => void; onPickMedia?: (() => Promise<string | null>) | undefined; /** ADR 1100 D2 — the library's description of a token, read at call time (the host keeps it current across a pick). Absent ⇒ looked up in `assets`. */ libraryAlt?: LibraryAlt | undefined; /** The base layer, when `section.data` is a locale overlay (ADR 0748 — `fields` needs it). */ baseData?: Record<string, unknown> | undefined }): JSX.Element {
   // ADR 1029 D2 — motion is presentation, kept on the base layer only (the server
   // drops it from an overlay), and never on `fields`, the protocol's open body.
   const showMotion = props.section.type !== 'fields' && props.baseData === undefined;
   // ADR 1050 D5 — the band, on the base layer of each type the validator tones.
   const showTone = (TONED_TYPES as readonly string[]).includes(props.section.type) && props.baseData === undefined;
+  // ADR 1100 D2 — a newly placed picture takes the library's alt text when its own
+  // is empty. Base layer only (an overlay must not get the base-language text),
+  // and never `fields` (the open protocol body). The lookup is read at CALL time
+  // through a ref: the media picker's Browse button awaits the dialog and then
+  // calls the onChange it captured before, so a memoized map would be stale.
+  const { t: tA11y } = useTranslation('a11y');
+  const assetsRef = useRef(props.assets);
+  assetsRef.current = props.assets;
+  const libraryAltRef = useRef(props.libraryAlt);
+  libraryAltRef.current = props.libraryAlt;
+  const { section, onChange: propsOnChange, baseData } = props;
+  const [fillNote, setFillNote] = useState<string | null>(null);
+  const onChange = useCallback((next: Record<string, unknown>) => {
+    if (baseData !== undefined || section.type === 'fields') { propsOnChange(next); return; }
+    const lookup: LibraryAlt = libraryAltRef.current ?? ((token) => libraryAltOf(assetsRef.current, token));
+    const filled = fillAltFromLibrary(section.data, next, lookup);
+    // Say what happened, aloud and on screen: a filled description, or a
+    // carried-over one removed. The note clears on the next edit.
+    if (filled !== next) {
+      const note = tA11y(altCount(filled) < altCount(next) ? 'altClearedOnSwap' : 'altFilledFromLibrary');
+      setFillNote(note);
+      announce(note);
+    } else setFillNote(null);
+    propsOnChange(filled);
+  }, [propsOnChange, baseData, section.type, section.data, tA11y]);
   return (
     <div className="cms-section-fields">
-      <SectionFieldsBody {...props} />
+      <SectionFieldsBody section={props.section} assets={props.assets} onChange={onChange} onPickMedia={props.onPickMedia} baseData={props.baseData} />
+      {fillNote ? <p className="u-label-sm u-text-muted" data-alt-fill-note>{fillNote}</p> : null}
       {showTone ? <ToneField d={props.section.data} onChange={props.onChange} /> : null}
       {showMotion ? <MotionField d={props.section.data} onChange={props.onChange} /> : null}
     </div>
@@ -251,7 +280,7 @@ export function SectionFields(props: { section: Section; assets: MediaAssetRef[]
 
 /** ADR 0920 D1 / ADR 1050 D5 — the section types whose validator keeps `tone`
  *  (cmsService's `...tone()` cases; pinned by adr1029-mirror-parity). */
-const TONED_TYPES = ['richText', 'image', 'cta', 'columns', 'faq', 'quotes', 'video', 'statusTable', 'dateCalc', 'conversation', 'featureIndex', 'decisionTree', 'scheduleSim'] as const satisfies readonly SectionType[];
+const TONED_TYPES = ['richText', 'image', 'cta', 'columns', 'faq', 'quotes', 'video', 'statusTable', 'dateCalc', 'conversation', 'featureIndex', 'decisionTree', 'scheduleSim', 'films'] as const satisfies readonly SectionType[];
 
 const ACTIVITY_MAX_ROWS = 6; // mirrors the server's MAX.activityItems (ADR 1029 D5)
 const FLOW_MAX_STEPS = 6; // mirrors the server's MAX.flowNodes (ADR 1038 D8)
@@ -859,6 +888,8 @@ function SectionFieldsBody({ section, assets, onChange, onPickMedia, baseData }:
             <input aria-label={t('pricingCtaUrlAria')} value={str(d.ctaUrl)} onChange={(e) => set('ctaUrl', e.target.value)} placeholder={t('pricingCtaUrlPlaceholder')} />
           </div>
           <input aria-label={t('pricingContactUrlAria')} value={str(d.contactUrl)} onChange={(e) => set('contactUrl', e.target.value)} placeholder={t('pricingContactUrlPlaceholder')} />
+          {/* ADR 1069 D4 — authored plans replace the billing tiers when set. */}
+          <JsonArrayField field="plans" value={d.plans} set={set} label={t('pricingPlansLabel')} hint={t('pricingPlansHint')} />
         </div>
       );
     }
@@ -908,7 +939,7 @@ function SectionFieldsBody({ section, assets, onChange, onPickMedia, baseData }:
     case 'video':
       return <VideoSectionFields d={d} set={set} />;
     // ADR 1080 — the design section types edit as JSON.
-    case 'statusTable': case 'dateCalc': case 'conversation': case 'featureIndex': case 'decisionTree': case 'scheduleSim':
+    case 'statusTable': case 'dateCalc': case 'conversation': case 'featureIndex': case 'decisionTree': case 'scheduleSim': case 'films':
       return <DesignJsonFields d={d} set={set} head={<HeadFields d={d} set={set} />} />;
     default:
       return <span className="u-label-sm">{t('unknownSection')}</span>;
@@ -1501,7 +1532,7 @@ export function AddSectionControl({ sharedSections, onAdd }: {
   );
 }
 
-export function SectionsEditor({ sections, assets, onChange, baseLocale = 'en', locales, onTranslate, onPickMedia, sharedSections, sharedFailed, onSaveShared, localeState, onSetLocaleState, translationStatus, onConfirmSource, focusRequest, translatorMode, structureElsewhere = false }: {
+export function SectionsEditor({ sections, assets, onChange, baseLocale = 'en', locales, onTranslate, onPickMedia, libraryAlt, sharedSections, sharedFailed, onSaveShared, localeState, onSetLocaleState, translationStatus, onConfirmSource, focusRequest, translatorMode, structureElsewhere = false }: {
   sections: Section[];
   assets: MediaAssetRef[];
   onChange: (sections: Section[]) => void;
@@ -1519,6 +1550,8 @@ export function SectionsEditor({ sections, assets, onChange, baseLocale = 'en', 
   /** Open the media picker (ADR 0206 B4) — resolves the chosen serve token or
    *  null. Absent ⇒ the classic select/input only (home-page editor unchanged). */
   onPickMedia?: () => Promise<string | null>;
+  /** ADR 1100 D2 — the library's description of a token, read at call time. */
+  libraryAlt?: LibraryAlt;
   /** Org shared sections (ADR 0204 C4) — offered in the add-section dropdown as
    *  inherit-by-reference inserts. Absent ⇒ no shared UI (home-page editor). */
   sharedSections?: SharedSection[];
@@ -1796,6 +1829,7 @@ export function SectionsEditor({ sections, assets, onChange, baseLocale = 'en', 
                 assets={assets}
                 onChange={(data) => (onBase ? patchData(i, data) : patchOverlay(i, active, data))}
                 onPickMedia={onPickMedia}
+                libraryAlt={libraryAlt}
                 baseData={onBase ? undefined : s.data}
               />
             )}

@@ -28,6 +28,15 @@
  * creation by a run-start contributor and frozen into `run.metadata.aiDefault`
  * (ADR 0099). A `:fork` reads the source's frozen value verbatim and never
  * re-resolves it (ADR 0604), so replay sees the provider the source ran on.
+ *
+ * Rung 2 also freezes the binding's credential REF NAME (issue #5764). Before,
+ * it froze only the provider and model, so a run started without
+ * `configurable.ai.credentialRef` (an agent-offered chain, a schedule, an event)
+ * chose the workspace's provider and then failed `byok_required`, because no key
+ * reached the run. The ref is frozen only when it is one of the tenant's stored
+ * secrets AND resolves at creation (`tenantRefStatus`, the check
+ * `validateHeadlessSpec` makes); it is a name, never a value; a `:fork` reads it
+ * verbatim. The executor feeds it to the ladder's `run` rung.
  */
 import { getChatByokConfig } from './chatByokConfig.js';
 import { registerRunStartContributor, type RunStartContext } from './runStartContext.js';
@@ -36,6 +45,7 @@ import { isManagedRef, refNamedProvider } from '../aiProviders/credentialRefLadd
 import { listSecretRefs } from '../byok/secretResolver.js';
 import { getManagedProviderStatuses } from '../providers/managedProvider.js';
 import { isAnonTenantId } from './requestSubject.js';
+import { runAiCredentialRef, tenantRefStatus } from './runCredentials.js';
 
 export const RUN_AI_DEFAULT_KEY = 'aiDefault';
 
@@ -43,8 +53,10 @@ export interface RunAiDefault {
   provider: string;
   model: string;
   source: 'run' | 'workspace' | 'managed' | 'catalog';
-  /** Only on `source: 'managed'`: the `managed:*` sentinel the call dispatches
-   *  on. A sentinel, never a stored key, so it is safe on run metadata. */
+  /** On `source: 'managed'`: the `managed:*` sentinel the call dispatches on.
+   *  On `source: 'workspace'` (issue #5764): the binding's stored-secret ref NAME,
+   *  validated as the tenant's own and resolving when frozen. Never a key value,
+   *  so it is safe on run metadata. */
   credentialRef?: string;
 }
 
@@ -76,7 +88,12 @@ export async function resolveFrozenAiDefault(tenantId: string): Promise<RunAiDef
   const binding = await getChatByokConfig(tenantId).catch(() => null);
   if (binding && !isManagedRef(binding.credentialRef) && !binding.credentialRef.startsWith('subscription:')
     && isSelectableProvider(binding.provider)) {
-    return { provider: binding.provider, model: modelFor(binding.provider, binding.model), source: 'workspace' };
+    const def: RunAiDefault = { provider: binding.provider, model: modelFor(binding.provider, binding.model), source: 'workspace' };
+    // Issue #5764 — carry the bound key's NAME when it is this tenant's own and
+    // resolves now. Otherwise freeze without it, as before: the step then fails
+    // `byok_required` honestly instead of reaching for a key that is not there.
+    const status = await tenantRefStatus({ tenantId }, binding.credentialRef).catch(() => 'unresolved' as const);
+    return status === 'ok' ? { ...def, credentialRef: binding.credentialRef } : def;
   }
   const selectable = listSelectableProviderIds();
   // An anonymous sandbox never reaches the managed tier (it needs a signed-in
@@ -125,7 +142,31 @@ function frozenOn(metadata: Record<string, unknown> | undefined): RunAiDefault |
     // Only ever a `managed:*` sentinel; anything else is not a managed default.
     return typeof credentialRef === 'string' && isManagedRef(credentialRef) ? { provider, model, source, credentialRef } : null;
   }
-  return { provider, model, source: source === 'workspace' || source === 'catalog' ? source : 'catalog' };
+  if (source === 'workspace') {
+    // Issue #5764 — the frozen BYOK ref, read verbatim. A managed or subscription
+    // value is not a workspace key and is dropped, never promoted.
+    return typeof credentialRef === 'string' && credentialRef.length > 0 && !isManagedRef(credentialRef) && !credentialRef.startsWith('subscription:')
+      ? { provider, model, source, credentialRef }
+      : { provider, model, source };
+  }
+  return { provider, model, source: 'catalog' };
+}
+
+/**
+ * Issue #5764 — the stored-secret ref a run's AI steps use when the wire names
+ * none: the WIRE ref (`configurable.ai.credentialRef`) first, else the
+ * workspace binding's ref frozen at creation, but only while that frozen value
+ * is the run's default (a run that chose its own provider on the wire did not
+ * choose this key). A name, never a value.
+ */
+export function runCredentialRefFor(
+  configurable: Record<string, unknown> | undefined,
+  metadata: Record<string, unknown> | undefined,
+): string | undefined {
+  const wire = runAiCredentialRef(configurable);
+  if (wire) return wire;
+  const def = runAiDefaultFor(configurable, metadata);
+  return def?.source === 'workspace' ? def.credentialRef : undefined;
 }
 
 /**
@@ -161,9 +202,10 @@ export function withRunAiDefault<T extends { provider?: string; model?: string; 
   }
   if (!def) return req;
   if (def.credentialRef) {
-    // The managed default fills provider, model AND its sentinel ref together.
-    // A call that already carries its own key keeps it and is left as it was:
-    // the managed provider must never be paired with a stored key.
+    // A default that carries a ref (the managed sentinel, or since #5764 the
+    // workspace binding's key) fills provider, model AND that ref together. A call
+    // that already carries its own key keeps it and is left as it was: a provider
+    // is never paired with another default's key.
     if (typeof req.credentialRef === 'string' && req.credentialRef.length > 0) return req;
     return { ...req, provider: def.provider, model: def.model, credentialRef: def.credentialRef };
   }

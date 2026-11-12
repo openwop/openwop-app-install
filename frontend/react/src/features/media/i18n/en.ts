@@ -112,6 +112,10 @@ export const messages = {
   altDecorativeChip: 'Decorative',
   altDialogTitle: 'Alt text — {{name}}',
   altDialogHelp: 'Alt text describes an image for screen-reader users. Write a concise description, generate one with AI, or mark the image decorative.',
+  // ADR 1100 D8 — when AI generation is off or not in the plan; D2 — where it goes.
+  altDialogHelpNoAi: 'Alt text describes an image for screen-reader users. Write a concise description, or mark the image decorative.',
+  altGenerateLocked: 'AI alt text is not included in this workspace’s plan.',
+  altPlacedNote: 'Once saved, this description fills the alt text when the image is next placed in a page or document. Pages that already use this image keep their current alt text.',
   altTextLabel: 'Alt text',
   altTextPlaceholder: 'e.g. A barista pouring latte art in a sunlit café',
   altCharCount: '{{n}} / {{max}}',

@@ -1,6 +1,6 @@
 # ADR 1023 — Funnels: blueprints the model can read, and step stats that count honestly
 
-Status: Accepted — D2 (the loader's sub-chain child lane) is implemented by its own PR, `fix/subchain-children-expand-params`, so it can be gated and reverted alone (lead decision 2026-11-01); D1 and D3–D9 land with the row-72 funnels PR.
+Status: implemented — D2 by #5452 (`fix/subchain-children-expand-params`, gated alone by lead decision 2026-11-01); D1 and D3–D9 by the row-72 funnels PR. Follow-ups filed in the row-72 record.
 
 Feature: `funnels` (extends ADR 0294 / 0296 / 0332 / 0948; no new toggle).
 Source: the row-72 grade, `docs/steward/workflows-assessment/2026-11-01-funnels-row72.md`
@@ -334,8 +334,8 @@ sum beside the split would keep the defect in model text).
 
 | Phase | PR / branch | Witness |
 |---|---|---|
-| D2 loader (+ FN72CD-1's config rule, FN72CD-6's alias merge) | `fix/subchain-children-expand-params` | `subchain-children-expand-params.test.ts` (every loaded child; a NON-funnel kicktodo `lesson-batch` witness red on main) |
-| D1, D3–D9 | row-72 funnels PR (`fl2-72-funnels`) | recorded there |
+| D2 loader (+ FN72CD-1's config rule, FN72CD-6's alias merge) | #5452 `fix/subchain-children-expand-params` | `subchain-children-expand-params.test.ts` (every loaded child; a NON-funnel kicktodo `lesson-batch` witness red on main) |
+| D1, D3–D9 (+ the grade rounds) | row-72 funnels PR (`fl2-72-funnels`) | `adr1023-funnels-honesty`, `adr0948-tripwire`, `adr0948-p2-lead-magnet`, `forms-funnel-attribution`, `funnels-packs`, `funnels-phase1/3`, FE `adr1023DetailHonesty`, `funnelsErrors`, `funnelMoneySteps` — every guard sabotage-witnessed red (the test headers name each one) |
 
 **Replay / fork of runs recorded before D2.** A child's minted workflow id and its
 node ids are unchanged: the id hashes `(tenant, chainId, version)` and the node-id

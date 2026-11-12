@@ -411,6 +411,68 @@ export async function releaseSubmission(
 }
 
 /**
+ * ADR 1036 D4 — the board explicitly refused this deal's submission.
+ *
+ * Written BEFORE any refund attempt and independent of it: the attestation
+ * readers void a consumption on this row (`attestation/claims.ts`
+ * `sentConsumptions`), so a refused application can never be attested as sent
+ * even when the refund CAS loses its races. The refund then only repairs the
+ * counter.
+ */
+export async function recordSubmissionRejected(tenantId: string, grantId: string, dealId: string): Promise<void> {
+  const current = await applyGrants.get(`${tenantId}:${grantId}`);
+  await appendAudit(tenantId, 'job-search.submission.rejected', {
+    grantId,
+    dealId,
+    ...(current ? { subjectId: current.subjectId, campaignId: current.campaignId } : {}),
+  });
+}
+
+/**
+ * ADR 1036 D4 — return ONE unit after the board explicitly refused the send.
+ *
+ * The pipeline consumes BEFORE the send (the contract above), so a board that
+ * says no would otherwise cost the applicant a unit for an application nobody
+ * received. Only an explicit refusal refunds; a THROWING send is an unknown
+ * outcome and its unit stays spent, which is the safe direction for a ceiling.
+ *
+ * The hour's pace slot comes back only while `paceHour` is still the hour the
+ * unit was consumed in (`consumedAt`): once the window has rolled, decrementing
+ * would hand capacity to a LATER hour and break the `ratePerHour` ceiling the
+ * consume CAS guarantees. The `refunded` audit row names `{grantId, dealId}`; the
+ * attestation readers void the consumption on it OR on the `submission.rejected`
+ * row the pipeline writes first ({@link recordSubmissionRejected}), so the
+ * attestation does not depend on this CAS winning.
+ */
+export async function refundSubmit(tenantId: string, grantId: string, dealId: string, consumedAt: number): Promise<boolean> {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const current = await applyGrants.get(`${tenantId}:${grantId}`);
+    if (!current || current.submitsUsed <= 0) return false;
+    const sameHour = current.paceHour === epochHour(consumedAt) && (current.paceUsed ?? 0) > 0;
+    const next: ApplyGrant = {
+      ...current,
+      submitsUsed: current.submitsUsed - 1,
+      ...(sameHour ? { paceUsed: (current.paceUsed ?? 0) - 1 } : {}),
+    };
+    if (await applyGrants.compareAndSwap(current, next)) {
+      await appendAudit(tenantId, 'job-search.grant.refunded', {
+        grantId: current.grantId,
+        subjectId: current.subjectId,
+        campaignId: current.campaignId,
+        unit: 'submit',
+        dealId,
+        submitsUsed: next.submitsUsed,
+      });
+      return true;
+    }
+  }
+  // Six lost races: the unit stays spent — over-counting is the safe direction
+  // for the CEILING. The attestation is protected separately by the
+  // `submission.rejected` row written before this call.
+  return false;
+}
+
+/**
  * Revoke immediately. Revocation does not require the campaign to stop (D5).
  *
  * `orgId` is REQUIRED and checked. The key is tenant-scoped, so a cross-TENANT
@@ -419,12 +481,15 @@ export async function releaseSubmission(
  * tenant. The list route filters on `orgId`; revoke must agree with it, or read
  * and write disagree about who owns a grant. (Found by `/code-review`.)
  */
-export async function revokeApplyGrant(tenantId: string, orgId: string, grantId: string, now: number): Promise<boolean> {
+export async function revokeApplyGrant(tenantId: string, orgId: string, grantId: string, now: number, byUser: string): Promise<boolean> {
   const current = await applyGrants.get(`${tenantId}:${grantId}`);
   if (!current || current.revokedAt) return false;
   // Same 404 as "not found" — a caller must not learn that a grant exists in an
   // org they cannot see.
   if (current.orgId !== orgId) return false;
+  // ADR 1036 D5 — and not a colleague's grant either: only the person it acts
+  // for, or the person who issued it. Same 404, for the same reason.
+  if (byUser !== current.subjectId && byUser !== current.grantedBy) return false;
   return applyGrants.compareAndSwap(current, { ...current, revokedAt: new Date(now).toISOString() });
 }
 

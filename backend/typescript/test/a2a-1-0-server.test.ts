@@ -227,11 +227,14 @@ describe('RFC 0152 §D.1 — operations this host does not implement fail typed'
     }
   });
 
-  it('advertised push: Get/List/Delete are typed UNSUPPORTED_OPERATION, never method-not-found', async () => {
+  // CHAN-F7 — Get/List/Delete are implemented (RFC 0214); on an unknown task they
+  // answer TASK_NOT_FOUND, never method-not-found and no longer UNSUPPORTED_OPERATION.
+  // The lifecycle is in `adr1045-a2a-push-delivery.test.ts`.
+  it('advertised push: Get/List/Delete on an unknown task are TASK_NOT_FOUND, never method-not-found', async () => {
     for (const method of ['GetTaskPushNotificationConfig', 'ListTaskPushNotificationConfigs', 'DeleteTaskPushNotificationConfig']) {
       const r = await rpc10(method, { taskId: 't', id: 'c' }, 21);
       expect(r.error?.code, method).not.toBe(-32601);
-      expect(reasonOf(r.error), method).toBe('UNSUPPORTED_OPERATION');
+      expect(reasonOf(r.error), method).toBe('TASK_NOT_FOUND');
     }
   });
 

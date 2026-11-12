@@ -67,6 +67,7 @@ import {
   buildInsightsMetaWorkflow, WEEKLY_VARIANCE_ID, ANNIVERSARY_DRAFT_ID, TALENT_PREP_ID,
 } from '../src/features/insights-suite/metaWorkflows.js';
 import type { NodeContext, WorkflowDefinition } from '../src/executor/types.js';
+import { rowSubject } from '../../../packs/feature.insights-suite.nodes/index.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, '..', '..', '..');
@@ -76,10 +77,16 @@ type NodeResult = { status: string; outputs?: Record<string, unknown>; error?: {
 /* ── Stubs: the three things that are NOT this feature's logic ───────────── */
 
 const AI_CONTENT = 'Ten years of steady, generous work. Thank you, and congratulations.';
-const aiStub = async (_ctx: NodeContext): Promise<NodeResult> => ({
-  status: 'success',
-  outputs: { content: AI_CONTENT, usage: {}, finishReason: 'stop', model: 'stub' },
-});
+/** ADR 1102 D11 (`INS91-14`) — what the LLM step was HANDED. The stub used to
+ *  ignore its ctx, so a draft step whose whole user turn was the bare subject id
+ *  passed every case here (`INS91-2`). */
+const aiInputs: unknown[] = [];
+const aiStub = async (ctx: NodeContext): Promise<NodeResult> => {
+  aiInputs.push(ctx.inputs);
+  return { status: 'success', outputs: { content: AI_CONTENT, usage: {}, finishReason: 'stop', model: 'stub' } };
+};
+/** Node starts and broker calls, in the order they happened (ADR 1102 D11). */
+const trace: string[] = [];
 
 /**
  * The ADR 0037 broker, stubbed at its boundary. It answers by URL, so a node that
@@ -95,6 +102,7 @@ function connectorsStub(): NonNullable<NodeContext['connectors']> {
   return {
     async invoke(connectorId, request) {
       brokerCalls.push({ connectorId, url: request.url, method: request.method ?? 'GET', body: request.body ?? '' });
+      trace.push(`broker:${connectorId}`);
       if (connectorId === 'bigquery') {
         const row = (metric: string, actual: number, plan: number) => ({ f: [{ v: metric }, { v: String(actual) }, { v: String(plan) }] });
         return {
@@ -125,9 +133,13 @@ function connectorsStub(): NonNullable<NodeContext['connectors']> {
   };
 }
 
+const EXEMPLAR_TEXT = 'We say thank you plainly and name the specific work.';
 const knowledgeStub: NonNullable<NodeContext['knowledge']> = {
   async retrieve() {
-    return { chunks: [{ id: 'k1', text: 'We say thank you plainly and name the specific work.', relevanceScore: 0.9 }], totalCandidates: 1 };
+    // The real `KnowledgeResultChunk` field is `content` (`host/knowledgeSurface.ts`).
+    // This stub said `text` until ADR 1102, which nothing noticed because nothing
+    // downstream read a chunk at all (`INS91-2`).
+    return { chunks: [{ chunkId: 'k1', content: EXEMPLAR_TEXT, relevanceScore: 0.9 }], totalCandidates: 1 };
   },
 };
 
@@ -136,8 +148,11 @@ const knowledgeStub: NonNullable<NodeContext['knowledge']> = {
  * runs `packs/tarballLoader` → `host/packTrust.classifyPackDir`. "The pack has
  * tests" is not "the pack is reachable in production".
  */
+/** A test may swap the completion for one leg (ADR 1102 D3's empty-draft case). */
+let emptyCompletion: ((ctx: NodeContext) => Promise<NodeResult>) | null = null;
+
 async function nodeImpl(typeId: string): Promise<(ctx: NodeContext) => Promise<NodeResult>> {
-  if (typeId === 'core.ai.chatCompletion') return aiStub;
+  if (typeId === 'core.ai.chatCompletion') return emptyCompletion ?? aiStub;
   const mod = await getNodeRegistry().resolve(typeId);
   expect(mod, `${typeId} did not resolve through the trust-gated pack lane`).toBeTruthy();
   return async (ctx) => {
@@ -150,6 +165,9 @@ async function nodeImpl(typeId: string): Promise<(ctx: NodeContext) => Promise<N
 }
 
 /* ── The harness ─────────────────────────────────────────────────────────── */
+
+/** The inputs each node received on the last `runDefinition` (ADR 1102 D11). */
+const lastInputs: Record<string, unknown> = {};
 
 /** The short (pre-expansion) node id — expansion prefixes `<chain>_<hash>_`. */
 const shortId = (nodeId: string): string => nodeId.slice(nodeId.lastIndexOf('_') + 1);
@@ -192,9 +210,12 @@ async function runDefinition(
   const byId = new Map(def.nodes.map((n) => [n.nodeId, n]));
   const results: Record<string, StepResult> = {};
   const emitted: Array<{ type: string; payload: unknown }> = [];
+  trace.length = 0;
+  for (const k of Object.keys(lastInputs)) delete lastInputs[k];
   for (const nodeId of snapshot.order) {
     const node = byId.get(nodeId)!;
     const inputsByPort = buildNodeInputs(nodeId, graph, snapshot, variableBag);
+    trace.push(`node:${shortId(node.nodeId)}`);
     const impl = await nodeImpl(node.typeId);
     const ctx: NodeContext = {
       runId,
@@ -211,6 +232,7 @@ async function runDefinition(
       connectors: broker,
       knowledge: knowledgeStub,
     };
+    lastInputs[shortId(node.nodeId)] = ctx.inputs;
     const result = await impl(ctx);
     const step: StepResult = { status: result.status, outputs: result.outputs ?? {}, ...(result.error ? { error: result.error } : {}) };
     results[shortId(node.nodeId)] = step;
@@ -288,7 +310,7 @@ describe('PROBE-IS-0 — the insights node pack is REACHABLE through the trust g
   it('is dispatchable and both nodes resolve through the registry, not a direct import', async () => {
     const verdict = classifyPackDir(join(REPO_ROOT, 'packs', 'feature.insights-suite.nodes'), { noCache: true });
     expect(verdict.dispatchable, `not dispatchable (${verdict.tier}: ${verdict.reason}) ⇒ every insights node is a refusal stub`).toBe(true);
-    for (const typeId of ['feature.insights-suite.nodes.variance-compute', 'feature.insights-suite.nodes.talent-score', 'feature.notifications.nodes.notify']) {
+    for (const typeId of ['feature.insights-suite.nodes.variance-compute', 'feature.insights-suite.nodes.talent-score', 'feature.insights-suite.nodes.recognition-brief', 'feature.insights-suite.nodes.draft-check', 'feature.notifications.nodes.notify']) {
       expect(await getNodeRegistry().resolve(typeId), typeId).toBeTruthy();
     }
   });
@@ -655,5 +677,146 @@ describe('PROBE-IS-10 — who the notification reaches, what it says, and where 
     expect(r.notify?.outputs.emitted).toBe(false);
     expect(r.notify?.outputs.reason).toBe('no_acting_user_on_this_run');
     expect(await __hostExtStorage()!.listNotifications({ tenantId, limit: 20 })).toHaveLength(0);
+  });
+});
+
+/**
+ * PROBE-IS-12 (ADR 1102 D11) — what FLOWS, not only what succeeds.
+ *
+ * Every case above asserts node statuses and terminal effects. That is how three
+ * defects survived three ADRs: the draft step was handed the bare subject id
+ * (`INS91-2`), the mailbox was written before the approval (`INS91-3`), and a
+ * talent review stored the whole workforce's ratings in its run (`INS91-1`).
+ * Each leg below reads the thing that crossed an edge.
+ */
+describe('PROBE-IS-12 — what crosses each edge (ADR 1102)', () => {
+  it('anniversary-draft: the draft step is handed the fenced brief, never the bare subject id', async () => {
+    aiInputs.length = 0;
+    const r = await runDefinition(buildInsightsMetaWorkflow(ANNIVERSARY_DRAFT_ID), maximalLaunch(ANNIVERSARY_DRAFT_ID), `t-b1-${Date.now()}`);
+    expect(firstFailure(r)).toBeNull();
+    expect(aiInputs).toHaveLength(1);
+    const handed = aiInputs[0] as Record<string, unknown>;
+    // The ONLY input: `prompt` is the first port `toMessages` reads.
+    expect(Object.keys(handed)).toEqual(['prompt']);
+    const prompt = String(handed.prompt);
+    expect(prompt, 'the user turn is the bare id again').not.toBe('subj-42');
+    expect(prompt).toContain('Milestone: 10 years');
+    expect(prompt).toContain(EXEMPLAR_TEXT);
+    // The exemplar sits INSIDE the fence, not beside it.
+    const open = prompt.indexOf('BEGIN UNTRUSTED CONTENT');
+    const close = prompt.lastIndexOf('END UNTRUSTED CONTENT');
+    expect(open).toBeGreaterThan(-1);
+    expect(prompt.indexOf(EXEMPLAR_TEXT)).toBeGreaterThan(open);
+    expect(prompt.indexOf(EXEMPLAR_TEXT)).toBeLessThan(close);
+    expect(r.brief?.outputs).toMatchObject({ subjectId: 'subj-42', milestone: '10 years', milestoneSource: 'supplied', exemplarCount: 1 });
+  });
+
+  it('anniversary-draft: the human approves the TEXT before anything reaches a mailbox', async () => {
+    const r = await runDefinition(buildInsightsMetaWorkflow(ANNIVERSARY_DRAFT_ID), maximalLaunch(ANNIVERSARY_DRAFT_ID), `t-b2-${Date.now()}`);
+    expect(firstFailure(r)).toBeNull();
+    // The gate was handed the draft as a string, which is what its card shows.
+    expect(lastInputs.approve).toEqual({ draft: AI_CONTENT });
+    const gateAt = trace.indexOf('node:approve');
+    const firstDraftWrite = trace.findIndex((t) => t === 'broker:gmail' || t === 'broker:microsoft-graph');
+    expect(gateAt).toBeGreaterThan(-1);
+    expect(firstDraftWrite, 'no draft reached the broker after approval').toBeGreaterThan(-1);
+    expect(gateAt, 'the mailbox was written BEFORE the approval gate (INS91-3)').toBeLessThan(firstDraftWrite);
+    // A reject ends the run at the gate (`routes/interrupts.ts`, `approval_rejected`):
+    // that guarantee is the interrupt route's and is covered there. What this
+    // chain must guarantee is that the gate stands IN FRONT of the write.
+  });
+
+  it('anniversary-draft: an empty completion is refused before the gate and the mailbox', async () => {
+    const tenantId = `t-b3-${Date.now()}`;
+    const def = buildInsightsMetaWorkflow(ANNIVERSARY_DRAFT_ID);
+    const empty = async (): Promise<NodeResult> => ({ status: 'success', outputs: { content: '', usage: {}, finishReason: 'stop' } });
+    emptyCompletion = empty;
+    try {
+      brokerCalls.length = 0;
+      const r = await runDefinition(def, maximalLaunch(ANNIVERSARY_DRAFT_ID), tenantId);
+      expect(r.check?.status).toBe('failure');
+      expect(r.check?.error?.code).toBe('insufficient_data');
+      expect(r.approve, 'an approver was asked to approve nothing').toBeUndefined();
+      expect(brokerCalls.some((c) => c.connectorId === 'gmail' || c.connectorId === 'microsoft-graph')).toBe(false);
+    } finally {
+      emptyCompletion = null;
+    }
+  });
+
+  it('talent-prep: the run keeps ONLY the subject\'s review rows, not the workforce\'s', async () => {
+    const workforce = brokerReturning({
+      data: [
+        { workerId: 'w-other-1', performanceRating: 1, potentialRating: 3 },
+        { workerId: 'subj-42', performanceRating: 3, potentialRating: 2 },
+        { workerId: 'w-other-2', performanceRating: 2, potentialRating: 2 },
+      ],
+      total: 3,
+    });
+    const r = await runWithBroker(TALENT_PREP_ID, workforce, `t-b4-${Date.now()}`);
+    expect(r.pull?.status).toBe('success');
+    const kept = r.pull?.outputs.rows as Array<{ workerId: string }>;
+    expect(kept.map((row) => row.workerId), 'another person\'s review would be persisted in this run (INS91-1)').toEqual(['subj-42']);
+    expect(r.pull?.outputs).toMatchObject({ rowCount: 1, scannedCount: 3 });
+    expect(r.score?.outputs).toMatchObject({ subjectId: 'subj-42', box: 6 });
+  });
+
+  it('the Workday filter and the scorer agree about whose row a row is, for every id key', async () => {
+    // The code-review pass: `core.workday.query`'s `workerId` filter and the pack's
+    // `rowSubject` are two copies of one expression, and the leg above uses only
+    // `workerId`, on which every spelling agrees. These rows exercise each key and
+    // the precedence between them.
+    const rows: Array<Record<string, unknown>> = [
+      { subjectId: 'subj-42', performanceRating: 3, potentialRating: 2 },
+      { workerId: 'subj-42', performanceRating: 3, potentialRating: 2 },
+      { employeeId: 'subj-42', performanceRating: 3, potentialRating: 2 },
+      { id: 'subj-42', performanceRating: 3, potentialRating: 2 },
+      { subjectId: null, workerId: 'subj-42', performanceRating: 3, potentialRating: 2 },
+      { id: 'subj-42', workerId: 'w-other', performanceRating: 1, potentialRating: 1 },
+      { subjectId: 'w-other', id: 'subj-42', performanceRating: 1, potentialRating: 1 },
+      { workerId: ' subj-42 ', performanceRating: 3, potentialRating: 2 },
+    ];
+    const r = await runWithBroker(TALENT_PREP_ID, brokerReturning({ data: rows, total: rows.length }), `t-b6-${Date.now()}`);
+    expect(r.pull?.status).toBe('success');
+    const kept = r.pull?.outputs.rows as Array<Record<string, unknown>>;
+    expect(kept, 'the node filter and the scorer disagree about whose row a row is').toEqual(rows.filter((row) => rowSubject(row) === 'subj-42'));
+    expect(kept).toHaveLength(6);
+    expect(r.score?.status).toBe('success');
+  });
+
+  it.each([
+    ['blank', '   '],
+    ['omitted', undefined],
+  ])('talent-prep and anniversary-draft: an %s subject id refuses at the read, before any fetch', async (_label, subjectId) => {
+    // Rounds 2 and 3 of the code re-grade: a blank `{{params.subjectId}}` reached
+    // the node as `''`, and an omitted one as `undefined`, and both read as "no
+    // filter". Chain params are not validated at launch, so the whole workforce
+    // was fetched and kept in the read's outputs before `talent-score` refused.
+    // `config.requireWorkerId` makes either a refusal before the broker is called.
+    for (const chainId of [TALENT_PREP_ID, ANNIVERSARY_DRAFT_ID]) {
+      brokerCalls.length = 0;
+      const bag = { ...maximalLaunch(chainId) };
+      if (subjectId === undefined) delete bag.subjectId; else bag.subjectId = subjectId;
+      const r = await runDefinition(buildInsightsMetaWorkflow(chainId), bag, `t-b7-${Date.now()}`);
+      const read = chainId === TALENT_PREP_ID ? r.pull : r.milestones;
+      expect(read?.status, `${chainId}: the read ran without a subject`).toBe('failure');
+      expect(read?.error?.code).toBe('worker_id_required');
+      expect(read?.outputs.rows, 'a missing filter persisted the workforce').toBeUndefined();
+      expect(brokerCalls.filter((c) => c.connectorId === 'workday'), 'the workforce was fetched at all').toEqual([]);
+    }
+  });
+
+  it('weekly-variance: the red-team reviewer is shown the figures', async () => {
+    const r = await runDefinition(buildInsightsMetaWorkflow(WEEKLY_VARIANCE_ID), maximalLaunch(WEEKLY_VARIANCE_ID), `t-b5-${Date.now()}`);
+    expect(firstFailure(r)).toBeNull();
+    const gate = lastInputs.redteam as Record<string, unknown>;
+    expect(Object.keys(gate)).toEqual(['summary']);
+    const summary = String(gate.summary);
+    expect(summary).toContain('- **sales**: actual 95, plan 100, delta -5 (-5.0%), **flagged**');
+    expect(summary).toContain('- **margin**: actual 40, plan 38, delta +2 (+5.3%), **flagged**');
+    expect(summary).toContain('- **labor**: actual 22, plan 20, delta +2 (+10.0%), **flagged**');
+    // A zero is a plain zero, not `+0.0%` or `-0.0%`.
+    expect(summary).toContain('- **shrink**: actual 3, plan 3, delta 0 (0.0%)\n\n');
+    // A blank line before the verdict, so Markdown cannot fold it into the last bullet.
+    expect(summary.endsWith('\n\n**Verdict:** off plan on sales, margin, labor.')).toBe(true);
   });
 });

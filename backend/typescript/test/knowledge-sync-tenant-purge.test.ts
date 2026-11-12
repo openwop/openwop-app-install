@@ -60,6 +60,7 @@ vi.mock('../src/features/kb/kbService.js', async (orig) => ({
 import { createApp } from '../src/index.js';
 import { hostExtStorage, purgeTenantHostExt } from '../src/host/hostExtPersistence.js';
 import { upsertOAuthConnection } from '../src/features/connections/connectionsService.js';
+import { createMember } from '../src/host/accessControlService.js';
 import { createCollection } from '../src/features/kb/kbService.js';
 import {
   createSyncSource, getSyncSource, listFileStates, upsertFileState,
@@ -180,6 +181,8 @@ describe('the runner stamps the tenant, so cursors self-heal as files change', (
       tokens: { accessToken: 't', tokenType: 'Bearer', scopes: [] },
     });
     await createCollection(tenantId, 'org1', 'test', { name: 'col' }, { collectionId: 'col' });
+    // ADR 1101 D3 — the person a pass acts as must hold write on the source's org.
+    await createMember({ orgId: 'org1', tenantId, displayName: 'O', subject: 'user:o', roles: ['editor'] });
     const s = await createSyncSource(tenantId, 'org1', {
       connectionId: conn.connectionId, provider: 'google', externalFolderId: 'F',
       collectionId: 'col', cadence: 'hourly', createdBy: 'user:o',

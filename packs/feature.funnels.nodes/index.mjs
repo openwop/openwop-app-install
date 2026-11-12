@@ -32,7 +32,34 @@ export async function list(ctx) {
 export async function get(ctx) {
   const s = ensureFunnels(ctx); const i = merged(ctx);
   need(i, ['orgId', 'funnelId'], 'get');
-  return { status: 'success', outputs: await s.get(i) };
+  const out = await s.get(i);
+  // ADR 1023 FN72WF-5 — a missing funnel is a typed failure, never `{funnel:null}`
+  // recorded as success and handed to a model as the funnel.
+  if (!out || !out.funnel) return { status: 'failed', error: { code: 'not_found', message: 'No such funnel in this org.' } };
+  // ADR 1023 (grade-code FN72CD-2) — `view: 'model'` is what a model reads: a CLOSED
+  // projection (the shape, never the row: no experiment salt, receipts, ids of other
+  // runs or timestamps that differ between a run and its replay).
+  if (text(i.view, 16) === 'model') return { status: 'success', outputs: { funnel: funnelForModel(out.funnel) } };
+  return { status: 'success', outputs: out };
+}
+
+function funnelForModel(f) {
+  const steps = Array.isArray(f.steps) ? f.steps : [];
+  return omitEmpty({
+    name: text(f.name, 200),
+    status: text(f.status, 16),
+    steps: steps.filter((st) => st && typeof st === 'object').map((st) => omitEmpty({
+      stepId: text(st.stepId, 64), kind: text(st.kind, 32), name: text(st.name, 120),
+      routing: Array.isArray(st.routing) ? st.routing.filter((r) => r && typeof r === 'object').map((r) => omitEmpty({
+        goto: text(r.goto, 64),
+        when: r.when && typeof r.when === 'object' ? omitEmpty({ outcome: text(r.when.outcome, 16), utm: r.when.utm && typeof r.when.utm === 'object' ? omitEmpty({ key: text(r.when.utm.key, 64), value: text(r.when.utm.value, 200) }) : undefined }) : undefined,
+      })) : [],
+      sells: st.offer && typeof st.offer === 'object' ? true : undefined,
+      experiment: st.experiment && typeof st.experiment === 'object'
+        ? omitEmpty({ status: text(st.experiment.status, 16), variants: Array.isArray(st.experiment.variants) ? st.experiment.variants.length : undefined })
+        : undefined,
+    })),
+  });
 }
 
 export async function create(ctx) {
@@ -76,7 +103,28 @@ export async function requestPublish(ctx) {
 export async function stepStats(ctx) {
   const s = ensureFunnels(ctx); const i = merged(ctx);
   need(i, ['orgId', 'funnelId'], 'step-stats');
-  return { status: 'success', outputs: await s.stepStats(i) };
+  // ADR 1023 FN72WF-5 — the surface refuses an unknown funnel `not_found`.
+  try { return { status: 'success', outputs: await s.stepStats(i) }; } catch (e) { return refused(e); }
+}
+
+/** ADR 1023 D3 — a blueprint's FIRST node: every offer product id (each `…ProductId`
+ *  input and `productIds`; empty entries skipped) must be an ACTIVE product of the org, checked by THE offer
+ *  rule on the host, before any step sub-chain drafts a page. Typed failure
+ *  `offer_not_found`. */
+export async function checkOffers(ctx) {
+  const s = ensureFunnels(ctx); const i = merged(ctx);
+  need(i, ['orgId'], 'check-offers');
+  if (typeof s.checkOffers !== 'function') {
+    throw Object.assign(new Error('host ctx.features.funnels does not expose checkOffers — needs ADR 1023'), { code: 'host_capability_missing', capability: 'host.funnels' });
+  }
+  // Each id arrives as its OWN whole-value input (`productId`, `bumpProductId`, …):
+  // deferred expansion binds only whole-value `{{params.x}}` tokens, so an array of
+  // tokens would freeze. `productIds` (an array) is accepted too.
+  const productIds = [
+    ...(Array.isArray(i.productIds) ? i.productIds : []),
+    ...Object.entries(i).filter(([k]) => /(^p|P)roductId$/.test(k)).map(([, v]) => v),
+  ].filter((x) => typeof x === 'string' && x.trim()).map((x) => x.trim());
+  try { return { status: 'success', outputs: await s.checkOffers({ orgId: i.orgId, productIds }) }; } catch (e) { return refused(e); }
 }
 
 // ── ADR 0948 P2 — blueprint step plumbing. Pure: no surface call, no clock, no
@@ -133,6 +181,80 @@ export async function composeStepPage(ctx) {
     ...(steps.length ? [{ type: 'richText', data: { ...(text(copy.nextStepsHeading, 200) ? { heading: text(copy.nextStepsHeading, 200) } : {}), text: bullet(steps) } }] : []),
   ];
   return { status: 'success', outputs: { title: headline, sections } };
+}
+
+// ── ADR 1023 D1 — what a step's copy model reads. ──
+// The copy node used to be fed by two BARE edges (brief→copy, products→copy): the
+// scheduler maps a bare edge to port `input`, so the second overwrote the first, and
+// `toMessages` then sent the first string-valued input — the product id — as the
+// whole prompt. This node is the copy model's ONE input. It returns CLOSED
+// projections, never a raw row: a brief row carries `kernelReview.runId`, `budget`,
+// `createdBy` and timestamps, and a product row carries `cost`, download tokens and
+// stock (a run id in model text breaks the ADR 1002 replay digest; stock drifts).
+
+const strs = (v, maxItems, max) => (Array.isArray(v) ? v.map((x) => text(x, max)).filter(Boolean).slice(0, maxItems) : []);
+const omitEmpty = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== '' && v !== undefined && !(Array.isArray(v) && v.length === 0) && !(v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === 0)));
+
+function briefProjection(b) {
+  const m = b.messaging && typeof b.messaging === 'object' ? b.messaging : {};
+  const k = b.kernel && typeof b.kernel === 'object' ? b.kernel : null;
+  return omitEmpty({
+    name: text(b.name, 200),
+    objective: text(b.objective, 2000),
+    productName: text(b.productName, 200),
+    productDescription: text(b.productDescription, 4000),
+    industryVertical: text(b.industryVertical, 200),
+    competitors: strs(b.competitors, 20, 200),
+    messaging: omitEmpty({
+      primaryValueProp: text(m.primaryValueProp, 2000), toneOverride: text(m.toneOverride, 400),
+      proofPoints: strs(m.proofPoints, 12, 600), ctaStrategy: text(m.ctaStrategy, 1000),
+    }),
+    kernel: k ? omitEmpty({
+      headline: text(k.headline, 400), supportingStatement: text(k.supportingStatement, 2000),
+      proofPoints: strs(k.proofPoints, 12, 600), primaryCta: text(k.primaryCta, 200),
+      secondaryCta: text(k.secondaryCta, 200), tone: text(k.tone, 400),
+    }) : undefined,
+  });
+}
+
+function productProjection(p) {
+  const attrs = Array.isArray(p.attributes)
+    ? p.attributes.filter((a) => a && typeof a === 'object').map((a) => omitEmpty({ label: text(a.label, 120), value: text(a.value, 400) })).filter((a) => a.label).slice(0, 20)
+    : [];
+  return omitEmpty({
+    name: text(p.name, 200), description: text(p.description, 4000), type: text(p.type, 40),
+    categories: strs(p.categories, 20, 120), tags: strs(p.tags, 20, 120), attributes: attrs,
+  });
+}
+
+/** ADR 1023 D1 — the copy model's context: the brief (closed projection) and, for a
+ *  money step, the ONE active catalog product the step sells (+ the checkout's bump).
+ *  Inputs: brief (port, a get-brief output or the brief), products (port, a
+ *  list-products output; required when productId is given), productId?,
+ *  bumpProductId?. Typed failures: brief_not_found, offer_not_found. Pure. */
+export async function offerContext(ctx) {
+  const i = merged(ctx);
+  const rawBrief = i.brief && typeof i.brief === 'object' ? (i.brief.brief && typeof i.brief.brief === 'object' ? i.brief.brief : i.brief) : null;
+  if (!rawBrief || !text(rawBrief.name, 200)) return invalid('brief_not_found', 'offer-context needs the campaign `brief`.');
+  const context = { brief: briefProjection(rawBrief) };
+  const productId = text(i.productId, 120);
+  const bumpId = text(i.bumpProductId, 120);
+  if (productId || bumpId) {
+    const list = Array.isArray(i.products) ? i.products : (i.products && Array.isArray(i.products.products) ? i.products.products : null);
+    if (!list) return invalid('offer_check_missing', 'offer-context needs the org\'s `products` to find the offer.');
+    const find = (id) => list.find((p) => p && p.productId === id && p.active !== false);
+    if (productId) {
+      const p = find(productId);
+      if (!p) return invalid('offer_not_found', `The offer product is not an active product of this client: ${productId}`);
+      context.product = productProjection(p);
+    }
+    if (bumpId) {
+      const b = find(bumpId);
+      if (!b) return invalid('offer_not_found', `The order-bump product is not an active product of this client: ${bumpId}`);
+      context.bumpProduct = productProjection(b);
+    }
+  }
+  return { status: 'success', outputs: { context } };
 }
 
 /** A step sub-chain's result: the funnel step for the page it drafted, written to
@@ -198,6 +320,8 @@ export async function collectSteps(ctx) {
 export const nodes = {
   'feature.funnels.nodes.list': list,
   'feature.funnels.nodes.get': get,
+  'feature.funnels.nodes.check-offers': checkOffers,
+  'feature.funnels.nodes.offer-context': offerContext,
   'feature.funnels.nodes.create': create,
   'feature.funnels.nodes.set-steps': setSteps,
   'feature.funnels.nodes.step-stats': stepStats,

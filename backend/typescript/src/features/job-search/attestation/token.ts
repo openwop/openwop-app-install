@@ -260,15 +260,30 @@ export async function resolveAttestation(rawToken: string): Promise<AttestationV
  * unknown token: both resolve to null through the same path. Deleting it would
  * also destroy the applicant's own record of what they once attested.
  */
-export async function revokeAttestation(tenantId: string, attestationId: string, now: number): Promise<boolean> {
+export async function revokeAttestation(tenantId: string, attestationId: string, now: number, byUser: string): Promise<boolean> {
   const rec = await attestations.get(`${tenantId}:${attestationId}`);
   if (!rec || rec.revokedAt) return false;
+  // ADR 1036 D5 — an attestation states a person's own conduct; only they can
+  // withdraw it. A colleague gets the same "not found" as an unknown id.
+  if (rec.issuedBy !== byUser) return false;
   await attestations.put({ ...rec, revokedAt: new Date(now).toISOString() });
   return true;
 }
 
-/** The applicant's own list. Never exposes the hash. */
-export async function listAttestations(tenantId: string): Promise<Array<Omit<AttestationRecord, 'tokenHash'>>> {
+/**
+ * The applicant's own list. Never exposes the hash.
+ *
+ * CORRECTED (ADR 1036 D5): this was documented as "the applicant's own list"
+ * and returned every attestation in the TENANT, so any member read a
+ * colleague's — and then revoked it. It now filters on `issuedBy`.
+ */
+export async function listAttestations(tenantId: string, issuedBy: string): Promise<Array<Omit<AttestationRecord, 'tokenHash'>>> {
+  return (await listAllAttestations(tenantId)).filter((r) => r.issuedBy === issuedBy);
+}
+
+/** Every attestation in the tenant, for the ADR 0820 admin-class portability
+ *  export only (`dataExport.ts`) — never a member-facing door. */
+export async function listAllAttestations(tenantId: string): Promise<Array<Omit<AttestationRecord, 'tokenHash'>>> {
   const rows = await attestations.listByPrefix(`${tenantId}:`);
   return rows.map(({ tokenHash: _omit, ...pub }) => pub);
 }

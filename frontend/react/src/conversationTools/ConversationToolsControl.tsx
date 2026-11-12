@@ -20,7 +20,7 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { AlertIcon, SettingsIcon } from '../ui/icons/index.js';
-import { getCapabilityScope, type CapabilityScopeView } from './capabilityScopeClient.js';
+import { getCapabilityScope, isExpiredApproval, type CapabilityScopeView } from './capabilityScopeClient.js';
 
 const CapabilityScopeModal = lazy(() => import('./CapabilityScopeModal.js'));
 
@@ -46,7 +46,7 @@ export default function ConversationToolsControl({ sessionId, refreshKey, onView
   }, [sessionId, onViewer]);
   useEffect(() => { void load(); }, [load, refreshKey]);
 
-  const pending = (view?.approvals ?? []).filter((a) => a.status === 'pending').length;
+  const pending = (view?.approvals ?? []).filter((a) => a.status === 'pending' && !isExpiredApproval(a)).length;
   const label = pending > 0 ? t('pendingChip', { count: pending }) : t('openTitle');
   return (
     <>

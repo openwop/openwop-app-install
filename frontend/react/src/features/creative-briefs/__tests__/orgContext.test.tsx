@@ -38,6 +38,8 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
   useFeatureAccess: (id: string) => makeFeatureAccess({ enabled: id === 'creative-briefs', loading: false }),
 }));
 vi.mock('../RendersSection.js', () => ({ RendersSection: () => null }));
+// ADR 1039 D8 — the brief page asks the agent catalog whether to offer "Ask the Creative Director".
+vi.mock('../../../chat/lib/agentMentions.js', () => ({ useAgentMentions: () => ({ entries: [], isLoading: false, error: null }) }));
 vi.mock('../../media/mediaClient.js', async orig => ({ ...await orig<Record<string, unknown>>(), listAssets: vi.fn(async () => []) }));
 import { CreativeBriefsPage } from '../CreativeBriefsPage.js';
 const ORGS: Org[] = [{ orgId: 'house', name: 'QA house' }, { orgId: 'kick', name: 'QA KickTodo' }];

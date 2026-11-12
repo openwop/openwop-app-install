@@ -91,7 +91,7 @@ describe('ADR 0948 D1 — offers and the campaign link are validated at write', 
     const inactive = await product(T, orgId, 'Old', false);
     const pg = await page(T, orgId);
     for (const pid of [foreign, inactive, 'no-such-product']) {
-      expect(await errorOf(createFunnel({ tenantId: T, orgId, createdBy: 't', name: 'x', steps: [{ kind: 'checkout', pageId: pg, offer: { productIds: [pid] } }] }))).toEqual({ status: 404, code: undefined });
+      expect(await errorOf(createFunnel({ tenantId: T, orgId, createdBy: 't', name: 'x', steps: [{ kind: 'checkout', pageId: pg, offer: { productIds: [pid] } }] }))).toEqual({ status: 404, code: 'offer_not_found' }); // ADR 1023 D3 — the one offer rule types its refusal
     }
   });
 

@@ -22,6 +22,9 @@
 import type { BackendFeature } from '../types.js';
 import { registerInsightsSuiteRoutes } from './routes.js';
 import { registerInsightsMetaWorkflows } from './metaWorkflows.js';
+import { registerSubjectEraser } from '../../host/subjectErasure.js';
+import { registerScheduledJobFireGate } from '../../host/scheduledJobFireGates.js';
+import { eraseInsightsSuiteSubject, ownsInsightsWeeklyJob, WEEKLY_JOB_PREFIX } from './insightsSuiteService.js';
 
 export const insightsSuiteFeature: BackendFeature = {
   id: 'insights-suite',
@@ -32,12 +35,26 @@ export const insightsSuiteFeature: BackendFeature = {
   registerRoutes: (deps) => {
     registerInsightsMetaWorkflows();
     registerInsightsSuiteRoutes(deps);
+    // ADR 1102 D8 — the suite is erased with the person it runs as. Registered
+    // unconditionally: an erasure must not depend on a toggle being on today.
+    registerSubjectEraser(eraseInsightsSuiteSubject);
+    // ADR 1102 D4 (architect H5) — reserve the weekly job's id prefix, so the generic
+    // scheduler route cannot mint, squat, retarget, re-enable or re-own it. The
+    // fire-time feature check is already the job's `featureId`, so the gate itself
+    // lets every fire through.
+    registerScheduledJobFireGate('insights-suite', {
+      owns: ownsInsightsWeeklyJob,
+      gate: async () => null,
+      refusal: 'dispatch-error',
+      reservedJobIdPrefix: WEEKLY_JOB_PREFIX,
+      managedBy: { id: 'insights-suite', message: 'This schedule belongs to Insights & Drafting. Change it in Settings → AI → Insights & Drafting.' },
+    });
   },
   toggleDefault: {
     id: 'insights-suite',
     label: 'Insights & Drafting',
     description:
-      'Three domain agents + built-in workflows driven through the existing chat / builder / scheduler / triggers: Financial (Actual-vs-Plan variance from the data lake), Talent (9-box readiness from Workday), Communication (in-voice recognition drafting from Workday milestones — always a draft for approval, never auto-send). Results surface as run outputs + notifications — no separate dashboard or store.',
+      'Three domain agents + built-in workflows driven through the existing chat / builder / scheduler: Financial (Actual-vs-Plan variance from the data lake, on a weekly schedule set in Settings → AI → Insights & Drafting), Talent (9-box readiness from ratings you supply or Workday), Communication (in-voice recognition drafting — the draft is approved before it is saved to your mailbox, never sent). Results surface as run outputs + notifications — no separate dashboard or store.',
     category: 'Agents',
     status: 'off',
     bucketUnit: 'tenant',

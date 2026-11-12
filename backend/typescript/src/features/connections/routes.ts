@@ -20,7 +20,7 @@ import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { resolveAndResume } from '../../routes/interrupts.js';
 import { vendorPath } from '../../middleware/protocolVersion.js';
 import { createLogger } from '../../observability/logger.js';
-import { resolveEffectiveAccess, getOrg } from '../../host/accessControlService.js';
+import { resolveEffectiveAccess, getOrg, type Scope } from '../../host/accessControlService.js';
 import { isProviderAllowed } from '../../host/governanceService.js';
 import { requireSuperadmin } from '../../host/superadmin.js';
 import { publicBaseUrl, requireTenantWrite, callerSubjectSpellings } from '../featureRoute.js';
@@ -33,7 +33,7 @@ import { isAuthoredByOtherTenant } from '../../host/workflowOwnership.js';
 import { getUser } from '../users/usersService.js';
 import { listProviders, getProvider, type CredentialKind } from './providerRegistry.js';
 import { sendError } from '../../middleware/errorEnvelope.js';
-import { sendChannelInboundRateLimited } from '../../middleware/rateLimit.js';
+import { chargeIngestFailure, sendChannelInboundRateLimited } from '../../middleware/rateLimit.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { getPairing, pairConnection, unpair, type OutboundProvider } from './messagingOutbound.js';
 import {
@@ -132,7 +132,16 @@ export async function listCallerConnections(req: Request): Promise<Connection[]>
  * the tenant-wide union: a sub-org admin is not a workspace-root admin.
  */
 async function requireConnectionsManage(req: Request, orgId: string): Promise<void> {
-  const scope = 'host:connections:manage';
+  return requireScopeAtOrg(req, orgId, 'host:connections:manage');
+}
+
+/**
+ * The predicate behind {@link requireConnectionsManage}, for any scope (ADR 1053
+ * D10): `scope` held AT `orgId` (the workspace root when `orgId === tenantId`),
+ * by provenance, never the tenant-wide union. A feature whose setting is
+ * tenant-wide (the WhatsApp attestation) judges it at the root through this.
+ */
+export async function requireScopeAtOrg(req: Request, orgId: string, scope: Scope): Promise<void> {
   const tenantId = tenantOf(req);
   const refuse = (): never => {
     throw new OpenwopError('forbidden_scope', `Missing required scope: ${scope}`, 403, { requiredScope: scope, orgId });
@@ -791,12 +800,14 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
     sendError(res, 403, 'verification_failed', 'Webhook verification failed.');
   });
   app.post('/host/openwop-app/connections-inbound/:connectionId', async (req: Request, res: import('express').Response) => {
+    let verified = false;
     try {
       // The scoped `express.json({ verify })` parser populates rawBody for every
       // application/json POST on this path. If it's absent the HMAC can't be
       // verified over the exact bytes the provider signed — reject rather than
       // re-serialize (which could never match) and pretend to have a body.
       if (!req.rawBody) {
+        chargeIngestFailure(req);
         sendError(res, 401, 'unauthorized', 'The raw request body is required to verify the webhook signature.');
         return;
       }
@@ -814,6 +825,7 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
       const zoomSig = req.get('x-zm-signature'); // adr 0404 zoom-webinar
       const zoomTs = req.get('x-zm-request-timestamp');
       const outcome = await handleInboundEvent(startDeps, {
+        onVerified: () => { verified = true; },
         connectionId: req.params.connectionId,
         rawBody: req.rawBody.toString('utf8'),
         body: (req.body ?? {}) as Record<string, unknown>,
@@ -870,6 +882,7 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
           );
           return;
         case 'unauthorized':
+          chargeIngestFailure(req); // ADR 1053 D8b — only unverified deliveries spend the per-IP budget
           sendError(res, 401, 'unauthorized', 'Webhook signature verification failed.');
           return;
         case 'rate_limited':
@@ -878,10 +891,14 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
           return;
         case 'not_found':
         default:
+          chargeIngestFailure(req);
           sendError(res, 404, 'not_found', 'No such inbound webhook.');
           return;
       }
     } catch (err) {
+      // ADR 1053 D8b (WA85CD-18) — a throw BEFORE the signature verified is an
+      // unverified delivery: it spends the caller's failure budget like a 401 does.
+      if (!verified) chargeIngestFailure(req);
       log.error('inbound webhook handler error', { error: err instanceof Error ? err.message : String(err) });
       sendError(res, 500, 'internal_error', 'An unexpected error occurred.');
     }

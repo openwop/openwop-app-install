@@ -9,6 +9,7 @@ import { useTranslation } from 'react-i18next';
 import { StateCard, ErrorBoundary } from '../../ui/index.js';
 import { Tabs } from '../../ui/Tabs.js';
 import { SETTINGS_GROUP_ORDER, panelsForGroup, type SettingsGroup } from './settingsPanels.js';
+import { useFeatureVisible } from '../../featureToggles/FeatureAccessContext.js';
 
 function groupFromHash(): SettingsGroup {
   const h = window.location.hash.replace('#', '');
@@ -18,6 +19,7 @@ function groupFromHash(): SettingsGroup {
 export function SettingsPage(): JSX.Element {
   const { t } = useTranslation('settings-shell');
   const [group, setGroup] = useState<SettingsGroup>(groupFromHash);
+  const visible = useFeatureVisible();
 
   useEffect(() => {
     const onHash = (): void => setGroup(groupFromHash());
@@ -46,7 +48,7 @@ export function SettingsPage(): JSX.Element {
         panelId="settings-tabpanel"
       />
       <div id="settings-tabpanel" role="tabpanel" aria-labelledby={`settings-tabs-tab-${group}`} className="u-grid u-gap-3 u-mt-3">
-        {panelsForGroup(group).map((panel) => {
+        {panelsForGroup(group).filter((panel) => visible(panel.featureId)).map((panel) => {
           const Panel = panel.component;
           return (
             <section key={panel.id} id={panel.id} className="surface-card" aria-labelledby={`settings-h-${panel.id}`}>

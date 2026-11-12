@@ -124,7 +124,15 @@ describe('a fixture the executor refuses is not advertised', () => {
     //   2.44.0: + `conformance-replay-ordinal-loop` (openwop#1745), also a cycle.
     //     DECIDED: withheld for the same reason (this host's scheduler is a DAG),
     //     so its rows record inapplicable rather than failing at run start.
-    // Bounded loopback (loop row 3, openwop#1745) un-withholds BOTH.
-    expect([...refused].sort()).toEqual(['conformance-approval-reject-loopback', 'conformance-replay-ordinal-loop']);
+    //   2.46.44: + `conformance-loopback-refine` and `conformance-loopback-refine-fail`
+    //     (RFC 0258), whose `loopback` edge is a cycle to this DAG scheduler.
+    //     DECIDED: withheld until #5583 implements bounded loopback.
+    // Bounded loopback (loop row 3, openwop#1745) un-withholds them.
+    expect([...refused].sort()).toEqual([
+      'conformance-approval-reject-loopback',
+      'conformance-loopback-refine',
+      'conformance-loopback-refine-fail',
+      'conformance-replay-ordinal-loop',
+    ]);
   });
 });

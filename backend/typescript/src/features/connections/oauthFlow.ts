@@ -177,6 +177,15 @@ export function inboundIngestUrl(connectionId: string, reqOrigin: string): strin
   return `${callbackBaseUrl(reqOrigin)}${VENDOR_ROOT}/connections-inbound/${encodeURIComponent(connectionId)}`;
 }
 
+/** ADR 1053 D3 — the same URL `inboundIngestUrl` shows the operator, for a lane
+ *  with no request (a WhatsApp send asking Twilio for status callbacks). Read
+ *  from configuration only: `undefined` when no base is configured, never a
+ *  request origin and never a throw, so the caller simply asks for no callback. */
+export function configuredInboundIngestUrl(connectionId: string): string | undefined {
+  const base = [process.env.OPENWOP_OAUTH_CALLBACK_BASE_URL, process.env.OPENWOP_PUBLIC_BASE_URL].map((v) => v?.trim()).find((v) => v);
+  return base ? `${stripTrailingSlash(base)}${VENDOR_ROOT}/connections-inbound/${encodeURIComponent(connectionId)}` : undefined;
+}
+
 /**
  * The OAuth `redirect_uri`. Unlike the ingest URL it must EQUAL what the
  * provider console holds, on the authorize request and the token exchange,

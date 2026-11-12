@@ -34,8 +34,15 @@ vi.mock('../src/byok/secretResolver.js', async (orig) => ({
   ...(await orig<object>()),
   listSecretRefs: async () => { if (vault.refs === null) throw new Error('vault down'); return vault.refs; },
 }));
+// Issue #5764 — which stored refs RESOLVE now. Empty by default, so every case
+// written before #5764 freezes exactly what it froze then (no ref).
+const resolvable = vi.hoisted(() => ({ refs: [] as string[] }));
+vi.mock('../src/byok/userNamedSecret.js', async (orig) => ({
+  ...(await orig<object>()),
+  resolveUserNamedSecret: async (ref: string) => (resolvable.refs.includes(ref) ? 'synthetic-value' : null),
+}));
 
-const { runAiDefaultContributor, runAiDefaultFor, withRunAiDefault, RUN_AI_DEFAULT_KEY } = await import('../src/host/runAiDefault.js');
+const { runAiDefaultContributor, runAiDefaultFor, withRunAiDefault, runCredentialRefFor, RUN_AI_DEFAULT_KEY } = await import('../src/host/runAiDefault.js');
 const { getDefaultModel, listManagedProviderIds } = await import('../src/providers/catalog.js');
 const { expandChain } = await import('../src/host/workflowChainPackLoader.js');
 const { openStorage } = await import('../src/storage/index.js');
@@ -47,7 +54,7 @@ const { insertRunWithStartContext } = await import('../src/host/runInsert.js');
 const REPO = join(import.meta.dirname, '..', '..', '..');
 const now = '2026-10-17T00:00:00.000Z';
 
-beforeEach(() => { binding.current = null; vault.refs = ['anthropic']; });
+beforeEach(() => { binding.current = null; vault.refs = ['anthropic']; resolvable.refs = []; });
 
 describe('withRunAiDefault — fills only what the node left out', () => {
   const def = { provider: 'google', model: 'gemini-x', source: 'workspace' as const };
@@ -97,6 +104,46 @@ describe('run-start contributor — frozen once, never on a fork', () => {
     expect(((await runAiDefaultContributor({ tenantId: 't' }))[RUN_AI_DEFAULT_KEY] as { source: string }).source).toBe('catalog');
     binding.current = { tenantId: 't', provider: 'google', model: 'g', credentialRef: 'google:x', updatedAt: now };
     expect(await runAiDefaultContributor({ tenantId: 't', derivedFromRun: true })).toEqual({});
+  });
+});
+
+describe('issue #5764 — the workspace binding\'s key reaches the run', () => {
+  const frozen = async () => (await runAiDefaultContributor({ tenantId: 't' }))[RUN_AI_DEFAULT_KEY];
+  it('a stored ref that resolves is frozen with the binding, as a NAME', async () => {
+    binding.current = { tenantId: 't', provider: 'google', model: 'gemini-z', credentialRef: 'google:acme', updatedAt: now };
+    vault.refs = ['google:acme']; resolvable.refs = ['google:acme'];
+    expect(await frozen()).toEqual({ provider: 'google', model: 'gemini-z', source: 'workspace', credentialRef: 'google:acme' });
+    expect(JSON.stringify(await frozen())).not.toContain('synthetic-value');
+  });
+  it('a ref this tenant does not hold, or one that no longer resolves, is NOT frozen (the step fails honestly, as before)', async () => {
+    binding.current = { tenantId: 't', provider: 'google', model: 'g', credentialRef: 'google:other', updatedAt: now };
+    vault.refs = ['anthropic']; resolvable.refs = ['google:other'];
+    expect(await frozen()).toEqual({ provider: 'google', model: 'g', source: 'workspace' });
+    vault.refs = ['google:other']; resolvable.refs = [];
+    expect(await frozen()).toEqual({ provider: 'google', model: 'g', source: 'workspace' });
+    vault.refs = null; // vault down
+    expect(await frozen()).toEqual({ provider: 'google', model: 'g', source: 'workspace' });
+  });
+  it('the frozen ref is read verbatim, whatever the binding says later; managed or subscription values are dropped', () => {
+    const md = { [RUN_AI_DEFAULT_KEY]: { provider: 'google', model: 'g', source: 'workspace', credentialRef: 'google:acme' } };
+    binding.current = { tenantId: 't', provider: 'anthropic', model: 'a', credentialRef: 'anthropic:new', updatedAt: now };
+    expect(runAiDefaultFor(undefined, md)).toEqual({ provider: 'google', model: 'g', source: 'workspace', credentialRef: 'google:acme' });
+    for (const bad of ['managed:openwop-free', 'subscription:x', '', 7]) {
+      expect(runAiDefaultFor(undefined, { [RUN_AI_DEFAULT_KEY]: { provider: 'google', model: 'g', source: 'workspace', credentialRef: bad } }))
+        .toEqual({ provider: 'google', model: 'g', source: 'workspace' });
+    }
+  });
+  it('runCredentialRefFor: the wire ref first; a run that chose its own provider does not take the frozen key', () => {
+    const md = { [RUN_AI_DEFAULT_KEY]: { provider: 'google', model: 'g', source: 'workspace', credentialRef: 'google:acme' } };
+    expect(runCredentialRefFor(undefined, md)).toBe('google:acme');
+    expect(runCredentialRefFor({ ai: { credentialRef: 'google:wire' } }, md)).toBe('google:wire');
+    expect(runCredentialRefFor({ ai: { provider: 'anthropic' } }, md)).toBeUndefined();
+    expect(runCredentialRefFor(undefined, { [RUN_AI_DEFAULT_KEY]: { provider: 'google', model: 'g', source: 'catalog', credentialRef: 'google:acme' } })).toBeUndefined();
+  });
+  it('withRunAiDefault: an unnamed call takes provider, model AND the frozen key; a call with its own key keeps it', () => {
+    const def = { provider: 'google', model: 'g', source: 'workspace' as const, credentialRef: 'google:acme' };
+    expect(withRunAiDefault({}, def)).toEqual({ provider: 'google', model: 'g', credentialRef: 'google:acme' });
+    expect(withRunAiDefault({ credentialRef: 'mine' }, def)).toEqual({ credentialRef: 'mine' });
   });
 });
 

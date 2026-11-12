@@ -1,3 +1,23 @@
+/** ADR 0951 P2.1 — the closed, geometry-only recording format
+ * (src/features/analytics/replayEvents.ts). A chunk is refused unless it is
+ * exactly the inert layout/pointer/scroll vocabulary: no captured text,
+ * attributes or URLs; masks are fixed-size opaque leaves; one structural root
+ * precedes every node; geometry and time are on their grid and bounded; and
+ * gzip inflation is capped inside zlib before any byte is parsed. A refusal
+ * never echoes the refused content.
+ *
+ * Sabotage witnesses (w103; replayEvents.ts): echoing the input in the error
+ * reds the no-echo case; relaxing the closed key set reds the content and
+ * metadata cases; dropping the mask-size or masked-leaf check reds the mask
+ * case; dropping the root, duplicate-id or child-inside-root check reds the
+ * structure and coordinate cases; dropping the depth, per-frame or per-chunk
+ * node bound reds the bounds case; dropping the geometry grid, the pointer or
+ * scroll bound, or the viewport limit reds the coordinate case; dropping
+ * monotone time, the time grid, the duration bound, the event bound or the
+ * closed `else` reds the vocabulary case; dropping `maxOutputLength` reds the
+ * zlib case; dropping the compressed-size or decoded-size precheck, or letting
+ * a zlib error escape untyped, reds the input-bytes case; zeroing scroll
+ * output reds the round trip. */
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { decodeReplayEventsGzip, parseReplayEventsJson, REPLAY_EVENT_LIMITS as L,
@@ -18,6 +38,14 @@ const chunk = () => ({ version: 1, events: [frame(), { type: 'pointer', at: 10, 
   { type: 'scroll', at: 20, x: 0, y: 160 }] });
 const encode = (value: unknown) => Buffer.from(JSON.stringify(value));
 const parse = (value: unknown) => parseReplayEventsJson(encode(value));
+/** Deterministic (xorshift-seeded) JSON whitespace: about two bits of entropy per byte. */
+const WHITESPACE = [32, 9, 10, 13] as const;
+function whitespace(length: number): Buffer {
+  const out = Buffer.alloc(length);
+  let s = 0x2545f491;
+  for (let i = 0; i < length; i++) { s ^= s << 13; s ^= s >>> 17; s ^= s << 5; out[i] = WHITESPACE[s & 3] ?? 32; }
+  return out;
+}
 
 describe('ADR 0951 P2 geometry-only recording contract', () => {
   it('round-trips a masked layout and bounded interaction through real gzip', () => {
@@ -28,8 +56,10 @@ describe('ADR 0951 P2 geometry-only recording contract', () => {
   ('refuses captured content or attributes under %s without echoing them', field => {
     const payload = { ...mask(), [field]: 'PRIVATE poison https://private.invalid/?token=secret' };
     const bytes = encode({ version: 1, events: [{ ...frame(), nodes: [root(), payload] }] });
-    expect(() => parseReplayEventsJson(bytes)).toThrow(ReplayEventFormatError);
-    try { parseReplayEventsJson(bytes); } catch (error) { expect(String(error)).not.toContain('PRIVATE'); }
+    const refused = (() => { try { parseReplayEventsJson(bytes); return undefined; } catch (error) { return error; } })();
+    expect(refused).toBeInstanceOf(ReplayEventFormatError);
+    expect(String(refused)).not.toContain('PRIVATE');
+    expect(String(refused)).not.toContain('private.invalid');
   });
 
   it('refuses metadata containers at every level, including page URLs and event payloads', () => {
@@ -50,7 +80,7 @@ describe('ADR 0951 P2 geometry-only recording contract', () => {
   });
 
   it('requires one preceding structural root and rejects duplicate, cyclic and future node references', () => {
-    for (const nodes of [[mask()], [root(), root()], [root(), { ...mask(), parent: 2 }],
+    for (const nodes of [[mask()], [root(), root()], [root(), mask(), mask()], [root(), { ...mask(), parent: 2 }],
       [root(), { ...mask(), parent: 3 }], [{ ...root(), parent: 2 }], [{ ...root(), x: 8 }]]) {
       expect(() => parse({ version: 1, events: [{ ...frame(), nodes }] })).toThrow(ReplayEventFormatError);
     }
@@ -75,7 +105,8 @@ describe('ADR 0951 P2 geometry-only recording contract', () => {
     expect(() => parse({ version: 1, events: [frame(), { type: 'scroll', at: 10, x: 8, y: 0 }] })).toThrow(ReplayEventFormatError);
     expect(() => parse({ version: 1, events: [frame(), { type: 'scroll', at: 10, x: 0, y: 608 }] })).toThrow(ReplayEventFormatError);
     expect(() => parse({ version: 1, events: [{ ...frame(), nodes: [root(), { ...mask(), x: 800 }] }] })).toThrow(ReplayEventFormatError);
-    expect(() => parse({ version: 1, events: [{ ...frame(), viewport: { width: L.viewport + 8, height: 600 } }] })).toThrow(ReplayEventFormatError);
+    // The root is as wide as the viewport, so only the viewport limit can refuse it.
+    expect(() => parse({ version: 1, events: [{ ...frame(), viewport: { width: L.viewport + 8, height: 600 }, nodes: [{ ...root(), width: L.viewport + 8 }] }] })).toThrow(ReplayEventFormatError);
   });
 
   it('requires an independently decodable starting frame, bounded monotone time and a closed event vocabulary', () => {
@@ -107,8 +138,16 @@ describe('ADR 0951 P2 geometry-only recording contract', () => {
   });
 
   it('bounds input bytes and refuses invalid UTF-8, non-gzip and truncated gzip', () => {
-    expect(() => parseReplayEventsJson(Buffer.alloc(L.decodedBytes + 1))).toThrow(ReplayEventFormatError);
-    expect(() => decodeReplayEventsGzip(Buffer.alloc(L.compressedBytes + 1))).toThrow(ReplayEventFormatError);
+    // Valid JSON one byte over the decoded bound: only the size precheck can refuse it.
+    const json = encode(chunk());
+    expect(() => parseReplayEventsJson(Buffer.concat([json, Buffer.alloc(L.decodedBytes + 1 - json.length, 32)]))).toThrow(ReplayEventFormatError);
+    // A valid gzip of a valid chunk whose COMPRESSED size is over the bound (seeded
+    // JSON whitespace barely compresses): refused before zlib runs at all.
+    const oversized = gzipSync(Buffer.concat([json, whitespace(1_600_000)]));
+    expect(oversized.length).toBeGreaterThan(L.compressedBytes);
+    vi.clearAllMocks();
+    expect(() => decodeReplayEventsGzip(oversized)).toThrow(ReplayEventFormatError);
+    expect(gunzipSync).not.toHaveBeenCalled();
     expect(() => parseReplayEventsJson(Buffer.from([0xff, 0xfe]))).toThrow(ReplayEventFormatError);
     expect(() => decodeReplayEventsGzip(encode(chunk()))).toThrow(ReplayEventFormatError);
     expect(() => decodeReplayEventsGzip(gzipSync(encode(chunk())).subarray(0, 20))).toThrow(ReplayEventFormatError);

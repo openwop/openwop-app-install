@@ -16,14 +16,13 @@ import { OpenwopError } from '../../types.js';
 import { authorizeOrgScope, optionalString } from '../featureRoute.js';
 import { renderMarkdownToPdf } from '../documents/render.js';
 import { purgeLinksForResource } from '../sharing/sharingService.js';
-import { pruneThreadsForResourceAndComposites } from '../comments/commentsService.js';
 import { getAsset as getMediaAsset } from '../media/mediaService.js';
 import {
   listBriefs, getBrief, createBrief, updateBrief, transitionBrief, deleteBrief,
   listVersions, diffVersions, assembleMoodBoard, validateBriefContent, mergeBriefContent, extractBriefContent,
   type BriefContentInput,
 } from './creativeBriefsService.js';
-import { renderForBrief, renderVariantsForBrief, listRenders, deleteRender, deleteRendersForBrief, type RenderBriefArgs } from './render/renderService.js';
+import { renderForBrief, renderVariantsForBrief, listRenders, deleteRender, type RenderBriefArgs } from './render/renderService.js';
 import { listTemplates } from './render/templates.js';
 import type { CreativeBrief } from './types.js';
 import { buildRunRecord, dispatchRunInBackground } from '../../host/runDispatch.js';
@@ -36,6 +35,9 @@ import { runLinks } from '../../middleware/protocolVersion.js';
 import { resolveHeadlessAiDescribed, resolveHeadlessAiForSpec } from '../../host/headlessAi.js';
 import { runJudgeEval, FIDELITY_RULESET_VERSION, type ProviderErrorSummary } from '../../host/creativeFidelity/index.js';
 import { createLogger } from '../../observability/logger.js';
+import { listSecretRefs } from '../../byok/secretResolver.js';
+import { byokRunConfigurable } from '../../host/runCredentials.js';
+import { explicitRefNamesOtherProvider, isManagedRef, pickCredentialRef } from '../../aiProviders/credentialRefLadder.js';
 
 const FEATURE = { toggleId: 'creative-briefs', label: 'Creative Briefs' };
 const log = createLogger('creative-briefs.routes');
@@ -47,6 +49,43 @@ const providerErrorFields = (e: ProviderErrorSummary | undefined): Record<string
   (e ? { ...(e.status !== undefined ? { providerStatus: e.status } : {}), providerCodes: e.codes.join(',') } : {});
 
 const ORG = '/host/openwop-app/creative-briefs/orgs/:orgId';
+
+/** The only video provider wired on this host (`aiProvidersHost` VIDEO_PROVIDERS). */
+const REEL_PROVIDER = 'replicate';
+
+/** The reel ratios the generate-reel node can request (its `REEL_DIMENSIONS`). */
+const REEL_ASPECT_RATIOS = new Set(['9:16', '16:9', '1:1']);
+
+/**
+ * ADR 1039 D2 (CB82WF-2) — the reel's video key, decided BEFORE a run exists.
+ * Video generation is BYOK-only and `callVideoGenerator` needs an explicit ref,
+ * so a launch that has none can only fail after it was admitted and charged.
+ * This picks the ref with the ladder the dispatch applies (`pickCredentialRef`),
+ * run here over the WORKSPACE's stored ref names (the ADR 0706 ignition
+ * pre-flight precedent), and refuses a ref named for another vendor. The caller
+ * then registers the pick on the run (`byokRunConfigurable`), because a run's
+ * secret set holds only declared refs: a ref passed as an input alone resolves
+ * to nothing at dispatch (`host/runCredentials.ts`). Names only here; the
+ * cleartext is read, and policy enforced, by `callVideoGenerator` alone. `mock`
+ * is the test seam and is refused unless the seam is on.
+ */
+export async function resolveReelCredential(tenantId: string, provider: string, explicit: string | undefined): Promise<string | undefined> {
+  const { CREDENTIAL_PROVIDERS, mockProviderEnabled } = await import('../../aiProviders/aiProvidersHost.js');
+  if (provider === 'mock' && mockProviderEnabled()) return explicit;
+  if (provider !== REEL_PROVIDER) {
+    throw new OpenwopError('validation_error', `Reels are generated with ${REEL_PROVIDER}.`, 400, { field: 'provider' });
+  }
+  const refusal = (): OpenwopError => new OpenwopError(
+    'credential_required',
+    'Reels need a Replicate key in this workspace. A host administrator can add one in the Secrets Vault, at workspace scope, named "replicate" or starting with "replicate:".',
+    422,
+    { provider: REEL_PROVIDER },
+  );
+  if (explicit && (isManagedRef(explicit) || explicitRefNamesOtherProvider(REEL_PROVIDER, explicit, CREDENTIAL_PROVIDERS) !== null)) throw refusal();
+  const pick = pickCredentialRef(REEL_PROVIDER, explicit, await listSecretRefs({ tenantId }));
+  if (pick.ref === null) throw refusal();
+  return pick.ref;
+}
 
 type Scope = 'workspace:read' | 'workspace:write' | 'host:members:manage';
 
@@ -226,15 +265,10 @@ export function registerCreativeBriefsRoutes(deps: RouteDeps): void {
   app.delete(`${ORG}/briefs/:briefId`, async (req, res, next) => {
     try {
       const { orgId, tenantId } = await authz(req, 'workspace:write');
+      // ADR 1039 D6 — `deleteBrief` owns every cascade (versions, usage refs,
+      // share links, render records, comment threads), so no caller can skip one.
       const ok = await deleteBrief(tenantId, orgId, req.params.briefId);
       if (!ok) throw notFound(req.params.briefId);
-      await purgeLinksForResource(tenantId, 'creative_brief', req.params.briefId);
-      // ADR 0399 — render records are children of the brief (the composed
-      // media assets survive as library assets; media owns their lifecycle).
-      await deleteRendersForBrief(tenantId, orgId, req.params.briefId);
-      // CB-CODE-2 / CS-DATA-14 — a deleted brief's comment threads have no
-      // reachable surface left; prune them (the canvas-delete precedent).
-      await pruneThreadsForResourceAndComposites(tenantId, 'creative_brief', req.params.briefId);
       res.status(204).end();
     } catch (err) { next(err); }
   });
@@ -346,21 +380,29 @@ export function registerCreativeBriefsRoutes(deps: RouteDeps): void {
       const brief = await getBrief(tenantId, orgId, briefId);
       if (!brief) throw new OpenwopError('not_found', 'Creative brief not found.', 404, { briefId });
       const body = (req.body ?? {}) as { directionIndex?: unknown; aspectRatio?: unknown; durationSeconds?: unknown; provider?: unknown; credentialRef?: unknown };
+      const aspectRatio = optionalString(body.aspectRatio);
+      if (aspectRatio && !REEL_ASPECT_RATIOS.has(aspectRatio)) {
+        throw new OpenwopError('validation_error', `\`aspectRatio\` must be one of: ${[...REEL_ASPECT_RATIOS].join(', ')}.`, 400, { field: 'aspectRatio' });
+      }
+      const provider = optionalString(body.provider) ?? REEL_PROVIDER;
+      const credentialRef = await resolveReelCredential(tenantId, provider, optionalString(body.credentialRef));
       const wf = await hostSuite.workflowCatalog.getWorkflow(CREATIVE_BRIEFS_REEL_ID);
       if (!wf) throw new OpenwopError('internal_error', 'creative-briefs reel workflow is not registered.', 500, {});
       const inputs: Record<string, unknown> = {
-        orgId, briefId,
+        orgId, briefId, provider,
         ...(typeof body.directionIndex === 'number' ? { directionIndex: body.directionIndex } : {}),
-        ...(optionalString(body.aspectRatio) ? { aspectRatio: optionalString(body.aspectRatio) } : {}),
+        ...(aspectRatio ? { aspectRatio } : {}),
         ...(typeof body.durationSeconds === 'number' ? { durationSeconds: body.durationSeconds } : {}),
-        ...(optionalString(body.provider) ? { provider: optionalString(body.provider) } : {}),
-        ...(optionalString(body.credentialRef) ? { credentialRef: optionalString(body.credentialRef) } : {}),
+        ...(credentialRef ? { credentialRef } : {}),
       };
       const run = buildRunRecord({
         workflowId: CREATIVE_BRIEFS_REEL_ID,
         tenantId,
         inputs,
         metadata: { source: 'creative-briefs-reel', briefId },
+        // ADR 1039 D2 (grade-code B1) — register the picked key on the run, or
+        // prepareRunSecrets leaves it out of the run's secret set.
+        configurable: byokRunConfigurable(credentialRef),
         ...(user.userId ? { actingUserId: user.userId } : {}),
         owner: ownerStampFromRequest(req),
       });

@@ -1,7 +1,17 @@
 /** ADR 0951 P2.5: erasure must fence visibility and late writers before deleting
  * bytes. Real SQLite connections share the index; the real memory blob adapter
  * stores bytes. Only its delete failure / put interleaving is injected. These
- * are storage-boundary witnesses, not a claim of public ingest qualification. */
+ * are storage-boundary witnesses, not a claim of public ingest qualification.
+ *
+ * Sabotage witnesses (w103; src/features/analytics/replayStore.ts): a read that
+ * ignores the erasing state (w103-ef-erasing-visible), an eraser that drops its
+ * pointer on failure (w103-ef-pointer-dropped), erasure that deletes the row
+ * instead of leaving a fence (w103-ef-no-fence), a fence window shorter than a
+ * day or a back-dated stamp (w103-ef-fence-window, w103-ef-fence-stamp), a lost
+ * acknowledgement that is not rescued (w103-ef-ack-not-rescued), clearing the
+ * receipt of an unacknowledged PUT (w103-ef-receipt-cleared), and treating an
+ * empty PUT or DELETE response as success (w103-ef-put-ack, w103-ef-delete-ack),
+ * plus finalizing over an erasing row (w103-ef-finalize-erasing). */
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -82,7 +92,7 @@ describe('ADR 0951 P2.5 — durable erasure fences', () => {
     await putReplayChunk(other, 0, CHUNK);
     expect(await keys(mine)).toHaveLength(1);
     failDelete = true;
-    await expect(eraseSubjectReplays(tenantId, mine.subjectKey)).rejects.toThrow();
+    await expect(eraseSubjectReplays(tenantId, mine.subjectKey)).rejects.toThrow(/not deleted/);
     initHostExtPersistence(b);
     expect(await get(mine)).toBeNull();
     expect((await listReplaySessionsForTenant(tenantId)).map(item => item.sessionId)).toEqual([other.sessionId]);
@@ -105,7 +115,7 @@ describe('ADR 0951 P2.5 — durable erasure fences', () => {
       tenantId, orgId: mine.orgId, sessionId: mine.sessionId, privacy: { state: 'erased', erasedAt: expect.any(String) },
     });
     initHostExtPersistence(b);
-    await expect(putReplayChunk(mine, 1, CHUNK)).rejects.toThrow();
+    await expect(putReplayChunk(mine, 1, CHUNK)).rejects.toMatchObject({ httpStatus: 409 });
     expect(await get(mine)).toBeNull();
     expect(await keys(mine)).toEqual([]);
   });
@@ -186,7 +196,7 @@ describe('ADR 0951 P2.5 — durable erasure fences', () => {
   it('a missing put acknowledgement cannot publish a readable session', async () => {
     const mine = row();
     registerSurfaceAdapter<BlobSurface>('blob', 'replay-erasure-witness', () => ({ ...blob, put: async () => ({}) }));
-    await expect(putReplayChunk(mine, 0, CHUNK)).rejects.toThrow();
+    await expect(putReplayChunk(mine, 0, CHUNK)).rejects.toThrow('Session replay chunk storage was not acknowledged.');
     initHostExtPersistence(b);
     expect(await get(mine)).toBeNull();
     await expect(eraseSubjectReplays(tenantId, mine.subjectKey)).rejects.toThrow(/not deleted/);
@@ -226,7 +236,7 @@ describe('ADR 0951 P2.5 — durable erasure fences', () => {
       expect(await get(mine)).toBeNull();
     } finally { resume(); }
     const outcome = await pending;
-    expect(outcome.status).toBe('rejected');
+    expect(outcome).toMatchObject({ status: 'rejected', error: { httpStatus: 409 } });
     expect(await get(mine)).toBeNull();
     expect(await keys(mine)).toEqual([]);
     await eraseSubjectReplays(tenantId, mine.subjectKey);

@@ -18,6 +18,7 @@ import { buildCreativeBriefsSurface, CREATIVE_BRIEFS_SURFACE_POLICY } from './su
 import { registerRenderMediaCascade } from './render/renderService.js';
 import { registerFeatureDataExporter } from '../../host/featureDataExport.js';
 import { exportCreativeBriefsData } from './dataExport.js';
+import { registerCreativeBriefsErasure } from './erasure.js';
 import { registerGrantResourceKind } from '../../host/externalCollaborators.js';
 import { getBrief, listBriefs } from './creativeBriefsService.js';
 import { briefToSharedMarkdown } from './routes.js';
@@ -31,6 +32,7 @@ export const creativeBriefsFeature: BackendFeature = {
     registerCreativeBriefsRoutes(deps);
     registerCreativeBriefsAgentTools(); // XCH-HOLE-7 (round 3) — openwop:creative-briefs.list (ADR 0308 seam)
     registerRenderMediaCascade(); // DATB-1 — prune render rows when their composed PNG is deleted
+    registerCreativeBriefsErasure(); // ADR 1039 D7 — DSAR: tombstone actors, keep the org's rows
     // ADR 0958 P2 — an external designer can be granted an APPROVED brief: the same
     // approved-only projection the `creative_brief` share link serves (ADR 0353 P4).
     registerGrantResourceKind('creative-brief', {

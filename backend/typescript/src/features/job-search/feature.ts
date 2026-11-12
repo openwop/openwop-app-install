@@ -30,7 +30,7 @@ import { JOB_SEARCH_TOGGLE, JOB_SEARCH_LABEL } from './service.js';
 import { registerJobSearchRoutes, registerPublicAttestationRoutes } from './routes.js';
 import { registerAnswerBankRoutes } from './autopilot/routes.js';
 import { registerJobSearchAgentTools } from './agentTools.js';
-import { buildJobSearchSurface } from './surface.js';
+import { buildJobSearchSurface, JOB_SEARCH_SURFACE_POLICY } from './surface.js';
 import { registerChainBackedWorkflow } from '../../host/chainBackedWorkflows.js';
 import { CAREER_CAMPAIGN_CARD_WORKFLOW_ID } from './agent/provision.js';
 import { registerJobSearchCrmCascade } from './lifecycle/crmCascade.js';
@@ -66,10 +66,12 @@ export const jobSearchFeature: BackendFeature = {
   // ADR 0014 — `ctx.features['job-search']`: read ops + ONE terminal write +
   // the WF-JS-1 campaign trigger. No op takes a submission target: the law's
   // substance is that nothing may route AROUND the ADR 0541 grant, and
-  // `runCampaignPass` takes nothing but the run's own tenant — every submission
-  // inside the pass is grant-consulted, pace-bounded and claim-CAS'd (see the
-  // surface.ts header + the ADR 0543 §D3 correction note).
-  surface: { id: JOB_SEARCH_TOGGLE, build: buildJobSearchSurface },
+  // `runCampaignPass` takes no input — the host resolves ONE person from the
+  // run (ADR 1036 D1) and every submission inside that person's pass is
+  // grant-consulted, pace-bounded and claim-CAS'd (see the surface.ts header +
+  // the ADR 0543 §D3 correction note).
+  // ADR 1036 D2 — the writer's scope for the ADR 0832 org floor.
+  surface: { id: JOB_SEARCH_TOGGLE, build: buildJobSearchSurface, orgPolicy: JOB_SEARCH_SURFACE_POLICY },
   // ADR 0540 P4 — the pack now exists, so it is declared.
   requiredPacks: [
     'feature.job-search.nodes',

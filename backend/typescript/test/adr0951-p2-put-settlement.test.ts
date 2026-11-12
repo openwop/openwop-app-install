@@ -3,7 +3,16 @@
  * `REPLAY_SETTLE_AFTER_MS` it cannot land: erasure and the sweep may then delete
  * what it stored and drop the receipt. Before that, or on a backend that cannot
  * enforce the deadline, the receipt stays and erasure still reports it. Two
- * SQLite clients share real rows; blob bytes are real (memory backend). */
+ * SQLite clients share real rows; blob bytes are real (memory backend).
+ *
+ * Sabotage witnesses (w103; src/features/analytics/replayStore.ts): dropping the
+ * upload's abort signal, or lengthening it, reds the deadline case; settling only
+ * after two windows reds the older-than-window and sweep cases; settling every
+ * receipt reds the inside-the-window case; `>` instead of `>=` at the window,
+ * not stamping `observedAt`, or treating an unstamped receipt as ancient reds the
+ * pre-P2.5 case; settling on any backend reds the unbounded-backend case; skipping
+ * the settlement blob delete, skipping `settleLiveRecordings` in the sweep, or a
+ * 33-receipt pending cap reds the sweep case. */
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,7 +23,7 @@ import type { Storage } from '../src/storage/storage.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { buildHostSurfaceBundle, initInMemorySurfaces, type BlobSurface } from '../src/host/inMemorySurfaces.js';
 import { registerSurfaceAdapter } from '../src/host/surfaceBackends.js';
-import { mergeConsentCategories } from '../src/features/consent/consentService.js';
+import { getStrictGrantGeneration, mergeConsentCategories } from '../src/features/consent/consentService.js';
 import {
   REPLAY_BLOB_ROOT, REPLAY_PUT_DEADLINE_MS, REPLAY_SETTLE_AFTER_MS, deleteReplaySession, putReplayChunk,
   replayChunkPrefix, sweepExpiredReplays, type ReplaySession,
@@ -132,8 +141,8 @@ describe('ADR 0951 P2.5 — unknown-PUT settlement', () => {
   it('the sweep settles a live recording, freeing the capacity its stale receipts held', async () => {
     const mine = row();
     await mergeConsentCategories({ tenantId, subjectKey: mine.subjectKey, categories: { 'analytics.replay': true }, source: 'public:client-a' });
-    const generation = await (await import('../src/features/consent/consentService.js'))
-      .getStrictGrantGeneration(tenantId, mine.subjectKey, 'analytics.replay');
+    const generation = await getStrictGrantGeneration(tenantId, mine.subjectKey, 'analytics.replay');
+    expect(generation).toBeTypeOf('string');
     const full = Array.from({ length: 32 }, (_, i) => receipt(i + 1, ago(REPLAY_SETTLE_AFTER_MS + 1000)));
     await b.kvSet(rawKey(mine), JSON.stringify({ ...mine, privacy: {
       state: 'active', committed: true, pending: full, chunks: {}, consentGeneration: generation, eligibilityId: `test-${tenantId}-client-a` } }));

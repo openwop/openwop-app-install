@@ -161,7 +161,6 @@
     "job-search:attestation-hashidx",
     "job-search:digest",
     "job-search:pipeline-binding",
-    "job-search:steering",
     "kb:docrev",
     "kb:enrichcache",
     "kb:reindex",

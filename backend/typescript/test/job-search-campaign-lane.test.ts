@@ -31,6 +31,7 @@ import { registerBoardAdapter, getBoardAdapter, type BoardAdapter } from '../src
 import { upsertListing } from '../src/features/job-search/boards/listing.js';
 import { putSteering } from '../src/features/job-search/agent/steering.js';
 import { createApplyGrant, applyGrants } from '../src/host/applyGrant.js';
+import { subjectDealTag } from '../src/features/job-search/domain/applications.js';
 import { runWithEffectContext } from '../src/host/runEffectContext.js';
 import { listCards } from '../src/host/kanbanService.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -116,7 +117,7 @@ describe('WF-JS-1 — the pass is honest about what it cannot do', () => {
     await steer();
     await grant({ origins: ['boards-api.greenhouse.io'] });
     await listing('greenhouse', 1); // real Tier-1 board — ships no submitLane
-    const report = await runTenantCampaignPass(T, NOW);
+    const report = await runTenantCampaignPass(T, ME, NOW);
     expect(report.ranGrants).toBe(1);
     expect(report.skippedNoSubmitLane).toBe(1);
     const d = report.results[0]!.digest;
@@ -132,9 +133,9 @@ describe('WF-JS-1 — the pass is honest about what it cannot do', () => {
     await steer();
     await grant();
     const up = await listing('lane-a', 1);
-    const report = await runTenantCampaignPass(T, NOW);
+    const report = await runTenantCampaignPass(T, ME, NOW);
     const d = report.results[0]!.digest;
-    expect(d.applied).toEqual([`deal:${up.listingId}`]);
+    expect(d.applied).toEqual([`deal:${subjectDealTag(ME)}:${up.listingId}`]);
     expect(submits).toEqual([{ listingId: up.listingId }]);
     const g = (await applyGrants.listByPrefix(`${T}:`))[0]!;
     expect(g.submitsUsed).toBe(1);
@@ -149,7 +150,7 @@ describe('WF-JS-1 — the pass is honest about what it cannot do', () => {
     await grant();
     await listing('lane-cap', 1);
     await listing('lane-cap', 2);
-    const report = await runTenantCampaignPass(T, NOW);
+    const report = await runTenantCampaignPass(T, ME, NOW);
     const d = report.results[0]!.digest;
     expect(d.applied.length).toBe(1);
     // The second submittable item was refused at the SUBMIT moment (the day
@@ -165,7 +166,7 @@ describe('WF-JS-1 — the pass is honest about what it cannot do', () => {
     await grant();
     await listing('lane-replay', 1);
     const report = await runWithEffectContext({ runId: 'run-replay', replaying: true }, () =>
-      runTenantCampaignPass(T, NOW),
+      runTenantCampaignPass(T, ME, NOW),
     );
     const d = report.results[0]!.digest;
     expect(d.applied).toEqual([]);

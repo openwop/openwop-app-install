@@ -46,7 +46,7 @@ export async function deliverA2aPush(
   } catch {
     return { delivered: false, reason: 'egress_denied' };
   }
-  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  const headers: Record<string, string> = { 'content-type': target.contentType ?? 'application/json' };
   if (target.authorization !== undefined) headers.authorization = target.authorization;
   let status: number;
   try {

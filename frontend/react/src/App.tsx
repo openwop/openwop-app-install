@@ -104,7 +104,7 @@ import { matchPrivacyRoute, privacyRedirect } from './features/site/privacyRoute
 import { PRIVACY_HREF } from './brand/privacyHref.js';
 import { FRONTEND_FEATURES, lastKnownEntitlementFeatureIds } from './features/registry.js';
 import { config } from './client/config.js';
-import { matchDocsIndex, matchDocsSlug } from './features/docs/docsRoute.js';
+import { canonicalDocsPath, matchDocsIndex, matchDocsSlug } from './features/docs/docsRoute.js';
 import { matchStoreOrgId } from './features/commerce/storeRoute.js';
 import { matchPodcastView } from './features/podcasts/podcastRoute.js';
 import { matchVerifyToken } from './features/job-search/verifyRoute.js';
@@ -249,6 +249,8 @@ export function App() {
   // bare-PublicShell posture as `/p/:slug` (published-only enforced server-side).
   const docsSlug = matchDocsSlug(location.pathname);
   const docsIndex = matchDocsIndex(location.pathname);
+  // ADR 1057 D1 (grade-ux N1) — one spelling per doc, the same rule the crawler door 301s by.
+  const docsCanonical = canonicalDocsPath(location.pathname);
 
   // ADR 0122 Phase 6 — a public, anonymous-reachable read-only share viewer at
   // `/shared/:token`, rendered in the bare PublicShell like `/p/:slug`.
@@ -472,6 +474,8 @@ export function App() {
           ? <Suspense fallback={<div className="u-p-4"><Skeleton /></div>}><PresentRemotePage token={presentRemoteToken} /></Suspense>
           : sharedToken
           ? <Suspense fallback={<div className="u-p-4"><Skeleton /></div>}><SharedSharePage token={sharedToken} /></Suspense>
+          : docsCanonical !== null
+          ? <Navigate replace to={`${docsCanonical}${location.search}${location.hash}`} />
           : docsSlug !== null || docsIndex
           ? <Suspense fallback={<div className="u-p-4"><Skeleton /></div>}><DocsPublicPage orgId={SYSTEM_SITE_ORG} slug={docsSlug} /></Suspense>
           : publicPageSlug

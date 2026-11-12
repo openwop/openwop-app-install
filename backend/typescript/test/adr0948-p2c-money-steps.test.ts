@@ -16,7 +16,8 @@
  *  2. Single use: accept charges once (per-step idempotency key); a replay returns
  *     the same purchase with no second charge; the downsell is then closed; decline
  *     then accept is refused; concurrent accepts charge once.
- *  3. Binding: another funnel's ref, a missing/forged token, `oc`, quantity 2, an
+ *  3. Binding: another funnel's ref, a missing/forged token, the storefront `oc` on a
+ *     funnel parent (architect L3), quantity 2 (the refusal names `quantity`), an
  *     unpaid parent, and an expired window are refused.
  *  4. Failure modes: an unknown Stripe outcome holds the step `charging` (routes as
  *     the end of the offers, never a downsell); a bank challenge is a decline.
@@ -29,7 +30,8 @@
  * decision claim (single use: the claim leg), the token HMAC check and the parent's
  * funnel binding (binding), upsell/downsell in SERVER_OUTCOME_KINDS (routing), the
  * reachability check (single use + routing), `charging` routing as accepted
- * (failure modes), and the funnel one-click quantity cap. The concurrent-accept leg
+ * (failure modes), the funnel one-click quantity cap, and the funnel-parent refusal on
+ * the storefront `oc` path (binding; grade-tests wave 104). The concurrent-accept leg
  * stays green with the claim sabotaged, because reachability serialises those
  * requests in practice; the claim leg is its witness.
  */
@@ -45,7 +47,7 @@ import { setSecret } from '../src/byok/secretResolver.js';
 import { getOrder, markAsPaid, captureSavedPmFromPaidIntent, listChildOrders } from '../src/features/commerce/commerceService.js';
 import { mintOneClickToken } from '../src/features/commerce/oneClickToken.js';
 import { mintFunnelOfferToken, offerParentValid, getOfferDecision, claimOfferDecision, FUNNEL_OFFER_WINDOW_MS } from '../src/features/funnels/offerDecisions.js';
-import { createFunnel, publishFunnel } from '../src/features/funnels/funnelsService.js';
+import { createFunnel, publishFunnel, type FunnelStep } from '../src/features/funnels/funnelsService.js';
 
 function portOf(s: { address(): string | AddressInfo | null }): number {
   const a = s.address();
@@ -110,7 +112,7 @@ beforeAll(async () => {
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   }
   await setSecret('billing:stripe-key', 'sk_test_mock');
-});
+}, 120_000);
 afterAll(async () => {
   delete process.env.OPENWOP_COMMERCE_PLATFORM_TENANTS;
   delete process.env.OPENWOP_COMMERCE_OFFSESSION_ENABLED;
@@ -133,7 +135,7 @@ function client(headers: Record<string, string> = {}) {
     post: <T = Record<string, unknown>>(p: string, b?: unknown) => call<T>('POST', p, b),
   };
 }
-type Body = Record<string, unknown> & { details?: { code?: string }; orderId?: string };
+type Body = Record<string, unknown> & { details?: { code?: string; field?: string }; orderId?: string };
 const store = (orgId: string, sfx: string): string => `/host/openwop-app/public-store/${encodeURIComponent(orgId)}${sfx}`;
 
 /** A shop with a published money funnel (explicit stepIds so routing can name them). */
@@ -154,15 +156,15 @@ async function shop() {
     return created.body.pageId;
   };
   const mk = async (tag: string) => {
-    const f = await createFunnel({
-      tenantId, orgId, createdBy: 'test', name: `Money ${tag} ${n++}`,
-      steps: [
-        { stepId: 'checkout', kind: 'checkout', pageId: await page(`Checkout ${tag}`), offer: { productIds: [p.main, p.alt], bumpProductIds: [p.bump] } },
-        { stepId: 'upsell', kind: 'upsell', pageId: await page(`Upsell ${tag}`), offer: { productIds: [p.up], oneClickProductId: p.up }, routing: [{ when: { outcome: 'accepted' }, goto: 'thankyou' }] },
-        { stepId: 'downsell', kind: 'downsell', pageId: await page(`Downsell ${tag}`), offer: { productIds: [p.down], oneClickProductId: p.down } },
-        { stepId: 'thankyou', kind: 'thankyou', pageId: await page(`Thanks ${tag}`) },
-      ],
-    } as never);
+    // Typed against the product's FunnelStep (no laundering cast): an offer or routing
+    // field the type does not have would hide a fixture the validator drops.
+    const steps: FunnelStep[] = [
+      { stepId: 'checkout', kind: 'checkout', pageId: await page(`Checkout ${tag}`), offer: { productIds: [p.main, p.alt], bumpProductIds: [p.bump] } },
+      { stepId: 'upsell', kind: 'upsell', pageId: await page(`Upsell ${tag}`), offer: { productIds: [p.up], oneClickProductId: p.up }, routing: [{ when: { outcome: 'accepted' }, goto: 'thankyou' }] },
+      { stepId: 'downsell', kind: 'downsell', pageId: await page(`Downsell ${tag}`), offer: { productIds: [p.down], oneClickProductId: p.down } },
+      { stepId: 'thankyou', kind: 'thankyou', pageId: await page(`Thanks ${tag}`) },
+    ];
+    const f = await createFunnel({ tenantId, orgId, createdBy: 'test', name: `Money ${tag} ${n++}`, steps });
     const pub = await publishFunnel(tenantId, orgId, f.funnelId);
     expect(pub?.status, JSON.stringify(pub)).toBe('published');
     return f;
@@ -282,8 +284,11 @@ describe('ADR 0948 P2c — post-purchase offers: once per step, on the reached s
     expect((await accept(guest, s, orderId, { productId: s.p.up, funnel: { funnelId: s.other.funnelId, stepId: 'upsell' }, ft: mintFunnelOfferToken(s.tenantId, s.orgId, orderId, s.other.funnelId) })).status, 'a parent stamped with funnel A').toBe(404);
     expect((await accept(guest, s, orderId, { productId: s.p.up, funnel: up, ft: `${ft.slice(0, -2)}xx` })).status).toBe(404);
     expect((await accept(guest, s, orderId, { productId: s.p.up, funnel: up })).status).toBe(404);
-    expect((await accept(guest, s, orderId, { productId: s.p.up, funnel: up, oc: mintOneClickToken(s.tenantId, s.orgId, orderId) })).status).toBe(404);
-    expect((await accept(guest, s, orderId, { productId: s.p.up, funnel: up, ft, quantity: 2 })).status).toBe(400);
+    // `oc` on the STOREFRONT path (no funnel ref): valid for this paid order, yet a funnel
+    // purchase never falls back to it (architect L3), because it has no per-step single use.
+    expect((await accept(guest, s, orderId, { productId: s.p.up, oc: mintOneClickToken(s.tenantId, s.orgId, orderId) })).status, 'a funnel parent via the storefront `oc`').toBe(404);
+    const qty = await accept(guest, s, orderId, { productId: s.p.up, funnel: up, ft, quantity: 2 });
+    expect([qty.status, qty.body.details?.field], 'the funnel quantity cap, not another 400').toEqual([400, 'quantity']);
     expect(intentCalls()).toBe(0);
     // Unpaid parent: a fresh checkout, never paid.
     const unpaid = await guest.post<Body>(store(s.orgId, '/checkout'), { email: `u-${n++}@x.test`, lines: [{ productId: s.p.main, quantity: 1 }], funnel: { funnelId: s.funnel.funnelId, stepId: 'checkout' } });

@@ -23,6 +23,18 @@
  * Not asserted: `preconnect` and `dns-prefetch`. Measured for ADR 1021: Chromium
  * opened no preconnect socket to the loopback sink even from an unsandboxed page, so
  * there is no control that could make a zero mean anything.
+ * Sabotage (product values this spec loads): `default-src *`, `img-src *` or a default
+ * `connect-src *` in uiPluginRpc.ts red the request-API case; dropping `form-action
+ * 'none'` reds the form-action case; an empty `pluginSandboxTokens()` (the HEADER
+ * sandbox alone) reds RESIDUAL, which proves Chromium enforces the header layer; a
+ * header token the attribute lacks reds the two-layers case while the form/popup/top
+ * production legs stay silent (the attribute still holds); admitting the loopback sink
+ * in firebase.json's `frame-src` reds the embedder case. The load-counting and
+ * `webrtc 'block'` cases pin Chromium behaviour an ADR decision rests on, not a product
+ * value, so no product edit can red them; a browser change is what they watch for.
+ * Timing: an absence claim needs an observation window, so each mount watches for a
+ * fixed 1.5 s after the host page (and its frame) loaded; every leak a control expects
+ * lands inside it.
  * Self-contained: no app server, no backend process.
  */
 import { test, expect, type Page } from '@playwright/test';
@@ -32,6 +44,9 @@ import type { AddressInfo } from 'node:net';
 import { readFileSync } from 'node:fs';
 import { PLUGIN_SANDBOX } from '../src/features/ui-plugins/pluginSandbox.js';
 import { pluginFrameCsp, pluginIframeCsp, pluginSandboxTokens } from '../../../backend/typescript/src/host/uiPluginRpc.js';
+
+/** Set by the host page's iframe `onload` (see the frame server). */
+declare global { interface Window { frameLoads?: number } }
 
 let hits: string[] = [];
 let selfHits: string[] = [];
@@ -168,8 +183,9 @@ test('form, popup and top navigation: blocked by the sandbox, and each leaks wit
 test("form-action 'none' blocks a form even if both sandbox layers allow forms (ADR 1021 D2)", async ({ page }) => {
   const sandbox = `${PLUGIN_SANDBOX} allow-forms`;
   const withAllowForms = (policy: string): string => `sandbox ${sandbox}; ${policy}`;
-  expect(pluginIframeCsp()).toContain("form-action 'none'");
   expect(leaked(await mount(page, { body: PAYLOADS().form!, sandbox, csp: withAllowForms(pluginIframeCsp()) }))).toBe(false);
+  // The control below removes exactly this directive, so it has to be there to remove.
+  expect(pluginIframeCsp()).toContain("form-action 'none'");
   // Control: the same policy without the directive. form-action does not fall back to default-src.
   const without = pluginIframeCsp().replace("; form-action 'none'", '');
   expect(leaked(await mount(page, { body: PAYLOADS().form!, sandbox, csp: withAllowForms(without) }))).toBe(true);
@@ -185,7 +201,7 @@ test('counting the frame\'s loads cannot catch a navigation (why ADR 1021 D5 rej
   // A 204 answer sends the request and loads no document, so no second load fires.
   // After the plugin's own load, as a plugin that has been running would.
   const later = (url: string): string => `<script>addEventListener('load',()=>setTimeout(()=>{location.href='${url}'},0))</script>`;
-  const loads = (): Promise<number | undefined> => page.evaluate(() => (window as unknown as { frameLoads?: number }).frameLoads);
+  const loads = (): Promise<number | undefined> => page.evaluate(() => window.frameLoads);
   const noContent = await mount(page, { body: later(sink('nocontent')) });
   expect(noContent.hits).toContain('/nocontent?d=secret');
   expect(await loads()).toBe(1);

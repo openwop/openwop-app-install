@@ -13,9 +13,12 @@
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { declarePiiFields } from '../../host/dataClassification.js';
 import { createLogger } from '../../observability/logger.js';
-import { registerJob, deleteJob, getJob } from '../../host/schedulingService.js';
-import { registerSubscription, setSubscriptionState } from '../../host/triggerBridgeService.js';
-import { WEEKLY_VARIANCE_ID, ANNIVERSARY_DRAFT_ID } from './metaWorkflows.js';
+import { registerJob, deleteJob, getJob, listJobs, validateCadence, type ScheduledJob } from '../../host/schedulingService.js';
+import { deleteSubscription, listSubscriptions, setSubscriptionState } from '../../host/triggerBridgeService.js';
+import { subjectKeyForms } from '../../host/subjectErasureRedaction.js';
+import type { SubjectEraseReport } from '../../host/subjectErasure.js';
+import { legacyPrincipalOf } from '../users/usersService.js';
+import { WEEKLY_VARIANCE_ID } from './metaWorkflows.js';
 import { OpenwopError } from '../../types.js';
 
 /** The toggle this feature's schedules + trigger subscriptions are gated on. */
@@ -28,34 +31,59 @@ const log = createLogger('features.insights-suite');
 // masked in logs + classifies confidential-pii, even though the result is now a run output
 // (not a persisted read-model row). The 9-box numbers are generic field names — not added to
 // the global PII union to avoid over-masking.
-// DELIBERATELY no `registerSubjectEraser`/`registerRetentionPurger` for this entity: nothing
-// persists it — the only durable row in this feature is `insights:config` below (opaque
-// RFC 0048 `principalUserId`, no declared PII), so there is no store for a DSAR or a
-// retention sweep to reach. The declaration exists purely for log masking of the run output
-// (grade-data RI-3 audit, 2026-07-06).
+// No eraser or purger for THIS entity: nothing persists a talent snapshot (it is a run
+// output). The declaration exists purely for log masking of that output (grade-data RI-3
+// audit, 2026-07-06).
+//
+// ADR 1102 D8 (`INS91-8` / `INS91-15`) — CORRECTED. This note used to go on to say the
+// feature's only durable row, `insights:config`, carried "no declared PII, so there is no
+// store for a DSAR … to reach". The subject-erasure census overrode that: the row is keyed
+// to a PERSON (`principalUserId`), and so are the job and the subscription it arms. They
+// are erased by `eraseInsightsSuiteSubject` below.
 declarePiiFields('insights.talentSnapshot', ['subjectId']);
 
 export interface InsightsSuiteConfig {
   tenantId: string;
-  /** The user the suite is scoped to (opaque principal id, RFC 0048 — not PII). */
+  /** The person the suite runs as (ADR 1102 D4): derived from the caller who saved
+   *  it, never supplied. Their weekly job carries it as `ownerUserId` AND as
+   *  `metadata.actingUserId`, so a scheduled run uses their own connections. */
   principalUserId: string;
-  /** Business units in scope for variance analysis. */
-  businessUnits: string[];
+  /** The one business unit the weekly variance analyses (ADR 1102 D5). */
+  businessUnit?: string;
+  /** LEGACY stored shape (pre ADR 1102): a list of which only `[0]` was ever
+   *  read. Read on load as `businessUnit`'s fallback; never written. */
+  businessUnits?: string[];
   /** Cron + IANA tz for the weekly variance run (consumed by the RFC 0052 scheduler). */
   scheduleCron?: string;
   scheduleTimezone?: string;
-  /** Binding to the data source (e.g. a BigQuery projectId/dataset). */
-  planSource?: { projectId?: string; dataset?: string };
-  /** ADR 0081 P4 — when true, a work-anniversary event (e.g. from Workday) ingested at the
-   *  trigger endpoint starts the `anniversary-draft` meta-workflow. Off by default. */
+  /** The BigQuery project the weekly financials query runs in. (ADR 1102 D5: a
+   *  `dataset` field used to sit here and was read by nothing; the dataset lives
+   *  in the chain's `sql`.) */
+  planSource?: { projectId?: string };
+  /** ADR 0081 P4 — the work-anniversary trigger. ADR 1102 D6: only `false` can be
+   *  saved today, because the trigger lane cannot supply the chain's required
+   *  params (`ISWF-6b`). `true` is refused by `applyConfig`. */
   anniversaryTriggerEnabled?: boolean;
   updatedAt: string;
 }
 
 const configs = new DurableCollection<InsightsSuiteConfig>('insights:config', (c) => c.tenantId);
 
+/** A stored row in today's shape: the legacy `businessUnits[0]` becomes
+ *  `businessUnit`, which is what the schedule always actually ran. */
+function normalizeStored(c: InsightsSuiteConfig): InsightsSuiteConfig {
+  const { businessUnits, planSource, ...rest } = c;
+  const bu = rest.businessUnit ?? businessUnits?.[0];
+  return {
+    ...rest,
+    ...(bu ? { businessUnit: bu } : {}),
+    ...(planSource?.projectId ? { planSource: { projectId: planSource.projectId } } : {}),
+  };
+}
+
 export async function getConfig(tenantId: string): Promise<InsightsSuiteConfig | null> {
-  return configs.get(tenantId);
+  const c = await configs.get(tenantId);
+  return c ? normalizeStored(c) : null;
 }
 
 /**
@@ -84,139 +112,228 @@ export function anniversaryTriggerSubscriptionId(config: InsightsSuiteConfig): s
   return `insights-anniversary:${config.tenantId}:${config.principalUserId}`;
 }
 
+/** ADR 1102 D4 — the id prefix only this feature mints. Reserved through the
+ *  fire gate (`feature.ts`), so the generic scheduler route can neither mint,
+ *  squat, retarget, re-enable nor re-own a job under it. */
+export const WEEKLY_JOB_PREFIX = 'insights-weekly:';
+const weeklyPrefixFor = (tenantId: string): string => `${WEEKLY_JOB_PREFIX}${tenantId}:`;
+const anniversaryPrefixFor = (tenantId: string): string => `insights-anniversary:${tenantId}:`;
+
+/** The fire gate's `owns`: both markers are server-written. */
+export function ownsInsightsWeeklyJob(job: ScheduledJob): boolean {
+  return job.jobId.startsWith(WEEKLY_JOB_PREFIX) && job.featureId === TOGGLE_ID;
+}
+
 /**
- * Persist the suite config AND reconcile its weekly-variance schedule (RFC 0052) + its
- * work-anniversary trigger subscription (RFC 0099):
+ * ADR 1102 D5 (`INS91-5`) — leave exactly the intended job and subscription.
+ *
+ * The ids embed the principal, and the config row is one per tenant, so a save by a
+ * different person used to arm their ids and never touch the previous person's: the
+ * old job fired weekly, invisible to `GET /config`. This reconcile is STATELESS. It
+ * lists the tenant's rows by prefix and removes every one but the intended id. It
+ * never diffs against the stored row, so a save that fails part-way heals on the
+ * retry (the architect pass's B1: a diff read after `configs.put` saw no difference on
+ * the retry, which made the orphan permanent). Failures are thrown, never swallowed.
+ */
+async function reconcileTenantRows(tenantId: string, keepJobId: string | null, currentSubId: string): Promise<void> {
+  for (const job of await listJobs(tenantId)) {
+    if (job.jobId.startsWith(weeklyPrefixFor(tenantId)) && job.jobId !== keepJobId) await deleteJob(job.jobId);
+  }
+  for (const sub of await listSubscriptions(tenantId)) {
+    if (!sub.subscriptionId.startsWith(anniversaryPrefixFor(tenantId))) continue;
+    // The current principal's row is PAUSED (its delivery history is the record of
+    // what it did); another principal's is DELETED, along with the raw id it carries.
+    if (sub.subscriptionId === currentSubId) await setSubscriptionState(sub.subscriptionId, 'paused');
+    else await deleteSubscription(sub.subscriptionId);
+  }
+}
+
+/**
+ * Persist the suite config AND reconcile it onto the engine:
  *   - schedule: a cron (re)registers the deterministic job that fires
- *     `openwop-app.insights.weekly-variance`; absent cron removes it.
- *   - anniversary trigger: when enabled, (re)register a deterministic webhook subscription
- *     that starts `openwop-app.insights.anniversary-draft` for an ingested anniversary event,
- *     and ensure it is `active` (registerSubscription is idempotent and won't reactivate a
- *     previously-paused row on its own); when disabled, pause it. There is no
- *     `deleteSubscription` — pausing makes ingest a no-op (the run never starts) and preserves
- *     delivery history (ADR 0081 P4 / architect C1). Re-enable revives delivery but does NOT
- *     clear the dedup window, so an identical `externalDeliveryId` replayed within retention
- *     still dedups (effectively-once).
- * Idempotent on re-save.
+ *     `openwop-app.insights.weekly-variance` AS the principal; absent cron removes it.
+ *   - anniversary trigger: ADR 1102 D6 — refused while the lane cannot run; any
+ *     existing subscription is paused.
+ *   - every other `insights-*` row this tenant holds is removed (D5).
+ * Idempotent on re-save, and self-healing on a retry after a part-way failure.
  */
 export async function applyConfig(config: InsightsSuiteConfig): Promise<InsightsSuiteConfig> {
-  const jobId = weeklyScheduleJobId(config);
-  const intendedSchedule = Boolean(config.scheduleCron && config.principalUserId);
-  // ADR 0599 §Correction 6 — VALIDATE BEFORE ANY WRITE, the same rule `ISC-6`
-  // established for `scheduleTimezone` four lines of intent away. The `!res.ok`
-  // branch below was correct AND thrown AFTER `configs.put`, so the one refusal
-  // it can actually produce left the caller with a 400 and a persisted row: a
-  // `GET /config` advertising a cron that is not armed and cannot be armed. That
-  // is the "refusal that persists is worse than the bug" defect this PR fixed
-  // one function call up, re-created in the opposite direction.
-  //
-  // The refusal it can produce is `jobid_conflict`, and the reasoning that said
-  // it could not ("the id embeds the tenantId") was wrong: `routes/scheduler.ts`
-  // accepts `body.jobId` VERBATIM under the CALLER's tenant, so any authenticated
-  // tenant can squat this deterministic id and 400 the victim's every save.
-  // (`schedule_horizon_exceeded` needs `firstFireAtMs`, which this call never
-  // passes — genuinely unreachable, and named rather than implied.)
-  //
-  // The refusal has an EXIT, which is what keeps it from being the worse cure:
-  // clearing the cron takes the `else` branch, which removes the squatted row,
-  // after which the save succeeds.
+  // ADR 1102 D6 (`INS91-6`) — refuse to ARM a trigger that provably cannot run, the
+  // ADR 0599 §6 rule this file applied to the cron and never to its sibling lane.
+  // The anniversary chain requires `subjectId`, `workdayBaseUrl` and `recipient`; the
+  // trigger lane seeds declared defaults only (`triggerIngestionService.ts`,
+  // ADR 0677 `ISWF-6a`), and mapping the event into the bag is `ISWF-6b`, still
+  // deferred. A trigger-started run also has no acting user, so its `self`
+  // notification refuses. Here, the one choke point every writer passes, so no
+  // arming path survives (ADR 0582). Validated BEFORE any write.
+  if (config.anniversaryTriggerEnabled === true) {
+    throw new OpenwopError(
+      'invalid_request',
+      'The work-anniversary trigger cannot be armed yet: a trigger event cannot supply the person, the Workday base URL or the recipient the recognition chain requires, so every fire would fail at its first node. Run the "Work-anniversary recognition draft" workflow from the chat or the builder instead.',
+      400,
+      { field: 'anniversaryTriggerEnabled', reason: 'trigger_lane_unrunnable' },
+    );
+  }
+  // Never write the legacy list (D5); a caller still holding it gets its `[0]`.
+  const stored = normalizeStored(config);
+  const jobId = weeklyScheduleJobId(stored);
+  const intendedSchedule = Boolean(stored.scheduleCron && stored.principalUserId);
+  // What this id held before this save, so a failure after arming can put it back.
+  let priorJob: ScheduledJob | null = null;
+  // ADR 0599 §Correction 6 — VALIDATE BEFORE ANY WRITE. A job under this id held by
+  // another workspace is the one refusal `registerJob` can produce here. ADR 1102 D4
+  // reserves the prefix, so the generic scheduler route can no longer mint one; this
+  // stays for a row squatted before the reservation. Its exit is clearing the cron.
   if (intendedSchedule) {
+    // The code-review pass (ADR 1102): a cron that PARSES but never fires
+    // (`0 0 31 2 *`) passed the route's parse check, was persisted, and was then
+    // refused by `registerJob`'s own cadence check: the persisted-refusal shape
+    // again. The same judgement, made here before anything is written.
+    const cadence = validateCadence(stored.scheduleCron!, stored.scheduleTimezone);
+    if (cadence) {
+      throw new OpenwopError('invalid_request', cadence.message, 400, {
+        field: cadence.code === 'invalid_timezone' ? 'scheduleTimezone' : 'scheduleCron', reason: cadence.code,
+      });
+    }
     const prior = await getJob(jobId);
-    if (prior && prior.tenantId !== config.tenantId) {
+    priorJob = prior;
+    if (prior && prior.tenantId !== stored.tenantId) {
       throw new OpenwopError(
         'invalid_request',
         'The weekly variance schedule could not be armed: its schedule id is held by another workspace. '
-        + 'Clear `scheduleCron` and save to release it, then re-arm.',
+        + 'An operator has to remove that schedule before this one can be saved.',
         400,
         { field: 'scheduleCron', reason: 'jobid_conflict' },
       );
     }
   }
-  await configs.put(config);
+  // Arm FIRST, persist second (the code-review pass): a refusal `registerJob` can
+  // still produce (a write-contention loss) then leaves the stored row as it was,
+  // instead of a row advertising a schedule that is not armed.
   let scheduleArmed = false;
   if (intendedSchedule) {
     const res = await registerJob({
       jobId,
-      tenantId: config.tenantId,
-      cronExpr: config.scheduleCron!,
+      tenantId: stored.tenantId,
+      cronExpr: stored.scheduleCron!,
       workflowId: WEEKLY_VARIANCE_ID,
-      ownerUserId: config.principalUserId,
+      ownerUserId: stored.principalUserId,
+      // ADR 1102 D4 (architect B4) — "runs as" made TRUE. `ownerUserId` reaches the
+      // run as attribution only; `actingUserId` is what the Connections resolver keys
+      // the person's own credentials off, and what `jobActors` lists for the removal
+      // and erasure cascade. The shared-workspace scheduler lane stamps the same key
+      // (`routes/scheduler.ts`).
+      metadata: { actingUserId: stored.principalUserId },
       enabled: true,
       // ADR 0599 §6 — the owning feature, resolved per tenant at FIRE time.
-      // Replaces the toggle-status listener that used to be the only protection
-      // and was backwards in both directions (see `teardownAllSchedules`'s
-      // removal note below).
       featureId: TOGGLE_ID,
-      // ADR 0599 §6 (ISWF-5) — the two values the weekly-variance chain needs,
-      // which this route has always COLLECTED and always thrown away.
-      // `registerJob` has supported `inputs` since the KickTodo daily loop lost
-      // its `enrollmentId` to exactly this omission, and `scheduleDaemon`
-      // forwards it into `seedRunVariables`. Without this the scheduled run
-      // resolves `{{params.projectId}}` to `undefined`, SILENTLY, and dies at
-      // node 1. `planSource` was previously read by NOTHING repo-wide.
+      // ADR 0599 §6 (ISWF-5) — the values the weekly-variance chain needs, forwarded
+      // by `scheduleDaemon` into `seedRunVariables`.
       inputs: {
-        ...(config.planSource?.projectId ? { projectId: config.planSource.projectId } : {}),
-        ...(config.businessUnits[0] ? { businessUnit: config.businessUnits[0] } : {}),
+        ...(stored.planSource?.projectId ? { projectId: stored.planSource.projectId } : {}),
+        ...(stored.businessUnit ? { businessUnit: stored.businessUnit } : {}),
       },
-      ...(config.scheduleTimezone ? { timezone: config.scheduleTimezone } : {}),
+      ...(stored.scheduleTimezone ? { timezone: stored.scheduleTimezone } : {}),
     });
-    // ADR 0599 §6 (ISC-7) — `registerJob` reports failure BY VALUE
-    // (`schedule_horizon_exceeded`, `jobid_conflict`), and this call used to be
-    // a bare `await` whose result was dropped. The route then 200'd and the one
-    // ops line this feature emits asserted `scheduleArmed:true` for a job that
-    // was never written — strictly worse than emitting nothing, because it
-    // defeats the investigation that would find the real defect.
-    //
-    // §Correction 6 — this is now the RACE BACKSTOP, not the primary gate: the
-    // pre-flight above catches the one reachable refusal before anything is
-    // written. Kept because a squat landing between the pre-flight and here is a
-    // real (if narrow) window, and a by-value failure must never be dropped
-    // again. It is NOT separately witnessed — the pre-flight is what the test
-    // exercises — and that is stated rather than implied.
+    // ADR 0599 §6 (ISC-7) — `registerJob` reports failure BY VALUE; never dropped.
+    // The race backstop behind the pre-flight above.
     if (!res.ok) {
       throw new OpenwopError('invalid_request', `The weekly variance schedule was refused: ${res.error.message}`, 400, {
         field: 'scheduleCron', reason: res.error.code,
       });
     }
     scheduleArmed = true;
-  } else {
-    await deleteJob(jobId).catch(() => undefined);
   }
-
-  const annivSubId = anniversaryTriggerSubscriptionId(config);
-  const anniversaryArmed = Boolean(config.anniversaryTriggerEnabled && config.principalUserId);
-  if (anniversaryArmed) {
-    await registerSubscription({
-      subscriptionId: annivSubId,
-      tenantId: config.tenantId,
-      source: 'webhook',
-      workflowId: ANNIVERSARY_DRAFT_ID,
-      // ADR 0599 §6 — resolved per tenant at INGEST time. Without it, disabling
-      // the feature for one tenant left this webhook accepting events and
-      // starting LLM runs on their BYOK key indefinitely, while their config
-      // route 404'd so they could not disarm it themselves.
-      featureId: TOGGLE_ID,
-      // Documented (ADR 0081 P4 / architect C2): a production Workday webhook SHOULD register
-      // with verificationMode 'required' + a signing secret. The host-extension ingest route
-      // is already tenant-auth-gated; 'none' keeps the path deterministic.
-      verificationMode: 'none',
-      label: 'Work-anniversary recognition draft',
-    });
-    await setSubscriptionState(annivSubId, 'active'); // revive if a prior save paused it
-  } else {
-    await setSubscriptionState(annivSubId, 'paused'); // no-op when absent (returns null)
+  try {
+    await configs.put(stored);
+  } catch (err) {
+    // The round-2 code re-grade: arming first means a failed ROW write would leave
+    // a job the stored row does not describe (on a take-over, a SECOND weekly run
+    // nobody can see). Put this id back, then fail loudly.
+    if (scheduleArmed) await restoreJob(jobId, priorJob, stored.tenantId);
+    throw err;
   }
-  // INS-1: suite-level reconciliation telemetry — one structured line per config apply so
-  // ops can see, per tenant, whether the weekly variance schedule is armed (and on what
-  // cron) and whether the anniversary trigger is live. The per-RUN outcome/cost of the
-  // workflows themselves surfaces through the executor's standard run events.
+  // Not rolled back (the round-3 code re-grade): once the row is written, the row
+  // and the armed job agree, and undoing the job would leave a saved schedule with
+  // nothing behind it. A failure here leaves only leftovers this same reconcile
+  // removes on the next save, so it is thrown for the caller to retry.
+  await reconcileTenantRows(stored.tenantId, intendedSchedule ? jobId : null, anniversaryTriggerSubscriptionId(stored));
+  // INS-1: suite-level reconciliation telemetry — one structured line per config apply.
   log.info('insights_suite_reconciled', {
-    tenantId: config.tenantId,
-    businessUnits: config.businessUnits.length,
-    scheduleArmed, ...(scheduleArmed ? { jobId, cron: config.scheduleCron } : {}),
-    anniversaryArmed, ...(anniversaryArmed ? { subscriptionId: annivSubId } : {}),
+    tenantId: stored.tenantId,
+    hasBusinessUnit: stored.businessUnit !== undefined,
+    scheduleArmed, ...(scheduleArmed ? { jobId, cron: stored.scheduleCron } : {}),
+    // ADR 1102 D6 — never armed (refused above); kept on the line so a dashboard
+    // reading it sees a definite false, not an absent field.
+    anniversaryArmed: false,
   });
-  return config;
+  return stored;
+}
+
+/**
+ * Return `jobId` to what this save replaced: absent, or its prior cadence, inputs,
+ * owner, metadata and `enabled` (so a removed-member pause survives). Its run
+ * history (`lastRunAt`, skip counters, `nextFireAt`) is not restored; the forward
+ * save had already reset it. Never throws: a failed restore is logged, because the
+ * caller is already failing with the original error.
+ */
+async function restoreJob(jobId: string, prior: ScheduledJob | null, tenantId: string): Promise<void> {
+  const fail = (error: string): void => log.error('insights_suite_rollback_failed', { tenantId, jobId, error });
+  try {
+    if (!prior) { await deleteJob(jobId); return; }
+    const res = await registerJob({
+      jobId: prior.jobId,
+      tenantId: prior.tenantId,
+      cronExpr: prior.cronExpr,
+      ...(prior.workflowId !== undefined ? { workflowId: prior.workflowId } : {}),
+      ...(prior.ownerUserId !== undefined ? { ownerUserId: prior.ownerUserId } : {}),
+      ...(prior.metadata !== undefined ? { metadata: prior.metadata } : {}),
+      ...(prior.featureId !== undefined ? { featureId: prior.featureId } : {}),
+      ...(prior.inputs !== undefined ? { inputs: prior.inputs } : {}),
+      ...(prior.timezone !== undefined ? { timezone: prior.timezone } : {}),
+      enabled: prior.enabled,
+    });
+    // `registerJob` refuses BY VALUE (ISC-7): a dropped result here is a silent
+    // failed restore (the round-3 code re-grade).
+    if (!res.ok) fail(`${res.error.code}: ${res.error.message}`);
+  } catch (e) {
+    fail(e instanceof Error ? e.message : String(e));
+  }
+}
+
+/**
+ * ADR 1102 D8 (`INS91-8`) — DSAR. The suite is scoped to a PERSON (whose schedule,
+ * whose connections), so erasing that person erases the suite: every weekly job and
+ * anniversary subscription this tenant holds (the subscription id carries the raw
+ * principal, and `deleteSubscription` takes its delivery rows with it), then the
+ * config row. Delete, not re-point: handing a person's schedule to someone else is a
+ * decision only a human makes, and re-saving recreates it as the saver.
+ *
+ * Matches the forms the scheduler eraser matches, including the home-tenant legacy
+ * principal alias. Idempotent; a key that matches nothing touches nothing.
+ *
+ * Keyed off the ROW: a weekly job acting as the subject under a row that names
+ * someone else (reachable only if a rollback above failed) is not reached here.
+ * The host scheduler eraser reaches it, by its owner and `actingUserId`.
+ */
+export async function eraseInsightsSuiteSubject(tenantId: string, subjectKey: string): Promise<SubjectEraseReport> {
+  if (!tenantId || !subjectKey) return { rowsTouched: 0 };
+  const c = await configs.get(tenantId);
+  if (!c) return { rowsTouched: 0 };
+  const forms = new Set(subjectKeyForms(subjectKey).forms);
+  const legacy = await legacyPrincipalOf(tenantId, subjectKey);
+  if (legacy && !('ambiguous' in legacy)) forms.add(legacy.principalId);
+  if (!forms.has(c.principalUserId)) return { rowsTouched: 0 };
+  let rowsTouched = 0;
+  for (const job of await listJobs(tenantId)) {
+    if (job.jobId.startsWith(weeklyPrefixFor(tenantId)) && await deleteJob(job.jobId)) rowsTouched++;
+  }
+  for (const sub of await listSubscriptions(tenantId)) {
+    if (sub.subscriptionId.startsWith(anniversaryPrefixFor(tenantId)) && await deleteSubscription(sub.subscriptionId)) rowsTouched++;
+  }
+  await configs.delete(tenantId);
+  rowsTouched++;
+  return { rowsTouched };
 }
 
 /**
@@ -248,6 +365,15 @@ export async function applyConfig(config: InsightsSuiteConfig): Promise<Insights
  * the USE lane. It is per-tenant, correct under every narrowing, non-destructive (the row
  * survives, so re-enabling resumes with no re-save), and it cannot silently half-succeed.
  */
+
+/** ADR 1102 D10 — is the saved weekly schedule actually armed? The generic
+ *  scheduler may still PAUSE a reserved job (`enabled:false`), and the panel
+ *  must not report a paused schedule as running. */
+export async function isWeeklyScheduleArmed(config: InsightsSuiteConfig): Promise<boolean> {
+  if (!config.scheduleCron) return false;
+  const job = await getJob(weeklyScheduleJobId(config));
+  return job !== null && job.tenantId === config.tenantId && job.enabled === true;
+}
 
 /** Test-only — clear the config collection. */
 export async function __resetInsightsSuiteStore(): Promise<void> {

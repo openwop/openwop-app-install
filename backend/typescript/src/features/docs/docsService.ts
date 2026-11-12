@@ -7,9 +7,7 @@
  */
 import { OpenwopError } from '../../types.js';
 import { createLogger } from '../../observability/logger.js';
-import { getOrg } from '../../host/accessControlService.js';
-import { resolveToggle } from '../../host/featureToggles/service.js';
-import { ownerPublicRuntimeLapsed } from '../../host/publicLapse.js';
+import { publicDocsTenant } from '../../host/publicDocsLane.js';
 import { listPages, type Page } from '../cms/cmsService.js';
 
 const log = createLogger('docs');
@@ -27,19 +25,6 @@ export interface DocsNavItem {
   updatedAt: string;
 }
 
-/** Resolve an org to its tenant, gating on the tenant's `docs` toggle. Returns
- *  null (→ 404 at the route) when the org is unknown or docs is off — a tenant
- *  that hasn't enabled docs exposes no docs surface. */
-async function resolveDocsTenant(orgId: string): Promise<string | null> {
-  const org = await getOrg(orgId);
-  if (!org) return null;
-  // ADR 0819 §1 opt-out — a PUBLIC lane (tenant from the resource): ADR 0419 never paywalls a shopper/visitor on the operator's plan.
-  const assignment = await resolveToggle('docs', { tenantId: org.tenantId });
-  if (!assignment?.enabled) return null;
-  // ADR 0820 §7 — the owner-lapse policy (off unless OPENWOP_BILLING_PUBLIC_LAPSE_GRACE_DAYS is set); the lane's own unavailable shape.
-  return (await ownerPublicRuntimeLapsed('docs', org.tenantId)) ? null : org.tenantId;
-}
-
 /** ADR 0392 — the ordering key for a docs page: its `docsNav` if set, else the
  *  slug (so unordered docs still sort deterministically). */
 function orderKeyOf(p: Page): string {
@@ -53,7 +38,8 @@ function orderKeyOf(p: Page): string {
 const MAX_PUBLIC_DOCS = 500;
 
 async function orderedPublishedDocs(orgId: string): Promise<{ tenantId: string; pages: Page[] } | null> {
-  const tenantId = await resolveDocsTenant(orgId);
+  // ADR 1057 D1 — the ONE public-lane gate, shared with the crawler doors and the sitemap.
+  const tenantId = await publicDocsTenant(orgId);
   if (!tenantId) return null;
   const all = (await listPages(tenantId, orgId, { collection: 'docs', status: 'published' }))
     .sort((a, b) => {
@@ -72,8 +58,15 @@ async function orderedPublishedDocs(orgId: string): Promise<{ tenantId: string; 
  *  not a 404: the public shell probes this on every page load to decide whether
  *  to show a Docs link, and "no docs here" is an answer, not an error. */
 export async function listPublishedDocs(orgId: string): Promise<DocsNavItem[]> {
+  return (await publishedDocsOrNull(orgId)) ?? [];
+}
+
+/** ADR 1057 D1 — the same projection, but NULL when the public lane is closed
+ *  (unknown org, docs off, lapsed owner), so the crawler index can answer 404
+ *  instead of an empty list. */
+export async function publishedDocsOrNull(orgId: string): Promise<DocsNavItem[] | null> {
   const resolved = await orderedPublishedDocs(orgId);
-  if (!resolved) return [];
+  if (!resolved) return null;
   return resolved.pages.map((p) => ({ slug: p.slug, title: p.title, order: orderKeyOf(p), updatedAt: p.updatedAt }));
 }
 

@@ -29,6 +29,7 @@ import {
   type CreativeBrief, type CreativeBriefVersion, type CreativeDirection, type Org,
 } from './creativeBriefsClient.js';
 import { RendersSection } from './RendersSection.js';
+import { AskCreativeDirector } from './AskCreativeDirector.js';
 // ADR 0945 Q1 — the client's edit-mode opt-in, only when product-grounded creative is on.
 const GroundingSettingsPanel = lazy(() => import('./GroundingSettingsPanel.js'));
 
@@ -37,6 +38,39 @@ const GroundingSettingsPanel = lazy(() => import('./GroundingSettingsPanel.js'))
 type DirectionRow = { key: string; label: string; rationale: string };
 
 const BRIEF_STATUSES = ['draft', 'review', 'approved'] as const;
+
+/** CB82UX-4 — a diff names a field the way the form above it does (one name per
+ *  field per locale), so these are the form's own label keys. */
+const DIFF_FIELD_LABEL: Readonly<Record<string, string>> = {
+  title: 'fieldTitle', assetType: 'fieldAssetType', sceneDescription: 'fieldScene', composition: 'fieldComposition',
+  cameraAngle: 'fieldCamera', lighting: 'fieldLighting', messagingIntent: 'fieldMessagingIntent', directions: 'fieldDirections',
+  platformSpec: 'fieldPlatform', brandPalette: 'issueField_brandPalette', moodBoard: 'moodBoardHeading',
+};
+
+/** CB82UX-4 — a version-diff value as a person reads it, never raw JSON: text as
+ *  itself, the palette as a list, directions by label, the mood board as a count,
+ *  the platform spec as its parts. */
+/** One side of a diff line. When the two readable projections are identical
+ *  (a rationale-only edit, a swapped mood-board asset) the line says the field was
+ *  edited rather than showing an unchanged-looking "A → A". */
+export function diffLine(t: TFn, field: string, from: unknown, to: unknown): string {
+  const a = diffValue(t, field, from);
+  const b = diffValue(t, field, to);
+  return a === b ? t('diffEditedDetail', { value: b }) : `${a} → ${b}`;
+}
+
+export function diffValue(t: TFn, field: string, v: unknown): string {
+  if (v === undefined || v === null || v === '') return '—';
+  if (typeof v === 'string' || typeof v === 'number') return String(v);
+  if (field === 'directions' && Array.isArray(v)) return v.map((d) => (d && typeof d === 'object' ? String((d as { label?: unknown }).label ?? '') : '')).filter(Boolean).join(' · ') || '—';
+  if (field === 'moodBoard' && Array.isArray(v)) return t('diffMoodBoardCount', { count: v.length });
+  if (Array.isArray(v)) return v.map(String).join(', ') || '—';
+  if (field === 'platformSpec' && typeof v === 'object') {
+    const p = v as { platform?: unknown; format?: unknown; textRulePct?: unknown };
+    return [p.platform, p.format, typeof p.textRulePct === 'number' ? t('diffTextRule', { pct: p.textRulePct }) : undefined].filter((x) => typeof x === 'string' && x).join(' · ') || '—';
+  }
+  return t('diffEditedValue');
+}
 
 function statusChip(status: CreativeBrief['status']): string {
   return status === 'approved' ? 'chip chip--success' : 'chip chip--muted';
@@ -431,6 +465,13 @@ function BriefDetail({ t, orgId, brief, onBack, onChanged, onDelete, active = tr
     return () => { cancelled = true; };
   }, [orgId, moodBoard, active, t]);
 
+  /** Saves the form; false when the save failed (it has already said why). The
+   *  cost-bearing and hand-off actions call this first when the form is dirty. */
+  const saveFirst = async (): Promise<boolean> => {
+    try { await saveFields(); await onChanged(); return true; }
+    catch (e) { toast.error(e instanceof Error ? e.message : t('actionFailed')); return false; }
+  };
+
   const exportPdf = async (): Promise<void> => {
     if (exporting) return;
     setExporting(true);
@@ -555,6 +596,9 @@ function BriefDetail({ t, orgId, brief, onBack, onChanged, onDelete, active = tr
         <span className={statusChip(brief.status)}>{t(`status_${brief.status}`)}</span>
         <span className="u-label-sm">v{brief.version}</span>
         <div className="action-bar u-ml-auto">
+          {/* ADR 1039 D8 — FIRST in the right-aligned bar: it appears once the agent
+              catalog loads, and as the first item it shifts nothing under the cursor. */}
+          {active ? <AskCreativeDirector briefId={brief.briefId} orgId={orgId} title={brief.title} dirty={dirty} onSaveFirst={saveFirst} /> : null}
           <Button variant="danger" size="sm" onClick={onDelete}><TrashIcon size={14} aria-hidden /> {t('common:delete')}</Button>
           {/* CRB-G1 — when the form is dirty the action saves first, and says so,
               so a transition never acts on a document the reader isn't seeing. */}
@@ -698,11 +742,7 @@ function BriefDetail({ t, orgId, brief, onBack, onChanged, onDelete, active = tr
       {/* R2 CRB-SP-3 — the render lane saves-first when the form is dirty (the
           CRB-G1 pattern, extended to the cost-bearing actions); the callback
           reports whether the save landed so a failed save aborts the render. */}
-      {active ? <RendersSection orgId={orgId} brief={brief} dirty={dirty}
-        onSaveFirst={async () => {
-          try { await saveFields(); await onChanged(); return true; }
-          catch (e) { toast.error(e instanceof Error ? e.message : t('actionFailed')); return false; }
-        }} /> : null}
+      {active ? <RendersSection orgId={orgId} brief={brief} dirty={dirty} onSaveFirst={saveFirst} /> : null}
 
       <section className="surface-card u-p-4 u-grid u-gap-2">
         <div className="u-flex u-items-center u-gap-2">
@@ -723,7 +763,7 @@ function BriefDetail({ t, orgId, brief, onBack, onChanged, onDelete, active = tr
         ) : null}
         {diff ? diff.length === 0 ? <span className="muted u-fs-13">{t('noChanges')}</span> : (
           <ul className="u-m-0">
-            {diff.map((d) => <li key={d.field} className="u-fs-13"><strong>{d.field}</strong>: {JSON.stringify(d.from) ?? '—'} → {JSON.stringify(d.to) ?? '—'}</li>)}
+            {diff.map((d) => <li key={d.field} className="u-fs-13"><strong>{t(DIFF_FIELD_LABEL[d.field] ?? `issueField_${d.field}`, { defaultValue: d.field })}</strong>: {diffLine(t, d.field, d.from, d.to)}</li>)}
           </ul>
         ) : null}
       </section>

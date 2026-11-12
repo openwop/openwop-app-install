@@ -19,6 +19,7 @@ import { runCampaign, listParked, digestIsComplete, eraseSubjectParked, type Cam
 import { recordAnswer } from '../src/features/job-search/autopilot/answerBank.js';
 import type { PipelineInput, PreparedSubmission } from '../src/features/job-search/autopilot/pipeline.js';
 import { createApplyGrant } from '../src/host/applyGrant.js';
+import { subjectDealTag } from '../src/features/job-search/domain/applications.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 
@@ -145,7 +146,8 @@ describe('ADR 0545 D6 — every listing is accounted for', () => {
     expect(digest.considered).toBe(5);
     expect(digestIsComplete(digest), 'a listing that lands in no bucket is a silent skip').toBe(true);
     // …and each lands in the RIGHT bucket: a count that balances can still be wrong.
-    expect(digest.applied).toEqual(['deal:applied-1']);
+    // ADR 1036 D3 — the deal id is per PERSON: `deal:<subjectTag>:<listingId>`.
+    expect(digest.applied).toEqual([`deal:${subjectDealTag(ME)}:applied-1`]);
     expect(digest.alreadyApplied).toBe(0);
     expect(digest.parked.map((p) => p.listingId)).toEqual(['parked-1']);
     expect(Object.fromEntries(digest.skipped.map((s) => [s.listingId, s.reason]))).toEqual({

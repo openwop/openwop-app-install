@@ -23,10 +23,11 @@
  * and it produces a second "career agent" nobody asked for.
  */
 import { createLogger } from '../../../observability/logger.js';
-import { createRosterEntry, listRoster } from '../../../host/rosterService.js';
+import { createRosterEntry, listRoster, updateRosterEntry } from '../../../host/rosterService.js';
 import { createBoard, listBoards, listCardsExact, createCard, type KanbanCard } from '../../../host/kanbanService.js';
 import { applyGrants } from '../../../host/applyGrant.js';
 import { OpenwopError } from '../../../types.js';
+import { recordCampaignQueue, campaignQueueSubject } from './campaignQueue.js';
 
 const log = createLogger('job-search.agent.provision');
 
@@ -35,6 +36,10 @@ export const CAREER_PERSONA = 'career-agent';
 /** The pack-declared agent id this roster member dispatches to. */
 export const CAREER_AGENT_ID = 'vendor.openwop-app.career-agent.agents.default';
 export const CAREER_BOARD_NAME = 'Job search';
+/** ADR 1036 D9 — what the agent can actually do: two read tools. */
+export const CAREER_DESCRIPTION = 'Reads your job listings and applications and explains your apply grant and campaign controls.';
+/** The pre-D9 text, which overclaimed. Matched exactly so an edit survives. */
+const LEGACY_CAREER_DESCRIPTION = 'Finds roles, scores fit, and prepares applications within the limits you set.';
 
 export interface ProvisionResult {
   rosterId: string;
@@ -57,13 +62,20 @@ export async function provisionCareerAgent(tenantId: string): Promise<ProvisionR
 
   let rosterId = existing?.rosterId ?? '';
   let created = false;
+  // ADR 1036 D9 (grade-ux JSV-1) — a career agent provisioned before D9 still
+  // carries the old description, which claimed it scores fit and prepares
+  // applications; the Agents panel shows it. Replace it ONLY when it is still
+  // exactly the old text, so a description a person edited is never touched.
+  if (existing && existing.description === LEGACY_CAREER_DESCRIPTION) {
+    await updateRosterEntry(tenantId, existing.rosterId, { description: CAREER_DESCRIPTION });
+  }
   if (!existing) {
     const entry = await createRosterEntry({
       tenantId,
       persona: CAREER_PERSONA,
       agentRef: { agentId: CAREER_AGENT_ID },
       label: 'Career agent',
-      description: 'Finds roles, scores fit, and prepares applications within the limits you set.',
+      description: CAREER_DESCRIPTION,
       enabled: true,
       autonomyLevel: 'review',
     });
@@ -106,17 +118,19 @@ export interface QueueCampaignResult {
  * `autonomyLevel:'review'`) a human approval card before the run starts. A
  * "run it now" path here would be a second executor beside the loop.
  *
- * Fail-closed: refuses (409) when the tenant holds NO live grant — a card that
+ * Fail-closed: refuses (409) when the CALLER holds no live grant — a card that
  * could only ever produce a wall of `refused: no-grant` rows is intake theatre,
  * and the user is better served by the refusal naming the real precondition.
  *
- * Idempotent: an identical card already in a NON-terminal column is returned
- * as-is (`created:false`) — clicking twice queues once. A completed/failed
+ * Idempotent: the caller's own card already in a NON-terminal column is
+ * returned as-is (`created:false`) — clicking twice queues once. A completed/failed
  * card does not block a new queue (a new pass is a new ask).
  */
 export async function queueCampaignCard(tenantId: string, actor: string, now: number): Promise<QueueCampaignResult> {
+  // ADR 1036 D1b — the CALLER's grant. A pass acts for the person who queued it,
+  // so a colleague's live grant is no precondition for this person's pass.
   const grants = await applyGrants.listByPrefix(`${tenantId}:`);
-  const live = grants.filter((g) => !g.revokedAt && Date.parse(g.expiresAt) > now && g.submitsUsed < g.maxSubmits);
+  const live = grants.filter((g) => g.subjectId === actor && !g.revokedAt && Date.parse(g.expiresAt) > now && g.submitsUsed < g.maxSubmits);
   if (live.length === 0) {
     // `invalid_request` @409 is the house shape for "a stated precondition is
     // missing — do X first" (the app-builder's unbound-repo precedent). The
@@ -137,12 +151,16 @@ export async function queueCampaignCard(tenantId: string, actor: string, now: nu
   }
 
   // Dedupe needs every card: a miss would mint a second campaign card (ADR 0872 D4).
-  const existing = (await listCardsExact(boardId)).find(
+  // Per PERSON (ADR 1036 D1b): a pending card queued by a colleague is theirs —
+  // returning it here would leave this caller's pass never queued.
+  const pending = (await listCardsExact(boardId)).filter(
     (c) =>
       c.workflowId === CAREER_CAMPAIGN_CARD_WORKFLOW_ID &&
       !board.columns.find((col) => col.id === c.columnId)?.terminal,
   );
-  if (existing) return { card: existing, boardId, created: false };
+  for (const c of pending) {
+    if ((await campaignQueueSubject(tenantId, c.id)) === actor) return { card: c, boardId, created: false };
+  }
 
   const card = await createCard({
     boardId,
@@ -155,6 +173,9 @@ export async function queueCampaignCard(tenantId: string, actor: string, now: nu
     sourceLabel: 'Auto-apply authority',
     createdBy: actor,
   });
+  // The ONE writer of the card's subject (see campaignQueue.ts): the run reads
+  // the person from here, never from the body-writable `createdBy`.
+  await recordCampaignQueue(tenantId, card.id, actor, now);
   log.info('campaign_card_queued', { tenantId, boardId, cardId: card.id });
   return { card, boardId, created: true };
 }

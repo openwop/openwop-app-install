@@ -24,7 +24,16 @@ import type { ApprovalOrigin, CapabilityRule, CapabilityVerdict, FirewallMode, T
 const CAPABILITY_FIREWALL_KEY = 'capabilityFirewall';
 
 export interface FirewallHook {
-  evaluate(seenToolNames: readonly string[], nextToolName: string): CapabilityVerdict;
+  /** `input` + `callKey` (ADR 0834 FW2-D1): the held call's arguments and a per-call key,
+   *  so an approval bound to exact arguments can be checked. Lanes that pass a `grant`
+   *  MUST pass both; without them a `call`-grain approval satisfies nothing (fail closed). */
+  evaluate(seenToolNames: readonly string[], nextToolName: string, input?: Record<string, unknown>, callKey?: string): CapabilityVerdict;
+}
+
+/** FW2-D1 — the per-call approval answer a lane hands the hook (the ledger's
+ *  `makeApprovalGrant`). When present it REPLACES the by-name approved sets. */
+export interface FirewallApprovalGrant {
+  check(toolName: string, origin: ApprovalOrigin | undefined, input: Record<string, unknown> | undefined, callKey: string): boolean;
 }
 
 /** The shipped default rule set. EMPTY since the always-on graduation (2026-06-24,
@@ -103,6 +112,10 @@ export function buildFirewallHook(opts: {
    *  is not bound to the arguments that were shown. */
   singleUseApprovals?: boolean;
   onApprovalSpent?: (toolName: string) => void;
+  /** ADR 0834 FW2-D1 — per-call approvals (exact-argument binding). Overrides
+   *  `approvedTools`/`approvedBaselineTools`/`singleUseApprovals` for the ledger part;
+   *  `bypassApproval` still satisfies a `baseline` ask. */
+  grant?: FirewallApprovalGrant;
   unknownToolPolicy?: 'skip' | 'treat-as-risky';
   onUnclassified?: (toolName: string) => void;
   /** ADR 0150 — tools that need approval in `safe` mode regardless of the (opt-in) firewall
@@ -188,7 +201,13 @@ export function buildFirewallHook(opts: {
   // human with authority gave for a policy ask (`approvedTools`); a `baseline` ask also by the
   // user's own bypass or a baseline-only approval. A `deny` is never touched by this.
   const spent = new Set<string>();
-  const satisfied = (name: string, origin: ApprovalOrigin | undefined): boolean => {
+  let callCounter = 0;
+  const satisfied = (name: string, origin: ApprovalOrigin | undefined, input?: Record<string, unknown>, callKey?: string): boolean => {
+    if (opts.grant) {
+      if (origin !== 'policy' && opts.bypassApproval) return true;
+      // No callKey ⇒ a key no other gate shares (still answered at most once per call here).
+      return opts.grant.check(name, origin, input, callKey ?? `fw-anon-${callCounter++}`);
+    }
     if (!opts.singleUseApprovals) {
       if (opts.approvedTools?.has(name)) return true;
       if (origin === 'policy') return false;
@@ -208,7 +227,7 @@ export function buildFirewallHook(opts: {
     return v;
   };
   return {
-    evaluate(seenToolNames, nextToolName) {
+    evaluate(seenToolNames, nextToolName, input, callKey) {
       // ADR 0397 Phase 5 — the PLATFORM FLOOR is a hard, mode-INDEPENDENT gate, evaluated
       // FIRST in its OWN fail-closed try/catch (a floor error denies regardless of tenant
       // mode) and robust to unclassified tools (risky fallback — a tenant's `skip` can't
@@ -249,7 +268,7 @@ export function buildFirewallHook(opts: {
         // it never REPLACES a policy verdict (the first draft of the overlay did, which made
         // a tool that was both sensitive and policy-held skippable by bypass).
         if (verdict.decision === 'allow' && baselineHolds(nextToolName)) verdict = baselineAsk(nextToolName);
-        if (verdict.decision === 'require-approval' && satisfied(nextToolName, verdict.origin)) {
+        if (verdict.decision === 'require-approval' && satisfied(nextToolName, verdict.origin, input, callKey)) {
           verdict = { decision: 'allow' };
         }
         // Shadow would-block is recorded ONLY when the call actually proceeds (final allow),
@@ -273,7 +292,7 @@ export function buildFirewallHook(opts: {
         if (errVerdict.decision === 'allow') {
           let held = false;
           try { held = baselineHolds(nextToolName); } catch { held = Boolean(opts.requireApprovalTools?.has(nextToolName)); }
-          if (held && !satisfied(nextToolName, 'baseline')) errVerdict = baselineAsk(nextToolName);
+          if (held && !satisfied(nextToolName, 'baseline', input, callKey)) errVerdict = baselineAsk(nextToolName);
         }
         return finish(nextToolName, mostRestrictive(platformFloor, errVerdict));
       }

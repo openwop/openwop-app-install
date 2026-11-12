@@ -981,6 +981,22 @@ export async function listAllSystemRows(typeName: string): Promise<EntityRecord[
   return out;
 }
 
+/** ADR 1104 — `listAllSystemRows` with a per-tenant bound, for the daily
+ *  integrity gauges: at most `perTenantCap` rows of the type per tenant, and how
+ *  many tenants held more. A gauge that ran unbounded would load a huge tenant's
+ *  whole type into memory. */
+export async function listAllSystemRowsBounded(typeName: string, perTenantCap: number): Promise<{ rows: EntityRecord[]; truncatedTenants: number }> {
+  const rows: EntityRecord[] = [];
+  let truncatedTenants = 0;
+  for (const t of await types.list()) {
+    if (t.name !== typeName || !t.system) continue;
+    const page = await records.listByPrefixUpTo(`${t.typeId}|`, perTenantCap);
+    rows.push(...page.items);
+    if (page.truncated) truncatedTenants += 1;
+  }
+  return { rows, truncatedTenants };
+}
+
 /** Test-only: drop every tenant's rows + type record for one system type
  *  (the cms `__resetCms` seam). Production code never calls this. */
 export async function __clearSystemEntities(typeName: string): Promise<void> {

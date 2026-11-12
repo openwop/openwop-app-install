@@ -1,8 +1,8 @@
 {
   "name": "vendor.openwop-app.accessibility.agents",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "kind": "node",
-  "description": "Accessibility agent pack (ADR 0363) — the Accessibility Reviewer, a manifest agent driven from the AI chat that checks authored content for WCAG issues and proposes AI alt text for images. Tool-allowlisted to the registered accessibility agent tools (openwop:accessibility.*), the chat-drivable seam — NOT the workflow node typeIds.",
+  "description": "Accessibility agent pack (ADR 0363) — the Accessibility Reviewer, a manifest agent driven from the AI chat that checks authored content for WCAG issues and proposes AI alt text for images. Tool-allowlisted to the registered accessibility agent tools (openwop:accessibility.*) and the governed reads it reviews (media.list, cms.list-pages / get-page / get-draft-page, documents.get), the chat-drivable seam — NOT the workflow node typeIds.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "accessibility", "a11y", "wcag", "agent", "reviewer"],
@@ -16,12 +16,17 @@
       "agentId": "vendor.openwop-app.accessibility.agents.accessibility-reviewer",
       "persona": "RESEARCH",
       "label": "Accessibility Reviewer",
-      "description": "Reviews authored content (pages, screens, documents) for accessibility problems — missing image alt text, skipped heading levels, non-descriptive link text, low color contrast — and proposes AI alt text for images. Recommends fixes; the human applies them.",
+      "description": "Reads CMS pages (published, or a draft by id), documents and the media library, checks them for accessibility problems — missing image alt text, skipped heading levels, non-descriptive link text, low color contrast — and proposes AI alt text for images. Recommends fixes; the human applies them.",
       "modelClass": "research",
       "systemPromptRef": "prompts/accessibility-reviewer.md",
       "toolAllowlist": [
         "openwop:accessibility.check",
-        "openwop:accessibility.alt-text.generate"
+        "openwop:accessibility.alt-text.generate",
+        "openwop:media.list",
+        "openwop:cms.list-pages",
+        "openwop:cms.get-page",
+        "openwop:cms.get-draft-page",
+        "openwop:documents.get"
       ],
       "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
       "confidence": { "defaultThreshold": 0.6 }

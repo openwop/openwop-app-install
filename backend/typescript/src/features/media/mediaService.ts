@@ -1378,7 +1378,10 @@ export interface AltTextProposal {
   altText: string;
 }
 
-export async function generateAltText(tenantId: string, orgId: string, assetId: string): Promise<AltTextProposal> {
+/** ADR 1100 D7 — `actingSubject` is the person this proposal is FOR (the route's
+ *  caller, the chat turn's user, the run's actor), so a managed draw meters to
+ *  their bucket (ADR 0721). Absent ⇒ system work (a schedule). */
+export async function generateAltText(tenantId: string, orgId: string, assetId: string, opts: { actingSubject?: string } = {}): Promise<AltTextProposal> {
   const a = await getAsset(tenantId, orgId, assetId);
   if (!a) throw new OpenwopError('not_found', 'Asset not found.', 404, { assetId });
   if (!a.contentType.startsWith('image/')) {
@@ -1386,7 +1389,8 @@ export async function generateAltText(tenantId: string, orgId: string, assetId: 
   }
   const entry = await resolveMediaAsset(a.serveToken);
   if (!entry) throw new OpenwopError('not_found', 'Asset bytes not found.', 404, { assetId });
-  const dispatch = await resolveHeadlessAi(tenantId, 'image', { featureId: 'media' });
+  // ADR 1100 D7 — the spend is the accessibility feature's (ADR 0821 D4), not media's.
+  const dispatch = await resolveHeadlessAi(tenantId, 'image', { featureId: 'accessibility', ...(opts.actingSubject ? { actingSubject: opts.actingSubject } : {}) });
   if (!dispatch) {
     throw new OpenwopError('validation_error', 'No vision-capable AI provider is available. Configure a default AI provider (with a vision-capable model) in BYOK settings.', 422, {});
   }

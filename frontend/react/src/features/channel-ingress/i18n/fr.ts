@@ -163,4 +163,21 @@ export const messages = {
   relayApprovedHint: 'Les messages de ces expéditeurs deviennent des conversations dans votre chat principal et s’exécutent en votre nom. Rien n’est renvoyé à une personne non approuvée.',
   relayAdminOnly: 'Seul le propriétaire de cet appareil peut approuver ou refuser qui lui écrit. En tant qu’administrateur de l’espace de travail, vous pouvez révoquer une approbation.',
   approveGroupRelay: 'Sur un appareil, les groupes ne reçoivent de réponse que lorsque votre assistant est mentionné par son nom (celui défini par votre opérateur). Si aucun nom n’est défini, les messages de groupe sont ignorés.',
+
+  // CHAN-F11 — the per-channel relay switch.
+  channelSwitchTitle: 'Canaux de relais',
+  channelSwitchHint: 'Désactivez un canal de relais pour tout l’espace de travail. Ses messages sont ignorés et rien n’est envoyé tant que vous ne le réactivez pas. Les appareils conservent leur appairage et leurs approbations.',
+  channelSwitchLabel: 'Relais {{channel}}',
+  channelOn: 'Activé',
+  channelOff: 'Désactivé',
+  channelSwitchedOn: 'Le relais {{channel}} est activé.',
+  channelSwitchedOff: 'Le relais {{channel}} est désactivé. Ses appareils sont en pause.',
+  channelSwitchFailed: 'Impossible de modifier le canal de relais.',
+  channelsPausedNotice: 'Un administrateur de l’espace de travail a désactivé ces canaux de relais : {{channels}}. Les appareils qui les utilisent sont en pause.',
+  status_channelPaused: 'En pause (canal désactivé)',
+  channel_whatsapp: 'WhatsApp',
+  channel_signal: 'Signal',
+  channel_imessage: 'iMessage',
+  channel_discord: 'Discord',
+  whatsappSettingsLink: "Réglages WhatsApp : attestation, état et échecs de distribution",
 } as const;

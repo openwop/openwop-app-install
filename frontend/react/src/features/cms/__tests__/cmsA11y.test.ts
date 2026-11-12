@@ -9,7 +9,7 @@
  * alt reds cases 1+2; dropping the cta branch reds case 1.
  */
 import { describe, it, expect } from 'vitest';
-import { cmsPageToA11yModel } from '../cmsA11y.js';
+import { cmsPageToA11yModel, splitA11yRef } from '../cmsA11y.js';
 import { checkContentA11y } from '../../../a11y/contentA11y.js';
 import type { Section } from '../cmsClient.js';
 
@@ -43,5 +43,40 @@ describe('cmsPageToA11yModel', () => {
 
   it('ignores an image/hero section with no media token', () => {
     expect(cmsPageToA11yModel([sec('image', { alt: 'x' }), sec('hero', { heading: 'H' })]).images).toEqual([]);
+  });
+
+  // ADR 1100 D3 — every placement, by field name; sabotage: drop collectNested
+  // (red: columns/gallery/hub), drop the hero visual gate (red: the flow case),
+  // drop the richText gate (red: the prose case).
+  it('finds pictures in list items and nested objects, wherever the renderer reads them', () => {
+    const model = cmsPageToA11yModel([
+      sec('columns', { columns: [{ title: 'A', imageToken: 'tok:1', alt: 'First' }, { title: 'B', imageToken: 'tok:2' }] }, 'c1'),
+      sec('form', { imageToken: 'tok:3', alt: 'Photo', person: { name: 'Ada', imageToken: 'tok:4', alt: '' } }, 'f1'),
+    ]);
+    // More than one picture in a section → each its own ref, so the panel can say which.
+    expect(model.images).toEqual([{ alt: 'First', ref: 'c1#1' }, { alt: '', ref: 'c1#2' }, { alt: 'Photo', ref: 'f1#1' }, { alt: '', ref: 'f1#2' }]);
+  });
+
+  it('a hero shows only its own visual: a stale picture token is not checked, the hub centre is', () => {
+    const model = cmsPageToA11yModel([
+      sec('hero', { visual: 'flow', imageToken: 'tok:stale', heading: 'H' }, 'h1'),
+      sec('hero', { visual: 'hub', imageToken: 'tok:stale2', hub: { center: { imageToken: 'tok:hub' } } }, 'h2'),
+      sec('hero', { visual: 'image', imageToken: 'tok:shown', alt: 'Shown' }, 'h3'),
+    ]);
+    expect(model.images).toEqual([{ alt: '', ref: 'h2' }, { alt: 'Shown', ref: 'h3' }]);
+  });
+
+  it('an unknown hero visual renders the picture, so it is checked', () => {
+    expect(cmsPageToA11yModel([sec('hero', { visual: 'not-a-visual', imageToken: 'tok:x' }, 'h9')]).images).toEqual([{ alt: '', ref: 'h9' }]);
+  });
+
+  it('a rich-text picture counts only when its visual is image', () => {
+    expect(cmsPageToA11yModel([sec('richText', { text: 't', imageToken: 'tok:x' }, 'r1')]).images).toEqual([]);
+    expect(cmsPageToA11yModel([sec('richText', { text: 't', visual: 'image', imageToken: 'tok:x', alt: 'X' }, 'r2')]).images).toEqual([{ alt: 'X', ref: 'r2' }]);
+  });
+
+  it('splitA11yRef separates the section from the item', () => {
+    expect(splitA11yRef('c1#2')).toEqual({ sectionId: 'c1', item: 2 });
+    expect(splitA11yRef('sec:a')).toEqual({ sectionId: 'sec:a' });
   });
 });

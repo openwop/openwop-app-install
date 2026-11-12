@@ -24,7 +24,7 @@ import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { readSessionSecret } from '../../middleware/cookieSession.js';
 import { vendorPublicUrl } from '../featureRoute.js';
-import { listProducts } from '../commerce/commerceService.js';
+import { listProducts, isPubliclyListed } from '../commerce/commerceService.js';
 import { OpenwopError } from '../../types.js';
 import { isoExponent, adsCatalogPushEnabled } from '../../host/adsWire.js';
 import { pushCatalogItems, type CatalogPlatform, type CatalogPushResult, type ItemResult } from '../../host/catalogPushAdapter.js';
@@ -77,7 +77,7 @@ function hashItem(item: Omit<FeedItem, 'contentHash'>): string {
 
 /** Build the feed for one org. `baseUrl` is the public origin. */
 export async function buildProductFeed(tenantId: string, orgId: string, baseUrl: string): Promise<ProductFeed> {
-  const products = (await listProducts(tenantId, orgId)).filter((p) => p.active);
+  const products = (await listProducts(tenantId, orgId)).filter(isPubliclyListed); // ADR 1098 — a quote-only product never reaches an ad catalog
   const items: FeedItem[] = [];
   const excluded: ExcludedItem[] = [];
   const base = baseUrl.replace(/\/+$/, '');

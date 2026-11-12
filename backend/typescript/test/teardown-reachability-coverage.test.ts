@@ -285,6 +285,10 @@ const HOST_RESIDUAL_CLASSIFICATION: Record<string, { bucket: Bucket; reason: str
   'priority:evidence': { bucket: 'REACHABLE_PURGE_HOOK', reason: 'swept by purgeTenantPriorityMatrix (ADR 0590 registerTenantPurgeHook, feature.ts:51) — five listId::cardId[::voterId]/ev: collections resolved via the tenant priority-matrix:list rows' },
   'priority:intake': { bucket: 'REACHABLE_PURGE_HOOK', reason: 'swept by purgeTenantPriorityMatrix (ADR 0590 registerTenantPurgeHook, feature.ts:51) — five listId::cardId[::voterId]/ev: collections resolved via the tenant priority-matrix:list rows' },
   'users:user': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type User carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
+  'whatsapp:delivery-failure': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type WaDeliveryFailure carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows; the settings page\'s recent-failures view, last four digits only (ADR 1053 D10), 30-day age-out' },
+  'whatsapp:dispatch-sid': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type WaSidIndex carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows; provider message id → dispatch key, no number or text (ADR 1053 D3), ages out with the ledger (registerKvAgeOut whatsapp:dispatch-sid, 400 days)' },
+  'whatsapp:inbound-seen': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type WaInboundSeen carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows; the inbound replay claim holds only tenant + connection + provider message id (ADR 1053 D4), 400-day age-out' },
+  'whatsapp:status-parked': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type WaParkedStatus carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows; an early delivery status keyed by provider message id, no number (ADR 1053 D3), 1-day age-out' },
   'webinars:sync-state': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type SyncStateRow carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
 };
 

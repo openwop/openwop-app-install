@@ -19,11 +19,17 @@ export interface TocEntry {
 import { headingSlug } from '../cms/headingSlug.js';
 export { headingSlug };
 
-/** Extract the TOC from a rendered container: h1/h2 → level 2, h3 → level 3
+/** Extract the TOC from a rendered container: h2 → level 2, h3 → level 3
  *  (h4+ ignored). Assigns slugified ids to headings that lack one, deduping
- *  with a numeric suffix. Returns [] when fewer than 2 headings (no TOC). */
+ *  with a numeric suffix. Returns [] when fewer than 2 headings (no TOC).
+ *
+ *  grade-ux row 88, finding 3: no `h1` (the page's own title, from its hero, is
+ *  not a section of the page) and nothing inside the visitor consent banner,
+ *  which `FrontPage` renders in the same container (live, at 375px, the TOC
+ *  listed "Analytics on this site"). */
 export function deriveToc(container: HTMLElement): TocEntry[] {
-  const headings = Array.from(container.querySelectorAll<HTMLElement>('h1, h2, h3'));
+  const headings = Array.from(container.querySelectorAll<HTMLElement>('h2, h3'))
+    .filter((h) => !h.closest('.visitor-consent'));
   const seen = new Map<string, number>();
   const entries: TocEntry[] = [];
   for (const h of headings) {

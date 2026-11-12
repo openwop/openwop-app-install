@@ -33,6 +33,7 @@ import { applyRefusal, plainRewriteText, selectionText } from './aiApply.js';
 import type { JSONContent } from '@tiptap/core';
 import { Placeholder } from '@tiptap/extension-placeholder';
 import { MediaPickerDialog } from '../media/MediaPickerDialog.js';
+import { insertedImageAlt } from './imageAlt.js';
 import { MathEditModal } from './MathEditModal.js';
 import { ChartEditModal } from './ChartEditModal.js';
 import { EmbedEditModal } from './EmbedEditModal.js';
@@ -255,7 +256,8 @@ function DocumentEditorSurfaceInner({ orgId, canvasId, doc, onDocChange, onAnnou
   // DOC-G1 — what the DOCX conversion could not carry across.
   const [importWarnings, setImportWarnings] = useState<string[] | null>(null);
   const onPickImage = useCallback((asset: MediaAsset) => {
-    editor?.chain().focus().setImage({ src: absoluteServeUrl(asset.serveUrl), alt: asset.name }).run();
+    // ADR 1100 D2 — the library's alt text, not the file name, when it has one.
+    editor?.chain().focus().setImage({ src: absoluteServeUrl(asset.serveUrl), alt: insertedImageAlt(asset) }).run();
     onAnnounce(t('imageInserted'));
     setImgOpen(false);
   }, [editor, onAnnounce, t]);
