@@ -27,6 +27,8 @@ export interface ProviderModel {
    *  sends a manual budget to it). Backend-only behaviour; typed here so the
    *  shared `providers.json` stays one schema. */
   adaptiveThinkingOnly?: boolean;
+  /** Thinks when `thinking` is omitted (see the backend catalog type). */
+  thinksByDefault?: boolean;
 }
 
 export interface ProviderConfig {

@@ -33,10 +33,8 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Workspace',
-      label: 'Always-on chat',
       labelKey: 'chatDeploymentLabel',
       icon: SendIcon,
-      hint: 'Schedule it, or put it on your website',
       hintKey: 'chatDeploymentHint',
       order: 6,
       featureId: 'chat-deployment',

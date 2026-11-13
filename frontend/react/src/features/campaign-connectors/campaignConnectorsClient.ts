@@ -210,12 +210,19 @@ export interface CatalogFeed {
   /** Present only while the feed is on. Signed; rotating replaces it. */
   feedUrl?: string;
   items: number;
+  /** ADR 1110 P3 — the count stopped at its cap; `items` is a floor ("10,000+"). */
+  itemsCapped?: true;
   excluded: Array<{ productId: string; reason: 'no_image' | 'no_price' | 'invalid_currency' }>;
+  /** How many were left out in all; `excluded` lists at most the first 200. */
+  excludedTotal?: number;
 }
 export type CatalogPlatform = 'meta' | 'google';
 export type CatalogPushResult =
-  | { outcome: 'pushed'; sent: number; unchanged: number; removed: number; failed: number; failures: Array<{ id: string; op: 'upsert' | 'delete'; error: string }> }
+  /** `remaining` (ADR 1110): changes past one push's cap, sent by the next push. */
+  | { outcome: 'pushed'; sent: number; unchanged: number; removed: number; failed: number; failures: Array<{ id: string; op: 'upsert' | 'delete'; error: string }>; remaining?: number }
   | { outcome: 'unsupported' | 'no_connection' | 'disabled' }
+  /** ADR 1110 — too many products to push in one request: the signed feed URL is the lane. */
+  | { outcome: 'catalog_too_large'; max: number }
   | { outcome: 'not_configured'; missing: string };
 const feedPath = (orgId: string): string => `${base}/orgs/${encodeURIComponent(orgId)}/catalog-feed`;
 export async function getCatalogFeed(orgId: string): Promise<CatalogFeed> {

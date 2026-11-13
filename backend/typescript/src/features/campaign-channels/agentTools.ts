@@ -30,7 +30,6 @@
 
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { CAMPAIGN_RUN_TAG_KEY, campaignRunTagForBrief } from '../../host/campaignRefs.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
 import { resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { startWorkflowRun, type StartRunDeps } from '../../host/runStarter.js';
@@ -39,7 +38,8 @@ import { surfaceDispatchedRun } from '../../host/turnRunDispatch.js';
 import { createLogger } from '../../observability/logger.js';
 import { getBrief } from '../campaign-brief/briefService.js';
 import { CAMPAIGN_CHANNELS, type CampaignChannel } from '../campaign-brief/types.js';
-import { untrustedToolError, launchRefusalResult } from '../../host/agentToolKit.js';
+import { untrustedToolError, launchRefusalResult, resolveFeatureToggle, resolveFeatureAccess, featureUnavailable, type ToolAccessScope } from '../../host/agentToolKit.js';
+import { forwardedPlanExemption } from '../../host/operatorPlanExemption.js';
 
 const log = createLogger('campaign-channels.generator-tools');
 
@@ -67,9 +67,9 @@ function toolError(error: string, message: string, extra?: Record<string, unknow
   return { content: JSON.stringify({ ...(extra ?? {}), error, message }), isError: true, hostMessage: true };
 }
 
-async function channelsEnabled(tenantId: string, actingUserId: string | undefined): Promise<boolean> {
-  const assignment = await resolveOne(TOGGLE_ID, { tenantId, ...(actingUserId ? { userId: actingUserId } : {}) }).catch(() => null);
-  return Boolean(assignment?.enabled);
+async function channelsEnabled(scope: ToolAccessScope): Promise<boolean> {
+  // ADR 1108 — the kit's subject: the route's shape plus the operator exemption.
+  return resolveFeatureToggle(TOGGLE_ID, scope);
 }
 
 /** The SAME predicate the campaign-brief routes enforce — `resolveEffectiveAccess`
@@ -97,7 +97,7 @@ function channelCatalog(): Array<{ channel: CampaignChannel; label: string; work
  */
 export async function runChannelsTool(input: Record<string, unknown>, scope: BundleScope): Promise<ToolResult> {
   if (!scope.actingUserId) return { content: JSON.stringify({ channels: [] }) };
-  if (!(await channelsEnabled(scope.tenantId, scope.actingUserId))) return { content: JSON.stringify({ channels: [] }) };
+  if (!(await channelsEnabled(scope))) return { content: JSON.stringify({ channels: [] }) };
 
   const catalog = channelCatalog();
   const briefId = str(input.briefId);
@@ -129,7 +129,9 @@ export async function runChannelsTool(input: Record<string, unknown>, scope: Bun
  */
 export async function runChannelGenerateTool(deps: StartRunDeps, input: Record<string, unknown>, scope: BundleScope): Promise<ToolResult> {
   if (!scope.actingUserId) return toolError('acting_user_required', 'A channel can only be generated from a human-initiated turn.');
-  if (!(await channelsEnabled(scope.tenantId, scope.actingUserId))) return toolError('feature_disabled', 'Campaign Channels is turned off for this workspace.');
+  // CC-CHAN-1 — a plan refusal is worded as one (`not_entitled`), not "turned off".
+  const access = await resolveFeatureAccess(TOGGLE_ID, scope);
+  if (!access?.enabled) return featureUnavailable(access, 'Campaign Channels');
 
   const channel = str(input.channel) as CampaignChannel;
   if (!CAMPAIGN_CHANNELS.includes(channel)) {
@@ -172,6 +174,10 @@ export async function runChannelGenerateTool(deps: StartRunDeps, input: Record<s
       campaignChannel: { channel, briefId, agentId: scope.agentProfileId ?? GENERATOR_AGENT_ID },
       ...(campaignTag ? { [CAMPAIGN_RUN_TAG_KEY]: campaignTag } : {}),
     },
+    // CC-CHAN-1 / ADR 1108 — the run keeps the operator's exemption (re-checked at
+    // the run-start gate). Without it the operator's every generate was refused
+    // there as a plan block, live on 373d4863a.
+    ...forwardedPlanExemption(scope),
   }).catch((err) => {
     // DATA-4 — a startWorkflowRun THROW must also release the claim; coerce to
     // null so the shared failure handler below runs.

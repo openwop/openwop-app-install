@@ -86,6 +86,11 @@ interface AuditHead {
   headHash: string;
 }
 
+/** The chain's row collection. Hash-linked: a row edited after the fact fails
+ *  `verifyChain`, so a data migration must never rewrite it (CHAN-F14). The
+ *  constructor below keeps the literal (the ADR 0464 census reads it from
+ *  source); `adr1045-legacy-bearer-rewrite.test.ts` reds if the two drift. */
+export const AUDIT_CHAIN_COLLECTION = 'cdp:audit-chain';
 const entries = new DurableCollection<AuditEntry>(
   'cdp:audit-chain',
   (e) => `${e.tenantId}:${e.seq}`,

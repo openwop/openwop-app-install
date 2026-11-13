@@ -222,6 +222,42 @@ describe('ADR 0922 — asset registry', () => {
     expect(bad.raw).toContain('sections[sec:nope].data.heading');
   });
 
+  // CC-OPS-1 — red before the fix: the 400 named only the unknown path, and no
+  // route listed the client's pages or their field paths.
+  // The paths are not inlined: a section path carries a UUID, which the error
+  // sanitizer redacts. The pointer must lead to a list holding the real paths.
+  it('an unknown editable field is refused with a pointer to the valid field paths', async () => {
+    const { pageId, heroId } = await landingPage(orgA, `Webinar A valid ${++n}`);
+    const bad = await call<{ message?: string; details?: { validFieldsRoute?: string; unknown?: string[] } }>(operatorCookie, 'POST', `/clients/${orgA}/assets`, {
+      destination: 'openwop.cms.page', locator: { pageId }, label: 'A3', editableFields: ['heading'],
+    });
+    expect(bad.status, bad.raw).toBe(400);
+    expect(bad.body.details?.unknown).toEqual(['heading']);
+    expect(bad.body.details?.validFieldsRoute).toBe('asset-candidates');
+    expect(bad.body.message).toContain('asset-candidates route lists every valid field path');
+    expect(bad.raw).not.toContain('redacted');
+    const listed = await call<{ pages: Array<{ pageId: string; fields: Array<{ path: string }> }> }>(operatorCookie, 'GET', `/clients/${orgA}/asset-candidates`);
+    expect(listed.body.pages.find((p) => p.pageId === pageId)?.fields.map((f) => f.path))
+      .toEqual(expect.arrayContaining(['title', `sections[${heroId}].data.heading`, `sections[${heroId}].data.subheading`]));
+  });
+
+  it('lists the client’s own pages as candidates with the adapter’s field paths, marking registered ones', async () => {
+    const { pageId: freshId, heroId } = await landingPage(orgA, `Webinar A candidate ${++n}`);
+    const { pageId: registeredId } = await registeredPage();
+    const pageB = (await landingPage(orgB, `Webinar B candidate ${n}`)).pageId;
+    const r = await call<{ pages: Array<{ pageId: string; registered: boolean; fields: Array<{ path: string; preview: string }> }> }>(operatorCookie, 'GET', `/clients/${orgA}/asset-candidates`);
+    expect(r.status, r.raw).toBe(200);
+    const fresh = r.body.pages.find((p) => p.pageId === freshId);
+    expect(fresh?.registered).toBe(false);
+    expect(fresh?.fields.map((f) => f.path)).toEqual(expect.arrayContaining(['title', `sections[${heroId}].data.heading`]));
+    expect(fresh?.fields.find((f) => f.path === `sections[${heroId}].data.heading`)?.preview).toBe('Q4 pipeline review — Tuesday, Nov 3');
+    expect(r.body.pages.find((p) => p.pageId === registeredId)?.registered).toBe(true);
+    // Another client's page never appears; another client's list is the uniform 404.
+    expect(r.body.pages.some((p) => p.pageId === pageB)).toBe(false);
+    const other = await call(operatorCookie, 'GET', `/clients/${orgB}/asset-candidates`);
+    expect(other.status).toBe(404);
+  });
+
   it('refresh picks up a human edit made after registration', async () => {
     const { asset, pageId } = await registeredPage();
     const page = await getPage(TENANT, orgA, pageId);

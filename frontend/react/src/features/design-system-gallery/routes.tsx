@@ -20,10 +20,8 @@ const routes: FeatureRoute[] = [
     tier: 'admin', archetype: 'admin',
     nav: {
       group: 'Developer',
-      label: 'Design system',
       labelKey: 'designSystemLabel',
       icon: SparklesIcon,
-      hint: 'Primitive + pattern gallery',
       hintKey: 'designSystemHint',
       order: 96,
       featureId: 'developer-tools',

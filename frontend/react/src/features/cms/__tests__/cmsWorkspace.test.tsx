@@ -41,6 +41,7 @@ const ui = vi.hoisted(() => {
     page,
     confirm: vi.fn(async () => true),
     listVersions: vi.fn(async (): Promise<unknown[]> => []),
+    getVersion: vi.fn(async (): Promise<unknown> => { throw new Error('not stubbed'); }),
     rewriteSection: vi.fn(async (_org: string, input: { data: Record<string, unknown> }) => ({ ...input.data, text: 'Short body.' })),
     savePage: vi.fn(async (_org: string, _id: string, patch: Record<string, unknown>) => {
       // Like the server: a `new:` section gets a minted `sec:` id on save.
@@ -53,7 +54,8 @@ const ui = vi.hoisted(() => {
   };
 });
 vi.mock('../../../ui/confirm.js', () => ({ confirm: ui.confirm }));
-vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+const toastApi = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
+vi.mock('../../../ui/toast.js', () => ({ toast: toastApi }));
 vi.mock('../cmsClient.js', () => ({
   SECTION_TYPES: ['hero'],
   PAGE_STATUSES: ['draft', 'in_review', 'published', 'archived'],
@@ -66,7 +68,7 @@ vi.mock('../cmsClient.js', () => ({
   getLanguageSettings: vi.fn(async () => ({ baseLocale: 'en', supportedLocales: [], autoTranslateOnPublish: false })),
   putLanguageSettings: vi.fn(), getPageReview: vi.fn(async () => null), getPage: vi.fn(async () => ui.page),
   createPage: vi.fn(), deletePage: vi.fn(), savePage: ui.savePage, transition: ui.transition, translateSection: vi.fn(),
-  listVersions: ui.listVersions, restoreVersion: vi.fn(), rewriteSection: ui.rewriteSection,
+  listVersions: ui.listVersions, getVersion: ui.getVersion, restoreVersion: vi.fn(), rewriteSection: ui.rewriteSection,
   schedulePublish: vi.fn(), cancelSchedule: vi.fn(),
   listSharedSections: vi.fn(async () => []), createSharedSection: vi.fn(), updateSharedSection: vi.fn(),
   deleteSharedSection: vi.fn(), listSharedSectionPages: vi.fn(async () => []),
@@ -351,28 +353,48 @@ describe('the Page tab', () => {
   });
 
   it('History compares a seeded update by position and takes one section; Undo takes it back', async () => {
-    ui.listVersions.mockResolvedValue([{
-      versionId: 'pver:seed', version: 1, origin: 'seed', publishedAt: '2026-10-05T09:00:00Z', publishedBy: 'system (seeded update)',
-      snapshot: { title: 'Launch post', slug: 'p', sections: [
-        { sectionId: 'sec:s1', type: 'richText', data: { heading: 'The story we were sold', text: 'Body A' } },
-        { sectionId: 'sec:s2', type: 'richText', data: { heading: 'Where it shows up, with an example', text: 'Body B' } },
-      ] },
-    }]);
+    const head = { versionId: 'pver:seed', version: 1, origin: 'seed', publishedAt: '2026-10-05T09:00:00Z', publishedBy: 'system (seeded update)' };
+    // UXG-1112-14: the list carries no sections; Compare reads the capture.
+    ui.listVersions.mockResolvedValue([{ ...head, snapshot: { title: 'Launch post', slug: 'p' } }]);
+    ui.getVersion.mockResolvedValueOnce({ ...head, snapshot: { title: 'Launch post', slug: 'p', sections: [
+      { sectionId: 'sec:s1', type: 'richText', data: { heading: 'The story we were sold', text: 'Body A' } },
+      { sectionId: 'sec:s2', type: 'richText', data: { heading: 'Where it shows up, with an example', text: 'Body B' } },
+    ] } });
     try {
       renderDetail();
       fireEvent.click(await screen.findByRole('tab', { name: 'Page' }, { timeout: 3000 }));
       fireEvent.click(within(pagePanel()).getByText('History'));
       fireEvent.click(await within(pagePanel()).findByRole('button', { name: 'Compare' }));
       const dialog = await screen.findByRole('dialog');
+      expect(ui.getVersion).toHaveBeenCalledWith('o1', ui.page.pageId, 'pver:seed');
       expect(within(dialog).queryByText('Only in your draft.')).toBeNull();
       fireEvent.click(within(dialog).getByRole('button', { name: /^Use this version of Where it shows up/ }));
       fireEvent.click(within(dialog).getByRole('button', { name: /close/i }));
+      // Focus goes back to Compare, not to <body> (the busy button was disabled).
+      await waitFor(() => expect(document.activeElement?.textContent).toBe('Compare'));
       // The draft has it: open that section on the Edit tab.
       fireEvent.click(screen.getByRole('tab', { name: 'Edit' }));
       const card = await openEditor('Where it shows up, with an example');
       expect(within(card).getByDisplayValue('Where it shows up, with an example')).toBeTruthy();
       fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
       expect(screen.getByDisplayValue('Where it shows up')).toBeTruthy();
+    } finally {
+      ui.listVersions.mockResolvedValue([]);
+    }
+  });
+
+  it('a Compare whose capture cannot be read says so and opens nothing', async () => {
+    ui.listVersions.mockResolvedValue([{ versionId: 'pver:gone', version: 2, origin: 'publish', publishedAt: '2026-10-05T09:00:00Z', publishedBy: 'u', snapshot: { title: 'Launch post', slug: 'p' } }]);
+    ui.getVersion.mockRejectedValueOnce(new Error('boom'));
+    try {
+      renderDetail();
+      fireEvent.click(await screen.findByRole('tab', { name: 'Page' }, { timeout: 3000 }));
+      fireEvent.click(within(pagePanel()).getByText('History'));
+      const compare = await within(pagePanel()).findByRole('button', { name: 'Compare' });
+      fireEvent.click(compare);
+      await waitFor(() => expect(toastApi.error).toHaveBeenCalledWith('Could not load this version to compare. Try again.'));
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(compare.hasAttribute('disabled')).toBe(false);
     } finally {
       ui.listVersions.mockResolvedValue([]);
     }

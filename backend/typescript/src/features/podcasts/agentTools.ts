@@ -23,7 +23,7 @@
 
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveFeatureToggle, type ToolAccessScope } from '../../host/agentToolKit.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import { getProject, resolveProjectAccess } from '../projects/projectsService.js';
 import { startWorkflowRun, type StartRunDeps } from '../../host/runStarter.js';
@@ -39,6 +39,7 @@ import {
   type PodcastEpisode,
 } from './podcastsService.js';
 import { createLogger } from '../../observability/logger.js';
+import { forwardedPlanExemption } from '../../host/operatorPlanExemption.js';
 
 const log = createLogger('podcasts.producer-tools');
 
@@ -56,9 +57,9 @@ function toolError(error: string, message: string, extra?: Record<string, unknow
 }
 
 /** Per-call toggle honesty (ADR 0308 D2): per-tenant, dynamic, fail-closed. */
-async function podcastsEnabled(tenantId: string, actingUserId: string | undefined): Promise<boolean> {
-  const assignment = await resolveOne('podcasts', { tenantId, ...(actingUserId ? { userId: actingUserId } : {}) }).catch(() => null);
-  return Boolean(assignment?.enabled);
+async function podcastsEnabled(scope: ToolAccessScope): Promise<boolean> {
+  // ADR 1108 — the kit's subject: the route's shape plus the operator exemption.
+  return resolveFeatureToggle('podcasts', scope);
 }
 
 /** Resolve the org for a tool call — explicit `orgId`, else the workspace's sole
@@ -136,7 +137,7 @@ export function registerPodcastsAgentTools(deps: StartRunDeps): void {
     },
     async run(input, scope) {
       const empty = { content: JSON.stringify({ episodeProfiles: [], speakerProfiles: [], shows: [], episodes: [] }) };
-      if (!scope.actingUserId || !(await podcastsEnabled(scope.tenantId, scope.actingUserId))) return empty;
+      if (!scope.actingUserId || !(await podcastsEnabled(scope))) return empty;
       const resolved = await resolveOrgScope(scope, str(input.orgId), 'workspace:read');
       if ('content' in resolved) return empty; // read tools fail EMPTY, not typed
       const { orgId } = resolved;
@@ -180,7 +181,7 @@ export function registerPodcastsAgentTools(deps: StartRunDeps): void {
       },
     },
     async run(input, scope) {
-      if (!(await podcastsEnabled(scope.tenantId, scope.actingUserId))) return toolError('feature_disabled', 'Podcasts is not enabled for this workspace.');
+      if (!(await podcastsEnabled(scope))) return toolError('feature_disabled', 'Podcasts is not enabled for this workspace.');
       const resolved = await resolveOrgScope(scope, str(input.orgId), 'workspace:write');
       if ('content' in resolved) return resolved;
       const { orgId, actingUserId } = resolved;
@@ -218,6 +219,8 @@ export function registerPodcastsAgentTools(deps: StartRunDeps): void {
       });
       const runId = await startWorkflowRun(deps, {
         tenantId: scope.tenantId,
+        // CC-CHAN-1 / ADR 1108 — keep the listed operator's exemption on the started run.
+        ...forwardedPlanExemption(scope),
         workflowId: PODCASTS_GENERATE_ID,
         inputs: { episodeId: episode.id },
         metadata: {

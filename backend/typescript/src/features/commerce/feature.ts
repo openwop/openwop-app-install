@@ -19,19 +19,22 @@ import { registerToggleDefault } from '../../host/featureToggles/registry.js';
 import { buildCommerceSurface, COMMERCE_SURFACE_POLICY } from './surface.js';
 import { registerCommerceTransactionalTemplates } from './transactionalTemplates.js';
 import { startCommerceReservationSweep } from './reservationSweep.js';
+import { startCatalogIndexSweep } from './catalogIndexSweep.js';
 import { backfillAffiliateLedger } from './affiliate.js';
 import { registerSubscriptionRecurrence, registerProductDeletionCleanup } from './subscriptions.js';
 import { onCrmRecordDeleted } from '../../host/crmRecordLifecycle.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
-import { deleteSavedPaymentMethodsForContact, anonymizeOrderShippingForContacts, deleteCartsForUser } from './commerceService.js';
-import { registerFeatureDataExporter } from '../../host/featureDataExport.js';
-import { exportCommerceData } from './dataExport.js';
+import { deleteSavedPaymentMethodsForContact, anonymizeOrderShippingForContacts, deleteCartsForUser, catalogIndexGauge } from './commerceService.js';
+import { registerIntegrityGauge } from '../../host/integrityGauges.js';
+import { registerFeatureDataPagedExporter } from '../../host/featureDataExport.js';
+import { exportCommerceDataPage } from './dataExport.js';
 
 export const commerceFeature: BackendFeature = {
   id: 'commerce',
   registerRoutes: (deps) => {
     registerProductSourceVerifier(isProductSource); // ADR 0945 P2 — media's product-hint check asks the catalog
-    registerFeatureDataExporter('commerce', exportCommerceData); // ADR 0820 §7 — read-only export, served after a plan lapse
+    registerFeatureDataPagedExporter('commerce', exportCommerceDataPage); // ADR 0820 §7 + ADR 1110 P3 — read-only, paged export, served after a plan lapse
+    registerIntegrityGauge('commerce-catalog-index', catalogIndexGauge); // ADR 1110 D1 — drift + pending intents, daily
     registerCommerceRoutes(deps);
     // ADR 0447 D3 — opening-balance backfill: frozen `balanceOwed` values become
     // deterministic ledger rows. Idempotent by row key (never a sentinel), so
@@ -48,6 +51,7 @@ export const commerceFeature: BackendFeature = {
     // C5 — the reservation-expiry sweep (publishSweep pattern: feature-owned,
     // bounded, unref'd; releases stock held by unpaid expired orders).
     startCommerceReservationSweep();
+    startCatalogIndexSweep(); // ADR 1110 — index repair, background builds, hourly drift check
     // ADR 0296 P2 — a deleted CRM contact must not leave a charge-capable saved
     // payment reference behind (PRUNE: live capability, not historical data).
     onCrmRecordDeleted('commerce-saved-pm', async (e) => {

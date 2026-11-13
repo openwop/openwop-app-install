@@ -17,6 +17,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Notice } from '../../ui/index.js';
+import { TableScroll } from '../../ui/DataTable.js';
 import { ChartRenderer } from './ChartRenderer.js';
 import type { ArtifactRendererProps } from './rendererRegistry.js';
 
@@ -114,6 +115,7 @@ function SlideImg({ src, alt }: { src: string | null; alt: string }): JSX.Elemen
  *  text is React-escaped; images go through safeImageSrc; chart specs reuse
  *  the shared ChartRenderer (no new chart code path). */
 function BlockView({ block }: { block: Block }): JSX.Element | null {
+  const { t } = useTranslation('chat');
   // ADR 0344 2b — hidden blocks never render (the slides renderer is read-only
   // everywhere; the editor outline still shows the dimmed row for un-hiding).
   if (block.hidden) return null;
@@ -161,12 +163,12 @@ function BlockView({ block }: { block: Block }): JSX.Element | null {
       const rows = str('rows').split('\n').map((r) => r.trim()).filter(Boolean).slice(0, 12)
         .map((r) => r.split(',').map((c) => c.trim()));
       return cols.length ? (
-        <div className="canvas-slides__blk-table-wrap">
+        <TableScroll className="canvas-slides__blk-table-wrap" label={t('slidesTableLabel', { columns: cols.join(', ') })}>
           <table className="canvas-slides__blk-table">
             <thead><tr>{cols.map((c, i) => <th key={i}>{c}</th>)}</tr></thead>
             <tbody>{rows.map((r, i) => <tr key={i}>{cols.map((_, j) => <td key={j}>{r[j] ?? ''}</td>)}</tr>)}</tbody>
           </table>
-        </div>
+        </TableScroll>
       ) : null;
     }
     case 'statCard':

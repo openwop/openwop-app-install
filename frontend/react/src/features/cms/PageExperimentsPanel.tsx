@@ -30,7 +30,7 @@ import {
   type ExperimentResults,
   type ExperimentStatus,
   type PageExperiment,
-  type PageVersion,
+  type PageVersionSummary,
   experimentGates,
 } from './cmsClient.js';
 
@@ -54,7 +54,7 @@ const DEFAULT_DRAFT: VariantDraft[] = [
 export function PageExperimentsPanel({ orgId, pageId, versions, onLoadVersions, onPageChanged }: {
   orgId: string;
   pageId: string;
-  versions: PageVersion[] | null;
+  versions: PageVersionSummary[] | null;
   onLoadVersions: () => void;
   onPageChanged: () => void;
 }): JSX.Element {

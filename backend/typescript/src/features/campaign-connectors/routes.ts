@@ -13,7 +13,11 @@ import { assertOrgScope, type Scope } from '../../host/accessControlService.js';
 import { resolveCallerUser } from '../users/usersGuards.js';
 import { requireFeatureEnabled, requireString, authorizeOrgScope, requireTenantScope } from '../featureRoute.js';
 import { resolveToggle, resolveOne } from '../../host/featureToggles/service.js';
-import { buildProductFeed, renderFeedXml, getFeedSettings, saveFeedSettings, signedFeedUrl, verifyFeedSignature, pushCatalog, commerceServesStore } from './catalogFeed.js';
+import { feedBatches, feedSummary, feedXmlHead, feedXmlItems, FEED_XML_TAIL, getFeedSettings, saveFeedSettings, signedFeedUrl, verifyFeedSignature, pushCatalog, commerceServesStore } from './catalogFeed.js';
+import { once } from 'node:events';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('campaign-connectors.routes');
 import { publicBaseUrl } from '../featureRoute.js';
 import { ownerPublicRuntimeLapsed } from '../../host/publicLapse.js';
 import { getOrg } from '../../host/accessControlService.js';
@@ -228,14 +232,15 @@ export function registerCampaignConnectorsRoutes(deps: RouteDeps): void {
   // so every earlier URL stops working.
   const feedView = async (req: Request, tenantId: string, orgId: string) => {
     const s = await getFeedSettings(tenantId, orgId);
-    const feed = await buildProductFeed(tenantId, orgId, publicBaseUrl(req));
+    // ADR 1110 P3 — counted a batch at a time and capped, never built whole.
+    const feed = await feedSummary(tenantId, orgId, publicBaseUrl(req));
     return {
       enabled: s.enabled, version: s.version, contentLanguage: s.contentLanguage, feedLabel: s.feedLabel,
       ...(s.metaCatalogId ? { metaCatalogId: s.metaCatalogId } : {}),
       ...(s.merchantAccountId ? { merchantAccountId: s.merchantAccountId } : {}),
       ...(s.merchantDataSource ? { merchantDataSource: s.merchantDataSource } : {}),
       ...(s.enabled ? { feedUrl: signedFeedUrl(publicBaseUrl(req), s) } : {}),
-      items: feed.items.length, excluded: feed.excluded,
+      items: feed.items, ...(feed.itemsCapped ? { itemsCapped: true } : {}), excluded: feed.excluded, excludedTotal: feed.excludedTotal,
     };
   };
   app.get(`${BASE}/orgs/:orgId/catalog-feed`, async (req, res, next) => {
@@ -285,11 +290,34 @@ export function registerCampaignConnectorsRoutes(deps: RouteDeps): void {
       const s = await getFeedSettings(tenantId, req.params.orgId);
       if (!s.enabled || !verifyFeedSignature(s, req.query.v, req.query.sig)) notFound();
       const base = publicBaseUrl(req);
-      const feed = await buildProductFeed(tenantId, req.params.orgId, base);
+      const batches = feedBatches(tenantId, req.params.orgId, base);
+      // ADR 1110 P3 — read the first batch before committing to a 200, so a read that
+      // fails at once is still an error response; after that the document streams one
+      // batch at a time and never holds the catalog.
+      const first = await batches.next();
       res.setHeader('content-type', 'application/xml; charset=utf-8');
       // Never a shared (CDN) cache: a rotate or a disable must take effect at once.
       res.setHeader('cache-control', 'private, max-age=300');
-      res.send(renderFeedXml(feed, { title: org.name, brand: org.name, link: `${base}/store/${encodeURIComponent(req.params.orgId)}` }));
+      // Backpressure: wait for the socket to drain before the next batch, and stop reading
+      // the catalog the moment the fetcher goes away (a slow or gone client must not make
+      // the whole feed pile up in memory).
+      const send = async (chunk: string): Promise<boolean> => {
+        if (res.destroyed) return false;
+        if (!res.write(chunk)) await once(res, 'drain');
+        return !res.destroyed;
+      };
+      if (!(await send(feedXmlHead({ title: org.name, brand: org.name, link: `${base}/store/${encodeURIComponent(req.params.orgId)}` })))) return;
+      if (!first.done && !(await send(feedXmlItems(first.value.items, org.name)))) return;
+      try {
+        for await (const b of batches) if (!(await send(feedXmlItems(b.items, org.name)))) return;
+      } catch (err) {
+        // Mid-stream: the status is already sent, so cut the document short (a truncated
+        // XML file fails to parse, which a feed fetcher reports) rather than close it.
+        log.warn('catalog_feed_stream_failed', { error: err instanceof Error ? err.message : String(err) });
+        res.destroy();
+        return;
+      }
+      res.end(FEED_XML_TAIL);
     } catch (err) { next(err); }
   });
 

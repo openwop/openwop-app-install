@@ -9,10 +9,16 @@
  * peer's card is 0.3-only, so the client negotiates the ADR 0552 P2 downgrade
  * and speaks 0.3 method names.
  *
- * Tracker TST-BG1-11. Red when (probe-witnessed, wave 58): `normalizeResult`
- * stops upper-casing state or stops mapping a `tasks` list; the extended-card
- * follow-up is skipped; a remote error is mis-coded; SSE events are not
- * forwarded; card discovery failure loses `a2a_transport_error`.
+ * ADR 1045 D3 (CHAN-P6-3): the surface has NO workflow-side server methods, so
+ * the pack's emit/push nodes fail typed and card publish reports nothing published.
+ *
+ * Tracker TST-BG1-11. Red when (probe-witnessed, waves 58 and 107):
+ * `normalizeResult` stops upper-casing state, stops turning `-` into `_`, or stops
+ * mapping a `tasks` list; the agent-card path list loses the 0.3 path; the
+ * extended-card follow-up is skipped; a remote error is mis-coded; SSE events are
+ * not forwarded; card discovery failure loses `a2a_transport_error`; push-config
+ * create drops `pushNotificationConfig`; any one of `emitStatus`, `emitArtifact`,
+ * `pushSend` or `publishAgentCard` is put back on `createA2aSurface`.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -52,6 +58,8 @@ let server: Server;
 let baseUrl: string;
 /** The params the peer received on its last push-config set (what the client SENT). */
 let lastPushParams: unknown;
+/** The escape hatch's value before this file set it, restored in afterAll. */
+let priorAllowPrivate: string | undefined;
 
 beforeAll(async () => {
   server = createServer((req, res) => {
@@ -108,11 +116,13 @@ beforeAll(async () => {
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   // The A2A client egress is now SSRF-guarded (2026-07 vuln-scan M1); permit the
   // loopback test server via the documented dev/test escape.
+  priorAllowPrivate = process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE;
   process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
 });
 
 afterAll(async () => {
-  delete process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE;
+  if (priorAllowPrivate === undefined) delete process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE;
+  else process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = priorAllowPrivate;
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
@@ -198,9 +208,9 @@ describe('category: host.a2a error surfacing', () => {
 // answered delivered:false). They are withdrawn. This drives the REAL pack nodes
 // against the real surface: each emit/push node must now fail TYPED
 // (`host_capability_missing`) rather than succeed, and card publish must say it
-// published nothing. Sabotage-witnessed 2026-11-03: restoring the four stub
-// methods on `createA2aSurface` turns all four assertions red (the nodes resolve
-// with status success / published:true).
+// published nothing. Sabotage-witnessed 2026-11-03, and again per method in wave
+// 107: restoring any ONE of the four stubs on `createA2aSurface` reds its own
+// assertion (the node resolves with status success / published:true).
 describe('ADR 1045 D3 — host.a2a has no workflow-side server methods', () => {
   const PACK = new URL('../../../packs/core.openwop.a2a/index.mjs', import.meta.url).href;
   const ctxFor = (inputs: Record<string, unknown>) => ({
@@ -211,14 +221,18 @@ describe('ADR 1045 D3 — host.a2a has no workflow-side server methods', () => {
 
   it('emit-status, emit-artifact and push-send fail with host_capability_missing', async () => {
     const pack = await import(PACK) as Record<string, (ctx: unknown) => Promise<unknown>>;
-    await expect(pack.emitStatus!(ctxFor({ taskId: 'task-1', status: 'working' }))).rejects.toMatchObject({ code: 'host_capability_missing' });
-    await expect(pack.emitArtifact!(ctxFor({ taskId: 'task-1', artifact: {} }))).rejects.toMatchObject({ code: 'host_capability_missing' });
-    await expect(pack.pushSend!(ctxFor({ configId: 'cfg-1', event: {} }))).rejects.toMatchObject({ code: 'host_capability_missing' });
+    // Exact message, not just the code: the pack's `ensure()` refusal ("host does not
+    // expose ctx.a2a") shares `host_capability_missing`. That the REAL surface is what
+    // is consulted is the per-method probes' job (`w107g2-a2a-stub-*`).
+    await expect(pack.emitStatus!(ctxFor({ taskId: 'task-1', status: 'working' }))).rejects.toMatchObject({ code: 'host_capability_missing', message: 'host does not implement ctx.a2a.emitStatus' });
+    await expect(pack.emitArtifact!(ctxFor({ taskId: 'task-1', artifact: {} }))).rejects.toMatchObject({ code: 'host_capability_missing', message: 'host does not implement ctx.a2a.emitArtifact' });
+    await expect(pack.pushSend!(ctxFor({ configId: 'cfg-1', event: {} }))).rejects.toMatchObject({ code: 'host_capability_missing', message: 'host does not implement ctx.a2a.pushSend' });
   });
 
-  it('agent-card-publish reports published:false — nothing is stored or served', async () => {
-    const pack = await import(PACK) as Record<string, (ctx: unknown) => Promise<{ outputs: { published: boolean } }>>;
+  it('agent-card-publish reports published:false (the surface has no publishAgentCard)', async () => {
+    const pack = await import(PACK) as Record<string, (ctx: unknown) => Promise<{ status: string; outputs: { card: unknown; published: boolean } }>>;
     const out = await pack.agentCardPublish!(ctxFor({ card: AGENT_CARD }));
     expect(out.outputs.published).toBe(false);
+    expect(out.outputs.card).toEqual(AGENT_CARD);
   });
 });

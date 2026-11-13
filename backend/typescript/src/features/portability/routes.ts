@@ -16,7 +16,7 @@ import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { callerSubject, isAnonTenantId, tenantOf } from '../../host/requestSubject.js';
 import { requireTenantScope } from '../featureRoute.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
-import { EXPORT_PAGE_MAX, exportableFeatureIds, featureDataExporter } from '../../host/featureDataExport.js';
+import { EXPORT_PAGE_MAX, exportableFeatureIds, featureDataExporter, featureDataPagedExporter } from '../../host/featureDataExport.js';
 import { getToggleDefault } from '../../host/featureToggles/registry.js';
 import { resolveSubjectScopesUnion } from '../../host/accessControlService.js';
 import {
@@ -132,7 +132,8 @@ export function registerPortabilityRoutes(deps: RouteDeps): void {
       await requireExportAdmin(req);
       const featureId = req.params.featureId;
       const exporter = featureDataExporter(featureId);
-      if (!exporter) throw new OpenwopError('not_found', 'This feature has no data export.', 404, { featureId });
+      const paged = featureDataPagedExporter(featureId);
+      if (!exporter && !paged) throw new OpenwopError('not_found', 'This feature has no data export.', 404, { featureId });
       const tenantId = tenantOf(req);
       const { access, blockedBy } = await exportAccess(featureId, tenantId);
       if (!access) {
@@ -144,6 +145,19 @@ export function registerPortabilityRoutes(deps: RouteDeps): void {
       // `page.nextOffset` is null on the last page; a client walks it to the end.
       const offset = intParam(req.query.offset, 0);
       const limit = Math.min(Math.max(intParam(req.query.limit, EXPORT_PAGE_MAX), 1), EXPORT_PAGE_MAX);
+      res.setHeader('content-disposition', `attachment; filename="${featureId}-export-${new Date().toISOString().slice(0, 10)}.json"`);
+      if (paged) {
+        // ADR 1110 P3 — the exporter pages itself: `?cursor=` walks it, `page.nextCursor`
+        // is absent on the last page. No totals: they would need the whole read.
+        const cursor = typeof req.query.cursor === 'string' && req.query.cursor ? req.query.cursor : undefined;
+        const page = await paged(tenantId, { ...(cursor ? { cursor } : {}), limit });
+        res.json({
+          featureId, readOnly: true, access, exportedAt: new Date().toISOString(), sections: page.sections,
+          page: { offset: 0, limit, totals: {}, nextOffset: null, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) },
+        });
+        return;
+      }
+      if (!exporter) throw new OpenwopError('not_found', 'This feature has no data export.', 404, { featureId });
       const all = await exporter(tenantId);
       const sections: Record<string, readonly unknown[]> = {};
       const totals: Record<string, number> = {};
@@ -153,7 +167,6 @@ export function registerPortabilityRoutes(deps: RouteDeps): void {
         totals[name] = rows.length;
         if (rows.length > offset + limit) more = true;
       }
-      res.setHeader('content-disposition', `attachment; filename="${featureId}-export-${new Date().toISOString().slice(0, 10)}.json"`);
       res.json({
         featureId, readOnly: true, access, exportedAt: new Date().toISOString(), sections,
         page: { offset, limit, totals, nextOffset: more ? offset + limit : null },

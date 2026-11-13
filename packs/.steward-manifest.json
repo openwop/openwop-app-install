@@ -207,9 +207,9 @@
       "digest": "eca8d095e675b1b42bae9b81d4d146ac2350c43dcdd0e1ef585fb9d2c9135223"
     },
     "core.openwop.http": {
-      "version": "2.1.1",
+      "version": "2.1.2",
       "files": 73,
-      "digest": "88e8dff30f32ef654f2713e3f30db6a4704e37b026793243ceb910f805d43bb1"
+      "digest": "61b7e2cd06e7eae8bcee0e24b5fb8209fd8f22e10adb6e1124b0a0a13687cb7f"
     },
     "core.openwop.integration": {
       "version": "1.2.1",
@@ -492,9 +492,9 @@
       "digest": "29e1b6fa4e15e344314911a8d4c04993030cef7b1e79c32586072c9a2616951a"
     },
     "feature.funnels.nodes": {
-      "version": "1.6.0",
+      "version": "1.6.1",
       "files": 2,
-      "digest": "f9e67c608826e0f4d9c2d74b213b80ae84f22890594dfa757404f91b85fb04b2"
+      "digest": "4eb007417d90bbf951c494ed40907d8d6b446f1a91001e722220c07bfd6edb42"
     },
     "feature.insights-suite.nodes": {
       "version": "1.3.0",
@@ -532,9 +532,9 @@
       "digest": "bed91ac9e392acc9469a52c206c38633175f790dc34d214a589a8cb161f4e1d8"
     },
     "feature.notebooks.nodes": {
-      "version": "1.1.1",
+      "version": "1.2.0",
       "files": 2,
-      "digest": "766509c76a0076920812a7dbefc0c1ccd25f2643ff524a7f82c14ecab8ae8358"
+      "digest": "08e9026401329d30602f16b3bd575e27cfea1cb8866f921938b4356200d692d0"
     },
     "feature.notifications.nodes": {
       "version": "1.0.1",
@@ -722,9 +722,9 @@
       "digest": "41a77b7930d4e593e368ebdc337a8d205a7b28a334211e39c8e5a0a66b584dca"
     },
     "vendor.myndhyve.chat": {
-      "version": "1.4.0",
+      "version": "1.4.2",
       "files": 22,
-      "digest": "203844ba5b63e8f1e1e3c808cce36067226f48f9a39ccd0de87bf6904463cb0b"
+      "digest": "cdf3ecd6f387cc549834ba26a4efb785aca432b657b7db7efa0df948b9223205"
     },
     "vendor.myndhyve.data-integration": {
       "version": "1.0.2",
@@ -872,9 +872,9 @@
       "digest": "65f045f3087f0084468842a6fb4ef3b472fcee4d5979be5b57c32fff7cd66df2"
     },
     "vendor.openwop-app.campaign-orchestration.agents": {
-      "version": "1.4.2",
+      "version": "1.4.3",
       "files": 3,
-      "digest": "2a25b3eee6a81c3485c41fe7394ce981f2dae48812fdaa3ab673ce4366825d38"
+      "digest": "a104b0d0ddd9d76dad2efa02ca267b42ca62a68094dc7c3436ed9d595676b8c7"
     },
     "vendor.openwop-app.campaign-studio.agents": {
       "version": "1.2.0",
@@ -992,9 +992,9 @@
       "digest": "0d73e2658eab2ae4827e2c366b133de47c29c2d22e9e518c235ff9ccdaa3bdbc"
     },
     "vendor.openwop-app.notebooks.agents": {
-      "version": "1.0.2",
+      "version": "1.0.3",
       "files": 2,
-      "digest": "20e49608b6f1c5ab280736e25abc811982f55c6bd541d7f72b7b63a8790ff9c6"
+      "digest": "d0681a616bdc4f122180e01fab07dfa4d9ef07f4f60374d5e7df55d6608fe79e"
     },
     "vendor.openwop-app.podcasts.agents": {
       "version": "1.0.2",

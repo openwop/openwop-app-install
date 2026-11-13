@@ -163,7 +163,7 @@ export function AuditLogPage(): JSX.Element {
           ) : visibleRows.length === 0 ? (
             <StateCard icon={<ShieldIcon size={20} />} title={t('auditNoMatchTitle')} body={t('auditNoMatchBody')} action={<Button variant="secondary" size="sm" onClick={clearFilters}>{t('auditClearFilters')}</Button>} />
           ) : (
-            <DataTable columns={columns} rows={visibleRows} rowKey={(r) => `${r.timestamp}:${r.principalId}:${r.action}:${r.resource}`} />
+            <DataTable caption={t('auditTitle')} columns={columns} rows={visibleRows} rowKey={(r) => `${r.timestamp}:${r.principalId}:${r.action}:${r.resource}`} />
           )}
         </>
       )}

@@ -73,6 +73,20 @@ function strInput(ctx, key) {
   return typeof i[key] === 'string' ? i[key] : '';
 }
 
+/** ADR 1103 D4 — a node that wrote nothing FAILS, typed. The surface's write lane
+ *  answers a refusal as `{ error: { code, message } }` (the documents
+ *  `createDraftDocument` shape); this turns it into the node failure, carrying the
+ *  code (`notebook_unavailable`, `notebook_write_forbidden`, `source_changed`, …). */
+function typedFailure(code, message) {
+  return Object.assign(new Error(message), { code });
+}
+function throwIfRefused(res) {
+  if (res && typeof res === 'object' && res.error && typeof res.error.code === 'string') {
+    throw typedFailure(res.error.code, typeof res.error.message === 'string' ? res.error.message : res.error.code);
+  }
+  return res;
+}
+
 function inputs(ctx) {
   const i = ctx.inputs ?? {};
   return {
@@ -129,11 +143,16 @@ export async function search(ctx) {
 }
 
 /**
- * read-source (ADR 0084 Transformations T1) — the FIRST node of `notebooks.summarize`.
- * Reads a source's full text via the host surface and emits a chatCompletion-ready
- * `messages` payload for the downstream `core.ai.chatCompletion` node. An EMPTY
- * source (missing / private / blank) emits `empty:true` + no messages so the run
- * short-circuits to a clean no-op instead of asking the LLM to summarize nothing.
+ * read-source (ADR 0084 Transformations T1) — the FIRST node of `notebooks.summarize`
+ * and `notebooks.transform`. Reads a source's full text via the host surface and emits
+ * a chatCompletion-ready `messages` payload, plus the `revision` it read (ADR 1103 D4:
+ * the summary write refuses a summary of text that has since changed).
+ *
+ * ADR 1103 D4 — this used to answer a missing / unreadable / blank source with
+ * `success, empty:true, messages:[]`. The `all_success` edge then ran the model with no
+ * user turn and the writer stored nothing, so the run "completed". Now it FAILS:
+ * the surface's refusal code (`notebook_unavailable`, `source_unavailable`), or
+ * `source_empty` for a blank source.
  *
  * notebookId/sourceId come via `{type:'variable'}` inputs (merged into ctx.inputs).
  * Read-only. A READ: re-executing it on a replay is harmless, which is why it is
@@ -152,11 +171,12 @@ export async function readSource(ctx) {
   // text is fetched IN-RUN rather than inlined into run.inputs by the route — keeping
   // the run record small for large sources, and consistent with the summarize path.
   const systemPrompt = strInput(ctx, 'systemPrompt').trim();
-  const out = await notebooks.getSourceText({ notebookId, sourceId });
+  const out = throwIfRefused(await notebooks.getSourceText({ notebookId, sourceId }));
   const text = typeof out?.text === 'string' ? out.text : '';
   if (text.trim().length === 0) {
-    return { status: 'success', outputs: { empty: true, messages: [] } };
+    throw typedFailure('source_empty', 'The source has no text to read.');
   }
+  const revision = typeof out?.revision === 'number' ? out.revision : undefined;
   const messages = systemPrompt.length > 0
     ? [{ role: 'system', content: systemPrompt }, { role: 'user', content: text }]
     : [{ role: 'user', content: text }];
@@ -167,6 +187,7 @@ export async function readSource(ctx) {
       // The chatCompletion node reads ctx.inputs.messages; wire this `messages`
       // output to its `messages` input port.
       messages,
+      ...(revision !== undefined ? { revision } : {}),
     },
   };
 }
@@ -176,9 +197,13 @@ export async function readSource(ctx) {
  * Persists the LLM summary (the chatCompletion `content`, wired in via an edge port
  * to the `summary` input) through the one justified surface write `setSourceSummary`,
  * which un-gates the source's `summary` context level + recomputes the binding
- * projection. notebookId/sourceId come via `{type:'variable'}` inputs. An empty
- * summary is a no-op (`stored:false`). Replay-SERVED because the manifest declares `capabilities:["side-effectful"]` (ADR 0678 D1);
- * `role:"action"` confers nothing.
+ * projection. notebookId/sourceId come via `{type:'variable'}` inputs; `revision`
+ * arrives by an edge from `read-source` (ADR 1103 D4). Replay-SERVED because the
+ * manifest declares `capabilities:["side-effectful"]` (ADR 0678 D1); `role:"action"`
+ * confers nothing.
+ *
+ * ADR 1103 D4 — an empty summary and every refusal FAIL, typed (`summary_empty`, or
+ * the surface's code). It used to answer `success, stored:false`.
  */
 export async function storeSummary(ctx) {
   const notebooks = ensureNotebooks(ctx);
@@ -189,10 +214,15 @@ export async function storeSummary(ctx) {
   const sourceId = strInput(ctx, 'sourceId');
   const summary = strInput(ctx, 'summary').trim();
   if (summary.length === 0) {
-    return { status: 'success', outputs: { stored: false } };
+    throw typedFailure('summary_empty', 'The model returned an empty summary.');
   }
-  const res = await notebooks.setSourceSummary({ notebookId, sourceId, summary });
-  return { status: 'success', outputs: { stored: res?.stored === true } };
+  const revision = typeof ctx.inputs?.revision === 'number' ? ctx.inputs.revision : undefined;
+  // A literal argument object (no spread), so the pack↔surface parity scan ASSERTS this
+  // call's keys rather than excluding it; an absent revision is `undefined`, which the
+  // surface reads as "not given".
+  const res = throwIfRefused(await notebooks.setSourceSummary({ notebookId, sourceId, summary, revision }));
+  if (res?.stored !== true) throw typedFailure('summary_not_stored', 'The summary was not stored.');
+  return { status: 'success', outputs: { stored: true } };
 }
 
 /**
@@ -203,7 +233,14 @@ export async function storeSummary(ctx) {
  * stays READ-ONLY; the write lands in Documents (the single owner of stored
  * artifacts, ADR 0053; the strategy create-board-memo precedent, ADR 0080).
  *
- * Inputs (orgId/title/kind/ownerSubject via `{type:'variable'}`; content via the
+ * WHERE it writes (ADR 1103 D5): the notebook's own org and project subject, from the
+ * surface's write-gated `transformTarget({ notebookId })` — never the run's inputs.
+ * `orgId` / `ownerSubject` inputs are still accepted from older definitions, and a
+ * value that disagrees with the notebook fails `target_mismatch` rather than choosing
+ * one. No `notebookId` ⇒ `notebook_required`. Empty model output ⇒
+ * `transformation_empty` (it used to be `success, written:false`).
+ *
+ * Inputs (notebookId/title/kind via `{type:'variable'}`; content via the
  * edge port): mints the Document at a CONTENT-DERIVED deterministic id, then appends its
  * first version. CORRECTED (ADR 0678 D1b): this used to say the version write "is
  * idempotency-keyed off the run id + the source so a replay/fork reuses the same version".
@@ -215,28 +252,35 @@ export async function storeSummary(ctx) {
  */
 export async function writeTransformation(ctx) {
   const docs = ensureDocuments(ctx);
-  const orgId = strInput(ctx, 'orgId');
+  const notebooks = ensureNotebooks(ctx);
+  if (typeof notebooks.transformTarget !== 'function') {
+    throw Object.assign(new Error('ctx.features.notebooks.transformTarget is unavailable'), { code: 'host_capability_missing' });
+  }
+  const notebookId = strInput(ctx, 'notebookId');
+  if (notebookId.length === 0) {
+    throw typedFailure('notebook_required', 'A transformation needs the notebook it belongs to.');
+  }
   const title = strInput(ctx, 'title') || 'Transformation';
   const kind = strInput(ctx, 'kind') || 'notebook-transformation';
   const content = strInput(ctx, 'content').trim();
+  if (content.length === 0) {
+    throw typedFailure('transformation_empty', 'The model returned an empty transformation.');
+  }
+  // ADR 1103 D5 — the notebook says where its Document goes (write-gated for the
+  // run's person). A copied `orgId` / `ownerSubject` input that disagrees is refused,
+  // so a definition can never aim the write at another org or another project.
+  const target = throwIfRefused(await notebooks.transformTarget({ notebookId }));
+  const orgId = target.orgId;
+  const ownerSubject = target.ownerSubject;
   const i = ctx.inputs ?? {};
-  // ownerSubject arrives as an object {kind, id} via a {type:'variable'} declaration.
-  // HARDENING (ADR 0084 review): a notebook transformation is ALWAYS owned by a
-  // `project` subject (the notebook). Constrain the kind so a chat-driven caller
-  // (the Research Analyst supplies this arg) can never mint a Document owned by an
-  // arbitrary `user`/`agent` subject — the createDocument org-guard already blocks
-  // cross-org; this closes the cross-subject-KIND surface. A non-project owner is
-  // dropped (the Document is created un-owned rather than mis-attributed).
-  const rawOwner =
+  const passedOrg = strInput(ctx, 'orgId');
+  const passedOwner =
     i.ownerSubject && typeof i.ownerSubject === 'object' && !Array.isArray(i.ownerSubject)
       ? i.ownerSubject
       : undefined;
-  const ownerSubject =
-    rawOwner && rawOwner.kind === 'project' && typeof rawOwner.id === 'string' && rawOwner.id.length > 0
-      ? rawOwner
-      : undefined;
-  if (!orgId || content.length === 0) {
-    return { status: 'success', outputs: { written: false } };
+  if ((passedOrg && passedOrg !== orgId)
+    || (passedOwner && (passedOwner.kind !== ownerSubject.kind || passedOwner.id !== ownerSubject.id))) {
+    throw typedFailure('target_mismatch', 'The transformation names a different org or owner than its notebook.');
   }
   // ADR 0678 D1b — the dedupe has to happen at the document MINT, and the id has to be
   // CONTENT-derived.
@@ -253,7 +297,7 @@ export async function writeTransformation(ctx) {
   // NOT routed through `ctx.features.documents.createDraftDocument` (the ADR 0166 owner, and
   // what ADR 0676 D1 used for strategy) for a measured reason: that surface does NOT accept
   // `ownerSubject` (`features/documents/surface.ts:69-92`), so routing through it would
-  // silently drop the ADR 0084 cross-subject hardening enforced twenty lines above — closing an
+  // silently drop the notebook-owned `ownerSubject` (ADR 1103 D5's target, above) — closing an
   // idempotency gap by opening an attribution one. `createDocument` short-circuits on an
   // explicit id (`documentsService.ts:326-329`), which is the same dedupe with the owner intact,
   // and is what `features/strategy/agentTools.ts:266-272` already does correctly.
@@ -272,7 +316,7 @@ export async function writeTransformation(ctx) {
     title,
     kind,
     format: 'markdown',
-    ...(ownerSubject ? { ownerSubject } : {}),
+    ownerSubject,
   });
   await docs.addVersion({
     orgId,
@@ -308,8 +352,9 @@ function ensureCallAI(ctx) {
  * Inputs: `audioBase64` + `mimeType` (the source bytes, supplied in run inputs by
  * the upload route) + optional `language`. provider/model come from ctx.config
  * (google / gemini default — an audio-capable provider; the host BYOK key resolves
- * via ADR 0024). An empty/blank `audioBase64` is a clean no-op (`empty:true`) so a
- * mis-enqueued run short-circuits rather than calling the model with no audio.
+ * via ADR 0024). ADR 1103 D4 — a blank `audioBase64` fails `validation_error` and an
+ * empty transcript fails `no_transcript` (the YouTube node's code); both used to be
+ * `success` with nothing for the ingest node to write.
  *
  * Side-effectful (a provider call) → recorded in the host's invocation log; a
  * replay/fork reuses the cached transcript rather than re-calling the model.
@@ -326,7 +371,7 @@ export async function transcribeSource(ctx) {
   const mimeType = strInput(ctx, 'mimeType') || 'audio/mpeg';
   const language = strInput(ctx, 'language').trim();
   if (audioBase64.trim().length === 0) {
-    return { status: 'success', outputs: { empty: true, transcript: '' } };
+    throw typedFailure('validation_error', 'No audio was supplied to transcribe.');
   }
   // ~3/4 of the base64 length is the decoded byte count — cheap pre-check.
   if (Math.floor((audioBase64.length * 3) / 4) > MAX_TRANSCRIBE_DECODED_BYTES) {
@@ -355,7 +400,8 @@ export async function transcribeSource(ctx) {
     ],
   });
   const transcript = typeof result?.content === 'string' ? result.content.trim() : '';
-  return { status: 'success', outputs: { empty: transcript.length === 0, transcript } };
+  if (transcript.length === 0) throw typedFailure('no_transcript', 'Transcription produced no text.');
+  return { status: 'success', outputs: { empty: false, transcript } };
 }
 
 /** Resolve the host-mediated SSRF-guarded fetch (RFC 0076 §B), or fail with the
@@ -586,9 +632,10 @@ export async function fetchYoutubeSource(ctx) {
  *
  * Inputs: `notebookId` + `title` + optional `sourceType` (audio|video|youtube, woven
  * into the title for provenance) via `{type:'variable'}`; `text` arrives via an edge
- * port from the upstream transcribe/fetch node's `transcript` output. Empty text ⇒
- * no-op (`ingested:false`). Replay-SERVED because the manifest declares `capabilities:["side-effectful"]` (ADR 0678 D1);
- * `role:"action"` confers nothing.
+ * port from the upstream transcribe/fetch node's `transcript` output. ADR 1103 D4 —
+ * a missing notebook id, empty text and every refusal FAIL, typed (they used to be
+ * `success, ingested:false`). Replay-SERVED because the manifest declares
+ * `capabilities:["side-effectful"]` (ADR 0678 D1); `role:"action"` confers nothing.
  *
  * SECURITY: this node is wired ONLY into the host-built-in ingest workflows the
  * upload ROUTE enqueues (RBAC workspace:write); it is deliberately NOT in the
@@ -604,14 +651,14 @@ export async function ingestSource(ctx) {
   const baseTitle = strInput(ctx, 'title').trim() || 'Transcribed source';
   const sourceType = strInput(ctx, 'sourceType').trim();
   const text = strInput(ctx, 'text').trim();
-  if (notebookId.length === 0 || text.length === 0) {
-    return { status: 'success', outputs: { ingested: false } };
-  }
+  if (notebookId.length === 0) throw typedFailure('notebook_required', 'No notebook was named for the new source.');
+  if (text.length === 0) throw typedFailure('transcript_empty', 'There is no transcript to add as a source.');
   const title = sourceType ? `${baseTitle} (${sourceType})` : baseTitle;
-  const res = await notebooks.ingestSource({ notebookId, title, text });
+  const res = throwIfRefused(await notebooks.ingestSource({ notebookId, title, text }));
+  if (res?.ingested !== true) throw typedFailure('source_not_ingested', 'The source was not added.');
   return {
     status: 'success',
-    outputs: { ingested: res?.ingested === true, sourceId: res?.sourceId ?? '', title },
+    outputs: { ingested: true, sourceId: res?.sourceId ?? '', title },
   };
 }
 
@@ -664,8 +711,11 @@ export async function listNotesNode(ctx) {
  * Each reads its args from `{type:'variable'}` inputs (the MCP arguments) AND a
  * `decision` from an edge port (the upstream `core.hitl.approval-request` output);
  * it performs the write ONLY when `decision === 'accept'`, else it is a clean no-op
- * (`declined:true`). This makes the human approval load-bearing: an untrusted MCP
- * client cannot mutate the workspace until a workspace member approves. The writes
+ * (`declined:true`) — a human answered, so that IS the outcome. This makes the human
+ * approval load-bearing: an untrusted MCP client cannot mutate the workspace until a
+ * workspace member approves. ADR 1103 D4 — after an accept, empty content fails
+ * `validation_error` and a refusal fails with the surface's code (both used to be
+ * `success, written:false`). The writes
  * land through the same narrow surface methods the host already exposes (untrusted
  * content fenced downstream). Replay-SERVED because the manifest declares `capabilities:["side-effectful"]` (ADR 0678 D1);
  * `role:"action"` confers nothing.
@@ -682,10 +732,11 @@ export async function mcpAddSource(ctx) {
   const title = strInput(ctx, 'title').trim() || 'Source';
   const text = strInput(ctx, 'text').trim();
   if (notebookId.length === 0 || text.length === 0) {
-    return { status: 'success', outputs: { written: false } };
+    throw typedFailure('validation_error', 'A notebook id and source text are required.');
   }
-  const res = await notebooks.ingestSource({ notebookId, title, text });
-  return { status: 'success', outputs: { written: res?.ingested === true, sourceId: res?.sourceId ?? '' } };
+  const res = throwIfRefused(await notebooks.ingestSource({ notebookId, title, text }));
+  if (res?.ingested !== true) throw typedFailure('source_not_ingested', 'The source was not added.');
+  return { status: 'success', outputs: { written: true, sourceId: res?.sourceId ?? '' } };
 }
 
 export async function mcpCreateNote(ctx) {
@@ -699,10 +750,11 @@ export async function mcpCreateNote(ctx) {
   const notebookId = strInput(ctx, 'notebookId');
   const content = strInput(ctx, 'content').trim();
   if (notebookId.length === 0 || content.length === 0) {
-    return { status: 'success', outputs: { created: false } };
+    throw typedFailure('validation_error', 'A notebook id and note content are required.');
   }
-  const res = await notebooks.addNote({ notebookId, content });
-  return { status: 'success', outputs: { created: res?.created === true } };
+  const res = throwIfRefused(await notebooks.addNote({ notebookId, content }));
+  if (res?.created !== true) throw typedFailure('note_not_created', 'The note was not added.');
+  return { status: 'success', outputs: { created: true } };
 }
 
 export const nodes = {

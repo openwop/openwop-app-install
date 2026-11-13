@@ -90,4 +90,12 @@ export const messages = {
   'error_account-erased': 'Ce compte n’existe plus.',
   'error_session-revoked': 'Vous avez été déconnecté sur tous vos appareils. Reconnectez-vous pour continuer.',
   cannotBeUndone: 'Cette action est irréversible.',
+  // ADR 1110 P2 — the shared Combobox (ui/Combobox.tsx).
+  comboboxLoading: 'Recherche…',
+  comboboxFailed: "Impossible de charger la liste. Appuyez sur Bas pour réessayer.",
+  comboboxNoResults: 'Aucun résultat',
+  comboboxResults_one: '{{count}} résultat',
+  comboboxResults_other: '{{count}} résultats',
+  comboboxResultsMore_one: "Plus de {{count}} résultat ; précisez votre saisie",
+  comboboxResultsMore_other: "Plus de {{count}} résultats ; précisez votre saisie",
 } as const;

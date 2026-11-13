@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.mcp-tool-projections",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "kind": "workflow-chain",
   "description": "MCP tool-projection workflows (core.openwop.mcp.expose-tool → backing node), migrated from the deprecated builtinWorkflows seam (ADR 0472 P4). chainIds keep the original *.mcp.* ids; registered chain-backed with the EXACT original metadata (the ADR 0087 mcp gates) restored, and the MCP mount enumerates them.",
   "keywords": [
@@ -669,7 +669,7 @@
     {
       "chainId": "notebooks.mcp.add-source",
       "internal": true,
-      "version": "1.0.2",
+      "version": "1.0.3",
       "label": "notebook-add-source",
       "description": "MCP tool projection notebook-add-source.",
       "parameters": {
@@ -735,7 +735,7 @@
           },
           {
             "id": "write",
-            "typeId": "feature.notebooks.nodes.mcp-add-source@1.1.0",
+            "typeId": "feature.notebooks.nodes.mcp-add-source@1.2.0",
             "inputs": {
               "notebookId": "{{params.notebookId}}",
               "title": "{{params.title}}",
@@ -760,7 +760,7 @@
     {
       "chainId": "notebooks.mcp.create-note",
       "internal": true,
-      "version": "1.0.2",
+      "version": "1.0.3",
       "label": "notebook-create-note",
       "description": "MCP tool projection notebook-create-note.",
       "parameters": {
@@ -819,7 +819,7 @@
           },
           {
             "id": "write",
-            "typeId": "feature.notebooks.nodes.mcp-create-note@1.1.0",
+            "typeId": "feature.notebooks.nodes.mcp-create-note@1.2.0",
             "inputs": {
               "notebookId": "{{params.notebookId}}",
               "content": "{{params.content}}"

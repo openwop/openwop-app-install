@@ -89,7 +89,9 @@ export function buildCampaignBriefSurface(scope: BundleScope): FeatureSurface {
         ...(optStr(args.adRef) ? { adRef: optStr(args.adRef) } : {}),
       });
       const { resolveOne } = await import('../../host/featureToggles/service.js');
-      const intel = await resolveOne('campaign-intel', { tenantId });
+      // ADR 1108 — tenant-only as before, plus the operator's plan exemption.
+      const { tenantToggleSubject } = await import('../../host/operatorPlanExemption.js');
+      const intel = await resolveOne('campaign-intel', tenantToggleSubject(scope));
       if (!intel?.enabled) return { url, linted: false, violations: [] };
       // Fail closed: a policy that cannot be read is an error, never "no violations".
       const { lintUrls } = await import('../campaign-intel/utmGovernance.js');

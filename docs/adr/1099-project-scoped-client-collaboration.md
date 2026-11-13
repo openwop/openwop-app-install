@@ -1,7 +1,7 @@
 # ADR 1099 — Project-scoped client collaboration
 
-Status: Proposed (2026-11-11). `/architect` recommends option A′ (see Review);
-awaiting the user's decision. Nothing is built.
+Status: Accepted (2026-11-11, the user's decision: option A′). Phases P0–P5 below;
+nothing is built yet.
 
 Host-extension work under `/host/openwop-app/*`. It adds no run-event field,
 capability, event type or endpoint contract on the OpenWOP wire, so it needs no
@@ -234,7 +234,7 @@ principal.
 
 ## Decision
 
-A′ (recommended by the review; Status stays Proposed until the user accepts it).
+A′, accepted by the user on 2026-11-11.
 
 | # | Decision |
 |---|---|

@@ -990,6 +990,7 @@ export const messages = {
   // ADR 0153 Phase 1 — canevas de diapositives
   slidesInvalid: 'Impossible d’afficher ce diaporama (données de diapositives non valides).',
   slidesDeckLabel: 'Diaporama',
+  slidesTableLabel: 'Tableau : {{columns}}',
   slidesNotesLabel: 'Notes :',
   // ADR 0153 Phase 2 — canevas du générateur d’apps
   appBuilderInvalid: 'Impossible d’afficher cette conception d’app (données non valides).',

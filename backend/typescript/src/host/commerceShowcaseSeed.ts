@@ -21,7 +21,7 @@ import { createLogger } from '../observability/logger.js';
 import { resolveOne } from './featureToggles/service.js';
 import { listOrgs } from './accessControlService.js';
 import {
-  listProducts, createProduct, deleteProduct,
+  collectCatalog, createProduct, deleteProduct,
   listOrders, createOrder, markAsPaid, updateFulfillment, deleteOrder,
   listCoupons, createCoupon, deleteCoupon,
   type FulfillmentStatus,
@@ -44,7 +44,7 @@ export async function countCommerceShowcase(tenantId: string): Promise<number> {
   if (!(await gateOpen(tenantId))) return 0;
   const orgId = await orgIdFor(tenantId);
   const [products, orders, coupons] = await Promise.all([
-    listProducts(tenantId, orgId), listOrders(tenantId, orgId), listCoupons(tenantId, orgId),
+    collectCatalog(tenantId, orgId, (p) => p.createdBy === COMMERCE_SHOWCASE_ACTOR), listOrders(tenantId, orgId), listCoupons(tenantId, orgId),
   ]);
   return (
     products.filter((p) => p.createdBy === COMMERCE_SHOWCASE_ACTOR).length +
@@ -59,7 +59,7 @@ export async function seedCommerceShowcase(tenantId: string): Promise<{ created:
   let created = 0;
 
   // Products — create only the missing ones (idempotent by actor + name).
-  const existing = await listProducts(tenantId, orgId);
+  const existing = await collectCatalog(tenantId, orgId, (p) => p.createdBy === COMMERCE_SHOWCASE_ACTOR);
   const byKey = new Map<string, string>(); // showcase key → productId
   for (const sp of SHOWCASE_PRODUCTS) {
     const found = existing.find((p) => p.createdBy === COMMERCE_SHOWCASE_ACTOR && p.name === sp.name);
@@ -132,7 +132,7 @@ export async function clearCommerceShowcase(tenantId: string): Promise<{ cleared
   for (const o of (await listOrders(tenantId, orgId)).filter((x) => x.createdBy === COMMERCE_SHOWCASE_ACTOR)) {
     if (await deleteOrder(tenantId, orgId, o.orderId)) cleared += 1;
   }
-  for (const p of (await listProducts(tenantId, orgId)).filter((x) => x.createdBy === COMMERCE_SHOWCASE_ACTOR)) {
+  for (const p of (await collectCatalog(tenantId, orgId, (p) => p.createdBy === COMMERCE_SHOWCASE_ACTOR)).filter((x) => x.createdBy === COMMERCE_SHOWCASE_ACTOR)) {
     if (await deleteProduct(tenantId, orgId, p.productId)) cleared += 1;
   }
   for (const c of (await listCoupons(tenantId, orgId)).filter((x) => x.code === SHOWCASE_COUPON.code)) {

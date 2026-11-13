@@ -16,9 +16,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Marketing',
-      label: 'Intelligence', labelKey: 'campaignIntelLabel',
+      labelKey: 'campaignIntelLabel',
       icon: SparklesIcon,
-      hint: 'Budget & forecast recommendations', hintKey: 'campaignIntelHint',
+      hintKey: 'campaignIntelHint',
       order: 50,
       featureId: 'campaign-intel',
       // ADR 0200 Phase 2 — collapse into the Campaign Studio console when `campaigns` is on.

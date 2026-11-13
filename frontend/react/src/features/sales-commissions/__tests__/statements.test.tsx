@@ -17,6 +17,17 @@
  * `danger:false`, the confirm naming the raw id, submit-for-review gated, and the
  * table printing the raw id / a blank cell. Money is `4200.5` so a formatter that
  * drops cents changes the asserted title.
+ *
+ * ADR 1034 D8/D11 + grade-ux H2–H5 (re-probed wave 107, `w107g2-cm-*`): manager
+ * controls (plan form, compute, submit, pay) only with `host:commissions:manage`;
+ * no self-pay offer under any of the subject spellings; an unassigned plan renders;
+ * a pending review is "In review", a superseded one offers Recompute of THAT
+ * statement; left-off deals are named on the row with de-duplicated periods; a
+ * failed access read is announced with a retry and claims no audience (no
+ * read-only notice, no rep lede, no rep empty-state copy).
+ *
+ * DOUBLE GUARD (COM-EMPTY-ON-FAIL-1): the catch leaves the list `null` AND the
+ * panel renders no list while failed; one probe breaks both in a single edit.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent, act, within } from '@testing-library/react';
@@ -271,7 +282,7 @@ describe('ADR 1034 (grade-ux H2–H5) — what the page says about reviews, left
     expect(chip.textContent).toContain('Already counted on an approved statement of this plan (2026-02)'); // real text, not a hover-only title
   });
 
-  it('a rep reads rep copy, and a failed access read is said out loud with a retry', async () => {
+  it('a failed access read claims no audience, and is said out loud with a retry', async () => {
     getEffectiveAccess.mockRejectedValueOnce(new Error('access down'));
     listStatements.mockResolvedValue([]);
     await view();
@@ -280,6 +291,7 @@ describe('ADR 1034 (grade-ux H2–H5) — what the page says about reviews, left
     expect(screen.queryByText(/Only commission managers/)).toBeNull();
     // …nor rep copy: an unanswered read says nothing about who the reader is.
     expect(screen.queryByText(/Your manager computes them each period/)).toBeNull();
+    expect(screen.queryByText(/A manager computes and approves them/)).toBeNull(); // the rep lede
     getEffectiveAccess.mockResolvedValue({ roles: [], scopes: ['workspace:read', 'host:commissions:manage'], basis: 'member' });
     fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
     expect(await screen.findByRole('button', { name: /compute/i })).toBeTruthy();

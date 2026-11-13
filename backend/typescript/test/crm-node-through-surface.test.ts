@@ -1,5 +1,5 @@
 /**
- * ADR 0627 D1 (`CRMWF-5`) — all 36 `feature.crm.nodes` (27 + ADR 0837's get-contact / record-triage + ADR 0954's grade-lead / route-lead / sla-deadline / check-first-touch / sla-rung / lead-evidence / assess-lead) driven THROUGH the real
+ * ADR 0627 D1 (`CRMWF-5`) — every `feature.crm.nodes` node (27 + ADR 0837's get-contact / record-triage + ADR 0954's grade-lead / route-lead / routing-result / sla-deadline / check-first-touch / sla-rung / lead-evidence / assess-lead; the last case pins the set to the manifest) driven THROUGH the real
  * `buildCrmSurface` (via the production `buildHostSurfaceBundle`) on a seeded
  * tenant, with the pack's OWN `nodes` map. The `profiles-node-through-surface`
  * shape: the pack→surface edge is crossed for every node, so a key drift on
@@ -26,6 +26,14 @@
  * the surface's owned-contact guard dropped, record-triage writing without the
  * run's stamp, the gmail list call unpinned, and `idFor` dropping the runId
  * each turn a case red.
+ *
+ * Re-graded w106: the ADR 0954 refusal case used to accept `forbidden` OR
+ * `forbidden_scope`, and with the sub-toggle at its OFF default every op stopped
+ * at the toggle, so the run-stamp guard its title named was never reached. It now
+ * asserts each half exactly (`feature_disabled` off, `wrong_client` on). Removing
+ * the stamp guard in `assertLeadRun`, `gradeLead` or the qualification frame, or
+ * the frame's toggle read, reds it. record-triage now also meets a stamp naming
+ * ANOTHER run (superseded), so comparing the stamp's runId is witnessed too.
  */
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -54,7 +62,19 @@ interface Outputs {
 type NodeOut = { status: string; outputs?: Outputs; error?: { code: string; message: string } };
 type NodeFn = (ctx: Record<string, unknown>) => Promise<NodeOut>;
 
-const manifest = JSON.parse(readFileSync(join(PACK_DIR, 'pack.json'), 'utf8')) as { runtime: { entry: string }; nodes: Array<{ typeId: string }> };
+/** The manifest, read as `unknown` and narrowed (no `any` from JSON.parse). */
+function readManifest(): { runtime: { entry: string }; nodes: Array<{ typeId: string }> } {
+  const raw: unknown = JSON.parse(readFileSync(join(PACK_DIR, 'pack.json'), 'utf8'));
+  if (!raw || typeof raw !== 'object') throw new Error('pack.json is not an object');
+  const { runtime, nodes } = raw as { runtime?: unknown; nodes?: unknown };
+  const entry = runtime && typeof runtime === 'object' ? (runtime as { entry?: unknown }).entry : undefined;
+  if (typeof entry !== 'string' || !Array.isArray(nodes)) throw new Error('pack.json lacks runtime.entry or nodes[]');
+  const raws = nodes.map((n: unknown) => (n && typeof n === 'object' ? (n as { typeId?: unknown }).typeId : undefined));
+  const ids = raws.filter((t): t is string => typeof t === 'string');
+  if (ids.length !== raws.length) throw new Error('a pack.json node has no string typeId');
+  return { runtime: { entry }, nodes: ids.map((typeId) => ({ typeId })) };
+}
+const manifest = readManifest();
 const T = 'org:crm-node-surface';
 const ORG = 'org-1';
 const RUN = 'run-crm-surface';
@@ -84,7 +104,7 @@ beforeAll(async () => {
   if (crm) await saveConfig({ ...crm, status: 'on' }, 'test');
   const mod = (await import(pathToFileURL(join(PACK_DIR, manifest.runtime.entry)).href)) as { nodes: Record<string, NodeFn> };
   nodes = mod.nodes;
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 describe('feature.crm.nodes through the REAL ctx.features.crm surface (CRMWF-5)', () => {
@@ -105,7 +125,7 @@ describe('feature.crm.nodes through the REAL ctx.features.crm surface (CRMWF-5)'
   it('create-contact → update-contact-stage → update-contact-owner (entityId fallback) land on the SAME tenant row', async () => {
     const created = await run('feature.crm.nodes.create-contact', { name: 'Ada Lovelace', email: 'ada@acme.test', stage: 'lead' });
     expect(created.status).toBe('success');
-    contactId = created.outputs!.contact.contactId as string;
+    contactId = created.outputs!.contact.contactId;
     expect(contactId).toBe(`crm:${RUN}:n`); // the per-run dedupe key (ADR 0162)
     expect('tenantId' in created.outputs!.contact).toBe(false); // projected
 
@@ -126,6 +146,11 @@ describe('feature.crm.nodes through the REAL ctx.features.crm surface (CRMWF-5)'
     // No stamp names this run yet ⇒ superseded, nothing written.
     const early = await run('feature.crm.nodes.record-triage', { contactId, triage });
     expect(early.outputs).toEqual({ success: true, recorded: false, outcome: 'superseded' });
+    // A stamp naming ANOTHER run ⇒ still superseded: a stale run never writes over a newer one.
+    await setContactTriage(contactId, T, { variant: 'enriched', runId: 'run-crm-surface-other', at: new Date().toISOString() });
+    const stale = await run('feature.crm.nodes.record-triage', { contactId, triage });
+    expect(stale.outputs).toEqual({ success: true, recorded: false, outcome: 'superseded' });
+    expect((await getContact(contactId))!.lastTriage?.score).toBeUndefined();
     await setContactTriage(contactId, T, { variant: 'enriched', runId: RUN, at: new Date().toISOString() });
     const done = await run('feature.crm.nodes.record-triage', { contactId, triage });
     expect(done.outputs).toEqual({ success: true, recorded: true, outcome: 'recorded' });
@@ -133,21 +158,37 @@ describe('feature.crm.nodes through the REAL ctx.features.crm surface (CRMWF-5)'
     await expect(run('feature.crm.nodes.record-triage', { contactId, triage: { variant: 'basic' } })).rejects.toMatchObject({ code: 'validation_error' });
   });
 
-  it('ADR 0954 P1: grade-lead is a TYPED refusal on a run not started to grade that lead (or with the sub-toggle off)', async () => {
-    // Its success path needs a grading run the lead route started (stamp + pending
-    // run); `adr0954-p1-lead-grade.test.ts` drives that end to end through the chain.
-    await expect(run('feature.crm.nodes.grade-lead', { orgId: 'org-x', contactId })).rejects.toMatchObject({ code: expect.stringMatching(/^(forbidden|forbidden_scope)$/) });
-    // ADR 0954 P2 — route-lead refuses the same way (no lead stamp on this run).
-    await expect(run('feature.crm.nodes.route-lead', { orgId: 'org-x', contactId, routingEpoch: 1 })).rejects.toMatchObject({ code: expect.stringMatching(/^(forbidden|forbidden_scope)$/) });
-    // ADR 0954 P3 — the clock's surface nodes refuse the same way; the pure
-    // deadline node with no recorded clock inputs ends the clock.
-    await expect(run('feature.crm.nodes.check-first-touch', { orgId: 'org-x', contactId, routingEpoch: 1 })).rejects.toMatchObject({ code: expect.stringMatching(/^(forbidden|forbidden_scope)$/) });
-    await expect(run('feature.crm.nodes.sla-rung', { orgId: 'org-x', contactId, routingEpoch: 1, rung: 1 })).rejects.toMatchObject({ code: expect.stringMatching(/^(forbidden|forbidden_scope)$/) });
+  it('ADR 0954: every lead-intelligence node is a TYPED refusal — feature_disabled with the sub-toggle off, wrong_client on a run not started for that lead', async () => {
+    // Their success paths need a run the lead route started (stamp + pending run);
+    // `adr0954-p1-lead-grade.test.ts` drives that end to end through the chain.
+    // The sub-toggle defaults OFF, so with it off every surface op stops at the
+    // toggle; only with it ON does the case reach the run-stamp guard the title
+    // names (`wrong_client`) — which is why the two halves are asserted apart.
+    const leadOps: Array<[string, Record<string, unknown>]> = [
+      ['feature.crm.nodes.grade-lead', { orgId: 'org-x', contactId }],
+      ['feature.crm.nodes.route-lead', { orgId: 'org-x', contactId, routingEpoch: 1 }],
+      ['feature.crm.nodes.check-first-touch', { orgId: 'org-x', contactId, routingEpoch: 1 }],
+      ['feature.crm.nodes.sla-rung', { orgId: 'org-x', contactId, routingEpoch: 1, rung: 1 }],
+      // lead-evidence and assess-lead both stop at the qualification frame, before
+      // any evidence read or model call (this ctx has no `callAI` at all).
+      ['feature.crm.nodes.lead-evidence', { orgId: 'org-x', contactId, modelId: 'v0', modelVersion: 0 }],
+      ['feature.crm.nodes.assess-lead', { orgId: 'org-x', contactId, modelId: 'v0', modelVersion: 0 }],
+    ];
+    for (const [typeId, inputs] of leadOps) {
+      await expect(run(typeId, inputs), `${typeId} with the sub-toggle off`).rejects.toMatchObject({ code: 'forbidden', details: { reason: 'feature_disabled' } });
+    }
+    const sub = getToggleDefault('crm.lead-intelligence');
+    expect(sub, 'the crm.lead-intelligence sub-toggle must be declared').toBeTruthy();
+    await saveConfig({ ...sub!, status: 'on' }, 'test');
+    try {
+      for (const [typeId, inputs] of leadOps) {
+        await expect(run(typeId, inputs), `${typeId} on a run not started for this lead`).rejects.toMatchObject({ code: 'forbidden_scope', details: { reason: 'wrong_client' } });
+      }
+    } finally {
+      await saveConfig({ ...sub!, status: 'off' }, 'test');
+    }
+    // ADR 0954 P3 — the pure deadline node with no recorded clock inputs ends the clock.
     expect((await run('feature.crm.nodes.sla-deadline', { sla: null })).outputs).toEqual({ hasSla: false });
-    // ADR 0954 P4 — lead-evidence refuses the same way; assess-lead with no
-    // criteria is a typed failure before any model call.
-    await expect(run('feature.crm.nodes.lead-evidence', { orgId: 'org-x', contactId, modelId: 'v0', modelVersion: 0 })).rejects.toMatchObject({ code: expect.stringMatching(/^(forbidden|forbidden_scope)$/) });
-    await expect(run('feature.crm.nodes.assess-lead', { orgId: 'org-x', contactId, modelId: 'v0', modelVersion: 0 })).rejects.toMatchObject({ code: expect.stringMatching(/^(forbidden|forbidden_scope)$/) });
   });
 
   it('a foreign-tenant or empty contactId is a TYPED refusal crossing the edge (never a success-with-empty)', async () => {
@@ -158,11 +199,11 @@ describe('feature.crm.nodes through the REAL ctx.features.crm surface (CRMWF-5)'
 
   it('create-company → create-deal (linked) → move-deal-stage derives won', async () => {
     const company = await run('feature.crm.nodes.create-company', { orgId: ORG, name: 'Acme', domain: 'acme.test' });
-    companyId = company.outputs!.company.companyId as string;
+    companyId = company.outputs!.company.companyId;
     expect(companyId).toBe(`cmp:${RUN}:n`);
 
     const deal = await run('feature.crm.nodes.create-deal', { orgId: ORG, title: 'Acme deal', amount: 1200, companyId, contactId });
-    dealId = deal.outputs!.deal.dealId as string;
+    dealId = deal.outputs!.deal.dealId;
     expect(dealId).toBe(`deal:${RUN}:n`);
     expect(deal.outputs!.deal.companyId).toBe(companyId);
 
@@ -174,7 +215,7 @@ describe('feature.crm.nodes through the REAL ctx.features.crm surface (CRMWF-5)'
 
   it('create-task (linked to the deal) → complete-task; log-activity appends to the contact timeline', async () => {
     const task = await run('feature.crm.nodes.create-task', { orgId: ORG, title: 'Send the contract', dealId });
-    taskId = task.outputs!.task.taskId as string;
+    taskId = task.outputs!.task.taskId;
     expect(taskId).toBe(`task:${RUN}:n`);
     const done = await run('feature.crm.nodes.complete-task', { orgId: ORG, taskId });
     expect(done.outputs!.task.status).toBe('done');
@@ -234,7 +275,7 @@ describe('feature.crm.nodes through the REAL ctx.features.crm surface (CRMWF-5)'
 
     const persisted = await run('feature.crm.nodes.persist-segment', { name: 'Qualified', filters });
     expect(persisted.outputs!.success).toBe(true);
-    segmentId = persisted.outputs!.segment.segmentId as string;
+    segmentId = persisted.outputs!.segment.segmentId;
     expect(segmentId).toBe(`seg:${RUN}:n`);
 
     const members = await run('feature.crm.nodes.list-segment-members', { segmentId });

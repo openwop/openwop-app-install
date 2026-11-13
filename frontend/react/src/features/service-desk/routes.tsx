@@ -12,9 +12,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Business',
-      label: 'Support', labelKey: 'serviceDeskLabel',
+      labelKey: 'serviceDeskLabel',
       icon: LifeBuoyIcon,
-      hint: 'Ticket queue + threads', hintKey: 'serviceDeskHint',
+      hintKey: 'serviceDeskHint',
       featureId: 'service-desk',
     },
   },

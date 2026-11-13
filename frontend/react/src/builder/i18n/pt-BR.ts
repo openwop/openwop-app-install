@@ -7,6 +7,7 @@ export const messages = {
   errCanonicalSourceOutput: "A vinculação de saída de origem salva é inválida. Recarregue o fluxo antes de salvar.",
   defaultSourceOutput: "Saída padrão",
   missingSourceOutput: "Saída não encontrada: {{name}}",
+  undeclaredSourceOutput: "{{name}} (saída não declarada pelo nó)",
   defaultSourceOutputHelp: "Usa a propriedade output quando presente; caso contrário, passa o mapa de saídas da origem.",
   sourceOutputDescription: "Saída da origem: {{name}} ({{type}})",
 

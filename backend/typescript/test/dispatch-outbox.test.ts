@@ -468,6 +468,7 @@ describe('ADR 0551 P1 — forward migration onto a real pre-outbox database', ()
     // ADR 0812 P3d: bumped to 50 (drop the major-1 webhook subscriptions).
     // ADR 0987 D2: bumped to 51 (`runs.admission_key` + its index).
     // ADR 1043 RELAY-LOG-RETENTION-1: bumped to 52 (`idx_messaging_delivery_log_at`).
-    expect(LATEST_SCHEMA_VERSION).toBe(52);
+    // ADR 1114: bumped to 53 (`idx_notifications_tenant_run_request` partial index).
+    expect(LATEST_SCHEMA_VERSION).toBe(53);
   });
 });

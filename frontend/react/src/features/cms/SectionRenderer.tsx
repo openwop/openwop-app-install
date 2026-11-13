@@ -352,7 +352,7 @@ function HeroRunLedger(): JSX.Element {
         <span className="fp-run__id"><span className="fp-run__mark" />{t('site:heroRunName')}</span>
         <span>{t('site:heroRunLog')}</span>
       </div>
-      <ol className="fp-run__list">
+      <ol role="list" className="fp-run__list">
         {RUN_LEDGER.map((row) => (
           <li key={row.event} className={row.waits ? 'fp-run__row fp-run__row--waits' : 'fp-run__row'}>
             <span className="fp-run__at">{row.at}</span>
@@ -645,7 +645,7 @@ function FilmsSection({ d, eyebrow, heading, sx = '' }: { d: Record<string, unkn
             <p className="sr-only" role="status">{t('filmFilterShowing', { shown, total: films.length })}</p>
           </>
         ) : null}
-        <ul className="fp-film-gallery__grid">
+        <ul role="list" className="fp-film-gallery__grid">
           {films.map((f, i) => (
             <li key={i} className={`fp-film-gallery__item fp-film-gallery__item--${FILM_SHAPE_CLASS[str(f.shape)] ?? '16x9'}`} hidden={pick !== null && valueOf(f) !== pick}>
               <SectionFilm d={f} />
@@ -742,7 +742,7 @@ function DiveArt({ kind }: { kind: string }): JSX.Element | null {
     return (
       <div className="fp-dive__art fp-dive__art--canvas" aria-hidden="true">
         <p className="fp-dive__meta"><span>{t('site:diveCanvasName')}</span><span>{t('site:diveCanvasDraft')}</span></p>
-        <ol className="fp-dive__nodes">
+        <ol role="list" className="fp-dive__nodes">
           {steps.map((k, i) => (
             <li key={k} className={i === 2 ? 'fp-dive__node fp-dive__node--waits' : 'fp-dive__node'}>
               <span className="fp-dive__node-num">{pad2(i + 1)}</span>{t(k)}
@@ -756,7 +756,7 @@ function DiveArt({ kind }: { kind: string }): JSX.Element | null {
     return (
       <div className="fp-dive__art fp-dive__art--ledger" aria-hidden="true">
         <p className="fp-dive__meta"><span>{t('site:heroRunName')}</span><span>{t('site:diveLedgerLive')}</span></p>
-        <ol className="fp-run__list">
+        <ol role="list" className="fp-run__list">
           {RUN_LEDGER.slice(0, 4).map((row) => (
             <li key={row.event} className="fp-run__row">
               <span className="fp-run__at">{row.at}</span>
@@ -785,7 +785,7 @@ function DiveArt({ kind }: { kind: string }): JSX.Element | null {
     return (
       <div className="fp-dive__art fp-dive__art--fork" aria-hidden="true">
         <p className="fp-dive__meta"><span>{t('site:diveForkName')}</span><span>{t('site:diveForkFrom')}</span></p>
-        <ol className="fp-dive__fork">
+        <ol role="list" className="fp-dive__fork">
           <li className="fp-dive__fork-row fp-dive__fork-row--reused"><span>1–3</span><span>{t('site:diveForkReused')}</span></li>
           <li className="fp-dive__fork-row"><span>4</span><span>agent.decided · {t('site:diveForkNew')}</span></li>
           <li className="fp-dive__fork-row fp-dive__fork-row--held"><span>5</span><span>send-email · {t('site:diveForkHeld')}</span></li>
@@ -878,7 +878,7 @@ function diagramSpec(v: unknown): DiagramSpec | null {
 function WorkflowDiagram({ spec }: { spec: DiagramSpec }): JSX.Element {
   return (
     <figure className="fp-diagram">
-      <ol className="fp-diagram__nodes">
+      <ol role="list" className="fp-diagram__nodes">
         {spec.nodes.map((n, i) => (
           <li key={i} className={n.waiting ? 'fp-diagram__node fp-diagram__node--waiting' : 'fp-diagram__node'}>
             <span className="fp-diagram__label">{n.label}</span>
@@ -901,7 +901,7 @@ function TryToggles({ spec }: { spec: { title: string; items: { label: string; o
   return (
     <div className="fp-try" role="group" aria-labelledby={spec.title ? titleId : undefined}>
       {spec.title ? <p id={titleId} className="fp-try__title">{spec.title}</p> : null}
-      <ul className="fp-try__list">
+      <ul role="list" className="fp-try__list">
         {spec.items.map((it, i) => (
           <li key={i}>
             <label className="fp-try__row">
@@ -983,7 +983,7 @@ function HubFigure({ hub }: { hub: unknown }): JSX.Element | null {
         {str(c.eyebrow) ? <span className="fp-hub__eyebrow">{str(c.eyebrow)}</span> : null}
         <strong className="fp-hub__label">{str(c.label)}</strong>
       </figcaption>
-      <ul className="fp-hub__places">
+      <ul role="list" className="fp-hub__places">
         {spokes.map((sp, i) => {
           const p = at(i);
           const Icon = str(sp.icon) ? ICON_BY_SLUG[str(sp.icon)] : undefined;
@@ -1020,7 +1020,7 @@ function FeatureCards({ cols, legend, stg }: { cols: FeatureItem[]; legend: Reco
   return (
     <>
       {str(legend.now) || str(legend.soon) ? (
-        <ul className="fp-features__legend">
+        <ul role="list" className="fp-features__legend">
           {str(legend.now) ? <li className="fp-tag fp-tag--now">{str(legend.now)}</li> : null}
           {str(legend.soon) ? <li className="fp-tag fp-tag--soon">{str(legend.soon)}</li> : null}
         </ul>
@@ -1041,7 +1041,7 @@ function FeatureCards({ cols, legend, stg }: { cols: FeatureItem[]; legend: Reco
                 </p>
               ) : null}
               {tags.length > 0 ? (
-                <ul className="fp-feature__tags">
+                <ul role="list" className="fp-feature__tags">
                   {tags.map((tg, j) => {
                     const st = str(tg.state);
                     const w = word(st);
@@ -1111,12 +1111,21 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
       // ADR 0920 D3 — the example plan sits IN the grid beside the copy (the
       // run-ledger model), and under it on a phone.
       // ADR 1080 D7 — the queue sits in the same grid as the plan card.
+      // #5779 B7 — with a photo, the queue card sits over the photo's lower edge
+      // (under it on a phone). Without one the markup is unchanged.
       if (visual === 'queue') {
+        const token = str(d.imageToken);
+        const queue = <HeroQueue queue={d.queue} />;
         return (
-          <section className={`cms-public-section fp-hero fp-hero--plan fp-hero--queue${mx}`}>
+          <section className={`cms-public-section fp-hero fp-hero--plan fp-hero--queue${token ? ' fp-hero--queue-photo' : ''}${mx}`}>
             <div className="fp-shell fp-hero__grid">
               <div className="fp-hero__copy">{copy}</div>
-              <HeroQueue queue={d.queue} />
+              {token ? (
+                <div className="fp-hero__queue-stage">
+                  <img className="fp-hero__photo" src={assetUrl(token)} alt={str(d.alt)} />
+                  {queue}
+                </div>
+              ) : queue}
             </div>
           </section>
         );
@@ -1431,7 +1440,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
                         name: a status reads as its own line, not part of a price. */}
                     {str(c.badge) ? <p className="fp-col__status"><span className="fp-col__badge">{str(c.badge)}</span></p> : null}
                     {str(c.text) ? <p className="fp-col__text">{inlineMarkdown(str(c.text), `list-${i}`)}</p> : null}
-                    <ul className="fp-col__items">
+                    <ul role="list" className="fp-col__items">
                       {(Array.isArray(c.items) ? c.items : []).filter((it) => str(it?.label)).map((it, j) => (
                         <li key={j} className="fp-col__item">
                           <span>{str(it.label)}</span>
@@ -1550,7 +1559,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
                       </h3>
                       {/* ADR 1068 D3 — a lane's own line (the roadmap's proof line). */}
                       {str(c.text) ? <p className="fp-lane__text">{inlineMarkdown(str(c.text), `lane-${i}`)}</p> : null}
-                      <ul className="fp-lane__items">
+                      <ul role="list" className="fp-lane__items">
                         {items.map((it, j) => (
                           <li key={j} className="fp-lane__item">
                             {str(it.label)}
@@ -2190,8 +2199,8 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
       );
     }
 
-    // ADR 1080 D1–D4 — the design section types.
-    case 'statusTable': case 'dateCalc': case 'conversation': case 'featureIndex': case 'decisionTree': case 'scheduleSim':
+    // ADR 1080 D1–D4 — the design section types; ADR 1105 the two worksheets.
+    case 'statusTable': case 'dateCalc': case 'conversation': case 'featureIndex': case 'decisionTree': case 'scheduleSim': case 'marginCalc': case 'allowanceGap': case 'partyViews': case 'stageChart':
       return <DesignSection section={section} sx={`${sx}${mx}`} />;
 
     case 'faq': {

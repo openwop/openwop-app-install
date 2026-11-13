@@ -76,7 +76,11 @@ export const messages = {
   noRulesTitle: "No merch rules",
   noRulesBody: "Rules hide products from your storefront. None are active, so shoppers see everything.",
   productsTruncated: "Showing the first {{shown}} of {{total}} matches.",
+  // ADR 1110 P2 — the search read a bounded set
+  productsTruncatedFloor: "Showing the first {{shown}} of more than {{total}} matches.",
   facetsTruncated: "Top {{shown}} of {{total}} values per facet.",
+  // ADR 1110 round fix
+  facetsFloor: "Counts cover the first 1,000 matches.",
   fieldCategoryHelp: "Products in this category join the collection automatically as they are added.",
   fieldHideCategoryHelp: "Products in this category stop appearing on your storefront while this rule is active.",
   colEffect: "Effect",

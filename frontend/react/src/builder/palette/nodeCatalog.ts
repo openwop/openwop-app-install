@@ -94,6 +94,12 @@ export interface NodeCatalogEntry {
   accent: string;
   inputs: PortDef[];
   outputs: PortDef[];
+  /** CC-BLD-1 — the output names the node's schema DECLARES (every
+   *  `outputSchema.properties` key, required or not) and whether the schema is
+   *  closed (`additionalProperties: false`). A pack with no output schema is
+   *  `{ names: [], closed: false }`. Absent on curated static entries, whose
+   *  `outputs` list is authoritative. */
+  declaredOutputs?: { readonly names: readonly string[]; readonly closed: boolean };
   configFields: ConfigField[];
   /** Pack name (e.g., `core.openwop.flow`) when the node comes from a pack
    *  manifest. Absent for host-local nodes. Used by the palette to render
@@ -231,6 +237,64 @@ export const NODE_CATALOG: readonly NodeCatalogEntry[] = [
       { key: 'prompt', label: 'Task', kind: 'text', defaultValue: '', help: 'What Claude Code should do, in plain language. An upstream value named prompt overrides it.' },
       { key: 'maxTurns', label: 'Max turns', kind: 'number', defaultValue: 30, help: 'Upper bound on Claude Code\'s steps for this task (max 100).' },
       { key: 'deadlineMinutes', label: 'Deadline (minutes)', kind: 'number', defaultValue: 30, help: 'Stops waiting after this long (max 120). A task cut off mid-way ends as maybe_executed and is never retried automatically.' },
+    ],
+  },
+  {
+    // CC-SEO-1 — `core.email.draft` / `core.email.send` are IN-TREE nodes
+    // (bootstrap/nodes.ts, no pack manifest), so the server catalog carries no
+    // configSchema and the inspector rendered NO fields, while the executor
+    // requires `to` and `subject`. A chain step shipped with an empty config could
+    // not be repaired in the builder. These rows give them a form (ADR 0785's
+    // precedent for in-tree nodes). Keys mirror parseEmailConfig.
+    kind: 'core.email.draft',
+    typeId: 'core.email.draft',
+    label: 'Email draft',
+    description: 'Saves an email as a draft in your connected Outlook or Gmail mailbox. Nothing is sent.',
+    category: 'integration',
+    badge: 'E',
+    accent: 'var(--cat-integration)',
+    inputs: [{ name: 'in', type: 'any' }],
+    outputs: [{ name: 'out', type: 'object' }],
+    configFields: [
+      { key: 'to', label: 'To', kind: 'string-list', defaultValue: [], help: 'One recipient address per line. Required.' },
+      { key: 'subject', label: 'Subject', kind: 'text', defaultValue: '', help: 'Required. An upstream value named subject is used when this is empty.' },
+      { key: 'body', label: 'Body', kind: 'textarea', defaultValue: '', help: 'An upstream value named body is used when this is empty.' },
+      {
+        key: 'bodyFormat', label: 'Body format', kind: 'select', defaultValue: 'Text',
+        options: [{ value: 'Text', label: 'Plain text' }, { value: 'HTML', label: 'HTML' }],
+        help: 'How the body is sent.',
+      },
+      {
+        key: 'connectorId', label: 'Mailbox', kind: 'select', defaultValue: 'microsoft-graph',
+        options: [{ value: 'microsoft-graph', label: 'Microsoft Outlook' }, { value: 'gmail', label: 'Gmail' }],
+        help: 'Which connected mailbox to use. You are asked to connect it on the first run if it is not connected.',
+      },
+    ],
+  },
+  {
+    kind: 'core.email.send',
+    typeId: 'core.email.send',
+    label: 'Send email',
+    description: 'Sends an email from your connected Outlook or Gmail mailbox after a person approves it.',
+    category: 'integration',
+    badge: 'E',
+    accent: 'var(--cat-integration)',
+    inputs: [{ name: 'in', type: 'any' }],
+    outputs: [{ name: 'out', type: 'object' }],
+    configFields: [
+      { key: 'to', label: 'To', kind: 'string-list', defaultValue: [], help: 'One recipient address per line. Required.' },
+      { key: 'subject', label: 'Subject', kind: 'text', defaultValue: '', help: 'Required. An upstream value named subject is used when this is empty.' },
+      { key: 'body', label: 'Body', kind: 'textarea', defaultValue: '', help: 'An upstream value named body is used when this is empty.' },
+      {
+        key: 'bodyFormat', label: 'Body format', kind: 'select', defaultValue: 'Text',
+        options: [{ value: 'Text', label: 'Plain text' }, { value: 'HTML', label: 'HTML' }],
+        help: 'How the body is sent.',
+      },
+      {
+        key: 'connectorId', label: 'Mailbox', kind: 'select', defaultValue: 'microsoft-graph',
+        options: [{ value: 'microsoft-graph', label: 'Microsoft Outlook' }, { value: 'gmail', label: 'Gmail' }],
+        help: 'Which connected mailbox to use. You are asked to connect it on the first run if it is not connected.',
+      },
     ],
   },
   {

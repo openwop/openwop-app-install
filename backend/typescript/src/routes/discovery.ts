@@ -34,6 +34,7 @@ import {
 import { ifNoneMatchSatisfied } from '../host/restTransport.js';
 import { minClientVersion, preferredVersion, protocolVersions, VENDOR_ROOT, PROTOCOL_VERSION_V1, advertisedPath } from '../middleware/protocolVersion.js';
 import { EVENT_LOG_SCHEMA_VERSION } from '../storage/eventEra.js';
+import { resolvedViaEnabled } from '../host/interruptResolvedVia.js';
 import { INTERRUPT_TOKEN_ALGS } from '../host/interruptToken.js';
 import { defaultRetentionDays } from '../storage/runRetentionStamp.js';
 import { MAX_MULTI_PARTY_PARTICIPANTS } from '../host/multiPartyConversation.js';
@@ -95,6 +96,8 @@ import {
   readWorkloadIdentityConfigFromEnv,
 } from '../host/workloadIdentity.js';
 import { declaration } from '../host/specDeclaration.js';
+import { isBoundedLoopbackEnabled, LOOPBACK_MAX_HISTORY_ENTRY_BYTES, LOOPBACK_MAX_ITERATIONS_CEILING } from '../executor/loopback.js';
+import { LOOPBACK_CAPABILITY, LOOPBACK_MAX_HISTORY_ENTRY_BYTES_FIELD, LOOPBACK_MAX_ITERATIONS_FIELD } from '../executor/loopbackWire.js';
 
 const discoveryLog = createLogger('routes.discovery');
 
@@ -421,6 +424,28 @@ function stripSupportedAtDepth(value: unknown): unknown {
  * would be a claim about how the family can be proven, which is the corpus's
  * call, not ours.
  */
+/**
+ * ADR 1058 / RFC 0258 §E — the `loopback` core family. Present exactly when
+ * the host admits and runs declared loopback edges (`OPENWOP_BOUNDED_LOOPBACK`),
+ * read from the same owners admission uses (`LOOPBACK_MAX_ITERATIONS_CEILING`,
+ * `LOOPBACK_MAX_HISTORY_ENTRY_BYTES`), so the advert and the refusal cannot
+ * disagree. `witnessable-gated` per `spec/v2/declaration.json`; `experimental`,
+ * so `until` is required.
+ */
+function v2LoopbackFamily(since: string, until: string): Record<string, unknown> | null {
+  if (!isBoundedLoopbackEnabled()) return null;
+  return {
+    [LOOPBACK_CAPABILITY]: {
+      status: 'experimental',
+      since,
+      until,
+      witness: 'witnessable-gated',
+      [LOOPBACK_MAX_ITERATIONS_FIELD]: LOOPBACK_MAX_ITERATIONS_CEILING,
+      [LOOPBACK_MAX_HISTORY_ENTRY_BYTES_FIELD]: LOOPBACK_MAX_HISTORY_ENTRY_BYTES,
+    },
+  };
+}
+
 function v2MemoryFamily(): Record<string, unknown> | null {
   const cap = memoryCapability();
   if (!cap.supported) return null;
@@ -1415,6 +1440,8 @@ export function buildV2Advertisement(config: AppConfig, req?: Request): Record<s
       return { uiPlugins: { status: 'experimental', since: SINCE, until: EXPERIMENTAL_UNTIL, witness: 'witnessable-gated', ...facets, ...(uiPluginOperationsServed() ? { served: true } : {}) } };
     })() : {}),
     ...(v2MemoryFamily() ?? {}),
+    // ADR 1058 / RFC 0258 §E — only while the host runs declared loopbacks.
+    ...(v2LoopbackFamily(SINCE, EXPERIMENTAL_UNTIL) ?? {}),
     ...v2AgentsFamily(),
     ...v2MultiAgentFamily(SINCE, EXPERIMENTAL_UNTIL),
     ...v2HostServiceFamilies(SINCE, EXPERIMENTAL_UNTIL),
@@ -1530,6 +1557,9 @@ export function buildV2Advertisement(config: AppConfig, req?: Request): Record<s
       until: EXPERIMENTAL_UNTIL,
       witness: 'witnessable-unaided',
       tokenAlgs: INTERRUPT_TOKEN_ALGS as readonly 'hs256'[],
+      // ADR 1059 (RFC 0259 §B) — claimed only where the recording is on. Off by
+      // default until the RFC's shape is on the corpus `main` and vendored.
+      ...(resolvedViaEnabled() ? { resolvedVia: true } : {}),
     },
     // `eventLog` — the v2 snapshot carries `eventLogSchemaVersion: eraOf(run)`
     // and the storage seat translates era-2 logs for a major-2 reader

@@ -7,7 +7,7 @@
  * A client-side cart only — an anonymous visitor has no server cart.
  */
 import { Button } from '../../ui/Button.js';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { StateCard } from '../../ui/StateCard.js';
 import { Skeleton } from '../../ui/Skeleton.js';
@@ -38,6 +38,12 @@ export function StorefrontPage({ orgId }: { orgId: string }): JSX.Element {
   const { t } = useTranslation('commerce');
   const fmt = useFormat();
   const [products, setProducts] = useState<PublicProduct[] | null>(null);
+  // ADR 1110 P2 — the store is read a page at a time; `nextCursor` is the next page.
+  const [nextCursor, setNextCursor] = useState<string | undefined>(undefined);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [loadMoreFailed, setLoadMoreFailed] = useState(false);
+  // The page a Load more belongs to: a category switch retires an older page's answer.
+  const listSeq = useRef(0);
   const [storeName, setStoreName] = useState('');
   const [loadError, setLoadError] = useState(false);
   const [notFound, setNotFound] = useState(false);
@@ -60,19 +66,37 @@ export function StorefrontPage({ orgId }: { orgId: string }): JSX.Element {
   useEffect(() => {
     // grade-code H2: an active flag so the LAST click wins, not the last response.
     let active = true;
-    setProducts(null); setLoadError(false);
+    listSeq.current += 1;
+    setProducts(null); setLoadError(false); setLoadMoreFailed(false);
     const q = category ? `?category=${encodeURIComponent(category)}` : '';
     void fetch(`${root}/public-store/${encodeURIComponent(orgId)}/products${q}`, fetchOpts({}))
       .then(async (r) => {
         if (r.status === 404) { if (active) { setNotFound(true); setProducts([]); } return null; }
         if (!r.ok) throw new Error(String(r.status));
-        return (await r.json()) as { products: PublicProduct[]; store?: { name?: string } };
+        return (await r.json()) as { products: PublicProduct[]; store?: { name?: string }; nextCursor?: string };
       })
-      .then((r) => { if (active && r) { setProducts(r.products); if (r.store?.name) setStoreName(r.store.name); } })
+      .then((r) => { if (active && r) { setProducts(r.products); setNextCursor(r.nextCursor); if (r.store?.name) setStoreName(r.store.name); } })
       // grade-code H3: a transient failure is an ERROR, not "store not found" / empty.
       .catch(() => { if (active) { setLoadError(true); setProducts([]); } });
     return () => { active = false; };
   }, [orgId, category, nonce]);
+  const loadMore = (): void => {
+    if (!nextCursor) return;
+    const qs = new URLSearchParams({ cursor: nextCursor, ...(category ? { category } : {}) });
+    const mine = listSeq.current;
+    setLoadingMore(true);
+    setLoadMoreFailed(false);
+    void fetch(`${root}/public-store/${encodeURIComponent(orgId)}/products?${qs.toString()}`, fetchOpts({}))
+      .then(async (r) => { if (!r.ok) throw new Error(String(r.status)); return (await r.json()) as { products: PublicProduct[]; nextCursor?: string }; })
+      .then((r) => {
+        if (mine !== listSeq.current) return; // the shopper switched category meanwhile
+        setProducts((cur) => [...(cur ?? []), ...r.products.filter((p) => !(cur ?? []).some((c) => c.productId === p.productId))]);
+        setNextCursor(r.nextCursor);
+      })
+      // A failed next page keeps the grid the shopper is browsing (an inline line, not the error card).
+      .catch(() => { if (mine === listSeq.current) setLoadMoreFailed(true); })
+      .finally(() => setLoadingMore(false));
+  };
 
   // Guard per-product array fields: a product row omitting `categories` would
   // throw in this render (outside the fetch catch) → white screen (pricing-'*' class).
@@ -145,6 +169,12 @@ export function StorefrontPage({ orgId }: { orgId: string }): JSX.Element {
           ))}
         </div>
       )}
+      {products !== null && !loadError && nextCursor ? (
+        <div className="action-bar u-justify-center">
+          {loadMoreFailed ? <span className="u-text-sm" role="alert">{t('loadMoreFailed')}</span> : null}
+          <Button variant="secondary" disabled={loadingMore} onClick={loadMore}>{loadingMore ? t('loadingMore') : loadMoreFailed ? t('retry') : t('loadMore')}</Button>
+        </div>
+      ) : null}
 
       {cartCount > 0 ? (
         checkingOut
@@ -215,12 +245,15 @@ function CheckoutForm({ orgId, cart, total, currency, onBack, onPlaced, onDropLi
         if (body.details?.productId !== undefined) {
           // A failed re-read identifies nothing, so it falls through to the generic
           // message rather than guessing which line went away.
-          let listed: { productId: string }[] | undefined;
+          // ADR 1110 P2 — each cart line is asked about by id (the store is paged, so its
+          // first page cannot say what it no longer sells). A 404 is the line that went away.
+          let gone: string | undefined;
           try {
-            const r = await fetch(`${root}/public-store/${encodeURIComponent(orgId)}/products`, fetchOpts({}));
-            if (r.ok) listed = ((await r.json()) as { products?: { productId: string }[] }).products;
-          } catch { listed = undefined; }
-          const gone = listed ? Object.keys(cart).find((id) => !listed!.some((p) => p.productId === id)) : undefined;
+            for (const id of Object.keys(cart)) {
+              const r = await fetch(`${root}/public-store/${encodeURIComponent(orgId)}/products/${encodeURIComponent(id)}`, fetchOpts({}));
+              if (r.status === 404) { gone = id; break; }
+            }
+          } catch { gone = undefined; }
           if (gone) { setBadLine(gone); setError(t('lineUnavailable', { name: cart[gone]!.name })); return; }
         }
         if (body.details?.field === 'couponCode') { setError(t('couponInvalid')); return; }

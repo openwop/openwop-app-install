@@ -129,10 +129,13 @@ describe('the counting CSS', () => {
   it('hides the digit only inside @supports, both reduced-motion guards and outside forced colours', () => {
     const at = css.indexOf(sel);
     expect(at).toBeGreaterThan(0);
-    const block = css.slice(css.lastIndexOf('@supports', at), at);
+    const block = css.slice(css.lastIndexOf('@supports (animation-timeline: view())', at), at);
     expect(block.startsWith('@supports (animation-timeline: view())')).toBe(true);
-    // @supports, the reduced-motion media and forced-colors: none are all still open here.
-    expect(depth(block)).toBe(3);
+    // @supports, the reduced-motion media, forced-colors: none and (ACT-1) the
+    // alt-text `content` support query are all still open here: the digit is
+    // hidden only where the overlay can draw.
+    expect(depth(block)).toBe(4);
+    expect(block.slice(block.lastIndexOf('@supports'))).toMatch(/^@supports \(content: "" \/ ""\) \{/);
     expect(block).toContain('@media screen and (prefers-reduced-motion: no-preference)');
     expect(block.slice(block.lastIndexOf('@media'))).toMatch(/^@media \(forced-colors: none\) \{/);
     expect(block).not.toMatch(/\n\}\n/);
@@ -147,9 +150,10 @@ describe('the counting CSS', () => {
     ]);
     for (const { l, i } of hides) {
       const pos = lines.slice(0, i).join('\n').length;
-      const guard = css.slice(css.lastIndexOf('@supports', pos), pos);
+      const guard = css.slice(css.lastIndexOf('@supports (animation-timeline: view())', pos), pos);
       expect(guard.startsWith('@supports (animation-timeline: view())'), l).toBe(true);
-      expect(depth(guard), l).toBe(3);
+      expect(depth(guard), l).toBe(4);
+      expect(guard.slice(guard.lastIndexOf('@supports')), l).toMatch(/^@supports \(content: "" \/ ""\) \{/);
       expect(guard.slice(guard.lastIndexOf('@media')), l).toMatch(/^@media \(forced-colors: none\) \{/);
       // Only the paint is hidden, so the overlay inherits the figure's real colour.
       expect(l).toContain('-webkit-text-fill-color: transparent;');
@@ -174,6 +178,9 @@ describe('the counting CSS', () => {
     expect(at).toBeGreaterThan(0);
     const media = css.slice(css.lastIndexOf('@media', at), at);
     expect(media).toMatch(/^@media \(forced-colors: none\) \{/);
-    expect(depth(media)).toBe(1);
+    // ACT-1 — and inside the alt-text `content` support query, so an engine that
+    // rejects `counter() / ""` shows the plain digit instead of nothing.
+    expect(depth(media)).toBe(2);
+    expect(media).toContain('@supports (content: "" / "") {');
   });
 });

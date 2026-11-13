@@ -111,6 +111,15 @@ describe('the played card CSS', () => {
     expect(rule('.fp-activity--play .fp-activity__n::after {')).toContain('content: counter(fp-n) / "";');
   });
 
+  it('hides the real digit only where the overlay can draw (ACT-1)', () => {
+    // Inside the forced-colours block, under an alt-text `content` support
+    // query: without it, an engine that rejects `/ ""` would keep the digit
+    // transparent and drop the overlay, and the count would vanish.
+    const at = css.indexOf('.fp-activity--play .fp-activity__n { position: relative; color: transparent; }');
+    expect(at).toBeGreaterThan(-1);
+    expect(css.lastIndexOf('@supports (content: "" / "")', at)).toBeGreaterThan(css.lastIndexOf('@media (forced-colors: none)', at));
+  });
+
   it('anchors the RTL bar on :root and lets motion none opt out', () => {
     expect(css).toContain(':root[dir="rtl"]:not([data-reduce-motion="reduce"]) .fp-hero:not(.fp-motion--none) .fp-activity--play .fp-progress__fill');
     const played = css.split('\n').filter((l) => l.includes('.fp-activity--play'));

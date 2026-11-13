@@ -38,8 +38,8 @@ import { setAutonomyClientResolver } from '../../host/autonomyPolicy/index.js';
 import { getClient } from './clientService.js';
 import { registerCampaignMcpReadTools } from './mcpTools.js';
 import { registerMcpChangeRequestStarter } from './externalRead.js';
-import { registerCollaborationRoutes, EXTERNAL_COLLAB_TOGGLE } from './collaboration/routes.js';
-import { registerCollaborationOrgGate, registerGrantResourceKind } from '../../host/externalCollaborators.js';
+import { registerCollaborationRoutes, collabEnabledFor, EXTERNAL_COLLAB_TOGGLE } from './collaboration/routes.js';
+import { registerDefaultCollaborationSurface, registerGrantResourceKind } from '../../host/externalCollaborators.js';
 
 export const campaignOpsFeature: BackendFeature = {
   id: CAMPAIGN_OPS_TOGGLE,
@@ -93,8 +93,12 @@ export const campaignOpsFeature: BackendFeature = {
       return c ? { mode: c.mode, status: c.status } : null;
     });
     // ADR 0958 — external collaborators. The org gate is the client account: a
-    // paused or archived client refuses every collaborator use (D2, D7).
-    registerCollaborationOrgGate(async (tenantId, orgId) => (await getClient(tenantId, orgId))?.status === 'active');
+    // paused or archived client refuses every collaborator use (D2, D7). ADR 1099
+    // D1: this is the DEFAULT surface, which every kind without its own runs under.
+    registerDefaultCollaborationSurface({
+      enabledFor: collabEnabledFor,
+      orgOpen: async (tenantId, orgId) => (await getClient(tenantId, orgId))?.status === 'active',
+    });
     // ADR 0958 P1 — the ADR 0924 client approval link decides through a grant on
     // the change set. Only the portal mints these (`system:` actor); no member
     // route, agent tool or node can. Nothing to show in "Shared with me": a

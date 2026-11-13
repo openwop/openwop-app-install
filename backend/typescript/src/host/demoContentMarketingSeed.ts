@@ -83,8 +83,8 @@ export async function seedDemoContentMarketing(tenantId: string): Promise<{ crea
 
   // Resolve a few commerce products for the Shop productGrid (best-effort).
   try {
-    const { listProducts } = await import('../features/commerce/commerceService.js');
-    for (const p of (await listProducts(tenantId, orgId)).filter((x) => x.createdBy === 'demo:commerce-depth').slice(0, 8)) productIds.push(p.productId);
+    const { collectCatalog } = await import('../features/commerce/commerceService.js');
+    for (const p of (await collectCatalog(tenantId, orgId, (x) => x.createdBy === 'demo:commerce-depth')).slice(0, 8)) productIds.push(p.productId);
   } catch { /* commerce optional */ }
 
   // 2) CMS 6-page site (always-on). Deterministic page ids; publish transitions.

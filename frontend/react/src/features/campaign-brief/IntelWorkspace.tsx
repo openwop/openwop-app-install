@@ -19,7 +19,7 @@ import { ConfirmDialog } from '../../ui/ConfirmDialog.js';
 import { Modal } from '../../ui/Modal.js';
 import { TextField } from '../../ui/Field.js';
 import { toast } from '../../ui/toast.js';
-import { SparklesIcon, TrashIcon, CheckIcon, XIcon, MegaphoneIcon } from '../../ui/icons/index.js';
+import { SparklesIcon, TrashIcon, CheckIcon, MegaphoneIcon } from '../../ui/icons/index.js';
 import {
   listVocEvidence, deleteVocEvidence, listAngles, deleteAngle,
   listHooks, promoteHook, listTargetingPacks, deleteTargetingPack,
@@ -35,8 +35,11 @@ const sentimentChipClass = (s: VocSentiment): string =>
 const hookChipClass = (s: HookStatus): string =>
   s === 'tested' ? 'chip--success' : s === 'retired' ? 'chip--muted' : 'chip--accent';
 
+/** Which Strategist job a button opens the chat for (CC-UX-2: the staged draft differs). */
+export type StrategistIntent = 'kernel' | 'research';
+
 export function IntelWorkspace({ brief, onError, onOpenStrategist }: {
-  brief: CampaignBrief; onError: (m: string) => void; onOpenStrategist: () => void;
+  brief: CampaignBrief; onError: (m: string) => void; onOpenStrategist: (intent: StrategistIntent) => void;
 }): JSX.Element {
   // The i18n gate resolves the namespace per file — own the hook here rather
   // than threading `t` from the page.
@@ -51,7 +54,7 @@ export function IntelWorkspace({ brief, onError, onOpenStrategist }: {
   );
 }
 
-function EvidenceSection({ t, briefId, onError, onOpenStrategist }: { t: TFn; briefId: string; onError: (m: string) => void; onOpenStrategist: () => void }): JSX.Element {
+function EvidenceSection({ t, briefId, onError, onOpenStrategist }: { t: TFn; briefId: string; onError: (m: string) => void; onOpenStrategist: (intent: StrategistIntent) => void }): JSX.Element {
   const [evidence, setEvidence] = useState<VocEvidence[] | null>(null);
   const [sentiment, setSentiment] = useState<'' | VocSentiment>('');
   const [confirmDelete, setConfirmDelete] = useState<VocEvidence | null>(null);
@@ -79,10 +82,7 @@ function EvidenceSection({ t, briefId, onError, onOpenStrategist }: { t: TFn; br
         </select>
       </div>
       {conflict ? (
-        <Notice variant="warning">
-          <Button variant="link" className="u-fs-11" onClick={() => setConflict(null)} aria-label={t('common:close')}><XIcon size={12} /></Button>
-          {conflict}
-        </Notice>
+        <Notice variant="warning" onDismiss={() => setConflict(null)} dismissLabel={t('common:close')}>{conflict}</Notice>
       ) : null}
       {evidence === null ? (
         <StateCard icon={<SparklesIcon size={20} />} title={t('intelLoading')} loading />
@@ -91,7 +91,7 @@ function EvidenceSection({ t, briefId, onError, onOpenStrategist }: { t: TFn; br
           icon={<SparklesIcon size={22} />}
           title={sentiment ? t('noMatchTitle') : t('intelNoEvidenceTitle')}
           body={sentiment ? t('noMatchBody') : t('intelNoEvidenceBody')}
-          action={sentiment ? undefined : <Button variant="primary" size="sm" onClick={onOpenStrategist}><SparklesIcon size={13} /> {t('intelRunResearch')}</Button>}
+          action={sentiment ? undefined : <Button variant="primary" size="sm" onClick={() => onOpenStrategist('research')}><SparklesIcon size={13} /> {t('intelRunResearch')}</Button>}
         />
       ) : (
         <ul className="u-list-none u-m-0 u-p-0">

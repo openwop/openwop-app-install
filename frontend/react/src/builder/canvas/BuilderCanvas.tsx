@@ -12,7 +12,8 @@
  *   BaseNode paints execution state.
  */
 
-import { projectSourceOutput, virtualSourceOutputs, type SourceBinding } from '../schema/sourceOutput.js';
+import { type SourceBinding } from '../schema/sourceOutput.js';
+import { projectSourceOutputForKind, virtualSourceOutputsForKind } from './sourceOutputForKind.js';
 import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -293,7 +294,7 @@ function BuilderCanvasInner({ pairEnabled }: { pairEnabled: boolean }) {
       group.push(edge);
       grouped.set(edge.source, group);
     }
-    return new Map([...grouped].map(([id, edges]) => [id, virtualSourceOutputs(edges, catalogEntry(nodeKindById.get(id) ?? '')?.outputs ?? [], i18n.resolvedLanguage)]));
+    return new Map([...grouped].map(([id, edges]) => [id, virtualSourceOutputsForKind(edges, nodeKindById.get(id), i18n.resolvedLanguage)]));
   })();
 
   const rfNodes: Node[] = useMemo(
@@ -365,7 +366,7 @@ function BuilderCanvasInner({ pairEnabled }: { pairEnabled: boolean }) {
         id: e.id,
         source: e.source,
         target: e.target,
-        sourceHandle: projectSourceOutput(e, catalogEntry(nodeKindById.get(e.source) ?? '')?.outputs ?? []).handleId,
+        sourceHandle: projectSourceOutputForKind(e, nodeKindById.get(e.source)).handleId,
         targetHandle: e.targetPort,
         // Liveness: an edge whose target node is currently running carries the
         // marching-dash "data in flight" treatment (CSS .edge-running, §6).

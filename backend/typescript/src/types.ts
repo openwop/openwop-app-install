@@ -435,6 +435,14 @@ export type NotificationPriority = 'low' | 'normal' | 'high' | 'urgent';
 
 export type NotificationStatus = 'unread' | 'read' | 'archived';
 
+/**
+ * ADR 1114 (#5868) — how a request (a notification that names an interrupt)
+ * ended. Stamped on `metadata.resolution` by the one retire subscriber
+ * (`notifications/retireRequests.ts`) when the interrupt resolves or the run ends.
+ */
+export type RequestResolutionState = 'approved' | 'rejected' | 'changes-requested' | 'timed-out' | 'answered' | 'run-ended';
+export interface RequestResolution { state: RequestResolutionState; at: string }
+
 export interface NotificationRecord {
   notificationId: string;
   tenantId: string;

@@ -1,12 +1,22 @@
 /**
  * ADR 0127 Phase 4 — WidgetsPage admin (list + embed snippet + grant editor), ADR 0469
- * Phase B/D. Breaks if Embed shows a snippet that does not carry the widget's real
- * token and embed.js URL, if a write grant does not default to HITL, if the save does
- * not send the chosen control/cap, or if a save leaves the editor open with a stale list.
+ * Phase B/D, ADR 1018 (D1 absolute snippet, D8 byok refusal, grade-ux CW68U-2/8/16/17).
+ * Breaks if Embed shows a snippet that does not carry the widget's real token and an
+ * ABSOLUTE embed.js URL (under the production-shaped relative base `/api`), if a write
+ * grant does not default to HITL, if the save does not send the chosen control/cap, if a
+ * save leaves the editor open with a stale list, if the agent is not picked from the
+ * roster, if a disabled widget is not labelled or cannot be re-enabled, if Disable is not
+ * confirmed, or if a refused Enable / a `widget_byok_required` refusal reads as the
+ * generic error. Probe-witnessed in wave 107 (`w107g2-wid-*`).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
-const { listWidgets, listOrgs, getToolCatalog, patchWidget, provisionWidget, toastSuccess } = vi.hoisted(() => ({ listWidgets: vi.fn(), listOrgs: vi.fn(), getToolCatalog: vi.fn(), patchWidget: vi.fn(), provisionWidget: vi.fn(), toastSuccess: vi.fn() }));
+type WidgetApi = typeof import('../../../client/chatWidgetClient.js');
+const { listWidgets, listOrgs, getToolCatalog, patchWidget, provisionWidget, toastSuccess } = vi.hoisted(() => ({
+  listWidgets: vi.fn<WidgetApi['listWidgets']>(), listOrgs: vi.fn<WidgetApi['listOrgs']>(),
+  getToolCatalog: vi.fn<WidgetApi['getToolCatalog']>(), patchWidget: vi.fn<WidgetApi['patchWidget']>(),
+  provisionWidget: vi.fn<WidgetApi['provisionWidget']>(), toastSuccess: vi.fn(),
+}));
 // Spread the REAL client: `embedSnippet` must be the product's own, or the snippet
 // case asserts text this file wrote itself.
 vi.mock('../../../client/chatWidgetClient.js', async (orig) => ({
@@ -16,14 +26,24 @@ vi.mock('../../../client/chatWidgetClient.js', async (orig) => ({
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: toastSuccess, error: vi.fn() } }));
 // ADR 1018 — the page now offers a roster picker (listAgents) and a "try in chat" deep
 // link (useNavigate), so it renders inside a router with the roster read stubbed.
-const { listAgents, confirmMock } = vi.hoisted(() => ({ listAgents: vi.fn(), confirmMock: vi.fn() }));
+const { listAgents, confirmMock } = vi.hoisted(() => ({
+  listAgents: vi.fn<typeof import('../../../client/agentsClient.js')['listAgents']>(),
+  confirmMock: vi.fn<typeof import('../../../ui/confirm.js')['confirm']>(),
+}));
 vi.mock('../../../ui/confirm.js', () => ({ confirm: confirmMock }));
 vi.mock('../../../client/agentsClient.js', () => ({ listAgents }));
 import { MemoryRouter } from 'react-router-dom';
 import { WidgetsPage } from '../WidgetsPage.js';
 import type { Widget } from '../../../client/chatWidgetClient.js';
+import type { AgentEntry } from '../../../client/agentsClient.js';
+import { config } from '../../../client/config.js';
 
 const W: Widget = { widgetId: 'w1', agentId: 'support', allowedDomains: ['acme.com'], caps: {}, token: 'wgt_abc', enabled: true };
+/** A complete roster entry (typed: the mock is typed against `listAgents`). */
+const SUPPORT_AGENT: AgentEntry = {
+  agentId: 'vendor.x.agents.support', persona: 'assistant', label: 'Support agent', modelClass: 'standard',
+  packName: 'vendor.x.agents', packVersion: '1.0.0', toolAllowlist: [], hasHandoffSchemas: false,
+};
 
 beforeEach(() => { confirmMock.mockReset(); listWidgets.mockReset(); listOrgs.mockReset(); getToolCatalog.mockReset(); patchWidget.mockReset(); provisionWidget.mockReset(); toastSuccess.mockReset(); listOrgs.mockResolvedValue([{ orgId: 'o1', name: 'Org' }]); listAgents.mockReset(); listAgents.mockResolvedValue([]); getToolCatalog.mockResolvedValue(['openwop:kanban.add-todo', 'openwop:knowledge.search']); patchWidget.mockResolvedValue(W); });
 afterEach(cleanup);
@@ -44,15 +64,26 @@ describe('WidgetsPage (ADR 0127 Phase 4)', () => {
   // would be scenery: a mock of a module the subject never imports.
 
   it('lists widgets + reveals the embed snippet on Embed', async () => {
-    listWidgets.mockResolvedValue([W]);
-    render(<MemoryRouter><WidgetsPage /></MemoryRouter>);
-    expect(await screen.findByText('support')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Embed' }));
-    // The real snippet: an ABSOLUTE public embed.js URL carrying THIS widget's token.
-    // ADR 1018 D1 — anchored on `src="http`: the unanchored path match this used to
-    // be passed the production snippet, whose relative `/api/…` src 404s on every
-    // customer site (`CW68WF-1`).
-    expect(await screen.findByText(/^<script src="https?:\/\/[^"/]+\/[^"]*host\/openwop-app\/public\/widget\/embed\.js" data-token="wgt_abc"><\/script>$/)).toBeTruthy();
+    // ADR 1018 D1 (`CW68WF-1`) — production's base is the RELATIVE `/api`, and a
+    // relative `src` 404s on every customer site. The test env's default base is the
+    // absolute dev URL, under which a relative-src page passes too, so the case runs
+    // under the production shape. (`embedScriptUrl.test.ts` holds the URL math; this
+    // case holds that the page renders THIS widget's snippet through it.)
+    const savedBase = config.baseUrl;
+    config.baseUrl = '/api';
+    try {
+      listWidgets.mockResolvedValue([W]);
+      render(<MemoryRouter><WidgetsPage /></MemoryRouter>);
+      expect(await screen.findByText('support')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Embed' }));
+      // The page origin is the environment's (jsdom), not the product's.
+      expect(window.location.origin).toMatch(/^https?:\/\/[^/]+$/);
+      expect(await screen.findByText(
+        `<script src="${window.location.origin}/api/host/openwop-app/public/widget/embed.js" data-token="wgt_abc"></script>`,
+      )).toBeTruthy();
+    } finally {
+      config.baseUrl = savedBase;
+    }
   });
 
   it('Configure opens the grant editor, loads the catalog, defaults writes to HITL, and saves', async () => {
@@ -94,12 +125,15 @@ describe('WidgetsPage (ADR 0127 Phase 4)', () => {
   // a widget that reported Active and never answered), and a disabled widget says so in
   // words and can be turned back on.
   it('offers the roster as a picker and re-enables a disabled widget', async () => {
-    listAgents.mockResolvedValue([{ agentId: 'vendor.x.agents.support', label: 'Support agent' }]);
+    listAgents.mockResolvedValue([SUPPORT_AGENT]);
     listWidgets.mockResolvedValue([{ ...W, enabled: false }]);
     patchWidget.mockResolvedValue({ ...W, enabled: true });
     render(<MemoryRouter><WidgetsPage /></MemoryRouter>);
     expect(await screen.findByRole('option', { name: 'Support agent' })).toBeTruthy();
-    expect(screen.getByText('Disabled')).toBeTruthy();
+    // Wait for the widget list too: the roster and the list load independently, and under
+    // shuffle seed 11 the roster won the race, so a synchronous getByText saw "Loading"
+    // (wave 107 final verify; main's copy reddened the same way).
+    expect(await screen.findByText('Disabled')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Enable' }));
     await vi.waitFor(() => expect(patchWidget).toHaveBeenCalledWith('o1', 'w1', { enabled: true }));
   });

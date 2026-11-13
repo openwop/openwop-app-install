@@ -16,9 +16,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Canvas',
-      label: 'AI Video', labelKey: 'creativeVideoLabel',
+      labelKey: 'creativeVideoLabel',
       icon: WandIcon,
-      hint: 'Generate avatar videos', hintKey: 'creativeVideoHint',
+      hintKey: 'creativeVideoHint',
       order: 60,
       featureId: 'creative-video',
     },

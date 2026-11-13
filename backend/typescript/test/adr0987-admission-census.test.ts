@@ -12,7 +12,7 @@
  *   - `reservePlanRun` (monthly plan) has exactly one caller, `host/runStarter.ts`;
  *   - `insertRunWithStartContext` is called from 18 files (19 since ADR 1042: the
  *     channel-ingress conversation run, charged like any run — see the admission-lanes test);
- *   - `startWorkflowRun` has 37 code call sites in 30 files (39 / 32 until the KickTodo
+ *   - `startWorkflowRun` had 37 code call sites in 30 files at P0 (34 since ADR 1103 D3) (39 / 32 until the KickTodo
  *     packages left, ADR 1031 P3). ADR 0987's context
  *     table says 43 in 34: that raw grep also matched 5 mentions in comments.
  *     (39 since ADR 0957 D2: `startClientReportRun` in campaign-ops/runLauncher.ts
@@ -134,9 +134,10 @@ describe('ADR 0987 — the run-admission lane census (as of P2)', () => {
     ]);
   });
 
-  it('startWorkflowRun has 37 code call sites in 30 files (the monthly check, no per-day or concurrency check)', () => {
+  it('startWorkflowRun has 34 code call sites in 30 files (the monthly check, no per-day or concurrency check)', () => {
     const m = callSites(/startWorkflowRun\(/, /export async function startWorkflowRun/);
-    // 39 / 32 until the KickTodo packages left (ADR 1031 P3).
-    expect({ sites: total(m), files: m.size }).toEqual({ sites: 37, files: 30 });
+    // 39 / 32 until the KickTodo packages left (ADR 1031 P3). 37 → 34 when the four
+    // notebooks route starts folded into one `startAsCaller` (ADR 1103 D3); same file.
+    expect({ sites: total(m), files: m.size }).toEqual({ sites: 34, files: 30 });
   });
 });

@@ -47,6 +47,7 @@ import { instantiateOwnedChain } from '../host/chainInstantiation.js';
 import { getTenantInstalledChain, installedChainResolution, listTenantInstalledChains } from '../host/tenantInstalledPacks.js';
 import { preserveDroppedFields, parseFieldContract, FIELD_CONTRACT_HEADER } from '../host/preserveDroppedFields.js';
 import { getProvider } from '../features/connections/providerRegistry.js';
+import { RETIRED_CHAIN_ALIASES } from '../features/walkthroughs/walkthroughIds.js';
 import { getToggleDefault } from '../host/featureToggles/registry.js';
 import { buildNodeCatalog, requiredConfigKeysFor } from '../host/nodeCatalogBuilder.js';
 import { assertInstallable, installFromConfiguredRegistry } from '../packs/installLane.js';
@@ -992,7 +993,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
       // resolvable, composable, and from-chain-instantiable by id (presentational only).
       // ADR 1033 D5 — plus the chains of packs this tenant installed by applying a proposal.
       const tenantChains = (await listTenantInstalledChains(tenantOf(req))).map((e) => ({ ...e, category: undefined }));
-      const chains = [...listChains(), ...tenantChains].filter(({ chain }) => chain.internal !== true).map(({ packName, chain, category }) => ({
+      const chains = [...listChains(), ...tenantChains].filter(({ chain }) => chain.internal !== true && !RETIRED_CHAIN_ALIASES.has(chain.chainId)).map(({ packName, chain, category }) => ({
         chainId: chain.chainId,
         packName,
         label: chain.label,
@@ -1034,6 +1035,14 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
         throw new OpenwopError('validation_error', 'subject must look like `<feature>:<id>` (lowercase feature prefix, then up to 200 of [A-Za-z0-9:._-]).', 400, { field: 'subject' });
       }
       const subject = typeof body.subject === 'string' ? body.subject : undefined;
+      // CC-CHAIN-4 — a retired alias stays registered for replay/fork of old runs,
+      // but is never minted as a NEW workflow: it would duplicate its replacement.
+      const replacedBy = RETIRED_CHAIN_ALIASES.get(body.chainId);
+      if (replacedBy) {
+        // The message names the replacement in words: the wire error redactor masks
+        // dotted ids (they read like a JWT), so `replacedBy` may not survive to clients.
+        throw new OpenwopError('not_found', 'This template was retired. Use the Campaign Studio walkthrough in Guided walkthroughs instead.', 410, { chainId: body.chainId, reason: 'retired_alias', replacedBy });
+      }
       // ADR 1033 D5 — a host chain, else one from a pack this tenant installed by apply.
       const hostChain = getChain(body.chainId);
       const found = hostChain ?? await getTenantInstalledChain(tenantOf(req), body.chainId);

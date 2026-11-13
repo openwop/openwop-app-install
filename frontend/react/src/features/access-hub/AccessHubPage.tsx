@@ -39,6 +39,7 @@ import { Tabs, TabPanel, useUrlTab, type TabItem } from '../../ui/Tabs.js';
 import { scopesOf, tabIdOf, visibleHubRoutes } from '../../chrome/hubProjection.js';
 import { KeyFigureBand } from '../../ui/KeyFigure.js';
 import { accessSummaryView, getAccessSummary, type AccessSummary } from './accessSummary.js';
+import { navLabel } from '../../chrome/navText.js';
 
 const SCOPES: HubScope[] = ['workspace', 'personal'];
 /** Access Hub rail clusters (ADR 0144). */
@@ -78,7 +79,7 @@ export function AccessHubPage(): JSX.Element {
   const items: TabItem[] = routes.map((r) => {
     const id = tabIdOf(r);
     const group = r.hubTab.group;
-    const label = t(`tab_${id}`, { defaultValue: r.nav?.label ?? id });
+    const label = t(`tab_${id}`, { defaultValue: (r.nav ? navLabel(r.nav) : '') || id });
     return {
       id,
       label,

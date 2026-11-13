@@ -24,6 +24,7 @@ import { useResolvedNav } from './navConfig/NavConfigProvider.js';
 import { readExpandedHeaders, toggleExpandedHeader } from './navConfig/navCollapseCookie.js';
 import { AgentsNavItem } from './PinnedAgentsNav.js';
 import { NavRailItemContent, NavRailSection } from './NavRailPrimitives.js';
+import { navHint, navLabel } from './navText.js';
 
 const COLLAPSE_KEY = 'openwop.sidebar.collapsed';
 
@@ -106,7 +107,7 @@ export function Sidebar({ netOpen, onToggleNet }: { netOpen: boolean; onToggleNe
           const Icon = item.icon;
           const active = navItemIsActive(item, location.pathname);
           const locked = lockedFor(item.featureId);
-          const label = item.labelKey ? tn(item.labelKey, { defaultValue: item.label }) : item.label;
+          const label = navLabel(item, tn);
           return (
             <Link
               key={item.to}
@@ -229,12 +230,12 @@ export function Sidebar({ netOpen, onToggleNet }: { netOpen: boolean; onToggleNe
                         {...(!locked && item.end !== undefined ? { end: item.end } : {})}
                         className={`app-nav-link${active && !locked ? ' is-active' : ''}`}
                         {...(active && !locked ? { 'aria-current': 'page' as const } : {})}
-                        title={locked ? t('navLocked') : item.hintKey ? tn(item.hintKey, { defaultValue: item.hint }) : item.hint}
+                        title={locked ? t('navLocked') : navHint(item, tn)}
                       >
                         <NavRailItemContent
                           classPrefix="app-nav"
                           icon={<Icon size={16} />}
-                          label={item.labelKey ? tn(item.labelKey, { defaultValue: item.label }) : item.label}
+                          label={navLabel(item, tn)}
                           locked={locked}
                           lockedLabel={t('navLocked')}
                           badge={badge}

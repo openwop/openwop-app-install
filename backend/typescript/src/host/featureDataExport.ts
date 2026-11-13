@@ -37,9 +37,27 @@ export function featureDataExporter(featureId: string): FeatureDataExporter | nu
   return exporters.get(featureId) ?? null;
 }
 
-/** Feature ids with a registered exporter, sorted (the door's discovery list). */
+/**
+ * ADR 1110 P3 — the PAGED form, for a feature whose data cannot be read whole in one
+ * request (a catalog of up to 500,000 products): the door hands the exporter an opaque
+ * `cursor` and a row `limit`, and the exporter returns one page of sections plus the
+ * next cursor (absent on the last page). Same contract as above: read only,
+ * tenant-scoped, workspace-wide. A feature registers one form or the other; the paged
+ * form wins when both exist.
+ */
+export interface FeatureDataPage { sections: FeatureDataSections; nextCursor?: string }
+export type FeatureDataPagedExporter = (tenantId: string, page: { cursor?: string; limit: number }) => Promise<FeatureDataPage>;
+const pagedExporters = new Map<string, FeatureDataPagedExporter>();
+export function registerFeatureDataPagedExporter(featureId: string, exporter: FeatureDataPagedExporter): void {
+  pagedExporters.set(featureId, exporter);
+}
+export function featureDataPagedExporter(featureId: string): FeatureDataPagedExporter | null {
+  return pagedExporters.get(featureId) ?? null;
+}
+
+/** Feature ids with a registered exporter of either form, sorted (the door's discovery list). */
 export function exportableFeatureIds(): string[] {
-  return [...exporters.keys()].sort();
+  return [...new Set([...exporters.keys(), ...pagedExporters.keys()])].sort();
 }
 
 /** Concatenate an org-scoped list over every org of `tenantId` (tenant-scoped:

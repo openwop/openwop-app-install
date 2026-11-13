@@ -69,6 +69,7 @@ import type { ProviderPolicyResolver } from './index.js';
 import type { RunRecord } from '../types.js';
 import type { Storage } from '../storage/storage.js';
 import { resolveWebSearchPreference } from './webSearchPreference.js';
+import { planExemptOfRunMetadata } from './operatorPlanExemption.js';
 
 const log = createLogger('host.conversationToolLoop');
 
@@ -506,6 +507,18 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   // ADR 0832 D3 — the member who caused an actorless turn (a channel post): it
   // bounds which orgs the turn's knowledge reads reach, and grants nothing.
   const orgScopeSubject = (run.metadata as { orgScopeSubject?: unknown } | undefined)?.orgScopeSubject;
+  // ADR 1108 — the operator plan exemption the run was created under (reserved,
+  // request-stamped); the tools re-check it against the allowlist per call.
+  // It is BORROWED authority, exactly like a `bypass` (ADR 0834 D3): it reaches
+  // the turn's tools ONLY when the person posting this turn IS the run's acting
+  // principal. A participant posting into the operator's shared conversation, or
+  // any channel-ingress turn, gets none — else a customer could spend the
+  // operator's exemption on paywalled tools (priced ⟹ gated).
+  const planExempt = planExemptOfRunMetadata(run.metadata as Record<string, unknown> | undefined)
+    && typeof actingUserId === 'string'
+    && toolAuthorityHolds(params.callerPrincipal, actingUserId)
+    && !(run.metadata as Record<string, unknown> | undefined)?.['channelIngress']
+    ? true : undefined;
   // ADR 0309 — the conversation the promise is made in rides the scope too, so
   // the schedule-followup tool's delivery destination is unforgeable (it takes
   // no conversation input; same threading rationale as actingUserId above).
@@ -535,6 +548,7 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
     ...(typeof actingUserId === 'string' && actingUserId ? { actingUserId } : {}),
     ...(typeof personalTenant === 'string' && personalTenant ? { personalTenant } : {}),
     ...(typeof orgScopeSubject === 'string' && orgScopeSubject ? { orgScopeSubject } : {}),
+    ...(planExempt ? { planExempt } : {}),
     ...(typeof chatSessionId === 'string' && chatSessionId ? { conversationId: chatSessionId } : {}),
     onRunDispatched: runDispatchCollector.sink,
     ...(clarificationCollector ? { onClarificationAsk: clarificationCollector.sink } : {}),

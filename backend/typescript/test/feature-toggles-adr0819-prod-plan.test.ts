@@ -11,6 +11,9 @@
  * Tracker TST-DCA-2. Red when the campaign-brief tool's `featureEnabled` reads the
  * toggle alone (`resolveToggle`) instead of the access resolver `resolveOne`
  * (grade-tests w70 probe `pp-brief-gate`).
+ *
+ * CORRECTED (ADR 1108): the tool now resolves through the kit
+ * (`resolveFeatureAccess`), and the refusal code is `not_entitled`.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -54,7 +57,9 @@ describe('ADR 0819 S1 on the prod plan shape — a priced-not-free feature throu
       .executeTool({ name: CAMPAIGN_BRIEF_GET_TOOL_ID, input: { briefId } });
     expect(out.content, 'the brief leaked through chat').not.toContain('Launch Brief');
     expect(out.isError).toBe(true);
-    expect((JSON.parse(out.content) as { error?: string }).error).toBe('feature_disabled');
+    // ADR 1108 D6 — the refusal is the PLAN's (`not_entitled`); this used to pin
+    // `feature_disabled`, which told the model to flip a toggle that was on.
+    expect((JSON.parse(out.content) as { error?: string }).error).toBe('not_entitled');
   });
 
   it('positive control: the same call serves an entitled tenant (the host operator)', async () => {

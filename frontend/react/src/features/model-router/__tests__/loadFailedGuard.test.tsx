@@ -14,17 +14,29 @@
  * first org's rows on screen" is gone with the org picker: the config is the
  * workspace's, read once, and a failed read never leaves rows on screen.)
  *
- * Breaks if any write (Add rule, Save) is enabled while the read has failed, if
+ * Breaks if any write (Add rule, Save) is offered while the read has failed, if
  * the guard over-fires and disables a page whose read succeeded (or found no
  * config), if a non-admin is offered Add/Remove/Save, or if a read-only page
  * stops saying why.
+ *
+ * On a failed read the editor is withheld because `canManage` stays at its
+ * `false` default (the authority was never read); that is what case 1 witnesses
+ * (`w107g2-mr-canmanage`). The `loadFailed` checks in `writable` / `persist` are a
+ * second guard no flow can reach: the only re-read is the retry, which clears
+ * `loadFailed` before reading and sets `canManage` only on success, so the two are
+ * never true together. Wave 107 (`w107g2-mr-*`) also probe-witnessed:
+ * `writable` inverted, Save enabled while clean, the fallback effect keyed on the
+ * object, Add rule sending a partial list or dropping the fallback, a null read
+ * treated as a failure, the retry not re-reading, the read-only gates, and a
+ * preview answer kept across an input change.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
 import type { StoredRouterConfig } from '../modelRouterClient.js';
 
+type RouterApi = typeof import('../modelRouterClient.js');
 const { getRouterConfig, setRouterConfig } = vi.hoisted(() => ({
-  getRouterConfig: vi.fn(), setRouterConfig: vi.fn(),
+  getRouterConfig: vi.fn<RouterApi['getRouterConfig']>(), setRouterConfig: vi.fn<RouterApi['setRouterConfig']>(),
 }));
 vi.mock('../modelRouterClient.js', async (orig) => ({
   ...(await orig<typeof import('../modelRouterClient.js')>()),
@@ -56,7 +68,9 @@ const btn = (name: RegExp | string): HTMLButtonElement => screen.getByRole<HTMLB
 
 afterEach(cleanup);
 beforeEach(() => {
-  vi.clearAllMocks();
+  // mockReset, not clearAllMocks: a case's `mockImplementation` must not answer the next.
+  getRouterConfig.mockReset();
+  setRouterConfig.mockReset();
   getRouterConfig.mockResolvedValue({ stored: STORED, canManage: true });
   setRouterConfig.mockResolvedValue(STORED);
 });
@@ -102,7 +116,7 @@ describe('MR-G1 — a failed read disables the writes', () => {
     await mount();
     await act(async () => { fireEvent.click(btn(/Add rule/)); });
     expect(setRouterConfig).toHaveBeenCalledTimes(1);
-    const sent = setRouterConfig.mock.calls[0]![0] as StoredRouterConfig['config'];
+    const sent = setRouterConfig.mock.calls[0]![0];
     expect(sent.rules).toHaveLength(2);
     expect(sent.rules[0]).toEqual(STORED.config.rules[0]);
     expect(sent.fallback).toEqual(STORED.config.fallback);
@@ -146,12 +160,15 @@ describe('ADR 1016 D2 — a caller who cannot manage keys sees routing read-only
 describe('MR66UX-1 — a preview answer never outlives the question it answered', () => {
   it('changing the provider after Test clears the answer instead of relabelling it', async () => {
     const spy = vi.spyOn(await import('../modelRouterClient.js'), 'previewRoute');
-    spy.mockResolvedValue({ enabled: true, why: 'routed', decision: { reason: 'rule', ruleIndex: 0, target: { provider: 'anthropic', model: 'claude-opus-5-5' } } });
-    await mount();
-    await act(async () => { fireEvent.click(btn(/^Test$/)); });
-    expect(await screen.findByText(/Rule 1 sends it to/)).toBeTruthy();
-    fireEvent.change(screen.getByLabelText(/The conversation.s key is for/), { target: { value: 'openai' } });
-    expect(screen.queryByText(/Rule 1 sends it to/)).toBeNull();
-    spy.mockRestore();
+    try {
+      spy.mockResolvedValue({ enabled: true, why: 'routed', decision: { reason: 'rule', ruleIndex: 0, target: { provider: 'anthropic', model: 'claude-opus-5-5' } } });
+      await mount();
+      await act(async () => { fireEvent.click(btn(/^Test$/)); });
+      expect(await screen.findByText(/Rule 1 sends it to/)).toBeTruthy();
+      fireEvent.change(screen.getByLabelText(/The conversation.s key is for/), { target: { value: 'openai' } });
+      expect(screen.queryByText(/Rule 1 sends it to/)).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

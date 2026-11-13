@@ -216,10 +216,19 @@ export const messages = {
   priorityHigh: 'High',
   priorityLow: 'Low',
   cardUnread: 'Unread',
-  cardRunLink: 'run {{id}} →',
+  subjectUnknownProject: 'A project',
+  cardRunLink: 'Open the run →',
   archive: 'Archive',
   delete: 'Delete',
-  interruptResolvedElsewhere: 'Interrupt may have been resolved elsewhere — refresh to reconcile.',
+  interruptResolvedElsewhere: 'This step is no longer waiting.',
+  // ADR 1114 (issue 5868) — a request whose step is over.
+  archiveResolved: 'Archive finished requests',
+  endApproved: 'Approved',
+  endRejected: 'Rejected',
+  endChanges: 'Changes requested',
+  endTimedOut: 'Timed out',
+  endAnswered: 'Answered',
+  endRunEnded: 'No longer waiting',
 
   // ─── pushSubscription (developer-facing errors stay code; none user-facing) ──
 

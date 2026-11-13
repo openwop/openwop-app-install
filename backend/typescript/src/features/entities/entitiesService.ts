@@ -40,6 +40,7 @@ import { emitHostEvent } from '../../host/hostEventDispatcher.js';
 import { LOCALE_RE, resolveLocalizedValues } from '../../host/i18n/index.js';
 import { normalizeTypeName, projectKeyOf, requireProjectNamespace } from './common.js';
 import { listNamespaceTaxonomies, purgeNamespaceTaxonomies, termNamespace } from './taxonomyService.js';
+import { afterSystemWrite, beforeSystemWrite, configureSystemIndex } from './systemIndex.js';
 
 export { normalizeTypeName, requireProjectNamespace } from './common.js';
 
@@ -82,6 +83,9 @@ export interface EntityTypeRecord {
    *  Omitted ⇒ the type is publicRead-eligible as normal (e.g. commerce.product,
    *  cms.page). */
   neverPublic?: true;
+  /** ADR 1110 D2 — a system type's own row ceiling per tenant, in place of
+   *  `ENTITY_ROW_CAP_PER_TYPE`. Code-owned: set by the type's `mintSystemType`. */
+  rowCap?: number;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
@@ -387,18 +391,19 @@ export async function deleteEntityType(input: {
  *  cap — but ONLY after a recount self-heal (a crash between bump and row-write
  *  can leak +1; the cap must never be blocked by drift, so at the boundary the
  *  counter is re-derived from the actual bounded row slice). */
-async function bumpCount(tenantId: string, typeId: string, delta: 1 | -1): Promise<void> {
+async function bumpCount(tenantId: string, typeId: string, delta: 1 | -1, cap: number = ENTITY_ROW_CAP_PER_TYPE): Promise<void> {
   for (let attempt = 0; attempt < 6; attempt += 1) {
     const row = await counts.get(typeId);
     let current = row?.count ?? 0;
-    if (delta > 0 && current >= ENTITY_ROW_CAP_PER_TYPE) {
-      const actual = (await records.listByPrefix(`${typeId}|`)).length;
-      if (actual >= ENTITY_ROW_CAP_PER_TYPE) {
+    if (delta > 0 && current >= cap) {
+      // ADR 1110 D2 — recount in the database (`kvCount`), never by loading the rows.
+      const actual = await records.countByPrefix(`${typeId}|`);
+      if (actual >= cap) {
         throw new OpenwopError(
           'conflict',
-          `Entity cap reached for this type (${ENTITY_ROW_CAP_PER_TYPE}).`,
+          `Entity cap reached for this type (${cap}).`,
           409,
-          { typeId, cap: ENTITY_ROW_CAP_PER_TYPE },
+          { typeId, cap },
         );
       }
       current = actual; // drift healed — proceed with the true count
@@ -710,6 +715,8 @@ export async function mintSystemType(input: {
   extensionKinds?: string[];
   /** ADR 0409 Phase 1 — mint a type that can NEVER be publicly readable (CRM). */
   neverPublic?: boolean;
+  /** ADR 1110 D2 — the type's own row ceiling per tenant (absent ⇒ ENTITY_ROW_CAP_PER_TYPE). */
+  rowCap?: number;
   actor: string;
 }): Promise<EntityTypeRecord> {
   if (!SYSTEM_NAME_RE.test(input.name)) {
@@ -732,6 +739,7 @@ export async function mintSystemType(input: {
         status: 'published',
         system: true,
         ...(input.neverPublic ? { neverPublic: true as const } : {}),
+        ...(input.rowCap !== undefined ? { rowCap: input.rowCap } : {}),
         createdBy: input.actor,
         createdAt: now,
         updatedAt: now,
@@ -740,7 +748,7 @@ export async function mintSystemType(input: {
       continue;
     }
     if (JSON.stringify(existing.fields) === JSON.stringify(fields) && existing.displayName === input.displayName
-        && Boolean(existing.neverPublic) === Boolean(input.neverPublic)) {
+        && Boolean(existing.neverPublic) === Boolean(input.neverPublic) && existing.rowCap === input.rowCap) {
       return existing; // idempotent re-mint
     }
     // A re-mint reconciles the schema AND the neverPublic flag (code-owned).
@@ -749,6 +757,7 @@ export async function mintSystemType(input: {
       ...(input.neverPublic ? { neverPublic: true as const } : {}),
     };
     if (!input.neverPublic) delete next.neverPublic;
+    if (input.rowCap !== undefined) next.rowCap = input.rowCap; else delete next.rowCap;
     if (await types.compareAndSwap(existing, next)) return next;
   }
   throw new OpenwopError('conflict', 'Concurrent system-type mint — retry.', 409, { name: input.name });
@@ -819,8 +828,10 @@ export async function casSystemEntity(input: {
   if (ext && Object.keys(ext).length > 0) next.ext = ext; else delete next.ext;
   if (input.status === 'draft') next.status = 'draft'; else if (input.status === 'live') delete next.status;
   if (termIds !== undefined) { if (termIds.length > 0) next.termIds = termIds; else delete next.termIds; }
+  await beforeSystemWrite(type.name, input.tenantId, input.entityId, next); // ADR 1110 D1 — intent
   if (await records.compareAndSwap(existing, next)) {
     if (termIds !== undefined) await syncTermIndex(next, existing.termIds ?? [], termIds);
+    await afterSystemWrite(type.name, input.tenantId, input.entityId, next);
     emitEntityWritten(next.tenantId, type.name, next.entityId, 'update');
     return next;
   }
@@ -900,16 +911,19 @@ export async function putSystemEntity(input: {
       updatedBy: input.actor,
       updatedAt: now,
     };
+    await beforeSystemWrite(type.name, input.tenantId, input.entityId, next); // ADR 1110 D1 — intent
     if (existing) {
       if (await records.compareAndSwap(existing, next)) {
         if (termIds !== undefined) await syncTermIndex(next, existing.termIds ?? [], termIds);
+        await afterSystemWrite(type.name, input.tenantId, input.entityId, next);
         emitEntityWritten(next.tenantId, type.name, next.entityId, 'update');
         return next;
       }
     } else {
-      await bumpCount(input.tenantId, type.typeId, 1);
+      await bumpCount(input.tenantId, type.typeId, 1, type.rowCap);
       if (await records.compareAndSwap(null, next)) {
         if (termIds !== undefined && termIds.length > 0) await syncTermIndex(next, [], termIds);
+        await afterSystemWrite(type.name, input.tenantId, input.entityId, next);
         emitEntityWritten(next.tenantId, type.name, next.entityId, 'create');
         return next;
       }
@@ -935,8 +949,10 @@ export async function deleteSystemEntity(input: { tenantId: string; typeName: st
   // row carries nothing, so this is safe for the scalar-only system rows too.
   await syncRefIndex(rec, refTargetKeysOf(type, rec.values), []);
   await syncTermIndex(rec, rec.termIds ?? [], []);
+  await beforeSystemWrite(type.name, input.tenantId, input.entityId, null); // ADR 1110 D1 — intent
   await records.delete(rec.recordKey);
   await bumpCount(input.tenantId, type.typeId, -1);
+  await afterSystemWrite(type.name, input.tenantId, input.entityId, null);
   emitEntityWritten(input.tenantId, type.name, input.entityId, 'delete');
   return true;
 }
@@ -946,6 +962,47 @@ export async function listSystemEntities(tenantId: string, typeName: string): Pr
   const type = await getEntityType(tenantId, undefined, typeName);
   if (!type?.system) return [];
   return records.listByPrefix(`${type.typeId}|`);
+}
+
+/** ADR 1110 D4 — every row of one SYSTEM type, in pages of `batch` (key order), so a
+ *  caller that needs the whole type holds one page at a time. */
+export async function* iterateSystemEntities(tenantId: string, typeName: string, batch = 500): AsyncGenerator<EntityRecord> {
+  const type = await getEntityType(tenantId, undefined, typeName);
+  if (!type?.system) return;
+  let afterId: string | undefined;
+  for (;;) {
+    const page = await records.listByPrefixPage(`${type.typeId}|`, { ...(afterId !== undefined ? { afterId } : {}), limit: batch });
+    for (const rec of page.items) if (rec.tenantId === tenantId) yield rec;
+    if (!page.lastId) return;
+    afterId = page.lastId;
+  }
+}
+
+/** ADR 1110 D4 — point reads of several SYSTEM rows, 16 at a time (the storage layer has
+ *  no multi-get). Missing ids are absent from the result; order follows `entityIds`. */
+export async function getSystemEntities(tenantId: string, typeName: string, entityIds: readonly string[]): Promise<EntityRecord[]> {
+  const type = await getEntityType(tenantId, undefined, typeName);
+  if (!type?.system) return [];
+  const out: (EntityRecord | null)[] = new Array(entityIds.length).fill(null);
+  for (let i = 0; i < entityIds.length; i += 16) {
+    const slice = entityIds.slice(i, i + 16);
+    const got = await Promise.all(slice.map((id) => records.get(recordKeyOf(type.typeId, id))));
+    got.forEach((rec, j) => { if (rec && rec.tenantId === tenantId) out[i + j] = rec; });
+  }
+  return out.filter((r): r is EntityRecord => r !== null);
+}
+
+/** ADR 1110 — every tenant that has minted the SYSTEM type (a scan of the type rows,
+ *  for daily jobs only; never a request path). */
+export async function listSystemTypeTenants(typeName: string): Promise<string[]> {
+  return (await types.list()).filter((t) => t.system && t.name === typeName).map((t) => t.tenantId);
+}
+
+/** ADR 1110 — the number of rows of one SYSTEM type in the tenant, counted in the database. */
+export async function countSystemEntities(tenantId: string, typeName: string): Promise<number> {
+  const type = await getEntityType(tenantId, undefined, typeName);
+  if (!type?.system) return 0;
+  return records.countByPrefix(`${type.typeId}|`);
 }
 
 /** ADR 1052 D5 — every row of one ROOT-namespace USER type, through the schema-live
@@ -1656,7 +1713,7 @@ export async function countEntityNamespace(tenantId: string, projectId: string):
   if (!projectId) return 0;
   const ts = await namespaceTypes(tenantId, projectId);
   let n = ts.length;
-  for (const t of ts) n += (await records.listByPrefix(`${t.typeId}|`)).length;
+  for (const t of ts) n += await records.countByPrefix(`${t.typeId}|`);
   n += (await relationships.listForTenantIndexed(tenantId)).filter((r) => r.projectId === projectId).length;
   const tax = await listNamespaceTaxonomies(tenantId, projectId);
   return n + tax.taxonomies.length + tax.terms.length;
@@ -1716,3 +1773,7 @@ export async function purgeEntityNamespace(tenantId: string, projectId: string):
   }
   return n;
 }
+
+// ADR 1110 D1 — the declared-index module reads stored rows through the kernel's own
+// point read and pager (it must not import this module at runtime).
+configureSystemIndex({ readRow: getSystemEntity, scanRows: (tenantId, typeName) => iterateSystemEntities(tenantId, typeName), countRows: countSystemEntities });

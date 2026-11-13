@@ -3,8 +3,6 @@
  * Auto-discovered from this path as the `campaigns` i18n namespace.
  */
 export const messages = {
-  navLabel: 'Campaign Studio',
-  navHint: 'Briefs, campaigns, performance & intelligence in one place',
   eyebrow: 'Marketing',
   title: 'Campaign Studio',
   lede: 'Plan, run, measure and optimize marketing campaigns — briefs, orchestration, performance and intelligence in one place.',

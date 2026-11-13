@@ -17,9 +17,9 @@ const routes: FeatureRoute[] = [
     tier: 'admin', archetype: 'admin',
     nav: {
       group: 'Content',
-      label: 'Media', labelKey: 'mediaLabel',
+      labelKey: 'mediaLabel',
       icon: ImageIcon,
-      hint: 'Org asset library', hintKey: 'mediaHint',
+      hintKey: 'mediaHint',
       order: 10,
     },
   },

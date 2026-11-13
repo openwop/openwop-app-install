@@ -5,7 +5,8 @@
  */
 import { listChatSessions, type ChatSessionHeader } from '../../client/chatSessionsClient.js';
 import { listConnections, type Connection } from '../connections/connectionsClient.js';
-import { CHAT_SESSIONS_KEY, CONNECTIONS_KEY, sharedRead } from './sharedRead.js';
+import { listWorkflowSummaries, type WorkflowSummaryDTO } from '../../workflows/workflowsClient.js';
+import { CHAT_SESSIONS_KEY, CONNECTIONS_KEY, WORKFLOW_SUMMARIES_KEY, sharedRead } from './sharedRead.js';
 
 export function readChatSessions(): Promise<ChatSessionHeader[]> {
   return sharedRead(CHAT_SESSIONS_KEY, () => listChatSessions());
@@ -13,4 +14,8 @@ export function readChatSessions(): Promise<ChatSessionHeader[]> {
 
 export function readConnections(): Promise<Connection[]> {
   return sharedRead(CONNECTIONS_KEY, () => listConnections());
+}
+
+export function readWorkflowSummaries(): Promise<WorkflowSummaryDTO[]> {
+  return sharedRead(WORKFLOW_SUMMARIES_KEY, () => listWorkflowSummaries());
 }

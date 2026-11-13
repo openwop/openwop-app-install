@@ -42,7 +42,7 @@ import { selfApprovalBlockedCore } from '../../host/approvalSelfCheck.js';
 import { hasContentSectionResolver } from '../../host/contentDataSources.js';
 import { getNotificationEmitter } from '../../notifications/emitter.js';
 import { createLogger } from '../../observability/logger.js';
-import { assertNoPublishBlockers, deliverableSectionsForPage, getContentLanguageSettings, getPage, pageTranslationStatus, resolveSharedRefs, transitionPage, type Page } from './cmsService.js';
+import { assertNoPublishBlockers, assertResolvedPageFits, deliverableSectionsForPage, getContentLanguageSettings, getPage, pageTranslationStatus, resolveSharedRefs, transitionPage, type Page } from './cmsService.js';
 import { SYSTEM_SITE_ORG, SYSTEM_SITE_TENANT } from '../../host/systemSite.js';
 
 const log = createLogger('cms.contentApproval');
@@ -324,6 +324,8 @@ async function decideContentPublish(
     // but only after the row was resolved, then reopened. Checked here the row
     // simply stays pending.
     assertNoPublishBlockers(live);
+    // ADR 1112 Phase E — and the resolved size, for the same reason: refused here, the row stays pending.
+    await assertResolvedPageFits(live);
     // ADR 0859 D4 — separation of duties, BEFORE the CAS so a refusal consumes
     // nothing. Every decide lane (the page header, `/approvals/:id/claim`, `/reviews`,
     // the inbox) reaches this handler through `KIND_DISPATCH`, so this is the one place.

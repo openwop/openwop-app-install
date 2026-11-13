@@ -22,10 +22,10 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Planning',
-      label: 'Projects', labelKey: 'projectsLabel',
+      labelKey: 'projectsLabel',
       icon: FolderIcon,
       order: 38,
-      hint: 'Work containers — board, memory, workflows', hintKey: 'projectsHint',
+      hintKey: 'projectsHint',
     },
   },
   { path: '/projects/:projectId', element: <ProjectDetailPage />, tier: 'workspace' , archetype: 'detail',},

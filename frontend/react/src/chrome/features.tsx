@@ -32,7 +32,7 @@ import { assertSiteRouteContracts } from './siteRouteContract.js';
 import {
   MessageSquareIcon, BotIcon, WorkflowIcon, PlayIcon, ColumnsIcon, UserIcon,
   DatabaseIcon, FileTextIcon, PackageIcon,
-  BoxesIcon, ShieldIcon, TerminalIcon, SettingsIcon,
+  BoxesIcon, TerminalIcon, SettingsIcon, HistoryIcon, WrenchIcon,
   FlagIcon, SparklesIcon, ZapIcon, ActivityIcon,
 } from '../ui/icons/index.js';
 // ChatTab is lazy like every other route component, so the chat tree stays out
@@ -137,11 +137,11 @@ const CORE_FEATURES: FeatureRoute[] = [
   // '/chat' is chat's canonical URL.
   {
     path: '/chat', element: <ChatTab />, tier: 'workspace', archetype: 'immersive-chat', chrome: 'chat',
-    nav: { group: 'Pinned', label: 'Chat', labelKey: 'chatLabel', icon: MessageSquareIcon, hint: 'Conversational entry point', hintKey: 'chatHint', order: 10 },
+    nav: { group: 'Pinned', labelKey: 'chatLabel', icon: MessageSquareIcon, hintKey: 'chatHint', order: 10 },
   },
   {
     path: '/agents', element: <AgentDashboardPage />, tier: 'workspace', archetype: 'standard-index',
-    nav: { group: 'Pinned', label: 'Agents', labelKey: 'agentsLabel', icon: BotIcon, hint: 'Your digital workforce — named AI coworkers', hintKey: 'agentsHint', notUnder: ['/agents/templates'], order: 20 },
+    nav: { group: 'Pinned', labelKey: 'agentsLabel', icon: BotIcon, hintKey: 'agentsHint', notUnder: ['/agents/templates'], order: 20 },
   },
   {
     // ADR 0083 (§Amendment 2026-07-05) — the Library: the generated ASSETS the AI
@@ -151,7 +151,7 @@ const CORE_FEATURES: FeatureRoute[] = [
     // Moved to the admin Operations group (2026-06-21, user request) — it sits beside
     // Runs/Boards as the output side of run state inside the operator shell.
     path: '/library', element: <LibraryPage />, tier: 'admin', archetype: 'admin',
-    nav: { group: 'Operations', label: 'Library', labelKey: 'libraryLabel', icon: BoxesIcon, hint: 'Generated assets', hintKey: 'libraryHint', requiredScope: 'artifacts:read' },
+    nav: { group: 'Operations', labelKey: 'libraryLabel', icon: BoxesIcon, hintKey: 'libraryHint', requiredScope: 'artifacts:read' },
   },
   { path: '/agents/new', element: <AgentCreateWizard />, tier: 'workspace', archetype: 'narrow-form', chrome: 'narrow' },
   // Raw single-form authoring (also the ?fork= target) — kept for the
@@ -165,7 +165,7 @@ const CORE_FEATURES: FeatureRoute[] = [
   // not a day-to-day product surface. See the admin "Workforces" group below.
   {
     path: '/builder', element: <WorkflowsDashboard />, tier: 'workspace', archetype: 'standard-index',
-    nav: { group: 'Workspace', label: 'Workflows', labelKey: 'workflowsLabel', icon: WorkflowIcon, hint: 'Author + edit workflows', hintKey: 'workflowsHint', order: 10 },
+    nav: { group: 'Workspace', labelKey: 'workflowsLabel', icon: WorkflowIcon, hintKey: 'workflowsHint', order: 10 },
   },
   // The canvas is its own scroll/zoom region — full viewport, no centered column.
   { path: '/builder/:workflowId', element: <BuilderTab />, tier: 'workspace', archetype: 'canvas-editor', chrome: 'fullbleed' },
@@ -188,7 +188,7 @@ const CORE_FEATURES: FeatureRoute[] = [
   // ── admin (platform/console — one flat rail inside <AdminLayout>) ──────
   {
     path: '/admin', element: <AdminOverviewPage />, tier: 'admin', archetype: 'admin',
-    nav: { group: 'Admin', label: 'Overview', labelKey: 'overviewLabel', icon: SettingsIcon, hint: 'Admin home', hintKey: 'overviewHint', end: true },
+    nav: { group: 'Admin', labelKey: 'overviewLabel', icon: SettingsIcon, hintKey: 'overviewHint', end: true },
   },
   // ─ Operations: observe + drive run state (relocated from the workspace
   //   tier 2026-06-04 — the day-to-day view is /agents' ledger).
@@ -197,18 +197,18 @@ const CORE_FEATURES: FeatureRoute[] = [
   { path: '/mission', element: <Navigate to="/runs?tab=active" replace />, tier: 'admin' , archetype: 'admin',},
   {
     path: '/runs', element: <RunsIndexPage />, tier: 'admin', archetype: 'data-dense-index',
-    nav: { group: 'Operations', label: 'Runs', labelKey: 'runsLabel', icon: PlayIcon, hint: 'Execution history + detail', hintKey: 'runsHint', requiredScope: 'runs:read' },
+    nav: { group: 'Operations', labelKey: 'runsLabel', icon: PlayIcon, hintKey: 'runsHint', requiredScope: 'runs:read' },
   },
   {
     path: '/walkthroughs', element: <WalkthroughsPage />, tier: 'admin', archetype: 'admin',
-    nav: { group: 'Learning & support', label: 'Walkthroughs', labelKey: 'walkthroughsLabel', icon: FlagIcon, hint: 'Record + play walkthroughs', hintKey: 'walkthroughsHint', featureId: 'walkthroughs' },
+    nav: { group: 'Learning & support', labelKey: 'walkthroughsLabel', icon: FlagIcon, hintKey: 'walkthroughsHint', featureId: 'walkthroughs' },
   },
   {
     // ADR 0395 Phase D — the Operations hub console (health + DLQ + the admin
     // consoles). The `operations` toggle gates the surface; every cross-tenant
     // read + write action is superadmin-gated server-side regardless (D3).
     path: '/operations', element: <OperationsHubPage />, tier: 'admin', archetype: 'admin',
-    nav: { group: 'System operations', label: 'Ops Console', labelKey: 'opsHubLabel', icon: ActivityIcon, hint: 'System health, DLQ, webhook + admin consoles', hintKey: 'opsHubHint', featureId: 'operations', superadminOnly: true },
+    nav: { group: 'System operations', labelKey: 'opsHubLabel', icon: ActivityIcon, hintKey: 'opsHubHint', featureId: 'operations', superadminOnly: true },
   },
   {
     // ADR 0395 Phase A — the webhook-delivery health panel (linked from the hub).
@@ -218,7 +218,7 @@ const CORE_FEATURES: FeatureRoute[] = [
     // ADR 0396 — the consolidated personal-settings shell (composition only;
     // every panel's capability keeps its owning feature + toggle).
     path: '/settings', element: <SettingsPage />, tier: 'workspace', archetype: 'standard-index',
-    nav: { group: 'Workspace', label: 'Settings', labelKey: 'settingsShellLabel', icon: SettingsIcon, hint: 'Personal preferences — theme, accessibility, AI budget, privacy', hintKey: 'settingsShellHint', featureId: 'settings-shell' },
+    nav: { group: 'Workspace', labelKey: 'settingsShellLabel', icon: SettingsIcon, hintKey: 'settingsShellHint', order: 100, featureId: 'settings-shell' },
   },
   { path: '/runs/:runId', element: <RunDetailPage />, tier: 'admin' , archetype: 'admin',},
   { path: '/runs/:runId/audit', element: <RunAuditPage />, tier: 'admin' , archetype: 'admin',},
@@ -229,7 +229,7 @@ const CORE_FEATURES: FeatureRoute[] = [
   // here. Kept the canvas default chrome (the board scrolls horizontally).
   {
     path: '/boards', element: <KanbanPage />, tier: 'admin', archetype: 'admin',
-    nav: { group: 'Operations', label: 'Boards', labelKey: 'boardsLabel', icon: ColumnsIcon, hint: 'Kanban — card → run trigger', hintKey: 'boardsHint', requiredScope: 'workspace:read' },
+    nav: { group: 'Operations', labelKey: 'boardsLabel', icon: ColumnsIcon, hintKey: 'boardsHint', requiredScope: 'workspace:read' },
   },
   // Per-board URL (routing-correction wave, ADR 0058/0079 precedent): the bare
   // /boards redirects to the first (or personal) board, so it never greets
@@ -240,36 +240,36 @@ const CORE_FEATURES: FeatureRoute[] = [
   //   agents that compose them. Read-only governance surface, hence admin tier.
   {
     path: '/workforces', element: <WorkforcesGalleryPage />, tier: 'admin', archetype: 'admin',
-    nav: { group: 'Workforces', label: 'Workforces', labelKey: 'workforcesLabel', icon: BoxesIcon, hint: 'Governed agent clusters — purpose, telemetry, autonomy', hintKey: 'workforcesHint' },
+    nav: { group: 'Workforces', labelKey: 'workforcesLabel', icon: BoxesIcon, hintKey: 'workforcesHint' },
   },
   { path: '/workforces/:workforceId', element: <WorkforceOverviewPage />, tier: 'admin' , archetype: 'admin',},
   // Workforce migration journey wizard (EP1 MG-0) — guided 6-stage onboarding.
   { path: '/workforces/:workforceId/migrate', element: <MigrationWizardPage />, tier: 'admin', archetype: 'admin', chrome: 'narrow' },
   {
     path: '/agents/templates', element: <AgentsPage />, tier: 'admin', archetype: 'admin',
-    nav: { group: 'Workforces', label: 'Agent templates', labelKey: 'agentTemplatesLabel', icon: PackageIcon, hint: 'Installed manifest agents + packs', hintKey: 'agentTemplatesHint' },
+    nav: { group: 'Workforces', labelKey: 'agentTemplatesLabel', icon: PackageIcon, hintKey: 'agentTemplatesHint' },
   },
   { path: '/agents/templates/:agentId', element: <AgentDetailPage />, tier: 'admin', archetype: 'admin', chrome: 'narrow' },
   {
     path: '/roster', element: <RosterPage />, tier: 'admin', archetype: 'admin',
-    nav: { group: 'Workforces', label: 'Org chart', labelKey: 'orgChartLabel', icon: UserIcon, hint: 'Roster + org-chart editor (descriptive only — confers no authority)', hintKey: 'orgChartHint' },
+    nav: { group: 'Workforces', labelKey: 'orgChartLabel', icon: UserIcon, hintKey: 'orgChartHint' },
   },
   // ─ Platform: inspection + tooling surfaces.
   {
     path: '/prompts', element: <PromptLibraryPage />, tier: 'admin', archetype: 'admin',
-    nav: { group: 'AI & automation', label: 'Prompts', labelKey: 'promptsLabel', icon: FileTextIcon, hint: 'Reusable templates + variables', hintKey: 'promptsHint' },
+    nav: { group: 'AI & automation', labelKey: 'promptsLabel', icon: FileTextIcon, hintKey: 'promptsHint' },
   },
   {
     path: '/memory', element: <MemoryInspectorPage />, tier: 'admin', archetype: 'admin',
-    nav: { group: 'AI & automation', label: 'Memory', labelKey: 'memoryLabel', icon: DatabaseIcon, hint: 'Summaries of completed runs', hintKey: 'memoryHint' },
+    nav: { group: 'AI & automation', labelKey: 'memoryLabel', icon: DatabaseIcon, hintKey: 'memoryHint' },
   },
   {
     path: '/capabilities', element: <CapabilitiesPanel />, tier: 'admin', archetype: 'admin',
-    nav: { group: 'Governance & security', label: 'Capabilities', labelKey: 'capabilitiesLabel', icon: ShieldIcon, hint: 'What this host advertises', hintKey: 'capabilitiesHint' },
+    nav: { group: 'Governance & security', labelKey: 'capabilitiesLabel', icon: ZapIcon, hintKey: 'capabilitiesHint' },
   },
   {
     path: '/cli', element: <CliPage />, tier: 'admin', archetype: 'admin', chrome: 'narrow',
-    nav: { group: 'Developer', label: 'CLI', labelKey: 'cliLabel', icon: TerminalIcon, hint: 'In-app CLI quickstart + catalog', hintKey: 'cliHint' },
+    nav: { group: 'Developer', labelKey: 'cliLabel', icon: TerminalIcon, hintKey: 'cliHint' },
   },
   // `/test` (Manual tests) moved to features/manual-tests/ (ADR 0183) — registered via
   // FRONTEND_FEATURES in features/registry.ts, no longer in the core manifest.
@@ -302,12 +302,12 @@ const CORE_FEATURES: FeatureRoute[] = [
   { path: '/access/api-keys', element: <ApiKeysPage />, tier: 'workspace', archetype: 'admin', hubTab: { group: 'credentials', order: 5 } },
   {
     path: '/feature-toggles', element: <FeatureTogglePanel />, tier: 'admin', archetype: 'admin',
-    nav: { group: 'Governance & security', label: 'Feature toggles', labelKey: 'featureTogglesLabel', icon: FlagIcon, hint: 'On / off / beta + multivariant traffic-splitting', hintKey: 'featureTogglesHint', superadminOnly: true },
+    nav: { group: 'Governance & security', labelKey: 'featureTogglesLabel', icon: FlagIcon, hintKey: 'featureTogglesHint', superadminOnly: true },
   },
   // ADR 0104 — superadmin editor for an agent's offered-tool allowlist (override the pack default).
   {
     path: '/agent-allowlists', element: <AgentAllowlistPanel />, tier: 'admin', archetype: 'admin',
-    nav: { group: 'Governance & security', label: 'Agent tool allowlists', labelKey: 'agentAllowlistLabel', icon: ShieldIcon, hint: 'Grant or revoke an agent’s tools without editing a pack', hintKey: 'agentAllowlistHint', superadminOnly: true },
+    nav: { group: 'Governance & security', labelKey: 'agentAllowlistLabel', icon: WrenchIcon, hintKey: 'agentAllowlistHint', superadminOnly: true },
   },
   // ADR 0027 — the public front page collapsed into the CMS Page Builder: a super
   // admin edits it as the "Front page" scope inside CMS (/cms). No standalone nav
@@ -315,14 +315,14 @@ const CORE_FEATURES: FeatureRoute[] = [
   // Publishing nav lands in this 'Content' group, from their feature packages.
   {
     path: '/example-data', element: <ExampleDataPage />, tier: 'admin', archetype: 'admin', chrome: 'narrow',
-    nav: { group: 'Data & knowledge', label: 'Example data', labelKey: 'exampleDataLabel', icon: DatabaseIcon, hint: 'Re-seed the built-in example roster', hintKey: 'exampleDataHint' },
+    nav: { group: 'Data & knowledge', labelKey: 'exampleDataLabel', icon: BoxesIcon, hintKey: 'exampleDataHint' },
   },
   // Deferred Phase B.2 (ADM-7) — the ADR 0028 audit READ view as a first-class
   // admin page (backend tenant-scopes fail-closed; superadmin gate rendered as
   // an honest message state).
   {
     path: '/audit-log', element: <AuditLogPage />, tier: 'admin', archetype: 'admin', chrome: 'narrow',
-    nav: { group: 'Governance & security', label: 'Audit log', labelKey: 'auditLogLabel', icon: ShieldIcon, hint: 'Every audited action, tenant-scoped', hintKey: 'auditLogHint', order: 93, superadminOnly: true },
+    nav: { group: 'Governance & security', labelKey: 'auditLogLabel', icon: HistoryIcon, hintKey: 'auditLogHint', order: 93, superadminOnly: true },
   },
   // ADR 0208 §1 — the host-event → workflow binding registry's admin UI (it
   // shipped API-only). Host-level tenant automation (same trust tier as
@@ -330,30 +330,30 @@ const CORE_FEATURES: FeatureRoute[] = [
   // so it's declared directly here like Audit log / Example data.
   {
     path: '/event-bindings', element: <EventBindingsPage />, tier: 'admin', archetype: 'admin', chrome: 'narrow',
-    nav: { group: 'AI & automation', label: 'Event bindings', labelKey: 'eventBindingsLabel', icon: ZapIcon, hint: 'Start a workflow when a record changes', hintKey: 'eventBindingsHint', order: 94 },
+    nav: { group: 'AI & automation', labelKey: 'eventBindingsLabel', icon: ZapIcon, hintKey: 'eventBindingsHint', order: 94 },
   },
   {
     // ADR 0318 — host-wide superadmin control over the ADR 0313 autonomous work
     // loop: master on/off, an auto-disabling run window, cadence, run budget.
     path: '/heartbeat-settings', element: <HeartbeatSettingsPage />, tier: 'admin', archetype: 'admin', chrome: 'narrow',
-    nav: { group: 'AI & automation', label: 'Heartbeat', labelKey: 'heartbeatLabel', icon: ActivityIcon, hint: 'Autonomous work-loop cadence + on/off', hintKey: 'heartbeatHint', order: 95, superadminOnly: true },
+    nav: { group: 'AI & automation', labelKey: 'heartbeatLabel', icon: ActivityIcon, hintKey: 'heartbeatHint', order: 95, superadminOnly: true },
   },
   {
     // ADR 0990 — host-wide superadmin choice of the free tier's provider and model.
     path: '/free-tier-settings', element: <FreeTierSettingsPage />, tier: 'admin', archetype: 'admin', chrome: 'narrow',
-    nav: { group: 'AI & automation', label: 'Free tier', labelKey: 'freeTierLabel', icon: SparklesIcon, hint: 'Which provider and model the free tier runs on', hintKey: 'freeTierHint', order: 96, superadminOnly: true },
+    nav: { group: 'AI & automation', labelKey: 'freeTierLabel', icon: SparklesIcon, hintKey: 'freeTierHint', order: 96, superadminOnly: true },
   },
   // ADR 0742 — superadmin view of the Cloud Run posture (warm / cold), read
   // live from Cloud Run; change requests are audited and applied by an operator.
   {
     path: '/runtime-posture', element: <RuntimePosturePage />, tier: 'admin', archetype: 'admin', chrome: 'narrow',
-    nav: { group: 'Deployment & customization', label: 'Runtime posture', labelKey: 'runtimePostureLabel', icon: ActivityIcon, hint: 'Warm or cold on Cloud Run, read live', hintKey: 'runtimePostureHint', order: 61, superadminOnly: true },
+    nav: { group: 'Deployment & customization', labelKey: 'runtimePostureLabel', icon: ActivityIcon, hintKey: 'runtimePostureHint', order: 61, superadminOnly: true },
   },
   // ADR 0170 — the runtime, superadmin-managed white-label app identity (logo /
   // colors / fonts / name / theme). Host-level authority; applies live, no rebuild.
   {
     path: '/appearance', element: <AppearancePanel />, tier: 'admin', archetype: 'admin', chrome: 'narrow',
-    nav: { group: 'Deployment & customization', label: 'Appearance', labelKey: 'appearanceLabel', icon: SparklesIcon, hint: 'Logo, colors, fonts & name for this installation', hintKey: 'appearanceHint', order: 60, superadminOnly: true },
+    nav: { group: 'Deployment & customization', labelKey: 'appearanceLabel', icon: SparklesIcon, hintKey: 'appearanceHint', order: 60, superadminOnly: true },
   },
 ];
 

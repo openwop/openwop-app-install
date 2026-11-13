@@ -22,6 +22,7 @@ import { listRoster, type RosterEntry } from '../agents/rosterClient.js';
 import { roleThemeForAgentId } from '../agents/roleTheme.js';
 import { ChevronDownIcon, LockIcon } from '../ui/icons/index.js';
 import { navItemIsActive, type NavItem } from './features.js';
+import { navHint, navLabel } from './navText.js';
 
 // Per-user, per-device: whether the pinned-agents sub-menu is expanded.
 // Open by default (absent key → expanded); only an explicit '0' collapses it.
@@ -97,10 +98,10 @@ export function AgentsNavItem({ item, badge, locked = false }: { item: NavItem; 
           {...(!locked && item.end !== undefined ? { end: item.end } : {})}
           className={`app-nav-link${active && !locked ? ' is-active' : ''}`}
           {...(active && !locked ? { 'aria-current': 'page' as const } : {})}
-          title={locked ? t('navLocked') : item.hintKey ? tn(item.hintKey, { defaultValue: item.hint }) : item.hint}
+          title={locked ? t('navLocked') : navHint(item, tn)}
         >
           <span className="app-nav-icon" aria-hidden><Icon size={16} /></span>
-          <span className="app-nav-label">{item.labelKey ? tn(item.labelKey, { defaultValue: item.label }) : item.label}</span>
+          <span className="app-nav-label">{navLabel(item, tn)}</span>
           {locked ? <span role="img" className="app-nav-lock" aria-label={t('navLocked')}><LockIcon size={13} /></span>
             : badge ? <span className="nav-badge nav-badge--beta">{badge}</span> : null}
         </NavLink>

@@ -686,10 +686,15 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
       config, send, reset, cancel, emitSystem, runWorkflowMention, activeAgents, agentEntries,
       baseSendOptions: getSubmitExtras,
       onAgentActivated: (agentId) => { void sessionsCollection.addParticipant(session.id, `agent:${agentId}`); },
+      // CC-CHAT-4 — a deep-link-scoped agent becomes a member on its first turn (once),
+      // so a reopened conversation lists it; it is re-added, not selected (ADR 0140).
+      onAgentRouted: (agentId) => {
+        if (!(activeConversation?.participants ?? []).some((p) => p.subjectRef === `agent:${agentId}`)) void sessionsCollection.addParticipant(session.id, `agent:${agentId}`);
+      },
     }, [conveneInterceptor, boardInterceptor]);
   approvalContinueRef.current = (text: string) => { void onUserSubmit(text); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [send, cancel, reset, emitSystem, config, getSubmitExtras, runWorkflowMention, activeAgents.currentAgentId, activeAgents.activateAgent, agentEntries, session.id, sessionsCollection.addParticipant, conveneInterceptor, boardInterceptor, activeConversation?.type, loadSessionFromBackend, sessionsCollection.markRead, sessionsCollection.refresh, t]);
+  }, [send, cancel, reset, emitSystem, config, getSubmitExtras, runWorkflowMention, activeAgents.currentAgentId, activeAgents.activateAgent, agentEntries, session.id, sessionsCollection.addParticipant, conveneInterceptor, boardInterceptor, activeConversation?.type, activeConversation?.participants, loadSessionFromBackend, sessionsCollection.markRead, sessionsCollection.refresh, t]);
 
   // ADR 0140 follow-on — the right-docked members pane (parity with the deck; the
   // active conversation's roster lives in a RIGHT pane, not the left rail). Default

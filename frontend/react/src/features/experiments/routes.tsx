@@ -15,7 +15,7 @@ const routes: FeatureRoute[] = [
     path: '/experiments',
     element: <ExperimentsPage />,
     tier: 'workspace', archetype: 'standard-index',
-    nav: { group: 'Marketing', label: 'Experiments', labelKey: 'experimentsLabel', icon: FlaskIcon, hint: 'Pre-registered A/B tests', hintKey: 'experimentsHint', order: 64, featureId: 'experiments' },
+    nav: { group: 'Marketing', labelKey: 'experimentsLabel', icon: FlaskIcon, hintKey: 'experimentsHint', order: 64, featureId: 'experiments' },
   },
   { path: '/experiments/:experimentId', element: <ExperimentDetailPage />, tier: 'workspace', archetype: 'detail' },
 ];

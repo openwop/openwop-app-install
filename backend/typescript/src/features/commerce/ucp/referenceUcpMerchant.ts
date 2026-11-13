@@ -23,7 +23,7 @@
  * @see docs/adr/0260-reference-ucp-merchant.md, docs/adr/0258-ucp-buyer-mcp-transport.md
  */
 import { OpenwopError } from '../../../types.js';
-import { createOrder, createProduct, getOrder, listProducts, orderChargeTotal } from '../commerceService.js';
+import { collectCatalog, createOrder, createProduct, getOrder, listProductsPage, orderChargeTotal } from '../commerceService.js';
 import { toStripeMinorUnits } from '../../billing/stripeApi.js';
 
 /** The fixed namespace the reference merchant's catalog + orders live under (a demo tenant, so
@@ -46,7 +46,7 @@ const REF_CATALOG: { name: string; description: string; price: number; currency:
  *  Returns the count newly created; a re-run is a no-op. Written through `commerceService` so the
  *  merchant has REAL product ids the buyer's checkout can order against. */
 export async function ensureReferenceCatalog(): Promise<number> {
-  const existing = await listProducts(REF_MERCHANT_TENANT, REF_MERCHANT_ORG);
+  const existing = await collectCatalog(REF_MERCHANT_TENANT, REF_MERCHANT_ORG, (p) => p.createdBy === REF_MERCHANT_ACTOR);
   const have = new Set(existing.filter((p) => p.createdBy === REF_MERCHANT_ACTOR).map((p) => p.name));
   let created = 0;
   for (const item of REF_CATALOG) {
@@ -84,7 +84,7 @@ export async function handleUcpMerchantRpc(body: unknown): Promise<JsonRpcRes> {
     if (tool === 'ucp.discover') return { jsonrpc: '2.0', id, result: DISCOVERY };
     if (tool === 'ucp.search') {
       const q = typeof args.q === 'string' ? args.q : undefined;
-      const products = (await listProducts(REF_MERCHANT_TENANT, REF_MERCHANT_ORG, q))
+      const products = (await listProductsPage(REF_MERCHANT_TENANT, REF_MERCHANT_ORG, { q, limit: 50 })).products
         .map((p) => ({ productId: p.productId, name: p.name, price: p.price, currency: p.currency }));
       return { jsonrpc: '2.0', id, result: { products } };
     }

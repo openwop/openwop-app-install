@@ -84,7 +84,7 @@ beforeEach(() => {
   // `?? products.length` fallbacks turned that into the original defect. The client
   // types are required now, so a wire drop is a compile error; this keeps the fixture
   // honest about the shape.
-  search.mockResolvedValue({ products: products(3), facets: [], total: 3, truncated: false, hiddenByRules: 0 });
+  search.mockResolvedValue({ products: products(3), facets: [], total: 3, truncated: false, hiddenByRules: 0, candidatesTruncated: false });
 });
 afterEach(cleanup);
 
@@ -99,7 +99,7 @@ describe('PD-G1: preview prices are formatted money', () => {
 
 describe('PD-G2: truncation is disclosed', () => {
   it('says how many of how many when the list is capped', async () => {
-    search.mockResolvedValue({ products: products(40), facets: [], total: 40, truncated: false, hiddenByRules: 0 });
+    search.mockResolvedValue({ products: products(40), facets: [], total: 40, truncated: false, hiddenByRules: 0, candidatesTruncated: false });
     await runSearch();
     expect(await screen.findByText('Showing the first 12 of 40 matches.')).toBeTruthy();
     // …and the list really stopped at 12 (PRODUCT_CAP): rows 0–11, not row 12.
@@ -110,7 +110,7 @@ describe('PD-G2: truncation is disclosed', () => {
   });
 
   it('says NOTHING when the whole result set fits', async () => {
-    search.mockResolvedValue({ products: products(5), facets: [], total: 5, truncated: false, hiddenByRules: 0 });
+    search.mockResolvedValue({ products: products(5), facets: [], total: 5, truncated: false, hiddenByRules: 0, candidatesTruncated: false });
     await runSearch();
     // Settle on the LAST row first — absence before the result renders proves nothing.
     expect(await screen.findByText('Product 4 — $1,299.50')).toBeTruthy();
@@ -118,7 +118,7 @@ describe('PD-G2: truncation is disclosed', () => {
   });
 
   it('discloses the per-facet cap when a facet has more values', async () => {
-    search.mockResolvedValue({ products: products(1), facets: [facet(9)], total: 1, truncated: false, hiddenByRules: 0 });
+    search.mockResolvedValue({ products: products(1), facets: [facet(9)], total: 1, truncated: false, hiddenByRules: 0, candidatesTruncated: false });
     await runSearch();
     expect(await screen.findByText('Top 3 of 9 values per facet.')).toBeTruthy(); // review M2 — say of HOW MANY
     // …and the facet really stopped at 3 (FACET_CAP): cat0–cat2 shown, cat3 not.
@@ -128,7 +128,7 @@ describe('PD-G2: truncation is disclosed', () => {
   });
 
   it('says nothing about facets when every facet fits', async () => {
-    search.mockResolvedValue({ products: products(1), facets: [facet(2)], total: 1, truncated: false, hiddenByRules: 0 });
+    search.mockResolvedValue({ products: products(1), facets: [facet(2)], total: 1, truncated: false, hiddenByRules: 0, candidatesTruncated: false });
     await runSearch();
     // Settle on the rendered facet chips first, then the (real-copy) line is absent.
     expect(await screen.findByText('Category: cat1 (1,001)')).toBeTruthy();
@@ -182,7 +182,7 @@ describe('PD-G3: the rules table has a loading and an empty state', () => {
 
   it('states the real match count, not the page cap', async () => {
     // The server caps the page at 48 and reports the true match count separately.
-    search.mockResolvedValue({ products: products(48), facets: [], total: 5000, truncated: true, hiddenByRules: 0 });
+    search.mockResolvedValue({ products: products(48), facets: [], total: 5000, truncated: true, hiddenByRules: 0, candidatesTruncated: false });
     await runSearch();
     // "Showing the first {{shown}} of {{total}}" — the total must be 5,000, not 48.
     const line = await screen.findByText(/first 12 of/i);
@@ -190,22 +190,29 @@ describe('PD-G3: the rules table has a loading and an empty state', () => {
     expect(line.textContent).not.toContain('48');
   });
 
+  it('ADR 1110 P2 — a count from a bounded candidate read is a floor, and says so', async () => {
+    search.mockResolvedValue({ products: products(48), facets: [], total: 1000, truncated: true, hiddenByRules: 0, candidatesTruncated: true });
+    await runSearch();
+    const line = await screen.findByText(/first 12 of more than/i);
+    expect(line.textContent).toContain('1,000');
+  });
+
   it('says so even when hide rules removed EVERY match (review M1)', async () => {
     // The line used to live inside the non-empty branch, so the one case where "where
     // did they go?" most needs answering rendered a bare "No products matched."
-    search.mockResolvedValue({ products: [], facets: [], total: 0, truncated: false, hiddenByRules: 4 });
+    search.mockResolvedValue({ products: [], facets: [], total: 0, truncated: false, hiddenByRules: 4, candidatesTruncated: false });
     await runSearch();
     expect(await screen.findByText(/hidden from this preview/i)).toBeTruthy();
   });
 
   it('says when hide rules removed products from the preview', async () => {
-    search.mockResolvedValue({ products: products(3), facets: [], total: 3, truncated: false, hiddenByRules: 7 });
+    search.mockResolvedValue({ products: products(3), facets: [], total: 3, truncated: false, hiddenByRules: 7, candidatesTruncated: false });
     await runSearch();
     expect(await screen.findByText(/hidden from this preview/i)).toBeTruthy();
   });
 
   it('stays quiet when nothing was hidden (the disclosure must not become noise)', async () => {
-    search.mockResolvedValue({ products: products(3), facets: [], total: 3, truncated: false, hiddenByRules: 0 });
+    search.mockResolvedValue({ products: products(3), facets: [], total: 3, truncated: false, hiddenByRules: 0, candidatesTruncated: false });
     await runSearch();
     await screen.findByText(/Product 0/);
     expect(screen.queryByText(/hidden from this preview/i)).toBeNull();
@@ -214,7 +221,7 @@ describe('PD-G3: the rules table has a loading and an empty state', () => {
 
 describe('R3 PD2-8 — a failed search never presents the previous query\'s results', () => {
   it('failure clears the panel + shows the persistent failed state; a successful retry restores results and clears it', async () => {
-    search.mockResolvedValue({ products: products(2), facets: [], total: 2, truncated: false, hiddenByRules: 0 });
+    search.mockResolvedValue({ products: products(2), facets: [], total: 2, truncated: false, hiddenByRules: 0, candidatesTruncated: false });
     await runSearch();
     await screen.findByText(/Product 0/);
 
@@ -225,7 +232,7 @@ describe('R3 PD2-8 — a failed search never presents the previous query\'s resu
     expect(screen.getByText(/not results for your query/i)).toBeTruthy();
 
     // Retry succeeds → results return, the failure clears.
-    search.mockResolvedValueOnce({ products: products(1), facets: [], total: 1, truncated: false, hiddenByRules: 0 });
+    search.mockResolvedValueOnce({ products: products(1), facets: [], total: 1, truncated: false, hiddenByRules: 0, candidatesTruncated: false });
     // Scope to the failure notice — the page has other retry affordances.
     const callsBefore = search.mock.calls.length;
     const failureNotice = screen.getByText(/not results for your query/i).closest('div');

@@ -24,6 +24,7 @@ import type {
   InterruptRecord,
   NotificationRecord,
   NotificationStatus,
+  RequestResolution,
   PushSubscriptionRecord,
   RunRecord,
   UserAgentRecord,
@@ -1403,6 +1404,20 @@ export interface Storage {
    *  (their addressed rows + tenant broadcasts) are cleared, never another
    *  member's addressed items. */
   markAllNotificationsRead(tenantId: string, now: string, recipientUserId?: string, recipientRoles?: readonly string[]): Promise<number>;
+  /**
+   * ADR 1114 (#5868) — retire the requests a finished step leaves behind. Every
+   * non-archived row of the tenant that names this run AND an interrupt (only
+   * `interruptId` when given) and carries no `metadata.resolution` yet gets the
+   * resolution stamped, and moves `unread` → `read`. Rows without an
+   * `interrupt_id` (run failed/completed notices) are never touched. Returns the
+   * count stamped. Idempotent: a second call finds nothing unstamped.
+   */
+  resolveRequestNotifications(input: {
+    tenantId: string;
+    runId: string;
+    interruptId?: string;
+    resolution: RequestResolution;
+  }): Promise<number>;
   deleteNotification(notificationId: string): Promise<boolean>;
   /** Drop every notification owned by a tenant (used by account-delete). */
   deleteAllTenantNotifications(tenantId: string): Promise<number>;

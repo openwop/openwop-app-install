@@ -59,8 +59,21 @@ export const ACTION_NEEDED_TYPES = new Set<NotificationType>([
   'workflow.input_needed',
 ]);
 
-export function isActionNeeded(n: Notification): boolean {
-  return ACTION_NEEDED_TYPES.has(n.type);
+/** ADR 1109 D4 — the project a request is about, as the host wrote it
+ *  (`metadata.subject`, from a project schedule's owner). */
+export function subjectProjectId(n: Notification): string | undefined {
+  const s = n.metadata?.subject as { kind?: unknown; id?: unknown } | undefined;
+  return s?.kind === 'project' && typeof s.id === 'string' && s.id ? s.id : undefined;
+}
+
+const NO_FEATURE_TYPES: ReadonlySet<string> = new Set();
+
+/** ADR 1109 D5 — `featureTypes` are the types the composed features declare
+ *  (`featureActionNeededTypes()`), so an adopter's own type can need action too. */
+export function isActionNeeded(n: Notification, featureTypes: ReadonlySet<string> = NO_FEATURE_TYPES): boolean {
+  // ADR 1114 — a request whose step is over needs nothing, whatever its type.
+  if (n.metadata?.resolution) return false;
+  return ACTION_NEEDED_TYPES.has(n.type) || featureTypes.has(n.type);
 }
 
 // ─── Notification preferences (items 5 + 6) ────────────────────────

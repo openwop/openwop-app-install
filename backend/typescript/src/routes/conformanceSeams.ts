@@ -127,6 +127,10 @@ export const SEAM_OPERATIONS: readonly SeamOperation[] = [
   // through the production host-event fan-out. Not floor: its scenario records
   // `inapplicable` when `hostEvents` is not advertised (OPENWOP_HOST_EVENTS_V2 off).
   { operationId: 'emitHostEvent', method: 'post', v2Path: '/conformance/seams/sample/host-events/emit', served: true, floor: false },
+  // RFC 0259 §C.1 (ADR 1059 P2). Served by `routes/interruptTokenSeam.ts`: the
+  // stored resume token, plus the approval email's own signed voter for a
+  // session-lane caller. Not floor: its scenario gates on `interrupt.resolvedVia`.
+  { operationId: 'readInterruptToken', method: 'post', v2Path: '/conformance/seams/sample/interrupts/token', served: true, floor: false },
   // Suite 2.45.23 (RFC 0237 purpose propagation over A2A) — declared, NOT served:
   // this host does not advertise `purposePropagation`, so its scenario records
   // inapplicable. Listed so the manifest↔yaml parity holds; the alias answers 404
@@ -140,11 +144,6 @@ export const SEAM_OPERATIONS: readonly SeamOperation[] = [
   // `permittedPurposes` is ignored: `purposePropagation` is not advertised, so
   // its scenario stays inapplicable on the advert, not on a 404.
   { operationId: 'invokeA2aPeer', method: 'post', v2Path: '/conformance/seams/sample/a2a/invoke', served: true, floor: false },
-  // Suite 2.46.44 (RFC 0259 §Conformance) — declared, NOT served: this host does
-  // not yet record `resolvedVia` or advertise `interrupt.resolvedVia`, so the
-  // `v2-interrupt-resolved-via` legs record inapplicable. Listed so the
-  // manifest↔yaml parity holds; the alias answers 404. #5585 serves it.
-  { operationId: 'readInterruptToken', method: 'post', v2Path: '/conformance/seams/sample/interrupts/token', served: false, floor: false },
 ];
 
 /** `served: false` operations with their path compiled once — the alias runs on

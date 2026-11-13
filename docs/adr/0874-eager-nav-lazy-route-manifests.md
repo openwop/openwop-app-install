@@ -1,6 +1,6 @@
 # ADR 0874 — Entry-chunk headroom: shrink the preload plumbing, keep one route manifest
 
-Status: implemented (P1 shipped; P2 measured and REJECTED by its own W-NAV gate — see D3's correction)
+Status: implemented (P1 shipped; P2 measured and REJECTED by its own W-NAV gate — see D3's correction; P3 shipped 2026-11-13, nav copy has one source)
 
 Composes ADR 0001 (feature-first packages; `FrontendFeature.routes`), ADR 0139
 (configurable navigation; `FEATURES` is the one route + nav manifest), ADR 0144/0145
@@ -321,6 +321,7 @@ endpoint or run-event change.
 |---|---|---|---|
 | P1 (D2+D4) | function `chunkFileNames` + shared name-keyed list; lower the ceiling | budget script still finds every named override, and fails if a named key matches no chunk; `npm run build` green | ≈ 127.1 kB, ceiling 129 |
 | P2 (D3+D4) | `modulePreload: false` (or the `resolveDependencies` middle option) | W-STALE (sabotage-red), W-NAV numbers recorded here | ≈ 119.7 kB, ceiling 121 |
+| P3 (D4) | a nav entry's words have ONE source: a `nav` catalog key, or an English literal for a key-less adopter entry, never both; every surface reads them through `chrome/navText.ts` | `navCopyRatchet.test.ts` (sabotage-red); `npm run build` green | ≈ 126.6 kB, ceiling kept at 129 (user decision) |
 | Follow-ons | lazy auth UI; post-session notifications connect | per-split before/after | measured per PR |
 
 ## Open questions
@@ -343,12 +344,34 @@ endpoint or run-event change.
    notifications and auth follow-ons, which become the largest remaining first-party
    entry buckets?
 
+## Correction (2026-11-13, P3)
+
+The opening premise held that the manifest's weight is route structure. A build grep
+for one hint ("What this host advertises") found it three times: in the entry as the
+manifest literal, in the eager `i18n` chunk as the `nav` catalog value, and in one
+async chunk. Every reader already preferred the key. So 198 literals were a second
+source of the same words, and about 2.4 kB of the entry. P3 removes them. Nine
+entries (`/webinars`, `/ai-video`, `/campaign-studio`, six `/job-search/*`) carried
+keys that live in their feature's own catalog, which the `nav` namespace never reads,
+so those menu entries have always shown English in every language. P3 keeps their
+behaviour (literal only, dead key dropped). Translating them means adding the keys
+through `FrontendFeature.navMessages`, a follow-up.
+
+**Ceiling — user decision over D4 (2026-11-13).** D4 would set the ceiling to the measured
+entry plus 1 kB, rounded up: 128 kB. Asked whether the budget should move, the user chose
+to "raise the budget a little" (decided in the release manager's session, openwop-app-14,
+and relayed to this one). P3's ~2.4 kB is that raise: the ceiling stays at 129 kB, so the
+reclaimed bytes are headroom rather than a lower number. This is a recorded exception to
+D4, not a change to it; the next phase that reclaims bytes applies D4 again unless the user
+says otherwise. No route-manifest-split ADR for now (same decision).
+
 ## Implementation record
 
 | Phase | What landed | Measured | Witness |
 |---|---|---|---|
 | P1 (D2+D4) | `scripts/chunkNames.mjs` (the one name-keyed list) → `vite.config.ts` `chunkFileNames`; `check-bundle-budget.mjs` imports the list, refuses an override key missing from it, and refuses a key that matches no built chunk (default distribution only). `ENTRY_GZIP_BUDGET` 132 → **129 kB**. | Entry **127.1 kB** gzip on `ecf3dbd70` + P1 (E6 predicted 127.1). 1,036 async chunks now `c-[hash].js`; `index`, `i18n`, `i18n-<locale>`, `firebase`, `katex`, `markdown` keep their names. | `scripts/__tests__/chunkNames.test.ts` runs the real budget gate on fixture `dist/` trees; disabling the dead-override check turns 2 of its 6 tests red. `npm run build` green. |
 | P2 (D3+D4) | **Rejected, not shipped.** `modulePreload: false` built and measured; entry 119.9 kB, but +1 RTT per first route visit (D3 correction). | W-NAV: +558–625 ms (Fast 3G), +170–182 ms (Fast 4G) median. | W-STALE kept as a standing guard (`e2e/staleChunk.built.ts`, `playwright.built.config.ts`, `npm run test:e2e:built`), sabotage-red. |
+| P3 (D4) | 198 duplicate literals dropped from `chrome/features.tsx` and 82 `features/*/routes.tsx` (90 entries keep only their keys; 9 entries whose keys resolved nowhere keep only their literal). `chrome/navText.ts` `navLabel`/`navHint` replace 22 hand-written `t(key, { defaultValue: literal })` reads (Sidebar, AdminLayout, SiteShell, PinnedAgentsNav, AdminPageHeader, CommandPalette, AdminOverviewPage, MenuSettingsPage, four hub pages). `FeatureNav.label`/`hint` optional. `ENTRY_GZIP_BUDGET` **kept at 129 kB** (user decision, below). | Entry **126.6 kB** gzip on `7b9bb8138` + P3 (was 129.0, 9 B under). | `chrome/__tests__/navCopyRatchet.test.ts`: literal beside a key, a key the composed `nav` namespace lacks, and a hand-written key read are each red (two run as sabotages). |
 
 **Open question 2, re-run for P1 on `ecf3dbd70`:** still no consumer of async chunk
 name prefixes. The ADR 0873 service worker (`scripts/gen-service-worker.mjs`, merged

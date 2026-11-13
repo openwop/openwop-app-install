@@ -12,7 +12,7 @@
  * structured denies (the documents.get posture), never silent-empty.
  */
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveFeatureAccess } from '../../host/agentToolKit.js';
 import { resolveIdentityWithAccess } from './identityService.js';
 
 export const CDP_IDENTITY_RESOLVE_TOOL_ID = 'openwop:cdp.identity.resolve';
@@ -45,7 +45,7 @@ export function registerCdpAgentTools(): void {
       // feature has no surface) — SAME subject shape as the route's subjectOf
       // (tenant + user when present), so a user-bucketed rollout can't
       // disagree between route and tool (grade-pass, 2026-07-15).
-      const assignment = await resolveOne('cdp', { tenantId: scope.tenantId, ...(scope.actingUserId ? { userId: scope.actingUserId } : {}) }).catch(() => null);
+      const assignment = await resolveFeatureAccess('cdp', scope);
       if (!assignment?.enabled) {
         return toolError('feature_disabled', 'The CDP feature is not enabled for this workspace.');
       }

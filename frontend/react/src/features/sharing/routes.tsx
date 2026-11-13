@@ -18,9 +18,9 @@ const routes: FeatureRoute[] = [
     tier: 'admin', archetype: 'admin',
     nav: {
       group: 'Content',
-      label: 'Sharing', labelKey: 'sharingLabel',
+      labelKey: 'sharingLabel',
       icon: LinkIcon,
-      hint: 'Public share links to pages + collections', hintKey: 'sharingHint',
+      hintKey: 'sharingHint',
       order: 40,
     },
   },

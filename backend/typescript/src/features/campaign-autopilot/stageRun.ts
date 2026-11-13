@@ -25,6 +25,7 @@ import { projectCampaignStageAi } from '../campaign-orchestration/launchAi.js';
 import { CAMPAIGN_RUN_TAG_KEY, readCampaignRunTag, stampCampaignRun } from '../campaign-orchestration/campaignRunTag.js';
 import { getCampaign } from '../campaign-orchestration/campaignService.js';
 import type { MarketingCampaign } from '../campaign-orchestration/types.js';
+import { forwardedPlanExemption } from '../../host/operatorPlanExemption.js';
 
 /** The closed set of stages a v0.x autopilot starts as their own run. */
 export const AUTOPILOT_STAGES = { drafts: 'campaign-studio.campaign-orchestration' } as const;
@@ -99,6 +100,11 @@ export async function startStageRun(scope: BundleScope, args: { stage: Autopilot
       [CAMPAIGN_RUN_TAG_KEY]: { ...stampCampaignRun(campaign, { role: 'stage' }), goalVersion: readCampaignRunTag(metadata)?.goalVersion ?? 0 },
     },
     ...(!scope.actingUserId && scope.orgScopeSubject ? { orgScopeSubject: scope.orgScopeSubject } : {}),
+    // CC-AUTH-4 / ADR 1108 — the stage keeps the spine's operator exemption while it
+    // still holds; without it the run-start gate refused the drafting stage. Only for
+    // a stage with an acting person: an actorless stage (orgScopeSubject only) must not
+    // carry a `personalTenant`, which is an implicit-owner grant (D7).
+    ...(scope.actingUserId ? forwardedPlanExemption(scope) : {}),
   });
   if (!runId) throw new OpenwopError('internal_error', 'The stage workflow could not start.', 502, { reason: 'dispatch_failed', workflowId });
   return { stage: args.stage, runId, workflowId };

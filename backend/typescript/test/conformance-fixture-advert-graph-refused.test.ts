@@ -28,6 +28,7 @@ import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { ensureNodesRegistered } from '../src/bootstrap/nodes.js';
 import { executeRun } from '../src/executor/executor.js';
 import { fixtureGraphRefused, listLoadedConformanceFixtures } from '../src/host/index.js';
+import { isBoundedLoopbackEnabled, normalizeEdgeLoopback } from '../src/executor/loopback.js';
 import type { EdgeDef, WorkflowDefinition } from '../src/executor/types.js';
 import type { RunRecord } from '../src/types.js';
 
@@ -53,20 +54,38 @@ interface VendoredFixture {
   id?: string;
   workflowId?: string;
   nodes?: Array<{ id?: string; nodeId?: string; typeId?: string; config?: Record<string, unknown> }>;
-  edges?: Array<{ id?: string; edgeId?: string; sourceNodeId: string; targetNodeId: string; triggerRule?: EdgeDef['triggerRule'] }>;
+  edges?: Array<{ id?: string; edgeId?: string; sourceNodeId: string; targetNodeId: string; triggerRule?: EdgeDef['triggerRule']; loopback?: unknown }>;
 }
-/** Normalise a vendored fixture the way the loader does (corpus `id` → host `nodeId`/`edgeId`). */
-function normalise(raw: VendoredFixture): WorkflowDefinition {
+/**
+ * Normalise a vendored fixture the way the loader does (corpus `id` → host
+ * `nodeId`/`edgeId`, and a declared `loopback` through `normalizeEdgeLoopback`).
+ * Returns null where the loader skips the fixture: with OPENWOP_BOUNDED_LOOPBACK
+ * off, `normalizeEdgeLoopback` throws `capability_required`, so a loopback
+ * fixture is never loaded, rather than loaded as a plain cycle.
+ */
+function normalise(raw: VendoredFixture): WorkflowDefinition | null {
+  const workflowId = raw.workflowId ?? raw.id ?? '';
+  try {
+    return normaliseOrThrow(raw, workflowId);
+  } catch {
+    return null;
+  }
+}
+function normaliseOrThrow(raw: VendoredFixture, workflowId: string): WorkflowDefinition {
   return {
-    workflowId: raw.workflowId ?? raw.id ?? '',
+    workflowId,
     nodes: (raw.nodes ?? []).map((n) => ({ nodeId: n.nodeId ?? n.id ?? '', typeId: n.typeId ?? '', ...(n.config ? { config: n.config } : {}) })),
     ...(raw.edges ? {
-      edges: raw.edges.map((e) => ({
-        edgeId: e.edgeId ?? e.id ?? `${e.sourceNodeId}-${e.targetNodeId}`,
-        sourceNodeId: e.sourceNodeId,
-        targetNodeId: e.targetNodeId,
-        ...(e.triggerRule ? { triggerRule: e.triggerRule } : {}),
-      })),
+      edges: raw.edges.map((e, i) => {
+        const edgeId = e.edgeId ?? e.id ?? `${e.sourceNodeId}-${e.targetNodeId}`;
+        return {
+          edgeId,
+          sourceNodeId: e.sourceNodeId,
+          targetNodeId: e.targetNodeId,
+          ...(e.triggerRule ? { triggerRule: e.triggerRule } : {}),
+          ...(e.loopback !== undefined ? { loopback: normalizeEdgeLoopback(e.loopback, e, `${workflowId}#${e.edgeId ?? e.id ?? i}`) } : {}),
+        };
+      }),
     } : {}),
   };
 }
@@ -113,7 +132,7 @@ describe('a fixture the executor refuses is not advertised', () => {
     const docs = readdirSync(dir).filter((f) => f.endsWith('.json')).map((f) => {
       const raw: VendoredFixture = JSON.parse(readFileSync(join(dir, f), 'utf8'));
       return normalise(raw);
-    });
+    }).filter((d): d is WorkflowDefinition => d !== null);
     expect(docs.length, 'non-vacuity: fixtures are vendored').toBeGreaterThan(20);
     const refused = docs.filter((d) => fixtureGraphRefused(d)).map((d) => d.workflowId);
     const advertised = new Set(listLoadedConformanceFixtures());
@@ -124,15 +143,19 @@ describe('a fixture the executor refuses is not advertised', () => {
     //   2.44.0: + `conformance-replay-ordinal-loop` (openwop#1745), also a cycle.
     //     DECIDED: withheld for the same reason (this host's scheduler is a DAG),
     //     so its rows record inapplicable rather than failing at run start.
-    //   2.46.44: + `conformance-loopback-refine` and `conformance-loopback-refine-fail`
-    //     (RFC 0258), whose `loopback` edge is a cycle to this DAG scheduler.
-    //     DECIDED: withheld until #5583 implements bounded loopback.
-    // Bounded loopback (loop row 3, openwop#1745) un-withholds them.
-    expect([...refused].sort()).toEqual([
-      'conformance-approval-reject-loopback',
-      'conformance-loopback-refine',
-      'conformance-loopback-refine-fail',
-      'conformance-replay-ordinal-loop',
-    ]);
+    //   2.46.44: `conformance-loopback-refine` and `-fail` (RFC 0258) declare a
+    //     `loopback` edge. They are never in this set: with the flag off the
+    //     loader skips them (`capability_required`), and with it on
+    //     `planLoopbacks` admits them. The two above have no `loopback`
+    //     declaration, so they stay plain cycles in both postures.
+    expect([...refused].sort()).toEqual(['conformance-approval-reject-loopback', 'conformance-replay-ordinal-loop']);
+  });
+
+  it('the RFC 0258 loopback fixtures are advertised exactly when OPENWOP_BOUNDED_LOOPBACK is on', () => {
+    const advertised = new Set(listLoadedConformanceFixtures());
+    const on = isBoundedLoopbackEnabled();
+    for (const id of ['conformance-loopback-refine', 'conformance-loopback-refine-fail']) {
+      expect(advertised.has(id), `${id}: flag ${on ? 'on' : 'off'}`).toBe(on);
+    }
   });
 });

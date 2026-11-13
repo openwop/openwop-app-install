@@ -233,6 +233,7 @@ export async function dispatchPackNodeIsolated(input: IsolatedDispatchInput): Pr
     ...(ctx.nodeAgent !== undefined ? { nodeAgent: ctx.nodeAgent as unknown as Record<string, unknown> } : {}),
     configurable: ctx.configurable,
     ...(ctx.triggerData !== undefined ? { triggerData: ctx.triggerData } : {}),
+    ...(ctx.loopback !== undefined ? { loopback: { ...ctx.loopback } } : {}),
     attempt: ctx.attempt,
     // Always untrusted under isolation — a widening, never a copy. See
     // `packWorkerContract.ts` for why the run's own value is not inherited.

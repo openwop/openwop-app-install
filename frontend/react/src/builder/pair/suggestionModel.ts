@@ -12,7 +12,7 @@
  * Pure: no store, no React, no network — unit-tested directly.
  */
 
-import { projectSourceOutput } from '../schema/sourceOutput.js';
+import { projectSourceOutputForKind } from '../canvas/sourceOutputForKind.js';
 import type { BuilderEdge, BuilderNode } from '../schema/workflow.js';
 import { catalogEntry, catalogEntryByTypeId, defaultConfigFor } from '../palette/catalogRegistry.js';
 
@@ -333,7 +333,7 @@ export function projectGhosts(s: WorkflowEditSuggestion, g: Graph, statuses: rea
         const tgtKind = placed.find((n) => n.id === op.targetNodeId)?.kind;
         out.ghostEdges.push({
           id: op.edgeId, source: op.sourceNodeId, target: op.targetNodeId, index: o.index,
-          sourcePort: projectSourceOutput({ sourcePort: op.sourceOutput ?? 'out', canonicalSourceOutput: op.sourceOutput ?? null }, catalogEntry(srcKind ?? '')?.outputs ?? []).handleId,
+          sourcePort: projectSourceOutputForKind({ sourcePort: op.sourceOutput ?? 'out', canonicalSourceOutput: op.sourceOutput ?? null }, srcKind).handleId,
           canonicalSourceOutput: op.sourceOutput ?? null, targetPort: targetPortOf(tgtKind, op.targetInput),
           ...(op.condition ? { label: conditionLabel(op.condition) } : op.label ? { label: op.label } : {}),
         });

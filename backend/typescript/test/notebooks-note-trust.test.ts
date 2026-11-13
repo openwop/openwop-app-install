@@ -61,7 +61,7 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 
 type NoteRow = { content: string; contentTrust: 'trusted' | 'untrusted' };
 /** The JSON shapes this file reads (all optional: a failed call must fail an assertion). */
-interface Body { tenantId?: string; user?: { tenantId?: string }; orgId?: string; notebook?: { id: string }; notes?: NoteRow[] }
+interface Body { tenantId?: string; user?: { tenantId?: string; userId?: string }; orgId?: string; notebook?: { id: string }; notes?: NoteRow[] }
 interface Res { status: number; body: Body }
 interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res> }
 function client(): Client {
@@ -81,7 +81,7 @@ function client(): Client {
 
 const NB = '/host/openwop-app/notebooks';
 
-async function ownerWithNotebook(who: string): Promise<{ c: Client; tenantId: string; notebookId: string }> {
+async function ownerWithNotebook(who: string): Promise<{ c: Client; tenantId: string; notebookId: string; userId: string }> {
   const c = client();
   const login = await c.post('/host/openwop-app/test/login', { email: `${who}-${Date.now()}-${n++}@acme.test` });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
@@ -90,7 +90,7 @@ async function ownerWithNotebook(who: string): Promise<{ c: Client; tenantId: st
   const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
   const nb = await c.post(NB, { name: `Trust ${n}`, orgId: org.body.orgId });
   expect(nb.status, JSON.stringify(nb.body)).toBe(201);
-  return { c, tenantId: tenantId!, notebookId: nb.body.notebook!.id };
+  return { c, tenantId: tenantId!, notebookId: nb.body.notebook!.id, userId: login.body.user?.userId ?? '' };
 }
 
 /** The saved note row whose content contains `needle` — asserted present, so a
@@ -163,11 +163,13 @@ describe('ADR 0601 / NBC-2 — a note copied out of an untrusted source is FENCE
   });
 
   it('MCP notebook-create-note ⇒ untrusted UNCONDITIONALLY (the caller cannot name its own trust)', async () => {
-    const { tenantId, notebookId } = await ownerWithNotebook('nb-trust-mcp');
+    const { tenantId, notebookId, userId } = await ownerWithNotebook('nb-trust-mcp');
     const MCP_TEXT = 'Content handed in by an external MCP client (ADR 0087 §73: untrusted).';
 
     // The exact seam the `mcp-create-note` node calls: ctx.features.notebooks.addNote.
-    const surface = buildNotebooksSurface({ tenantId });
+    // An MCP run carries its caller as the actor (`mcpSemantics.ts`), and since ADR 1103
+    // D2 the surface writes only for a run that names a person who may write.
+    const surface = buildNotebooksSurface({ tenantId, actingUserId: userId });
     const created = await surface.addNote!({
       notebookId,
       content: MCP_TEXT,

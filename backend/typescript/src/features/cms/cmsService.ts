@@ -10,6 +10,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { DurableCollection, hostExtStorage } from '../../host/hostExtPersistence.js';
+import { registerTenantIndexAdoption } from '../../host/tenantIndexAdoption.js';
 import { OpenwopError } from '../../types.js';
 import { isValidUploadDate } from '../../host/videoUploadDate.js';
 // Same-feature sibling (cms/). Used only inside `deletePage` (call-time), so the
@@ -44,7 +45,7 @@ import { eraseContentLanguageSettingsSubject } from '../../host/contentLocales.j
 import { createLogger } from '../../observability/logger.js';
 import { isFragmentHref, isInternalHref } from '../../host/internalHref.js';
 import { cleanAllHeroArt, ITEM_BASE_KEYS } from './heroArt.js';
-import { buildDesignSectionData, cleanHeroQueue, cleanRichTextCard, DESIGN_SECTION_TYPES, VIDEO_LENGTH_RE, type DesignSectionType } from './designSections.js';
+import { alignSimOverlay, assertSimSectionBytes, buildDesignSectionData, cleanHeroQueue, cleanRichTextCard, DESIGN_SECTION_TYPES, SECTION_ITEM_BASE_KEYS, VIDEO_LENGTH_RE, type DesignSectionType } from './designSections.js';
 export { VIDEO_LENGTH_RE };
 
 const log = createLogger('feature.cms');
@@ -171,8 +172,8 @@ export const HERO_EMPHASES = ['accent', 'strike', 'underline', 'highlight'] as c
  * `validateSection` so every lane that builds base data (pages, shared sections)
  * keeps it; a locale overlay never carries it, so the base value stands.
  */
-function buildSectionData(type: SectionType, d: Record<string, unknown>, partial: boolean): Record<string, unknown> {
-  const data = buildTypedSectionData(type, d, partial);
+function buildSectionData(type: SectionType, d: Record<string, unknown>, partial: boolean, stored = false): Record<string, unknown> {
+  const data = buildTypedSectionData(type, d, partial, stored);
   if (partial || type === 'fields') return data;
   const motion = pickEnum(SECTION_MOTIONS, d.motion);
   // Only the activity card plays today; a leftover `play` on another visual would be
@@ -964,7 +965,7 @@ function cleanDiagram(raw: unknown): { nodes: { label: string; text?: string; wa
  * but cleans/bounds/safe-links every field IDENTICALLY, so a localization can
  * never become a stored-XSS or open-redirect vector that the base couldn't.
  */
-function buildTypedSectionData(type: SectionType, d: Record<string, unknown>, partial: boolean): Record<string, unknown> {
+function buildTypedSectionData(type: SectionType, d: Record<string, unknown>, partial: boolean, stored = false): Record<string, unknown> {
   // Optional `eyebrow`/`heading` shared by the marketing blocks (ADR 0027).
   const opt = (k: 'eyebrow' | 'heading' | 'lede', max: number): Record<string, string> => {
     const v = optionalCleanContent(d[k], max, k);
@@ -1497,10 +1498,10 @@ function buildTypedSectionData(type: SectionType, d: Record<string, unknown>, pa
         ...headStyle(),
       };
     }
-    case 'statusTable': case 'dateCalc': case 'conversation': case 'featureIndex': case 'decisionTree': case 'scheduleSim': case 'films':
+    case 'statusTable': case 'dateCalc': case 'conversation': case 'featureIndex': case 'decisionTree': case 'scheduleSim': case 'films': case 'marginCalc': case 'allowanceGap': case 'partyViews': case 'stageChart':
       // ADR 1080 D1–D4, D15, D16; ADR 1082 `films` (held to the `video` URL rule).
       return { ...opt('eyebrow', MAX.eyebrow), ...opt('heading', MAX.heading), ...opt('lede', MAX.lede), ...tone(), ...headStyle(),
-        ...buildDesignSectionData(type, d, partial, (v, field) => httpsMediaUrl(v, field, partial, undefined, 'films')) };
+        ...buildDesignSectionData(type, d, partial, (v, field) => httpsMediaUrl(v, field, partial, undefined, 'films'), stored) };
     case 'quotes': {
       // R2-G10 — attributed social proof (testimonials). Every 2026 leader puts
       // quantified, ATTRIBUTED quotes near the hero; the fields push authors
@@ -1652,11 +1653,15 @@ function buildTypedSectionData(type: SectionType, d: Record<string, unknown>, pa
  * surface), never at serve time: `resolveSection` is the RFC 0103 §C merge every
  * host must share byte for byte. Returns a copy.
  */
-export function restoreItemStates(base: unknown, overlay: Record<string, unknown>): Record<string, unknown> {
+export function restoreItemStates(base: unknown, overlay: Record<string, unknown>, type?: string): Record<string, unknown> {
+  // ADR 1112 D6 — a section type's own behaviour keys follow the base whatever their JSON type.
+  const own = type ? SECTION_ITEM_BASE_KEYS[type] : undefined;
   const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
-  const copy = structuredClone(overlay);
-  const walk = (b: unknown, o: unknown): void => {
+  // A scheduleSim translation is aligned to the base by id first (ADR 1112 D6).
+  const copy = type === 'scheduleSim' ? alignSimOverlay(base, structuredClone(overlay)) : structuredClone(overlay);
+  const walk = (b: unknown, o: unknown, list = ''): void => {
     if (Array.isArray(b) && Array.isArray(o)) {
+      const keys = [...(own?.all ?? []), ...(own?.lists?.[list] ?? [])];
       if (b.length !== o.length) return;
       o.forEach((item, i) => {
         const bi = b[i];
@@ -1666,11 +1671,15 @@ export function restoreItemStates(base: unknown, overlay: Record<string, unknown
           if (typeof bi[key] === 'string' || typeof bi[key] === 'number') item[key] = bi[key];
           else delete item[key];
         }
+        for (const key of keys) {
+          if (bi[key] !== undefined) item[key] = structuredClone(bi[key]);
+          else delete item[key];
+        }
         walk(bi, item);
       });
       return;
     }
-    if (isObj(b) && isObj(o)) for (const k of Object.keys(o)) if (Object.hasOwn(b, k)) walk(b[k], o[k]);
+    if (isObj(b) && isObj(o)) for (const k of Object.keys(o)) if (Object.hasOwn(b, k)) walk(b[k], o[k], k);
   };
   walk(base, copy);
   return copy;
@@ -1679,14 +1688,18 @@ export function restoreItemStates(base: unknown, overlay: Record<string, unknown
 /** An overlay with every list item's `state` removed, for comparing two overlays'
  *  authored content: a state synced from the base is not an author's edit, so it
  *  must not re-stamp an outdated translation as current (ADR 0861 D6). */
-function withoutItemStates(v: unknown): unknown {
-  if (Array.isArray(v)) return v.map((item) => {
-    if (typeof item !== 'object' || item === null || Array.isArray(item)) return withoutItemStates(item);
-    const rest = Object.fromEntries(Object.entries(item as Record<string, unknown>).filter(([k]) => !(ITEM_BASE_KEYS as readonly string[]).includes(k)));
-    return withoutItemStates(rest);
-  });
-  if (typeof v === 'object' && v !== null) return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, withoutItemStates(x)]));
-  return v;
+function withoutItemStates(v: unknown, type?: string): unknown {
+  const own = type ? SECTION_ITEM_BASE_KEYS[type] : undefined;
+  const strip = (x: unknown, list = ''): unknown => {
+    const synced: readonly string[] = [...ITEM_BASE_KEYS, ...(own?.all ?? []), ...(own?.lists?.[list] ?? [])];
+    if (Array.isArray(x)) return x.map((item) => {
+      if (typeof item !== 'object' || item === null || Array.isArray(item)) return strip(item);
+      return strip(Object.fromEntries(Object.entries(item as Record<string, unknown>).filter(([k]) => !synced.includes(k))));
+    });
+    if (typeof x === 'object' && x !== null) return Object.fromEntries(Object.entries(x).map(([k, y]) => [k, strip(y, k)]));
+    return x;
+  };
+  return strip(v);
 }
 
 function validateLocalizations(type: SectionType, raw: unknown, baseLocale: string, pageTenantId: string | undefined, baseData?: Record<string, unknown>): Record<string, Record<string, unknown>> | undefined {
@@ -1710,9 +1723,11 @@ function validateLocalizations(type: SectionType, raw: unknown, baseLocale: stri
     // page's. Parity, deliberately: a rule stricter than the one it mirrors is its own hazard.
     assertSectionTenant(type, overlay as Record<string, unknown>, pageTenantId);
     // ADR 1038 D8 — list-item states follow the base (see restoreItemStates).
-    const raw = baseData ? restoreItemStates(baseData, overlay as Record<string, unknown>) : (overlay as Record<string, unknown>);
+    const raw = baseData ? restoreItemStates(baseData, overlay as Record<string, unknown>, type) : (overlay as Record<string, unknown>);
     out[locale] = buildSectionData(type, raw, true);
   }
+  // ADR 1112 D5 — here too, so a shared section's writes are held to the same bytes.
+  if (type === 'scheduleSim' && baseData && baseLocale !== '') assertSimSectionBytes(baseData, out);
   return out;
 }
 
@@ -1748,9 +1763,18 @@ export function validateSection(raw: unknown, baseLocale = 'en', pageTenantId?: 
   }
   const d = (typeof r.data === 'object' && r.data !== null ? r.data : {}) as Record<string, unknown>;
   assertSectionTenant(type, d, pageTenantId); // ADR 0593 §C9 (CMSA-12)
-  const data = buildSectionData(type, d, false);
+  // The kernel's structure check of a stored row (baseLocale '') keeps its references as they are (ADR 1112 D8).
+  const data = buildSectionData(type, d, false, baseLocale === '');
   const localizations = validateLocalizations(type, r.localizations, baseLocale, pageTenantId, data);
   const hasLoc = !!localizations && Object.keys(localizations).length > 0;
+  // ADR 1112 D5 (corrected by the P2 measurement): a page saves as one request under the
+  // 1 MB JSON limit, and each locale overlay carries a whole copy of the decisions (RFC 0103
+  // §C replaces a nested list whole). So the binding limit is the section's bytes, base and
+  // overlays together, refused here with the reason rather than as a bare 413 later.
+  // Not in the kernel's structure check (baseLocale ''), which re-validates stored pages on
+  // system writes (redaction, erasure): those must not fail on a page saved before the limit.
+  // `validateLocalizations` already measured base and overlays together (CG-1112-9).
+  if (type === 'scheduleSim' && baseLocale !== '' && localizations === undefined) assertSimSectionBytes(data, localizations);
   const aiDrafted = cleanAiDrafted(r.aiDrafted, hasLoc ? localizations : undefined);
   const sourceDigest = cleanSourceDigest(r.sourceDigest, hasLoc ? localizations : undefined);
   return {
@@ -1829,7 +1853,16 @@ export function translationStatus(
  *  - `confirm` re-stamps one (section, locale) without changing the overlay.
  * Client-sent digests are discarded: only `prev` is read.
  */
-export function stampSourceDigests<S extends Pick<Section, 'sectionId' | 'data' | 'localizations' | 'sourceDigest'>>(
+/** A stored overlay put through the write path's restore and cleaner, against a base. */
+function realignedOverlay(type: SectionType, base: Record<string, unknown>, overlay: Record<string, unknown>): unknown {
+  try {
+    return buildSectionData(type, restoreItemStates(base, overlay, type), true);
+  } catch {
+    return undefined; // an old overlay the cleaner refuses is not "unchanged"
+  }
+}
+
+export function stampSourceDigests<S extends Pick<Section, 'sectionId' | 'data' | 'localizations' | 'sourceDigest'> & { type?: SectionType }>(
   prev: ReadonlyArray<Pick<Section, 'sectionId' | 'localizations' | 'sourceDigest'>> | undefined,
   next: S[],
   confirm?: { sectionId: string; locale: string },
@@ -1845,7 +1878,12 @@ export function stampSourceDigests<S extends Pick<Section, 'sectionId' | 'data' 
       const confirming = confirm?.sectionId === s.sectionId && confirm.locale === locale;
       // Item states are synced from the base (ADR 1038 D8), not authored, so they
       // are left out of "did the author change this overlay".
-      const unchanged = !!old?.localizations?.[locale] && JSON.stringify(withoutItemStates(old.localizations[locale])) === JSON.stringify(withoutItemStates(overlay));
+      const stored = old?.localizations?.[locale];
+      const same = (a: unknown): boolean => JSON.stringify(withoutItemStates(a, s.type)) === JSON.stringify(withoutItemStates(overlay, s.type));
+      // ADR 1112 D6 — a scheduleSim translation is realigned to the base it is saved with,
+      // so an untouched one changes when the base does: compare the stored one aligned the
+      // same way, or a base edit would mark an outdated translation current.
+      const unchanged = !!stored && (same(stored) || (s.type === 'scheduleSim' && same(realignedOverlay(s.type, s.data, stored))));
       if (!confirming && unchanged) {
         const carried = old?.sourceDigest?.[locale];
         if (carried) digests[locale] = carried;
@@ -1882,8 +1920,18 @@ function cleanAiDrafted(
 export function validateSections(raw: unknown, baseLocale = 'en', pageTenantId?: string): Section[] {
   if (raw === undefined) return [];
   if (!Array.isArray(raw)) throw new OpenwopError('validation_error', '`sections` must be an array.', 400, { field: 'sections' });
-  return raw.slice(0, MAX.sections).map((s) => validateSection(s, baseLocale, pageTenantId));
+  const sections = raw.slice(0, MAX.sections).map((s) => validateSection(s, baseLocale, pageTenantId));
+  // ADR 1112 D5 — a page saves as one request under the 1 MB JSON limit. Restoring base keys
+  // into translations can make the stored page larger than the request that wrote it, so a
+  // page over the limit is refused with its size here, before a later save fails as a bare 413.
+  const bytes = Buffer.byteLength(JSON.stringify(sections));
+  if (baseLocale !== '' && bytes > PAGE_SECTIONS_MAX_BYTES) { // see validateSection: not in the structure check
+    throw new OpenwopError('validation_error', `This page's sections come to ${Math.ceil(bytes / 1000)} kB; a page saves as one request of at most 1 MB. Move a large section to its own page, or remove a translation.`, 400, { reason: 'page_too_large', bytes, limit: PAGE_SECTIONS_MAX_BYTES });
+  }
+  return sections;
 }
+/** Room under the 1 MB request body for the rest of a page write (title, SEO, settings). */
+const PAGE_SECTIONS_MAX_BYTES = 975_000;
 
 /**
  * ADR 0593 §C9 (`CMSA-12` cross-tenant half) — an entity-reference section may
@@ -1995,11 +2043,24 @@ export interface PageSiteNav {
    *  `#fragment` on this page or a safe internal path; default: the page). The
    *  first published page (home included) that sets it wins. */
   featured?: SiteNavFeatured;
+  /** ADR 1105 D11 — the heading of this page's `group` in the menu and the
+   *  grouped footer (≤ 40), in place of the stock one ("Product", …). The first
+   *  page in the group (by order, then label) that sets it wins. Needs `group`. */
+  groupLabel?: string;
+  /** ADR 1113 — extra menu entries this page stores for destinations that are
+   *  not CMS pages (an app route such as `/discover`, or a `#fragment` on this
+   *  page). Each one is a full nav entry in its OWN `group`, so a site with
+   *  two published pages can still fill four columns. At most 12 per page. */
+  links?: SiteNavLink[];
 }
+
+/** ADR 1113 — one authored nav entry. `href` is a safe internal path or a
+ *  `#fragment` on the owning page, never an external URL. */
+export interface SiteNavLink { label: string; href: string; group: SiteNavGroup; description?: string; order?: number; groupLabel?: string }
 
 export interface SiteNavFeatured { eyebrow?: string; title: string; meta?: string; href?: string }
 
-const SITE_NAV_MAX = { label: 40, description: 90, cta: 40, order: 999, featuredEyebrow: 30, featuredTitle: 60, featuredMeta: 20, featuredHref: 200 } as const;
+const SITE_NAV_MAX = { label: 40, description: 90, cta: 40, groupLabel: 40, order: 999, featuredEyebrow: 30, featuredTitle: 60, featuredMeta: 20, featuredHref: 200, links: 12, linkHref: 200 } as const;
 
 /** ADR 1062 D2 — validate `siteNav.featured`. A title is required; `href` is a
  *  same-page fragment or a safe internal path, never an external URL (the card
@@ -2029,6 +2090,47 @@ function cleanSiteNavFeatured(raw: unknown): SiteNavFeatured | undefined {
     href = h;
   }
   return { ...(eyebrow ? { eyebrow } : {}), title, ...(meta ? { meta } : {}), ...(href ? { href } : {}) };
+}
+
+/** ADR 1113 — validate `siteNav.links`. Each entry needs a label, an href (a
+ *  safe internal path or a `#fragment`) and a group; `description`, `order` and
+ *  `groupLabel` follow the page-level rules. Anything else is a 400 naming the
+ *  entry, never coerced; an empty list is absent. */
+function cleanSiteNavLinks(raw: unknown): SiteNavLink[] | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) throw new OpenwopError('validation_error', '`siteNav.links` must be an array.', 400, { field: 'siteNav.links' });
+  if (raw.length > SITE_NAV_MAX.links) {
+    throw new OpenwopError('validation_error', `\`siteNav.links\` holds at most ${SITE_NAV_MAX.links} entries.`, 400, { field: 'siteNav.links', max: SITE_NAV_MAX.links });
+  }
+  const out = raw.map((entry, i): SiteNavLink => {
+    const field = `siteNav.links[${i}]`;
+    const bad = (k: string, why: string): never => { throw new OpenwopError('validation_error', `\`${field}${k ? `.${k}` : ''}\` ${why}`, 400, { field: `${field}${k ? `.${k}` : ''}` }); };
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) bad('', 'must be an object.');
+    const e = entry as Record<string, unknown>;
+    const text = (k: 'label' | 'description' | 'groupLabel', max: number): string | undefined => {
+      const v = e[k];
+      if (v === undefined || v === null) return undefined;
+      if (typeof v !== 'string') bad(k, 'must be a string.');
+      return optionalCleanContent(v as string, max, `${field}.${k}`) || undefined;
+    };
+    const label = text('label', SITE_NAV_MAX.label);
+    if (!label) bad('label', 'is required.');
+    const h = typeof e.href === 'string' ? e.href.trim() : '';
+    if (!h || h.length > SITE_NAV_MAX.linkHref || !(isFragmentHref(h) || isInternalHref(h))) bad('href', 'must be a `#fragment` or an internal path.');
+    if (typeof e.group !== 'string' || !(SITE_NAV_GROUPS as readonly string[]).includes(e.group)) bad('group', `must be one of ${SITE_NAV_GROUPS.join(', ')}.`);
+    let order: number | undefined;
+    if (e.order !== undefined && e.order !== null) {
+      if (typeof e.order !== 'number' || !Number.isInteger(e.order) || e.order < 0 || e.order > SITE_NAV_MAX.order) bad('order', `must be an integer from 0 to ${SITE_NAV_MAX.order}.`);
+      order = e.order as number;
+    }
+    const description = text('description', SITE_NAV_MAX.description);
+    const groupLabel = text('groupLabel', SITE_NAV_MAX.groupLabel);
+    return {
+      label: label as string, href: h, group: e.group as SiteNavGroup,
+      ...(description ? { description } : {}), ...(order !== undefined ? { order } : {}), ...(groupLabel ? { groupLabel } : {}),
+    };
+  });
+  return out.length > 0 ? out : undefined;
 }
 
 /** ADR 1049 — validate a `siteNav` value. Unknown keys are dropped; strings are
@@ -2082,6 +2184,18 @@ export function cleanSiteNav(raw: unknown): PageSiteNav | undefined {
   }
   const featured = cleanSiteNavFeatured(r.featured); // ADR 1062 D2
   if (featured) out.featured = featured;
+  // ADR 1105 D11 — an authored group heading. It names the page's group, so a
+  // page with no group cannot carry one (a 400, not a silent drop).
+  if (r.groupLabel !== undefined && r.groupLabel !== null) {
+    if (typeof r.groupLabel !== 'string') throw new OpenwopError('validation_error', '`siteNav.groupLabel` must be a string.', 400, { field: 'siteNav.groupLabel' });
+    const groupLabel = optionalCleanContent(r.groupLabel, SITE_NAV_MAX.groupLabel, 'siteNav.groupLabel');
+    if (groupLabel) {
+      if (!out.group) throw new OpenwopError('validation_error', '`siteNav.groupLabel` needs `siteNav.group`: it names that group.', 400, { field: 'siteNav.groupLabel' });
+      out.groupLabel = groupLabel;
+    }
+  }
+  const links = cleanSiteNavLinks(r.links); // ADR 1113
+  if (links) out.links = links;
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
@@ -2272,7 +2386,7 @@ export async function updatePage(
   if (pairedUnpublishCleared) delete next.scheduledUnpublishAt;
   // ADR 0836 D9 — an in-place edit of a PUBLISHED page is a publish of the new
   // content without a transition, so it meets the same blockers.
-  if (p.status === 'published') assertNoPublishBlockers(next);
+  if (p.status === 'published') { assertNoPublishBlockers(next); await assertResolvedPageFits(next); }
   await casPage(p, next);
   // ADR 0836 D1 — side effects only after the write landed: a lost race used to
   // leave a redirect to a slug the page never got. The write is committed, so a
@@ -2555,6 +2669,8 @@ export async function deletePage(
   // failure leaves inert orphans, never a live page with half its versions). Best-effort
   // + logged, like the usage clear above. All three live in the cms feature (intra-feature).
   try {
+    // The authoritative scan, not the index: a row the index has not marked yet must
+    // not outlive its page. Page deletes are rare.
     for (const v of (await versions.list()).filter((v) => v.tenantId === tenantId && v.orgId === orgId && v.pageId === pageId)) {
       await versions.delete(v.versionId);
     }
@@ -2682,7 +2798,72 @@ export interface Redirect {
   createdAt: string;
 }
 
-const versions = new DurableCollection<PageVersion>('cms:pageversion', (v) => v.versionId);
+/** DG-1112-11 — what the version list sorts and filters on, without the snapshot. A
+ *  snapshot is up to ~975 kB since ADR 1112, so the tenant index marker carries this
+ *  projection and a page's history is read without decoding every tenant's snapshots. */
+type VersionMeta = {
+  versionId: string; tenantId: string; orgId: string; pageId: string; version: number; origin?: PageVersion['origin']; publishedAt: string; seq: number; baseline: boolean;
+  /** UXG-1112-14 — what the history list shows. A marker written before these existed lacks them. */
+  title?: string; slug?: string; publishedBy?: string;
+};
+const versionMeta = (v: PageVersion): VersionMeta => ({
+  versionId: v.versionId, tenantId: v.tenantId, orgId: v.orgId, pageId: v.pageId, version: v.version,
+  ...(v.origin ? { origin: v.origin } : {}), publishedAt: v.publishedAt, seq: v.seq, baseline: !!v.promotionBaseline,
+  title: v.snapshot.title, slug: v.snapshot.slug, publishedBy: v.publishedBy,
+});
+const isVersionMeta = (m: Record<string, unknown>): m is Record<string, unknown> & VersionMeta =>
+  typeof m.versionId === 'string' && typeof m.tenantId === 'string' && typeof m.orgId === 'string' && typeof m.pageId === 'string'
+  && typeof m.version === 'number' && typeof m.publishedAt === 'string' && typeof m.baseline === 'boolean';
+const versions = new DurableCollection<PageVersion>('cms:pageversion', (v) => v.versionId, undefined, (v) => v.tenantId, versionMeta);
+// ADR 0866 — the index gains `tenantOf` in a deploy, so reads stay on the full scan
+// until the hourly reconcile has verified it.
+registerTenantIndexAdoption('cms:pageversion', versions);
+
+/** DG-1112-11 — one page's history, newest first, as metadata. Through the tenant
+ *  index once it is verified; the full scan before that. */
+async function pageVersionMetas(tenantId: string, orgId: string, pageId: string): Promise<VersionMeta[]> {
+  const all = await versions.tenantIndexVerified()
+    ? (await versions.listForTenantProjected(tenantId)).filter(isVersionMeta)
+    : (await versions.list()).filter((v) => v.tenantId === tenantId).map(versionMeta);
+  return all.filter((m) => m.tenantId === tenantId && m.orgId === orgId && m.pageId === pageId).sort(byNewest);
+}
+
+/** The rows behind `metas`, in order. A marker can outlive its row, so a missing
+ *  row is skipped, and a row is kept only when it is still this page's. */
+async function versionRows(metas: readonly VersionMeta[]): Promise<PageVersion[]> {
+  const out: PageVersion[] = [];
+  for (const m of metas) {
+    const v = await versions.get(m.versionId);
+    if (v && v.tenantId === m.tenantId && v.orgId === m.orgId && v.pageId === m.pageId) out.push(v);
+  }
+  return out;
+}
+
+/** The first of `metas` whose row still exists (`put` writes the marker first, so a
+ *  crash can leave a marker with no row, and a projected read does not drop it). */
+async function firstRow(metas: readonly VersionMeta[]): Promise<PageVersion | undefined> {
+  for (const m of metas) {
+    const [row] = await versionRows([m]);
+    if (row) return row;
+  }
+  return undefined;
+}
+
+/** Drop the oldest of a page's history beyond MAX_VERSIONS (baselines are kept). The
+ *  projection only says whether the page is over the cap; what to delete is decided on
+ *  the rows, so a marker with no row can never push out a real snapshot. */
+async function capPageVersions(tenantId: string, orgId: string, pageId: string): Promise<void> {
+  const metas = (await pageVersionMetas(tenantId, orgId, pageId)).filter((m) => !m.baseline);
+  if (metas.length <= MAX_VERSIONS) return;
+  const rows = (await versionRows(metas)).filter((v) => !v.promotionBaseline).sort(byNewest);
+  for (const old of rows.slice(MAX_VERSIONS)) await versions.delete(old.versionId);
+}
+
+/** Every version row of one tenant (erasure). */
+async function tenantVersions(tenantId: string): Promise<PageVersion[]> {
+  if (await versions.tenantIndexVerified()) return versions.listForTenantIndexed(tenantId);
+  return (await versions.list()).filter((v) => v.tenantId === tenantId);
+}
 const redirects = new DurableCollection<Redirect>('cms:redirect', (r) => r.redirectId);
 const MAX_VERSIONS = 50;
 let versionSeq = 0;
@@ -2704,11 +2885,10 @@ function byNewest(a: { publishedAt: string; seq: number }, b: { publishedAt: str
  * compatibility).
  */
 async function snapshotPage(page: Page, publishedBy: string, origin: 'publish' | 'submit'): Promise<void> {
-  const newest = (await versions.list())
-    // ADR 0836 D4 — page ids are per tenant: without the tenant/org filter, tenant
-    // B's publish of a same-id page deduped against (and PROMOTED) tenant A's row.
-    .filter((x) => x.tenantId === page.tenantId && x.orgId === page.orgId && x.pageId === page.pageId && x.origin !== 'seed' && !x.promotionBaseline) // ADR 0817: an offer, not a capture
-    .sort(byNewest)[0];
+  // ADR 0836 D4 — page ids are per tenant: without the tenant/org filter, tenant
+  // B's publish of a same-id page deduped against (and PROMOTED) tenant A's row.
+  const newest = await firstRow((await pageVersionMetas(page.tenantId, page.orgId, page.pageId))
+    .filter((x) => x.origin !== 'seed' && !x.baseline)); // ADR 0817: an offer, not a capture
   if (newest && newest.version === page.version) {
     // ADR 0593 §C3 (CMSA-11) — dedupe, but PROMOTE. `transitionPage` never
     // bumps `version`, so an approve lands on exactly the row submit captured
@@ -2740,9 +2920,7 @@ async function snapshotPage(page: Page, publishedBy: string, origin: 'publish' |
     seq: ++versionSeq,
   };
   await versions.put(v);
-  // Cap history per page (drop the oldest beyond MAX_VERSIONS).
-  const mine = (await versions.list()).filter((x) => x.tenantId === page.tenantId && x.orgId === page.orgId && x.pageId === page.pageId).sort(byNewest);
-  for (const old of mine.filter((row) => !row.promotionBaseline).slice(MAX_VERSIONS)) await versions.delete(old.versionId);
+  await capPageVersions(page.tenantId, page.orgId, page.pageId);
 }
 
 /**
@@ -2763,8 +2941,7 @@ export async function offerSeedVersion(
   const sections = validateSections(snapshot.sections, baseLocale, page.tenantId);
   // Ids are minted per validation, so compare content without them.
   const content = (ss: readonly Section[]): string => JSON.stringify(ss.map(({ sectionId: _id, ...rest }) => rest));
-  const mine = (await versions.list()).filter((x) => x.tenantId === page.tenantId && x.orgId === page.orgId && x.pageId === page.pageId).sort(byNewest);
-  const lastOffer = mine.find((x) => x.origin === 'seed');
+  const lastOffer = await firstRow((await pageVersionMetas(page.tenantId, page.orgId, page.pageId)).filter((x) => x.origin === 'seed'));
   if (lastOffer && lastOffer.snapshot.title === snapshot.title
     && content(lastOffer.snapshot.sections) === content(sections)) return null;
   const v: PageVersion = {
@@ -2780,14 +2957,44 @@ export async function offerSeedVersion(
     seq: ++versionSeq,
   };
   await versions.put(v);
-  for (const old of [v, ...mine].filter((row) => !row.promotionBaseline).slice(MAX_VERSIONS)) await versions.delete(old.versionId);
+  await capPageVersions(page.tenantId, page.orgId, page.pageId);
   return v;
 }
 
 export async function listVersions(tenantId: string, orgId: string, pageId: string): Promise<PageVersion[]> {
-  return (await versions.list())
-    .filter((v) => v.tenantId === tenantId && v.orgId === orgId && v.pageId === pageId && !v.promotionBaseline)
-    .sort(byNewest); // newest first — createdAt primary (restart-safe), seq tiebreaker
+  // newest first — createdAt primary (restart-safe), seq tiebreaker
+  return versionRows((await pageVersionMetas(tenantId, orgId, pageId)).filter((m) => !m.baseline));
+}
+
+/** UXG-1112-14 — a history entry without its sections: what the editor's History
+ *  list and the experiment variant picker show. Compare reads the whole row through
+ *  `getVersion`. */
+export type PageVersionSummary = Pick<PageVersion, 'versionId' | 'tenantId' | 'orgId' | 'pageId' | 'version' | 'publishedAt' | 'publishedBy' | 'origin' | 'seq'>
+  & { snapshot: { title: string; slug: string } };
+
+/** `listVersions` without the sections, from the index markers. A marker written
+ *  before it carried title/slug/publishedBy falls back to its row (and a row that is
+ *  gone drops the entry). Residue: a marker whose row write never landed (a crash
+ *  inside `put`) stays listed; Compare and Restore on it
+ *  answer 404. */
+export async function listVersionSummaries(tenantId: string, orgId: string, pageId: string): Promise<PageVersionSummary[]> {
+  const out: PageVersionSummary[] = [];
+  for (const m of (await pageVersionMetas(tenantId, orgId, pageId)).filter((x) => !x.baseline)) {
+    let head: { title: string; slug: string; publishedBy: string } | null =
+      typeof m.title === 'string' && typeof m.slug === 'string' && typeof m.publishedBy === 'string'
+        ? { title: m.title, slug: m.slug, publishedBy: m.publishedBy } : null;
+    if (!head) {
+      const [row] = await versionRows([m]);
+      if (!row) continue;
+      head = { title: row.snapshot.title, slug: row.snapshot.slug, publishedBy: row.publishedBy };
+    }
+    out.push({
+      versionId: m.versionId, tenantId: m.tenantId, orgId: m.orgId, pageId: m.pageId, version: m.version,
+      publishedAt: m.publishedAt, publishedBy: head.publishedBy, seq: m.seq, ...(m.origin ? { origin: m.origin } : {}),
+      snapshot: { title: head.title, slug: head.slug },
+    });
+  }
+  return out;
 }
 
 /** One version row, tenant+org+page IDOR-guarded (ADR 0236 D1 — the experiment
@@ -3083,7 +3290,10 @@ function collectStrings(v: unknown, out: string[] = []): string[] {
   return out;
 }
 
-export interface PublishBlocker { rule: 'todo'; sectionId: string }
+export type PublishBlocker =
+  | { rule: 'todo'; sectionId: string }
+  // DG-1112-5 — the page as readers get it, its shared sections resolved, is over the page limit.
+  | { rule: 'too_large'; bytes: number; limit: number };
 
 /** ADR 0836 D9 — what stops content reaching readers, decided on the server.
  *  Own-section `data` only, like the browser: a shared-section ref has no own
@@ -3092,6 +3302,31 @@ export function publishBlockers(page: Pick<Page, 'sections'>): PublishBlocker[] 
   return page.sections
     .filter((s) => !s.ref && collectStrings(s.data).some((x) => TODO_MARKER.test(x)))
     .map((s) => ({ rule: 'todo' as const, sectionId: s.sectionId }));
+}
+
+/**
+ * DG-1112-5 (ADR 1112 D5) — the page limit, applied to the page readers get. A save measures
+ * the stored sections; a shared-section ref is resolved only at delivery, and each shared
+ * scheduleSim may hold 850 kB, so a page of refs could go out at several MB with no check.
+ * Measured where content reaches readers (publish, and an edit of a published page), with
+ * the same `publish_blocked` refusal every publish lane already handles. A page with no
+ * refs is what its save measured, so it costs no read.
+ */
+export async function assertResolvedPageFits(page: Page, pending?: SharedSection): Promise<void> {
+  if (!page.sections.some((s) => s.ref)) return;
+  const bytes = Buffer.byteLength(JSON.stringify((await resolveSharedRefs(page, pending)).sections));
+  if (bytes <= PAGE_SECTIONS_MAX_BYTES) return;
+  throw new OpenwopError(
+    'validation_error',
+    pending
+      ? `This change would bring the published page "${page.title}" to ${Math.ceil(bytes / 1000)} kB; a published page is at most ${PAGE_SECTIONS_MAX_BYTES / 1000} kB. Make the shared section smaller, or move it off that page first.`
+      : `With its shared sections, this page comes to ${Math.ceil(bytes / 1000)} kB; a published page is at most ${PAGE_SECTIONS_MAX_BYTES / 1000} kB. Replace a large shared section with a smaller one, or move it to its own page.`,
+    422,
+    {
+      reason: 'publish_blocked', pageId: page.pageId, ...(pending ? { pageTitle: page.title } : {}),
+      blockers: [{ rule: 'too_large', bytes, limit: PAGE_SECTIONS_MAX_BYTES }] satisfies PublishBlocker[],
+    },
+  );
 }
 
 /** Throws the typed `422 validation_error` (`details.reason: 'publish_blocked'`). */
@@ -3149,7 +3384,7 @@ export async function transitionPage(
   // submit open with blockers on purpose ("a reviewer can help finish the
   // page"), and the approve that follows is checked here. (The pre-code review's
   // AR-M5 asked for submit too; that would have overturned 0828's product call.)
-  if (rule.to === 'published') assertNoPublishBlockers(p);
+  if (rule.to === 'published') { assertNoPublishBlockers(p); await assertResolvedPageFits(p); }
   const next: Page = { ...p, status: rule.to, updatedBy: actor, updatedAt: nowIso() };
   // ADR 0859 D2 — a NEW submission (draft → in_review) opens a new review cycle; a
   // resubmit of an in_review page stays in the cycle it is in (it re-pins that row).
@@ -3411,6 +3646,16 @@ export async function updateSharedSection(
   );
   if (stamped?.sourceDigest) next.sourceDigest = stamped.sourceDigest;
   else delete next.sourceDigest;
+  // ADR 1112 Phase E — a published page reads this section at delivery, so growing it
+  // can take that page past the page limit with no publish to catch it. Measured with
+  // the edit applied, before it is stored. Drafts meet the check when they publish.
+  if (patch.data !== undefined || patch.localizations !== undefined) {
+    for (const ref of await listPagesUsingSharedSection(tenantId, orgId, sharedSectionId)) {
+      if (ref.status !== 'published') continue;
+      const page = await getPage(tenantId, orgId, ref.pageId);
+      if (page) await assertResolvedPageFits(page, next);
+    }
+  }
   await sharedSections.put(next);
   return next;
 }
@@ -3529,12 +3774,15 @@ export async function pageTranslationStatus(
   return { sections, counts };
 }
 
-export async function resolveSharedRefs(page: Page): Promise<Page> {
+export async function resolveSharedRefs(page: Page, pending?: SharedSection): Promise<Page> {
   if (!page.sections.some((s) => s.ref)) return page;
   const resolved: Section[] = [];
   for (const s of page.sections) {
     if (!s.ref) { resolved.push(s); continue; }
-    const shared = await getSharedSection(page.tenantId, page.orgId, s.ref.sharedSectionId);
+    // `pending`: a shared-section edit not yet stored, measured as if it were (ADR 1112 Phase E).
+    const shared = pending && pending.sharedSectionId === s.ref.sharedSectionId
+      ? pending
+      : await getSharedSection(page.tenantId, page.orgId, s.ref.sharedSectionId);
     if (!shared) continue; // dangling — drop from delivery
     resolved.push({
       sectionId: s.sectionId,
@@ -3841,6 +4089,78 @@ export async function __resetCms(): Promise<void> {
  *  grant would still grant, to nobody auditable). */
 export const ERASED_SUBJECT = 'erased:subject';
 
+/** DG-1112-6 / RI-1112-1 — the page with every locale overlay put back through
+ *  `restoreItemStates` against its base, or null when none changes. The test is the
+ *  integrity gauge's own (`integrityGauge.ts` `staleItemOverlays`), so a repaired page
+ *  stops counting. Only base-owned item states move (ADR 1038 D8, ADR 1112 D6); no
+ *  translated text changes, so each overlay's source digest is kept as stored. */
+export function realignPageOverlays(page: Page): { next: Page; overlays: number } | null {
+  let overlays = 0;
+  const sections = page.sections.map((s) => {
+    if (!s.localizations) return s;
+    const base = typeof s.data === 'object' && s.data !== null ? s.data : {};
+    let changed = false;
+    const localizations: Record<string, Record<string, unknown>> = {};
+    for (const [locale, overlay] of Object.entries(s.localizations)) {
+      const fixed = typeof overlay === 'object' && overlay !== null ? restoreItemStates(base, overlay, s.type) : overlay;
+      if (JSON.stringify(fixed) !== JSON.stringify(overlay)) { changed = true; overlays += 1; }
+      localizations[locale] = fixed;
+    }
+    return changed ? { ...s, localizations } : s;
+  });
+  return overlays > 0 ? { next: { ...page, sections }, overlays } : null;
+}
+
+export interface OverlayRealignReport {
+  pages: number;
+  stalePages: number;
+  staleOverlays: number;
+  realigned: number;
+  /** Pages the stored-row validator refuses; the author's next save repairs them. */
+  invalid: number;
+  /** Pages that changed twice under the job; the next boot retries them. */
+  conflicts: number;
+  truncatedTenants: number;
+  invalidPageIds: string[];
+}
+
+/** DG-1112-6 — one pass over every tenant's pages. `report` counts and writes nothing;
+ *  `apply` CASes each stale page (same version and author, like the erasure rewrite),
+ *  retrying once on a concurrent edit. */
+export async function realignStoredOverlays(mode: 'report' | 'apply', perTenantCap = 10_000): Promise<OverlayRealignReport> {
+  const { pages: listed, truncatedTenants } = await listAllPagesForIntegrityGauge(perTenantCap);
+  const r: OverlayRealignReport = { pages: listed.length, stalePages: 0, staleOverlays: 0, realigned: 0, invalid: 0, conflicts: 0, truncatedTenants, invalidPageIds: [] };
+  for (const page of listed) {
+    const fix = realignPageOverlays(page);
+    if (!fix) continue;
+    r.stalePages += 1;
+    r.staleOverlays += fix.overlays;
+    if (mode === 'report') continue;
+    for (let attempt = 0; ; attempt += 1) {
+      const cur = await getPage(page.tenantId, page.orgId, page.pageId);
+      const next = cur ? realignPageOverlays(cur)?.next : undefined;
+      if (!cur || !next) break; // deleted, or already repaired by a save
+      try {
+        await casPage(cur, next);
+        r.realigned += 1;
+        break;
+      } catch (err) {
+        if (err instanceof OpenwopError && err.code === 'conflict') {
+          if (attempt === 0) continue;
+          r.conflicts += 1;
+        } else if (err instanceof OpenwopError && err.code === 'validation_error') {
+          r.invalid += 1;
+          r.invalidPageIds.push(page.pageId);
+        } else {
+          throw err;
+        }
+        break;
+      }
+    }
+  }
+  return r;
+}
+
 export async function eraseCmsSubject(tenantId: string, subjectKey: string): Promise<SubjectEraseReport> {
   if (!subjectKey) return { rowsTouched: 0 };
   // ADR 0592 §8 — match every subject-key FORM (raw `alice` + scoped
@@ -3876,8 +4196,8 @@ export async function eraseCmsSubject(tenantId: string, subjectKey: string): Pro
       }
     }
   }
-  for (const v of await versions.list()) {
-    if (v.tenantId !== tenantId || !hit(v.publishedBy)) continue;
+  for (const v of await tenantVersions(tenantId)) {
+    if (!hit(v.publishedBy)) continue;
     await versions.put({ ...v, publishedBy: ERASED_SUBJECT });
     touched += 1;
   }

@@ -13,9 +13,20 @@
  * return); (5) RESOLVED off still renders the off card. No "disabled → no fetch"
  * case: scheduled-chats graduated to always-on (ADR 0134).
  *
- * Breaks it: swapping the Active/Inert ternary, dropping `!r.enabled` precedence,
- * hard-coding the Pause/Resume label, deleting the `access.loading` branch, or
- * passing `true` instead of `access.enabled` to `useOrgSelection`.
+ * ADR 0985 (one page for both lists) adds: (6) the caller's own chat-created schedules
+ * (name not raw id, cadence, timezone, conversation link); (7) the badge is the JOB's
+ * state — Skipped with its reason, Missed for a spent follow-up, Not scheduled, and an
+ * erased creator's schedule explains itself — and Resume/Pause is offered only where it
+ * can work; (8) pausing a chat-created schedule calls its own endpoint.
+ *
+ * Breaks it (grade-tests w106 probes): swapping the Active/Inert ternary, dropping
+ * `!r.enabled` precedence, hard-coding the Pause/Resume label, deleting the
+ * `access.loading` branch, mounting either list while unresolved, an empty state with
+ * no Open chat action, the raw agent id, a dropped timezone, the skip, spent,
+ * unscheduled or creator-erased branch dropped, and the mine toggle sending the wrong
+ * value. (CORRECTED w106: "passing `true` to `useOrgSelection`" is no longer a
+ * sabotage — the product passes `true` since ADR 0134's graduation; "nothing is read
+ * while unresolved" is now held by the page's early returns, which mount neither list.)
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, within } from '@testing-library/react';
@@ -116,8 +127,10 @@ describe('ScheduledChatsPage (ADR 0125 Phase 3b)', () => {
     expect(screen.queryByText('Scheduled chats are off for this workspace.')).toBeNull();
     // The header survives: the whole point of not using a title-only StateCard.
     expect(screen.getByText('Scheduled chats')).toBeTruthy();
-    // And nothing is read while the answer is unknown.
+    // And nothing is read while the answer is unknown: neither list (ADR 0985 added the
+    // caller's own list, so "nothing" now means both reads).
     expect(mockOrgs).not.toHaveBeenCalled();
+    expect(mockMine).not.toHaveBeenCalled();
   });
 
   it('toggle RESOLVED off still renders the not-available card', async () => {
@@ -127,6 +140,7 @@ describe('ScheduledChatsPage (ADR 0125 Phase 3b)', () => {
     render(<ScheduledChatsPage />);
     expect(await screen.findByText('Scheduled chats are off for this workspace.')).toBeTruthy();
     expect(mockOrgs).not.toHaveBeenCalled();
+    expect(mockMine).not.toHaveBeenCalled();
   });
 
   // ── ADR 0985 ────────────────────────────────────────────────────────────────
@@ -166,7 +180,7 @@ describe('ScheduledChatsPage (ADR 0125 Phase 3b)', () => {
     mockList.mockResolvedValue([c('a', { agentId: 'iris', workflowId: 'wf', enabled: false, createdBy: 'erased:subject' })]);
     render(<ScheduledChatsPage />);
     const row = (await screen.findByText('iris')).closest('tr')!;
-    expect(within(row).getByText(/creator|created it was removed/)).toBeTruthy();
+    expect(within(row).getByText('The person who created it was removed, so it cannot be resumed. Delete it.')).toBeTruthy();
     expect(within(row).queryByText('Resume')).toBeNull();
   });
 

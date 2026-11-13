@@ -1664,7 +1664,7 @@ function cmsSectionsToMarkdown(sections: Section[]): string {
         // Media tokens have no public URL on this surface — render the words.
         if (str('caption') || str('alt')) parts.push(`*${str('caption') || str('alt')}*`);
         break;
-      case 'statusTable': case 'dateCalc': case 'conversation': case 'featureIndex': case 'decisionTree': case 'scheduleSim': case 'films': {
+      case 'statusTable': case 'dateCalc': case 'conversation': case 'featureIndex': case 'decisionTree': case 'scheduleSim': case 'films': case 'marginCalc': case 'allowanceGap': case 'partyViews': case 'stageChart': {
         // ADR 1080 (+ ADR 1082 `films`) — the design section types, through the same markdown projection.
         const md = designSectionMarkdown(s.type, d, head().join('\n'));
         if (md) parts.push(md);

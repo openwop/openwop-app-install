@@ -157,24 +157,45 @@ describe('generateTheme — invariants', () => {
   });
 });
 
+/**
+ * ADR 1029 D6 / ADR 1038 D6 — the motion preset rides BOTH generator paths (the stock
+ * fast path and the custom-colour path), identically in light and dark, and never
+ * makes a motion-only theme a custom theme in colour. Values are literals.
+ *
+ * Sabotage that turns it red: drop `...motion` from the stock fast path (both cases),
+ * or from its dark half (case 1); treat a motion-only theme as non-stock (case 1's
+ * colour leg: the custom path adds solved on-colours); give `calm` or no preset any
+ * tokens, change a subtle or lively value, or drop the custom path's light or dark
+ * `Object.assign` (case 2).
+ */
 describe('ADR 1029 D6 — the motion preset', () => {
   const MOTION_KEYS = ['--ease-reveal', '--reveal-distance', '--rise-distance', '--stagger-step', '--slide-distance', '--zoom-from', '--hover-lift'];
   const motionOf = (m: Record<string, string>) => Object.fromEntries(Object.entries(m).filter(([k]) => MOTION_KEYS.includes(k)));
+  const colourOf = (m: Record<string, string>) => Object.fromEntries(Object.entries(m).filter(([k]) => !MOTION_KEYS.includes(k)));
+  const SUBTLE = { '--reveal-distance': '0px', '--rise-distance': '0px', '--stagger-step': '4%', '--slide-distance': '0px', '--zoom-from': '1', '--hover-lift': '0px' };
 
   it('a theme that sets ONLY motion keeps it (the stock fast path does not drop it), in light and dark alike', () => {
     const t = generateTheme({ motion: 'lively' });
     expect(motionOf(t.light)).toEqual({ '--ease-reveal': 'cubic-bezier(0, 0, 0.1, 1)', '--reveal-distance': '28px', '--rise-distance': '64px', '--stagger-step': '10%', '--slide-distance': '56px', '--zoom-from': '0.92', '--hover-lift': '5px' });
     expect(motionOf(t.dark)).toEqual(motionOf(t.light));
-    // Colour stays stock: the motion preset is not a custom theme in colour.
+    // Colour stays stock: the motion preset is not a custom theme in colour. The
+    // whole colour map, not only --clay (the custom path reproduces the stock
+    // accent string exactly, so a --clay check alone cannot tell the paths apart).
+    const stock = generateTheme({});
+    expect(colourOf(t.light)).toEqual(colourOf(stock.light));
+    expect(colourOf(t.dark)).toEqual(colourOf(stock.dark));
     expect(t.light['--clay']).toBe(STOCK_ACCENT);
+    expect(t.light['--clay-text']).toBeUndefined();
   });
 
   it('subtle drops the travel; calm and absent emit nothing; it also rides a custom-colour theme', () => {
     // ADR 1038 D6: subtle also drops the sideways travel and the zoom.
-    expect(motionOf(generateTheme({ motion: 'subtle' }).light)).toEqual({ '--reveal-distance': '0px', '--rise-distance': '0px', '--stagger-step': '4%', '--slide-distance': '0px', '--zoom-from': '1', '--hover-lift': '0px' });
+    expect(motionOf(generateTheme({ motion: 'subtle' }).light)).toEqual(SUBTLE);
     expect(motionOf(generateTheme({ motion: 'calm' }).light)).toEqual({});
     expect(motionOf(generateTheme({}).light)).toEqual({});
     const custom = generateTheme({ accentSeed: 'oklch(58% 0.13 250)', motion: 'subtle' });
-    expect(motionOf(custom.dark)['--reveal-distance']).toBe('0px');
+    expect(custom.light['--clay']).toBe('oklch(58% 0.13 250)'); // it really took the custom path
+    expect(motionOf(custom.light)).toEqual(SUBTLE);
+    expect(motionOf(custom.dark)).toEqual(SUBTLE);
   });
 });

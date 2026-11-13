@@ -212,6 +212,7 @@ function buildWorkerContext(
   if (envelope.config !== undefined) ctx.config = envelope.config;
   if (envelope.nodeAgent !== undefined) ctx.nodeAgent = envelope.nodeAgent;
   if (envelope.triggerData !== undefined) ctx.triggerData = envelope.triggerData;
+  if (envelope.loopback !== undefined) ctx.loopback = { ...envelope.loopback };
   if (envelope.interactiveSession !== undefined) ctx.interactiveSession = envelope.interactiveSession;
   if (envelope.compaction !== undefined) ctx.compaction = envelope.compaction;
   if (envelope.userId !== undefined) ctx.userId = envelope.userId;

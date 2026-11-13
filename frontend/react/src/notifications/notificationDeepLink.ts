@@ -40,15 +40,15 @@ export function matchesInboxDeepLink(n: Notification, link: InboxDeepLink): bool
 /** The tab whose filter is guaranteed to include `n` — so a deep-link never
  *  lands on a tab that hides its target (an `agent.escalation` is NOT
  *  action-needed and would be invisible on the default action-needed tab). */
-export function canonicalInboxTabFor(n: Notification): InboxTab {
+export function canonicalInboxTabFor(n: Notification, featureTypes?: ReadonlySet<string>): InboxTab {
   if (n.status === 'archived') return 'archived';
-  return isActionNeeded(n) ? 'action-needed' : 'all';
+  return isActionNeeded(n, featureTypes) ? 'action-needed' : 'all';
 }
 
 /** Whether the given tab's filter currently surfaces `n`. */
-export function inboxTabShows(tab: InboxTab, n: Notification): boolean {
+export function inboxTabShows(tab: InboxTab, n: Notification, featureTypes?: ReadonlySet<string>): boolean {
   if (n.status === 'archived') return tab === 'archived';
   if (tab === 'archived') return false;
-  if (tab === 'action-needed') return isActionNeeded(n);
+  if (tab === 'action-needed') return isActionNeeded(n, featureTypes);
   return true; // 'all'
 }

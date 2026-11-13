@@ -74,7 +74,7 @@ export function FlowSteps({ steps, pulse, numbered = false }: { steps: FlowStep[
   // state (the mark is aria-hidden, so it would otherwise be shape alone).
   const word: Record<string, string> = { idle: t('flowStateWordIdle'), done: t('flowStateWordDone'), waiting: t('flowStateWordWaiting') };
   return (
-    <ol className="fp-flow__steps">
+    <ol role="list" className="fp-flow__steps">
       {steps.map((st, i) => {
         const state = (FLOW_STATES as readonly string[]).includes(st.state ?? '') ? st.state : undefined;
         return (
@@ -251,7 +251,7 @@ export function ActivityCard({ activity, play, iconFor }: { activity: unknown; p
           {tally}
         </div>
       ) : title ? <p className="fp-activity__title" aria-hidden="true">{title}</p> : null}
-      <ol className="fp-activity__list">
+      <ol role="list" className="fp-activity__list">
         {items.map((i, n) => {
           const state = ACTIVITY_STATES.find((x) => x === i.state);
           return (
@@ -291,7 +291,7 @@ export function Marquee({ items, cards }: { items: string[]; cards?: ReactNode[]
   useLayoutEffect(() => { copyRef.current?.setAttribute('inert', ''); });
   if (items.length === 0 && !(cards && cards.length > 0)) return null;
   const row = (copy: boolean): JSX.Element => (
-    <ul className="fp-marquee__list" {...(copy ? { 'aria-hidden': true, ref: copyRef } : {})}>
+    <ul role="list" className="fp-marquee__list" {...(copy ? { 'aria-hidden': true, ref: copyRef } : {})}>
       {cards && cards.length > 0
         // ADR 1037 — app cards (picture + name + line) in place of bare names.
         ? cards.map((card, i) => <li key={i} className="fp-marquee__item fp-marquee__item--card">{card}</li>)

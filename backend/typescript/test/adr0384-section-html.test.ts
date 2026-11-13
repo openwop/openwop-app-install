@@ -55,6 +55,10 @@ function fixture(type: Section['type']): Section {
     case 'decisionTree': return { ...base, data: { heading: 'Decide', trees: [{ title: 'Go', nodes: [{ id: 'a', text: 'In scope?', options: [{ label: 'No', outcome: 'Refer out.' }] }] }] } };
     case 'scheduleSim': return { ...base, data: { heading: 'Timeline', milestones: [{ id: 'm', label: 'Plumbing rough', startWeek: 0, weeks: 2, floatDays: 3, rework: 'Open tile' }], decisions: [{ title: 'Valve', milestone: 'm', kind: 'selection', options: [{ label: 'On time', delayDays: 0 }] }] } };
     case 'films': return { ...base, data: { heading: 'Examples', films: [{ src: 'https://cdn.example.com/a.mp4', poster: 'https://cdn.example.com/a.jpg', title: 'Onboard', description: 'A first run.', length: '0:45' }] } };
+    case 'marginCalc': return { ...base, data: { heading: 'Price it', cost: 4000, markup: 25, target: 30, currency: 'USD' } };
+    case 'allowanceGap': return { ...base, data: { heading: 'Allowances', currency: 'USD', lines: [{ name: 'Tile', allowance: 8000, specified: 9500 }, { name: 'Lighting', allowance: 6000, specified: 5200 }, { name: 'Plumbing fixtures', allowance: 4000 }] } };
+    case 'partyViews': return { ...base, data: { heading: 'Who sees what', parties: [{ label: 'Builder', needs: ['Dates that hold'], viewTitle: 'Builder view', rows: [{ title: 'Tile order', status: 'Late', tone: 'bad' }] }, { label: 'Client', needs: ['Fewer surprises'] }] } };
+    case 'stageChart': return { ...base, data: { heading: 'When decisions lock', unit: 'decisions', groups: [{ key: 'early', label: 'Before walls' }], stages: [{ label: 'Rough-in', count: 120, group: 'early' }, { label: 'Finishes', count: 30 }] } };
     case 'hero':
       return { ...base, data: { eyebrow: 'Eyebrow', heading: 'Hero heading', subheading: 'Sub with **bold**', ctaLabel: 'Go', ctaUrl: '/p/next', ctaLabel2: 'Docs', ctaUrl2: 'https://example.com/d' } };
     case 'richText':
@@ -228,6 +232,33 @@ describe('ADR 0384 sectionHtml — golden fixture', () => {
 <section data-owp-section="films">
 <h2 id="examples">Examples</h2>
 <ul><li><figure><img src="https://cdn.example.com/a.jpg" alt="Onboard"><figcaption><strong>Onboard</strong> (0:45). A first run. <a href="https://cdn.example.com/a.mp4">Onboard</a></figcaption></figure></li></ul>
+</section>
+<section data-owp-section="marginCalc">
+<h2 id="price-it">Price it</h2>
+<dl><dt>Cost</dt><dd>$4,000.00</dd><dt>Markup</dt><dd>25%</dd><dt>Client price</dt><dd>$5,000.00</dd><dt>Gross margin</dt><dd>20%</dd><dt>Target margin</dt><dd>30%</dd><dt>Markup for the target</dt><dd>42.9%</dd></dl>
+</section>
+<section data-owp-section="allowanceGap">
+<h2 id="allowances">Allowances</h2>
+<table><thead><tr><th>Line</th><th>Allowance</th><th>Expected</th><th>Over by</th></tr></thead><tbody>
+<tr><td>Tile</td><td>$8,000.00</td><td>$9,500.00</td><td>$1,500.00</td></tr>
+<tr><td>Lighting</td><td>$6,000.00</td><td>$5,200.00</td><td>Within</td></tr>
+<tr><td>Plumbing fixtures</td><td>$4,000.00</td><td>No figure</td><td>No figure</td></tr>
+</tbody></table>
+<p>Over the allowance: $1,500.00 on 1 of 3 lines (1 without a figure). Lines under their allowance are not netted.</p>
+</section>
+<section data-owp-section="partyViews">
+<h2 id="who-sees-what">Who sees what</h2>
+<h3>Builder</h3>
+<ul><li>Dates that hold</li></ul>
+<p>Builder view</p>
+<ul><li>Tile order (Late)</li></ul>
+<h3>Client</h3>
+<ul><li>Fewer surprises</li></ul>
+</section>
+<section data-owp-section="stageChart">
+<h2 id="when-decisions-lock">When decisions lock</h2>
+<ol><li>Rough-in: 120 decisions</li><li>Finishes: 30 decisions</li></ol>
+<ul><li>Before walls: 120 decisions</li></ul>
 </section>
 </main>`);
   });

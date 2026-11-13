@@ -95,7 +95,9 @@ describe('ADR 0836 D4 — ratchet: every version/marker exit in cmsService.ts is
 
   it('every `versions.list()` is filtered on tenantId in the same statement', () => {
     const hits = lines.map((l, i) => (l.includes('versions.list()') ? i : -1)).filter((i) => i >= 0);
-    expect(hits.length).toBeGreaterThanOrEqual(6); // the measured count (w62); a ratchet that matched nothing would pass
+    // The measured count: 6 at w62, 3 since DG-1112-11 (the rest read the tenant index).
+    // A ratchet that matched nothing would pass.
+    expect(hits.length).toBeGreaterThanOrEqual(3);
     for (const i of hits) expect(window(i, 4), `cmsService.ts:${i + 1}`).toMatch(/tenantId/);
   });
 

@@ -35,6 +35,7 @@
  */
 
 import { Pool, type PoolConfig } from 'pg';
+import { jsonbStringify, nulSafe } from '../jsonbSafe.js';
 import { aggregateHostExtTenantActivity, HOSTEXT_ACTIVITY_ROW_CAP } from '../hostExtActivity.js';
 import { withRemovalStamp } from '../runRetentionStamp.js';
 import { planHostExtRekey, rekeyTenantSegment, runBudgetBucketBelongsTo, tenantFoldNeedles } from '../tenantMigration.js';
@@ -100,17 +101,9 @@ function jsonbParam(value: unknown): string | null {
   return value === undefined || value === null ? null : JSON.stringify(value, nulSafe);
 }
 
-/**
- * ADR 0975 D10 — Postgres `jsonb` (and `text`) cannot hold U+0000; the insert
- * fails with `unsupported Unicode escape sequence` and takes the whole write with
- * it. MEASURED on kicktodo.com (2026-10-27): one NUL in a fetched web page failed
- * the Challenge Factory's `node.completed` append, twice. Strings are stored with
- * U+FFFD in its place: lossless for every other character, and visible. Exported
- * for its test.
- */
-export function nulSafe(_key: string, v: unknown): unknown {
-  return typeof v === 'string' && v.includes('\u0000') ? v.replaceAll('\u0000', '\uFFFD') : v;
-}
+/** ADR 0975 D10 / CC-SEARCH-1 / CC-SEARCH-1b — the shared jsonb sanitiser now lives
+ *  in the leaf module `../jsonbSafe.ts`; re-exported here for its existing tests. */
+export { nulSafe };
 
 function rowToRun(r: Row): RunRecord {
   return {
@@ -653,9 +646,11 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       add('updated_at', merged.updatedAt);
       if (has('status')) add('status', merged.status);
       if (has('removalAt')) add('removal_at', merged.removalAt ?? null);
-      if (has('inputs')) add('inputs', merged.inputs ?? null);
-      if (has('metadata')) add('metadata', merged.metadata ?? {});
-      if (has('configurable')) add('configurable', merged.configurable ?? {});
+      // CC-SEARCH-1b — serialized through the sanitiser (a raw object let node-pg
+      // stringify it with no replacer, so a lone surrogate failed the UPDATE).
+      if (has('inputs')) add('inputs', jsonbParam(merged.inputs ?? null));
+      if (has('metadata')) add('metadata', jsonbParam(merged.metadata ?? {}));
+      if (has('configurable')) add('configurable', jsonbParam(merged.configurable ?? {}));
       if (has('callbackUrl')) add('callback_url', merged.callbackUrl ?? null);
       if (has('completedAt')) add('completed_at', merged.completedAt ?? null);
       if (has('error')) {
@@ -681,7 +676,7 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
                updated_at = $3
          WHERE run_id = $1
            AND ($4::text IS NULL OR NOT (COALESCE(metadata, '{}'::jsonb) ? $4::text))`,
-        [runId, JSON.stringify(sets), new Date().toISOString(), opts?.ifAbsentKey ?? null, removals],
+        [runId, jsonbStringify(sets), new Date().toISOString(), opts?.ifAbsentKey ?? null, removals],
       );
       return (res.rowCount ?? 0) > 0;
     },
@@ -2120,7 +2115,7 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       await pool.query(
         `INSERT INTO annotations (annotation_id, run_id, tenant_id, payload, created_at)
          VALUES ($1, $2, $3, $4, $5)`,
-        [record.annotationId, record.runId, record.tenantId, JSON.stringify(record.payload), record.createdAt],
+        [record.annotationId, record.runId, record.tenantId, jsonbStringify(record.payload), record.createdAt],
       );
     },
 
@@ -2564,7 +2559,7 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
            outcome       = EXCLUDED.outcome,
            envelope_type = EXCLUDED.envelope_type,
            recorded_at   = EXCLUDED.recorded_at`,
-        [runId, correlationId, JSON.stringify(outcome), envelopeType, recordedAt],
+        [runId, correlationId, jsonbStringify(outcome), envelopeType, recordedAt],
       );
     },
 
@@ -2959,6 +2954,23 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
         [status, readAt, archivedAt, notificationId],
       );
       return rows[0] ? rowToNotification(rows[0]) : null;
+    },
+
+    async resolveRequestNotifications({ tenantId, runId, interruptId, resolution }) {
+      // ADR 1114 (#5868). SET expressions read the OLD row, so `status` below is
+      // the pre-update value: an unread row becomes read, read/archived stay.
+      const res = await pool.query(
+        `UPDATE notifications
+            SET metadata = COALESCE(metadata, '{}'::jsonb) || $4::jsonb,
+                read_at = CASE WHEN status = 'unread' THEN COALESCE(read_at, $5::timestamptz) ELSE read_at END,
+                status = CASE WHEN status = 'unread' THEN 'read' ELSE status END
+          WHERE tenant_id = $1 AND run_id = $2 AND interrupt_id IS NOT NULL
+            AND ($3::text IS NULL OR interrupt_id = $3)
+            AND status <> 'archived'
+            AND (metadata IS NULL OR metadata->'resolution' IS NULL)`,
+        [tenantId, runId, interruptId ?? null, JSON.stringify({ resolution }), resolution.at],
+      );
+      return res.rowCount ?? 0;
     },
 
     async markAllNotificationsRead(tenantId, now, recipientUserId, recipientRoles) {

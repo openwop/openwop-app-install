@@ -21,7 +21,7 @@ import { optionalCleanString } from '../../host/boundedStrings.js';
 import { bucketOf } from '../../host/variantAssignment.js';
 import { rankByPriority } from '../priority-matrix/scoring.js';
 import type { CriteriaSet } from '../priority-matrix/types.js';
-import { listProducts, getProduct, listOrders, isPubliclyListed, type Product } from '../commerce/commerceService.js';
+import { listProductsPage, getProducts, getProduct, listOrders, isPubliclyListed, type Product } from '../commerce/commerceService.js';
 import { resolveSegmentMembers } from '../crm/segmentsService.js';
 import { createLogger } from '../../observability/logger.js';
 import { tenantFeatureCheck } from '../../host/tenantFeatureGate.js';
@@ -361,8 +361,6 @@ export async function resolveRecommendations(input: ResolveInput): Promise<Resol
   };
 
   const anchor = input.productId ? await getProduct(tenantId, orgId, input.productId) : null;
-  const all = (await listProducts(tenantId, orgId)).filter(isPubliclyListed); // ADR 1098 — never recommend a quote-only product
-  const byId = new Map(all.map((p) => [p.productId, p]));
   const aff = anchor ? await affinity.get(affKey(tenantId, orgId, anchor.productId)) : null;
   const affScore = new Map<string, number>((aff?.related ?? []).map((r) => [r.relatedId, r.coScore]));
   const maxCo = Math.max(1, ...(aff?.related ?? []).map((r) => r.coScore));
@@ -373,6 +371,14 @@ export async function resolveRecommendations(input: ResolveInput): Promise<Resol
   const affinityComputedAt = [aff, ...trendRows].reduce<string | undefined>(
     (acc, row) => (row && (!acc || row.computedAt > acc) ? row.computedAt : acc), undefined);
   const maxTrend = Math.max(1, ...trendRows.map((a) => a.trendingScore));
+
+  // ADR 1110 P2 — the candidate pool, never the whole catalog: the anchor's own category
+  // and tag slices (bounded), plus the affinity and trending ids by point read. Listed
+  // products only (ADR 1098 — never recommend a quote-only product).
+  const pool = await anchorFacetPool(tenantId, orgId, anchor);
+  const signalIds = [...(aff?.related ?? []).map((r) => r.relatedId), ...[...trendById.entries()].sort((a, b) => b[1] - a[1]).slice(0, CANDIDATE_POOL).map(([id]) => id)];
+  const all = [...new Map([...pool, ...(await getProducts(tenantId, orgId, signalIds))].filter(isPubliclyListed).map((p) => [p.productId, p])).values()];
+  const byId = new Map(all.map((p) => [p.productId, p]));
 
   // Candidate generation per source.
   let candidateIds: string[];
@@ -437,4 +443,32 @@ export async function resolveRecommendations(input: ResolveInput): Promise<Resol
 export async function __resetRecommendations(): Promise<void> {
   await placements.__clear();
   await affinity.__clear();
+}
+
+/** ADR 1110 P2 — the most products a recommendation resolve considers from the catalog. */
+const CANDIDATE_POOL = 500;
+/** The most index pages one resolve reads for its pool (ADR 1110 round fix). */
+const POOL_PAGE_BUDGET = 6;
+
+/** The anchor's category and tag slices, listed products only, up to `CANDIDATE_POOL`.
+ *  These are the only catalog rows the facet-based sources (cross-sell, upsell, similar)
+ *  can pick from, so reading the slices instead of the catalog changes no result until a
+ *  slice holds more than the pool. */
+async function anchorFacetPool(tenantId: string, orgId: string, anchor: Product | null): Promise<Product[]> {
+  if (!anchor) return [];
+  const out = new Map<string, Product>();
+  const facets = [...(anchor.categories ?? []).map((category) => ({ category })), ...(anchor.tags ?? []).map((tag) => ({ tag }))];
+  // A page budget as well as the pool: a sparse slice must not walk the catalog.
+  let pages = 0;
+  for (const facet of facets) {
+    let cursor: string | undefined;
+    do {
+      const page = await listProductsPage(tenantId, orgId, { ...facet, listedOnly: true, limit: 200, ...(cursor ? { cursor } : {}) });
+      pages += 1;
+      for (const p of page.products) out.set(p.productId, p);
+      cursor = page.nextCursor;
+    } while (cursor && out.size < CANDIDATE_POOL && pages < POOL_PAGE_BUDGET);
+    if (out.size >= CANDIDATE_POOL || pages >= POOL_PAGE_BUDGET) break;
+  }
+  return [...out.values()];
 }

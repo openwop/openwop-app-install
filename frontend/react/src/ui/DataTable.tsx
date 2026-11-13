@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { formatNumber } from '../i18n/format.js';
 import { announce } from './announce.js';
@@ -19,6 +19,44 @@ import { ChevronDownIcon } from './icons/index.js';
  * owns the `Set` of selected row keys so it can clear it after a bulk op. Rows
  * are sorted client-side — fine for the page-sized lists these screens render.
  */
+
+/**
+ * <TableScroll> (lives beside <DataTable> so it adds no shared chunk to the entry's
+ * preload table) — the one horizontal scroller for a table (`.table-scroll`).
+ *
+ * A region that scrolls must be reachable from the keyboard (WCAG 2.1.1; axe
+ * `scrollable-region-focusable`), or a keyboard user cannot see the clipped
+ * columns. So while its content overflows, the wrapper is a focusable region
+ * named by `label` (pass the table's caption or heading); while it fits, it is a
+ * plain div and adds no tab stop. Never render a bare
+ * `<div className="table-scroll">` — `tableScrollRatchet.test.ts` refuses one.
+ */
+export function TableScroll({ label, className, children }: {
+  /** Accessible name for the region while it scrolls. */
+  label?: string | undefined;
+  /** Extra classes beside `table-scroll` (e.g. `table--stack`). */
+  className?: string | undefined;
+  children: ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [scrolls, setScrolls] = useState(false);
+
+  // A ResizeObserver reports each target once on observe, then on every resize:
+  // the wrapper (the card narrowed) and the table (rows or columns grew).
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => setScrolls(el.scrollWidth > el.clientWidth));
+    [el, el.firstElementChild].forEach((n) => n && ro.observe(n));
+    return () => ro.disconnect();
+  }, []);
+
+  return (
+    <div ref={ref} className={className ? `table-scroll ${className}` : 'table-scroll'} tabIndex={scrolls ? 0 : undefined} role={scrolls ? 'region' : undefined} aria-label={scrolls ? label : undefined}>
+      {children}
+    </div>
+  );
+}
 
 export interface DataColumn<T> {
   /** Stable column id (also the sort key). */
@@ -248,7 +286,7 @@ export function DataTable<T>({
         // won't announce; the useEffect above speaks via GlobalLiveRegion.
         <p className="dash-tile__state muted data-filter__nomatch">{t('tableNoFilterMatches', { query: filter.trim() })}</p>
       ) : (
-        <div className={`table-scroll${stack ? ' table--stack' : ''}`}>
+        <TableScroll className={stack ? 'table--stack' : undefined} label={caption}>
           <table className={`data-table${density === 'compact' ? ' data-table--compact' : ''}${stackHeaders ? ' data-table--stack-headers' : ''}`}>
             {caption ? <caption className="data-table-caption" {...(captionRef ? { ref: captionRef, tabIndex: -1 } : {})}>{caption}</caption> : null}
             <thead>
@@ -376,7 +414,7 @@ export function DataTable<T>({
               })}
             </tbody>
           </table>
-        </div>
+        </TableScroll>
       )}
     </>
   );

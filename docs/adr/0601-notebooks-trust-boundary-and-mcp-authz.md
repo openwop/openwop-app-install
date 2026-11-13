@@ -363,6 +363,12 @@ docblock names this exact shape ("the org-scoped, first-match
 `resolveEffectiveAccess({ subject })` is the wrong tool") for exactly this kind of
 non-org-scoped surface. R2 should have found that before writing its own residual.
 
+> **CORRECTED 2026-11-11 (ADR 1103):** the last sentence of R2 below ("the org-B case
+> is closed there") was false for the MCP tools. They are backed by
+> `ctx.features.notebooks`, not by the routes, and that surface authorized any run in
+> the tenant against any org-visible notebook. ADR 1103 D2 puts the door's rule on the
+> run lane.
+
 **R2 now reads:** the gate resolves the caller's authority as the **tenant-wide
 union** across their org memberships — deterministic, and granting a scope iff the
 caller holds it in ANY org. The per-org check belongs **at the surface**, where

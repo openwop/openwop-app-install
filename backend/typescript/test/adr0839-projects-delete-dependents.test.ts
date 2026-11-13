@@ -89,7 +89,7 @@ async function projectWithDependents() {
 
 describe('ADR 0839 D2 — a project delete takes its dependents', () => {
   it('every owning feature registered (a forgotten registration is a stranded store)', () => {
-    expect(listSubjectDependentKeys('project')).toEqual(['canvases', 'documents', 'entities', 'memoryProposals', 'priorityLists', 'teamLedger', 'teamLedgerSuggestions']);
+    expect(listSubjectDependentKeys('project')).toEqual(['canvases', 'documents', 'entities', 'memoryProposals', 'notebookSourceState', 'priorityLists', 'teamLedger', 'teamLedgerSuggestions']);
   });
 
   it('the delete preview names what will go, and a write is required to ask', async () => {
@@ -97,7 +97,7 @@ describe('ADR 0839 D2 — a project delete takes its dependents', () => {
     const r = await c.get<{ dependents: Counts }>(`${P}/${project.id}/delete-preview`);
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     // teamLedger = the ledger row + its creation delta.
-    expect(r.body.dependents).toEqual({ canvases: 1, documents: 1, entities: 0, memoryProposals: 1, priorityLists: 1, teamLedger: 2, teamLedgerSuggestions: 0 });
+    expect(r.body.dependents).toEqual({ canvases: 1, documents: 1, entities: 0, memoryProposals: 1, notebookSourceState: 0, priorityLists: 1, teamLedger: 2, teamLedgerSuggestions: 0 });
     // A CO-TENANT org viewer: the project is org-visible, so they hold READ — and the preview
     // still refuses them, because it needs WRITE. (A login in another tenant would 404 on
     // existence and prove nothing about the scope — the w13 probe showed exactly that.)
@@ -114,7 +114,7 @@ describe('ADR 0839 D2 — a project delete takes its dependents', () => {
     const { c, tenantId, project, canvas, list, ledger, doc, free } = await projectWithDependents();
     const del = await c.del<{ dependentsDeleted: Counts }>(`${P}/${project.id}`);
     expect(del.status, JSON.stringify(del.body)).toBe(200);
-    expect(del.body.dependentsDeleted).toEqual({ canvases: 1, documents: 1, entities: 0, memoryProposals: 1, priorityLists: 1, teamLedger: 2, teamLedgerSuggestions: 0 });
+    expect(del.body.dependentsDeleted).toEqual({ canvases: 1, documents: 1, entities: 0, memoryProposals: 1, notebookSourceState: 0, priorityLists: 1, teamLedger: 2, teamLedgerSuggestions: 0 });
 
     expect(await getCanvasForTenant(tenantId, canvas.canvasId), 'owned canvas').toBeNull();
     expect(await getList(tenantId, list.id), 'scoped priority list').toBeNull();

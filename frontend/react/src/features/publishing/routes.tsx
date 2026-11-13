@@ -17,9 +17,9 @@ const routes: FeatureRoute[] = [
     tier: 'admin', archetype: 'admin',
     nav: {
       group: 'Content',
-      label: 'Publishing', labelKey: 'publishingLabel',
+      labelKey: 'publishingLabel',
       icon: GlobeIcon,
-      hint: 'Public site + SEO for CMS pages', hintKey: 'publishingHint',
+      hintKey: 'publishingHint',
       order: 30,
     },
   },

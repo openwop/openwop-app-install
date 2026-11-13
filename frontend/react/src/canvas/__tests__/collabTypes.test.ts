@@ -12,6 +12,14 @@
  * source scan proves no `collab:` declaration lives anywhere else), the backend
  * set is read from the backend route sources. A new collab type on EITHER side
  * reds the set-equality leg; the pinned kind map reds a kind flip.
+ *
+ * ADR 1031 P3 — an adopter's tree adds `src/adopter/features/*` on both sides;
+ * the exact kind map and the elements count stay FIRST-PARTY pins, the parity and
+ * trait legs cover both. Measured at w107 (no adopter dir in this tree): 6
+ * backend `collab: true` registrations (the floor is 6), 5 elements-kind defs.
+ * Sabotage that turns it red (/grade-tests w107): a FE kind flip, a FE or backend
+ * `collab` dropped, a `collab:` declared outside a definition module, an
+ * elements type losing its frames key, index-derived slide ids made random.
  */
 import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { join, dirname, relative, sep } from 'node:path';

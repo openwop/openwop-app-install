@@ -21,7 +21,7 @@ import { cleanContent, cleanString, contentUrl, refuseIfScrubbed } from '../src/
 import { findCredentialShape, scrubSecretShaped } from '../src/host/redactSecrets.js';
 import { createPage, listPages, validateSection } from '../src/features/cms/cmsService.js';
 import { putSeo } from '../src/features/publishing/publishingService.js';
-import { createProduct, listProducts } from '../src/features/commerce/commerceService.js';
+import { createProduct, collectCatalog } from '../src/features/commerce/commerceService.js';
 import { createBookingLink } from '../src/features/crm/entities/bookingLinks.js';
 import { createShow } from '../src/features/podcasts/podcastsService.js';
 import { upsertReview } from '../src/features/marketplace/reviewService.js';
@@ -110,7 +110,7 @@ describe('every migrated content path: kept byte for byte, or a typed refusal', 
     expect(p.description).toBe(`SKU ${HASH}`);
     await refused(createProduct({ tenantId: T, orgId: O, createdBy: 'u', type: 'physical', name: 'Box', description: KEY, price: 100 }), 'description');
     // Nothing is stored: only the kept product exists (exact id).
-    expect((await listProducts(T, O)).filter((x) => x.name === 'Box').map((x) => x.productId)).toEqual([p.productId]);
+    expect((await collectCatalog(T, O, () => true)).filter((x) => x.name === 'Box').map((x) => x.productId)).toEqual([p.productId]);
   });
 
   it('booking link (description, video link)', async () => {

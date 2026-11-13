@@ -40,6 +40,7 @@ import { createLogger } from '../../observability/logger.js';
 import { ONWARD_SYNC_WORKFLOW_ID } from './onwardSyncWorkflow.js';
 import { applyFieldMap, getDestinationSync, listDestinationSyncs } from './destinationSyncService.js';
 import { warehouseLoad, warehouseLoadDeps } from './warehouseLoadService.js';
+import { forwardedPlanExemption } from '../../host/operatorPlanExemption.js';
 
 const log = createLogger('destination-sync.agent-tools');
 
@@ -178,6 +179,8 @@ export async function runRunTool(deps: StartRunDeps, input: Record<string, unkno
     }
     const runId = await startWorkflowRun(deps, {
       tenantId: scope.tenantId,
+      // CC-CHAN-1 / ADR 1108 — keep the listed operator's exemption on the started run.
+      ...forwardedPlanExemption(scope),
       workflowId: ONWARD_SYNC_WORKFLOW_ID,
       inputs: { syncId, records, peerIngestUrl: sync.peerIngestUrl },
       metadata: {

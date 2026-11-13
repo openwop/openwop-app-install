@@ -12,9 +12,9 @@ const routes: FeatureRoute[] = [
     tier: 'admin', archetype: 'admin',
     nav: {
       group: 'Analytics & usage',
-      label: 'Business metrics', labelKey: 'biLabel',
+      labelKey: 'biLabel',
       icon: BarChartIcon,
-      hint: 'Governed metric catalog', hintKey: 'biHint',
+      hintKey: 'biHint',
       featureId: 'bi',
     },
   },

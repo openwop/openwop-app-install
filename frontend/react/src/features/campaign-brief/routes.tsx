@@ -17,9 +17,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Marketing',
-      label: 'Campaign Briefs', labelKey: 'campaignBriefLabel',
+      labelKey: 'campaignBriefLabel',
       icon: ClipboardIcon,
-      hint: 'Personas, briefs & the messaging kernel', hintKey: 'campaignBriefHint',
+      hintKey: 'campaignBriefHint',
       order: 20,
       featureId: 'campaign-brief',
       // ADR 0200 Phase 2 — collapse into the Campaign Studio console when `campaigns` is on.

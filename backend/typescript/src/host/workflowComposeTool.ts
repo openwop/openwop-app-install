@@ -77,6 +77,7 @@ import { assertNoDisabledPacks } from './packEnablement.js';
 import { OpenwopError } from '../types.js';
 import type { WorkflowDefinition } from '../executor/types.js';
 import { createLogger } from '../observability/logger.js';
+import { forwardedPlanExemption } from './operatorPlanExemption.js';
 
 export { definitionHashOf } from './definitionHash.js';
 
@@ -400,6 +401,8 @@ export function registerWorkflowComposeTool(deps: StartRunDeps): void {
       // 6. An ORDINARY run via the shared recipe — every run-level gate applies.
       const runId = await startWorkflowRun(deps, {
         tenantId: scope.tenantId,
+        // CC-CHAN-1 / ADR 1108 — keep the listed operator's exemption on the started run.
+        ...forwardedPlanExemption(scope),
         workflowId: def.workflowId,
         inputs: (input.inputs && typeof input.inputs === 'object' ? input.inputs as Record<string, unknown> : {}),
         metadata: {

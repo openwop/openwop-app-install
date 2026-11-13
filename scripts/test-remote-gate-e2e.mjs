@@ -99,7 +99,8 @@ function fixture(t, { gate = 'green', workerRunner = 'fixture-runner', acceptedS
 
 test('a green remote gate is fetched and accepted by the local validator', supported, async t => {
   const f = fixture(t);
-  const outcome = await runRemoteGate(f.local);
+  const logDir = privateDir(f.dir, 'kept-logs');
+  const outcome = await runRemoteGate({ ...f.local, logDir });
   assert.equal(outcome.verdict, 'green', JSON.stringify(outcome));
   assert.equal(outcome.accepted.commit, f.local.commit);
   assert.equal(outcome.accepted.requiredBrowser, 'pass');
@@ -109,6 +110,8 @@ test('a green remote gate is fetched and accepted by the local validator', suppo
   assert.equal(job.details.exitCode, 0);
   assert.deepEqual(readdirSync(f.config.runnerRoot), [], 'the rebuilt checkout is removed');
   assert(existsSync(join(f.config.logRoot, `${job.id}.log.gz`)), 'the gate log is kept');
+  assert.equal(outcome.log, join(logDir, `${outcome.id}.log.gz`), 'the green gate log comes home too');
+  assert.match(gunzipSync(readFileSync(outcome.log)).toString('utf8'), /gate exit 0/);
 });
 
 test('a red remote gate is red, with its exit code, and nothing is fetched', supported, async t => {

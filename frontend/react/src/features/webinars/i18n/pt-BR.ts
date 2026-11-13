@@ -1,6 +1,4 @@
 export const messages = {
-  webinarsLabel: 'Webinars',
-  webinarsHint: 'Webinars do Zoom → presença no CRM',
   eyebrow: 'Marketing',
   title: 'Webinars',
   lede: 'Use webinars do Zoom como uma superfície de conversão do CRM — a presença flui para a linha do tempo do contato e pode inscrever jornadas.',

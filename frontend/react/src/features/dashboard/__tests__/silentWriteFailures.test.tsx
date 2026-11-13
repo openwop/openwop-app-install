@@ -18,13 +18,25 @@
  *      for a one-line message — so a failed save REPLACED the textarea and took
  *      the user's unsaved text off screen with no way back. Losing sight of
  *      unsaved work is worse than the silence this set out to fix.
+ *
+ * Sabotage that turns it red (/grade-tests w107): the note's save failure routed
+ * into the read-error flag; the inline "Not saved" line dropped; a toast added to
+ * either failure path; the note's "Saved" tick dropped; the read failure no longer
+ * replacing the tile; the layout catch not raising the Notice, or the next success
+ * not clearing it; a dashboard tile fetching around its mocked client (ADR 0661 —
+ * the W-1 case records every fetch). Fixtures are typed against dashboardClient.
  */
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { StrictMode } from 'react';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
+import type * as DashboardClient from '../dashboardClient.js';
 
-const { putNote, getNote } = vi.hoisted(() => ({ putNote: vi.fn(), getNote: vi.fn() }));
+const STAMP = '2026-11-01T00:00:00.000Z';
+const { putNote, getNote } = vi.hoisted(() => ({
+  putNote: vi.fn<typeof DashboardClient.putNote>(),
+  getNote: vi.fn<typeof DashboardClient.getNote>(),
+}));
 // The ONE dashboardClient mock (putNote/getNote/getLayout/putLayout) is below,
 // beside W-1. It used to be registered twice; the second silently won.
 
@@ -42,7 +54,7 @@ vi.mock('../../../ui/toast.js', async (orig) => ({
 import PersonalNoteTile from '../tiles/PersonalNoteTile.js';
 
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.useRealTimers(); });
-beforeEach(() => { getNote.mockResolvedValue({ text: 'my work' }); });
+beforeEach(() => { getNote.mockResolvedValue({ text: 'my work', updatedAt: STAMP }); });
 
 describe('W-2 · a failed note save keeps the text on screen', () => {
   it('does NOT replace the textarea when a save fails', async () => {
@@ -51,14 +63,14 @@ describe('W-2 · a failed note save keeps the text on screen', () => {
     await act(async () => { render(<PersonalNoteTile compact={false} />); });
     await act(async () => { await Promise.resolve(); });
 
-    const box = screen.getByRole('textbox') as HTMLTextAreaElement;
-    fireEvent.change(box, { target: { value: 'my work plus more' } });
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'my work plus more' } });
     await act(async () => { vi.advanceTimersByTime(2000); await Promise.resolve(); });
 
     // THE POINT: the editing surface survives, with the text still in it.
-    const still = screen.queryByRole('textbox') as HTMLTextAreaElement | null;
-    expect(still, 'the textarea must survive a failed save').toBeTruthy();
-    expect(still!.value).toBe('my work plus more');
+    expect(putNote).toHaveBeenCalledWith('my work plus more');
+    const still = screen.queryByRole('textbox');
+    expect(still, 'the textarea must survive a failed save').not.toBeNull();
+    expect(screen.getByDisplayValue('my work plus more')).toBe(still);
   });
 
   it('tells the user, inline (one channel — no toast)', async () => {
@@ -99,7 +111,7 @@ describe('W-2 · a failed note save keeps the text on screen', () => {
 
   it('SABOTAGE — a SUCCESSFUL save still reports saved, and says nothing alarming', async () => {
     vi.useFakeTimers();
-    putNote.mockResolvedValue(undefined);
+    putNote.mockResolvedValue({ text: 'ok', updatedAt: STAMP });
     await act(async () => { render(<PersonalNoteTile compact={false} />); });
     await act(async () => { await Promise.resolve(); });
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'ok' } });
@@ -126,12 +138,15 @@ describe('W-2 · a failed note save keeps the text on screen', () => {
  * the one with the riskier logic (a ref-based dedup that only clears on
  * success, so a session-long failure could otherwise go silent after one toast).
  */
-const { getLayout, putLayout } = vi.hoisted(() => ({ getLayout: vi.fn(), putLayout: vi.fn() }));
+const { getLayout, putLayout } = vi.hoisted(() => ({
+  getLayout: vi.fn<typeof DashboardClient.getLayout>(),
+  putLayout: vi.fn<typeof DashboardClient.putLayout>(),
+}));
 vi.mock('../dashboardClient.js', async (orig) => ({
   ...(await orig<typeof import('../dashboardClient.js')>()),
   putNote, getNote, getLayout, putLayout,
   // `runsWindow.readMyRuns` (NeedsYouTile, the run tiles) reads through here.
-  listOwnRuns: () => Promise.resolve({ runs: [], truncated: false }),
+  listOwnRuns: (async () => ({ runs: [], truncated: false })) satisfies typeof DashboardClient.listOwnRuns,
 }));
 vi.mock('../../../auth/useAuth.js', () => ({ useAuth: () => ({ user: null, loading: false }) }));
 vi.mock('../../../auth/backendSession.js', async (orig) => ({
@@ -205,7 +220,9 @@ vi.mock('../../../kanban/kanbanClient.js', async (importOriginal) => ({
 }));
 vi.mock('../../priority-matrix/priorityMatrixClient.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
-  listPortfolio: () => Promise.resolve([]),
+  // The real shape (`{ items, lists, normalize }`). A bare `[]` made
+  // TopPrioritiesTile read `undefined.length` and throw into its ErrorBoundary.
+  listPortfolio: (async () => ({ items: [], lists: [], normalize: 'none' })) satisfies typeof import('../../priority-matrix/priorityMatrixClient.js').listPortfolio,
 }));
 
 // ── ADR 0661, again: the population grew (train 399, 2026-11-06) ─────────────────
@@ -268,10 +285,13 @@ describe('W-1 · a failed layout save keeps a standing notice until a save succe
 
     expect(putLayout, 'the edit must actually reach a save for this to test anything').toHaveBeenCalled();
     expect(screen.getByText(/isn’t saving/i)).toBeTruthy();
+    // ONE surface: the Notice is already assertive, so a toast beside it would
+    // double-announce (grade-ux DASHW-10). The title says "not a toast"; assert it.
+    expect(toastError, 'a failed layout save uses the standing Notice, not a toast').not.toHaveBeenCalled();
 
     // …and it CLEARS on the next successful save (the header's claim; a banner
     // that only a reload removes pins one blip to the home screen — DASHW-13).
-    putLayout.mockResolvedValue({});
+    putLayout.mockResolvedValue({ tenantId: 't-w1', subject: 'u-w1', tiles: [], updatedAt: STAMP });
     const again = screen.getAllByRole('button').filter((b) => /make wide|make compact|remove/i.test(b.getAttribute('aria-label') ?? ''));
     fireEvent.click(again[0]!);
     await act(async () => { vi.advanceTimersByTime(2000); await Promise.resolve(); });

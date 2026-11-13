@@ -402,6 +402,43 @@ legacy id matches nothing.
 > Order: merge, deploy, `report`, read the counts, `apply`, then a follow-up PR
 > deletes the legacy branch of `isConfiguredEnvKeyIssuer` and removes the job.
 > Test: `test/adr1045-legacy-bearer-rewrite.test.ts`.
+>
+> > **CORRECTED 2026-11-11 (CHAN-F14 prod `report` run) — "audit-like collections
+> > are left" was not true of the one that matters most.** The first prod `report`
+> > (revision 01199-hzv, log 11:26:37Z) counted 234 rows to rewrite in
+> > `cdp:audit-chain`, the ADR 0301 tamper-evident hash chain. It was missing from
+> > `AUDIT_COLLECTIONS`, so `apply` would have edited entry payloads and every
+> > affected tenant's `verifyChain` would have failed, with no repair short of a
+> > point-in-time restore. Fixed before any `apply`: `auditChainService` exports
+> > `AUDIT_CHAIN_COLLECTION` and the skip list uses it, and the test appends a real
+> > chain entry carrying the mapped id and asserts it is untouched and the chain
+> > verifies (sabotage: dropping the entry reds 2 tests). The other hash-linked
+> > logs (compensation recovery, governance) ride the same chain; no other
+> > collection is hash-linked.
+> >
+> > Second defect from the same log line: the `values` count printed as `pii_…`.
+> > `forms.submission` declares `values` a PII field, and a declared name is masked
+> > in every log line. The count is now `valueCount`, and the test loads every
+> > feature's declarations and asserts each count survives the sink's masking
+> > (sabotage: re-adding `values` reds it). The user chose "fix first, then
+> > re-ask": re-run `report` after this deploys, then the user decides `apply`.
+>
+> > **UPDATED 2026-11-12 (CHAN-F14 applied; legacy rule deleted).** After the fix
+> > deployed, `report` on revision 01206-584 counted 207 values in 207 rows
+> > (`devkey:record` 151, `proposals` 35, `a2a:task` 17, `connections:connection` 3,
+> > `access-orgs` 1), 1 member and 7,728 stamped runs, with the 234 chain entries
+> > left. Ambiguous, unmapped, conflicts and failures were all 0. The user approved
+> > `apply` on those counts. It ran on revision 01207-v9m at 10:44:56Z with the same
+> > counts, and the job marked itself complete. The env var was then set to `off`.
+> >
+> > The legacy branch of `isConfiguredEnvKeyIssuer` is now deleted: a legacy id
+> > matches nothing. **The job is NOT removed yet, which departs from the order
+> > above.** 0.12.0 told white-label operators the rewrite was optional, so an
+> > install that upgrades without having run it would keep legacy ids with no tool
+> > to rewrite them. Without the rule those records fail closed: they lose operator
+> > standing, and nothing is handed to the wrong key. The job does not depend on
+> > the rule; it derives its map from the configured keys. Removing it is TODO
+> > `CHAN-F18`, after a release has carried the upgrade note.
 
 **What a principal-id change does to stored state (inventory, nothing
 rewritten).** The id an env key presents changes once, at deploy. Rotation

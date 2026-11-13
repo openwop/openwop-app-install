@@ -5,7 +5,8 @@
  * anchor, the one thing a `:fork` reads back. What turns it red: rewriting an existing
  * entry (a fork would restart the clock), stamping a non-approved ledger, dropping
  * other metadata keys, matching a stamp of another approval (the anchor of an earlier
- * mission would expire a new one), or letting a new approval inherit a legacy stamp.
+ * mission would expire a new one), or letting a new approval (or a legacy row of
+ * another conversation) inherit a legacy stamp.
  */
 import { describe, it, expect } from 'vitest';
 import { ledgerToScope, readApprovalStamp, readIntentLedgerStamp, withApprovalStamp, INTENT_LEDGER_KEY, INTENT_LEDGER_APPROVALS_KEY } from '../src/features/intent-ledger/ledgerProjection.js';
@@ -66,10 +67,11 @@ describe('readApprovalStamp / readIntentLedgerStamp', () => {
     const legacyMd = { [INTENT_LEDGER_KEY]: { conversationId: 'c', scope: { mode: 'restricted' }, goal: 'g', successCriteria: [], resolvedAt: 'legacy-anchor' } };
     expect(readApprovalStamp(legacyMd, base)?.resolvedAt).toBe('legacy-anchor'); // legacy row (no approvedAt)
     expect(readApprovalStamp(legacyMd, approved)).toBeNull(); // a new approval never inherits it
+    expect(readApprovalStamp(legacyMd, { ...base, conversationId: 'other' })).toBeNull(); // nor a legacy row of another conversation
   });
   it('reads a well-formed legacy stamp; null on malformed/absent', () => {
     const md = { [INTENT_LEDGER_KEY]: { conversationId: 'c', scope: { mode: 'restricted' }, goal: 'Draft the Q3 report', successCriteria: [], expiresAtRelMs: 3_600_000, resolvedAt: 'x' } };
-    expect(readIntentLedgerStamp(md)).toMatchObject({ conversationId: 'c', goal: 'Draft the Q3 report', expiresAtRelMs: 3_600_000, resolvedAt: 'x' });
+    expect(readIntentLedgerStamp(md)).toEqual({ conversationId: 'c', scope: { mode: 'restricted' }, goal: 'Draft the Q3 report', successCriteria: [], expiresAtRelMs: 3_600_000, resolvedAt: 'x' });
     expect(readIntentLedgerStamp(undefined)).toBeNull();
     expect(readIntentLedgerStamp({ [INTENT_LEDGER_KEY]: { goal: 'x' } })).toBeNull(); // no scope
   });

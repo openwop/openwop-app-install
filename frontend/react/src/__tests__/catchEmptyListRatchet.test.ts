@@ -46,7 +46,6 @@ const ALLOWED: Record<string, { count: number; why: string }> = {
   'features/cms/CmsLanguageSettings.tsx:setMembers': { count: 1, why: 'OK-SILENT: UserPicker options; grant name falls back to subject' },
   'features/cms/CmsPage.tsx:setAssets': { count: 1, why: 'OK-SILENT: media fields degrade to a free-text token input' },
   'features/cms/SectionsEditor.tsx:setTaxonomies': { count: 1, why: 'OK-SILENT: taxonomy <select> options only' },
-  'features/commerce/CommercePage.tsx:setProducts': { count: 2, why: 'NOT IN THE W48 AUDIT: secondary product reads beside the quotes / price-lists tabs (their primary reads are flagged)' },
   'features/dashboard/tiles/TodosTile.tsx:setCards': { count: 1, why: 'OK-FLAGGED (audit): `state` is checked before the empty copy; flag name outside the pattern' },
   'features/entities/EntitiesPage.tsx:setTaxonomies': { count: 1, why: 'OK-FLAGGED (audit): local `taxFailed` → `termsFailed` warning' },
   'features/marketplace/BundleShopPage.tsx:setCommerce': { count: 1, why: 'OK-FLAGGED (audit): `commerceUnavailable` warning' },

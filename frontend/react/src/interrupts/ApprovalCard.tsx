@@ -8,6 +8,8 @@ import { decideErrorMessage } from './decideErrorMessage.js';
 import { useReviewStatusByRunNode } from '../chat/reviews/reviewStatusStore.js';
 import { confirm } from '../ui/confirm.js';
 import { GateEvidence, isBrowserActionGate } from '../chat/reviews/GateEvidence.js';
+import { requestWords } from './requestWords.js';
+import { approvalResumeValue } from './approvalResumeValue.js';
 
 interface Props {
   runId: string;
@@ -47,6 +49,8 @@ export function ApprovalCard({ runId, nodeId, data, onResolved }: Props) {
   const inFlight = useRef(false);
 
   const prompt = ((data as { prompt?: string })?.prompt) ?? t('approvalDefaultPrompt');
+  // ADR 1109 D1 — the gate's own heading, now that `core.chat.approvalGate` forwards it.
+  const words = requestWords(data);
   // ADR 0778 (`APUX-7`) — a gate may declare verbs beyond the five this card
   // knows (`accept`, …). They used to be cast into the known set and rendered
   // `t(undefined)`: a button with no accessible name (WCAG 4.1.2).
@@ -83,7 +87,7 @@ export function ApprovalCard({ runId, nodeId, data, onResolved }: Props) {
     setSubmitting(true);
     setError(null);
     try {
-      await resolveByRun(runId, nodeId, { action, comment: comment || undefined });
+      await resolveByRun(runId, nodeId, approvalResumeValue(action, comment));
       setDecidedHere(true);
       onResolved();
     } catch (err) {
@@ -98,7 +102,7 @@ export function ApprovalCard({ runId, nodeId, data, onResolved }: Props) {
 
   return (
     <div className="card" role="group" aria-labelledby={headingId}>
-      <h2 id={headingId}>{t('approvalRequired')}</h2>
+      <h2 id={headingId}>{words.title ?? t('approvalRequired')}</h2>
       <p>{prompt}</p>
       {/* ADR 0600 §2 (`ISU-10`) — THE evidence. This card is where the interrupt
           notification's `actionUrl: '/inbox'` actually lands, and it used to read

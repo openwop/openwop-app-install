@@ -66,7 +66,7 @@ export async function startExecutionRun(
  *  (ADR 0942 P2b); the operator who asked is the run's cause. */
 export async function startClientReportRun(
   deps: { storage: Storage; hostSuite: HostAdapterSuite },
-  input: { tenantId: string; orgId: string; definitionId: string; definitionVersion: number; causedBy: string; periodStart?: string; periodEnd?: string; personalTenant?: string },
+  input: { tenantId: string; orgId: string; definitionId: string; definitionVersion: number; causedBy: string; periodStart?: string; periodEnd?: string; personalTenant?: string; planExempt?: true },
 ): Promise<string> {
   const { CLIENT_REPORT_CHAIN_ID } = await import('./reports/types.js');
   const started = await startWorkflowRun(deps, {
@@ -85,6 +85,7 @@ export async function startClientReportRun(
     } },
     orgScopeSubject: input.causedBy,
     ...(input.personalTenant ? { personalTenant: input.personalTenant } : {}),
+    ...(input.planExempt === true ? { planExempt: true as const } : {}),
   });
   if (!started) throw new OpenwopError('workflow_not_found', 'The client-report workflow is not available.', 422, { workflowId: CLIENT_REPORT_CHAIN_ID });
   return started;

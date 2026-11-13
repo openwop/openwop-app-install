@@ -1177,6 +1177,12 @@ export const MIGRATIONS: Record<number, (db: Database) => void> = {
     const has = db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'messaging_delivery_log'`).get();
     if (has) db.exec(`CREATE INDEX IF NOT EXISTS idx_messaging_delivery_log_at ON messaging_delivery_log (at);`);
   },
+  53: (db) => {
+    // ADR 1114 (#5868) — the by-run lookup that retires a finished step's
+    // requests. Mirrors postgres mig 51.
+    const has = db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'notifications'`).get();
+    if (has) db.exec(`CREATE INDEX IF NOT EXISTS idx_notifications_tenant_run_request ON notifications (tenant_id, run_id) WHERE interrupt_id IS NOT NULL;`);
+  },
 };
 
 /** Highest defined migration — DERIVED from MIGRATIONS, never a hand-bumped cap

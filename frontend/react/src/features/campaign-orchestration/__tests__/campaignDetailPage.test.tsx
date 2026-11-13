@@ -12,7 +12,7 @@
  *     off reads "Feature off", neither as "0 linked".
  *
  * Sabotage: mapping a failed links read to empty sections reds "a failed links
- * read…"; reading `listProducts` with another org reds the picker case; removing
+ * read…"; reading `listProductsPage` with another org reds the picker case; removing
  * either `primaries > 1` guard (the disabled button, the submit check) reds the
  * picker case; rendering an
  * `unavailable` section as a count reds the linked-work case.
@@ -30,7 +30,8 @@ const h = vi.hoisted(() => ({
   getCampaign: vi.fn(),
   getCampaignLinks: vi.fn(),
   updateCampaign: vi.fn(),
-  listProducts: vi.fn(),
+  listProductsPage: vi.fn(),
+  getProductsByIds: vi.fn(),
   listOrgs: vi.fn(),
   getCommand: vi.fn(),
 }));
@@ -43,7 +44,7 @@ vi.mock('../campaignStudioClient.js', async (orig) => ({
   listDispatches: vi.fn(async () => []),
   getCommand: h.getCommand,
 }));
-vi.mock('../../commerce/commerceClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), listProducts: h.listProducts }));
+vi.mock('../../commerce/commerceClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), listProductsPage: h.listProductsPage, getProductsByIds: h.getProductsByIds }));
 
 import { CampaignDetailPage } from '../CampaignDetailPage.js';
 
@@ -80,7 +81,8 @@ beforeEach(() => {
   h.getCampaign.mockResolvedValue(CAMPAIGN);
   h.getCampaignLinks.mockResolvedValue(LINKS);
   h.updateCampaign.mockImplementation(async (_id: string, patch: Partial<MarketingCampaign>) => ({ ...CAMPAIGN, ...patch, attention: patch.attention ? undefined : CAMPAIGN.attention }));
-  h.listProducts.mockResolvedValue([product('p1', 'Course'), product('p2', 'Workbook')]);
+  h.listProductsPage.mockResolvedValue({ products: [product('p1', 'Course'), product('p2', 'Workbook')] });
+  h.getProductsByIds.mockResolvedValue([]);
   h.listOrgs.mockResolvedValue([{ orgId: 'org-a', name: 'Acme' }]);
   // The detail now mounts the real command section. Its own suite exercises
   // run/gate behavior; this page fixture still supplies its actual read boundary.
@@ -157,7 +159,7 @@ describe('ADR 0941 P3 — campaign detail', () => {
     open();
     fireEvent.click(await screen.findByRole('button', { name: 'Choose products' }));
     const dialog = await screen.findByRole('dialog');
-    await waitFor(() => expect(h.listProducts).toHaveBeenCalledWith('org-a'));
+    await waitFor(() => expect(h.listProductsPage).toHaveBeenCalledWith('org-a', { limit: 20 }));
     fireEvent.change(await within(dialog).findByLabelText('Role for Course'), { target: { value: 'primary' } });
     fireEvent.change(within(dialog).getByLabelText('Role for Workbook'), { target: { value: 'primary' } });
     expect(within(dialog).getByRole('alert').textContent).toMatch(/only one primary/);

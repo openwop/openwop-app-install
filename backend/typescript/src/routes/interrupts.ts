@@ -8,6 +8,8 @@
  * the suspended node's index + the resolved value as input.
  */
 
+import { APPROVAL_DATA_LOOPBACK_FIELD, LOOPBACK_EXHAUSTED_REASON } from '../executor/loopbackWire.js';
+import { isRefineResolution } from '../executor/loopback.js';
 import { assertNotSubWorkflowMirror } from '../host/subWorkflowMirrorGuard.js';
 import { notifyInterruptResolved } from '../host/interruptResolutionObservers.js';
 import { timingSafeEqual } from 'node:crypto';
@@ -40,6 +42,7 @@ import { listTenantMembers, resolveEffectiveAccess } from '../host/accessControl
 import { isEligibleApprover, consumeVoteIdentity, gateAclOf, gateApproverRefs } from '../host/approverResolution.js';
 import { isAutonomyGateData, isAutonomyRequester } from '../host/autonomyPolicy/selfApproval.js';
 import { verifyVoterBinding } from '../host/interruptVoterBinding.js';
+import { tokenResolvedVia } from '../host/interruptResolvedVia.js';
 import { loadOwnedRun } from '../host/runAccess.js';
 import { holdsRunApprovalGrant } from '../host/runApprovalGrant.js';
 import { holdsProtocolScope, grantMayStandIn, withdrawScopeChallenge } from '../host/protocolAuthorization.js';
@@ -392,7 +395,7 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
       // declares the approver — on an ACL'd gate it must be eligible AND carry its
       // emailed signature, `assertTokenQuorumVote`, ADR 0899 D1). A public path:
       // no session reaches this route, so a cookie never stands in for the proof.
-      await resolveAndResume(storage, hostSuite, interrupt.interruptId, body?.resumeValue, { capabilityToken: true });
+      await resolveAndResume(storage, hostSuite, interrupt.interruptId, body?.resumeValue, { capabilityToken: true, tokenPresented: true });
       const run = await storage.getRun(interrupt.runId);
       res.json({ runId: interrupt.runId, nodeId: interrupt.nodeId, status: run?.status });
     } catch (err) {
@@ -483,7 +486,7 @@ ${bodyHtml}
         action,
         ...(voter ? { voter, voterSig: sig } : {}),
         ...(comment ? { comment } : {}),
-      }, { capabilityToken: true });
+      }, { capabilityToken: true, tokenPresented: true });
       res.status(200).type('html').send(confirmShell('Decision recorded',
         `<h1 style="font-size:1.1rem">Decision recorded</h1><p>Your ${esc(action === 'approve' ? 'approval' : 'rejection')} was recorded. You can close this page.</p>`));
     } catch (err) {
@@ -1595,6 +1598,11 @@ export async function resolveAndResume(
      *  v2). Present on the session lanes; a bare capability token has no
      *  identity to record, so it stays absent rather than invented. */
     resolvedBy?: RunSubjectV2;
+    /** ADR 1059 (RFC 0259) — this resolution PRESENTED the interrupt's resume
+     *  token (the two token routes). Not every `capabilityToken` lane does: the
+     *  MCP `requestState` resume and inbound webhooks present none, and a
+     *  `resolvedVia` naming a token there would be a false record. */
+    tokenPresented?: boolean;
     /** The caller already WON `storage.resolveInterrupt` for this interrupt (the
      *  ENG-6 claim pattern — the MCP retry, the connection-prompt expiry). The
      *  reject paths' own CAS would then lose and return, stranding the run with
@@ -1695,6 +1703,19 @@ export async function resolveAndResume(
   // exercise. The fail-safe exits stay open — cancel the run, or let the gate's
   // own timeout auto-reject (that path writes the store directly, not via here).
   /* removed */
+  // ADR 1059 (RFC 0259 §A.2/§A.4) — the instrument of a token resolution, and,
+  // for an interrupt that declares eligibility, the refusal of a presentation
+  // this host bound to no one: §Approver enforcement already demands that the
+  // host identified the resolver, and this makes it say whom. Undefined unless
+  // `OPENWOP_INTERRUPT_RESOLVED_VIA=true`. Before any claim, so a refusal
+  // consumes nothing.
+  const resolvedVia = reviewer?.tokenPresented === true && reviewer.preclaimed !== true
+    ? tokenResolvedVia(interrupt, resumeValue, (await storage.getRun(interrupt.runId))?.tenantId ?? 'default')
+    : undefined;
+  if (resolvedVia && !resolvedVia.boundTo && gateAclOf(interrupt.data).declared) {
+    throw new OpenwopError('forbidden', 'This step names who may decide it. Use the signed link from your notification email, or decide it in the app.', 403, { interruptId, reason: 'resolved_via_unbound' });
+  }
+  const viaField = resolvedVia ? { resolvedVia } : {};
   // A sub-workflow child's gate mirrored onto its parent is not decidable here:
   // resolving it would fabricate the child's completion (subWorkflowMirrorGuard.ts).
   // Same choke point as the trust check above, so every human lane (and MCP, which
@@ -1713,6 +1734,23 @@ export async function resolveAndResume(
       400,
       { field: 'resumeValue.action', received: 'timeout' },
     );
+  }
+  // ADR 1058 / RFC 0258 §D — a spent `withdraw` loopback no longer offers
+  // `refine`. The by-node route already enforces `actions` (`validateResumeValue`),
+  // but this shared choke point (token, reviews, MCP) does not, so the withdrawal
+  // is enforced here for every lane. Scoped to the loopback marker on the data,
+  // so no gate without a loopback changes behaviour.
+  if (interrupt.kind === 'approval' && isRefineResolution(resumeValue)) {
+    const d = (interrupt.data ?? {}) as Record<string, unknown> & { actions?: unknown };
+    const lb = d[APPROVAL_DATA_LOOPBACK_FIELD] as { exhausted?: unknown } | undefined;
+    if (lb?.exhausted === true && Array.isArray(d.actions) && !d.actions.includes('refine')) {
+      throw new OpenwopError(
+        'validation_error',
+        'resumeValue.action \'refine\' is no longer offered: this gate\'s loopback has used all its rounds (RFC 0258 §D).',
+        400,
+        { field: 'resumeValue.action', received: 'refine', allowed: d.actions, reason: LOOPBACK_EXHAUSTED_REASON },
+      );
+    }
   }
   if (interrupt.kind === 'credential') {
     assertCredentialResumeShape(resumeValue);
@@ -1884,7 +1922,7 @@ export async function resolveAndResume(
       runId: interrupt.runId,
       nodeId: interrupt.nodeId,
       type: 'interrupt.resolved',
-      payload: { interruptId, kind: interrupt.kind, decision: 'rejected', action: 'reject', reason: 'quorum-reject', ...(reviewer?.resolvedBy ? { resolvedBy: reviewer.resolvedBy } : {}) },
+      payload: { interruptId, kind: interrupt.kind, decision: 'rejected', action: 'reject', reason: 'quorum-reject', ...(reviewer?.resolvedBy ? { resolvedBy: reviewer.resolvedBy } : {}), ...viaField },
     });
     await announceResolved('rejected', { action: 'reject', reason: 'quorum-reject' });
     await signalReview('rejected'); // ADR 0074 — gate failed; surfaces clear the card
@@ -1961,7 +1999,7 @@ export async function resolveAndResume(
         type: 'interrupt.resolved',
         // ADR 0722 — no `outcome` (undeclared on the closed def; `decision`
         // carries it). openwop#1692 — `action` is a v2 MUST.
-        payload: { interruptId, kind: interrupt.kind, decision: 'rejected', action: 'reject', ...(reviewer?.resolvedBy ? { resolvedBy: reviewer.resolvedBy } : {}) },
+        payload: { interruptId, kind: interrupt.kind, decision: 'rejected', action: 'reject', ...(reviewer?.resolvedBy ? { resolvedBy: reviewer.resolvedBy } : {}), ...viaField },
       });
       await announceResolved('rejected', resumeValue);
       await signalReview('rejected');
@@ -2020,7 +2058,7 @@ export async function resolveAndResume(
     // def serves all eight `kind` values and §A.1 is OPTIONAL precisely
     // because a non-approval resolution has no action to record. Stamping a
     // default would be inventing one.
-    payload: { interruptId, kind: interrupt.kind, ...resolvedActionFields(interrupt.kind, resumeValue), ...(reviewer?.resolvedBy ? { resolvedBy: reviewer.resolvedBy } : {}) },
+    payload: { interruptId, kind: interrupt.kind, ...resolvedActionFields(interrupt.kind, resumeValue), ...(reviewer?.resolvedBy ? { resolvedBy: reviewer.resolvedBy } : {}), ...viaField },
   };
   if (reviewer?.hostDispatchJoin === true) {
     const { appendDispatchWaitResolution } = await import('../host/dispatchWaitAll.js');

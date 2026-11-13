@@ -14,7 +14,7 @@ const routes: FeatureRoute[] = [
     path: '/recommendations',
     element: <RecommendationsPage />,
     tier: 'workspace', archetype: 'standard-index',
-    nav: { group: 'Commerce', label: 'Recommendations', labelKey: 'recommendationsLabel', icon: SparklesIcon, hint: 'Upsell, cross-sell & recommendations', hintKey: 'recommendationsHint', order: 61, featureId: 'recommendations' },
+    nav: { group: 'Commerce', labelKey: 'recommendationsLabel', icon: SparklesIcon, hintKey: 'recommendationsHint', order: 61, featureId: 'recommendations' },
   },
 ];
 

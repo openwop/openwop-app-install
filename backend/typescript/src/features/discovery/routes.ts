@@ -111,7 +111,7 @@ export function registerDiscoveryRoutes(deps: RouteDeps): void {
       // computed, typed, and consumed behind `?? products.length` fallbacks, which
       // turned this missing line into the ORIGINAL defect (the cap rendered as the
       // total) instead of a compile error. The client fields are required now.
-      res.json({ products: result.products.map(publicProduct), facets: result.facets, appliedRuleIds: result.appliedRuleIds, total: result.total, truncated: result.truncated, hiddenByRules: result.hiddenByRules });
+      res.json({ products: result.products.map(publicProduct), facets: result.facets, appliedRuleIds: result.appliedRuleIds, total: result.total, truncated: result.truncated, hiddenByRules: result.hiddenByRules, candidatesTruncated: result.candidatesTruncated });
     } catch (err) { next(err); }
   });
   app.get(`${BASE}/collections/:collectionId/resolve`, async (req: Request, res: Response, next) => {
@@ -134,7 +134,7 @@ export function registerDiscoveryRoutes(deps: RouteDeps): void {
       // The public storefront gets the page/total honesty but NOT `hiddenByRules` —
       // how many products a merchant's rules suppress is merchandising config, and it
       // belongs on the operator console only (review B1).
-      res.json({ products: result.products.map(publicProduct), facets: result.facets, total: result.total, truncated: result.truncated });
+      res.json({ products: result.products.map(publicProduct), facets: result.facets, total: result.total, truncated: result.truncated, candidatesTruncated: result.candidatesTruncated });
     } catch (err) { next(err); }
   });
 }

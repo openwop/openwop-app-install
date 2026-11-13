@@ -33,6 +33,21 @@ describe('fetchFeatureExport', () => {
     expect('page' in doc).toBe(false);
   });
 
+  it('ADR 1110 P3 — walks `nextCursor` when the feature pages itself', async () => {
+    const seen: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: unknown) => {
+      const u = String(url);
+      seen.push(u);
+      const base = { featureId: 'commerce', readOnly: true, access: 'entitled', exportedAt: '2026-11-11T00:00:00Z' };
+      if (u.endsWith('offset=0')) return json({ ...base, sections: { products: [1, 2] }, page: { offset: 0, limit: 2, totals: {}, nextOffset: null, nextCursor: 'c/1' } });
+      if (u.endsWith('cursor=c%2F1')) return json({ ...base, sections: { products: [3] }, page: { offset: 0, limit: 2, totals: {}, nextOffset: null, nextCursor: 'c2' } });
+      return json({ ...base, sections: { orders: ['o1'] }, page: { offset: 0, limit: 2, totals: {}, nextOffset: null } });
+    }));
+    const doc = await fetchFeatureExport('commerce');
+    expect(seen).toEqual([`${ROOT}/commerce?offset=0`, `${ROOT}/commerce?cursor=c%2F1`, `${ROOT}/commerce?cursor=c2`]);
+    expect(doc.sections).toEqual({ products: [1, 2, 3], orders: ['o1'] });
+  });
+
   it('a refusal throws a typed ApiError carrying the status', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => json({ message: 'switched off' }, 403)));
     const err: unknown = await fetchFeatureExport('funnels').catch((e: unknown) => e);

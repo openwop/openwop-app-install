@@ -145,6 +145,7 @@ export async function loadPackFromManifest(packDir: string): Promise<NodeModule 
   let firstReturned: NodeModule | null = first;
   const registry = getNodeRegistry();
   const servedByRuntimeFloor: string[] = [];
+  const hostOwnedSkipped: string[] = [];
   for (const [typeId, fn] of Object.entries(loaded.nodes)) {
     if (typeof fn !== 'function') continue;
     // ADR 1048 D5 — the runtime manifest floor. A node no build classified is
@@ -228,9 +229,13 @@ export async function loadPackFromManifest(packDir: string): Promise<NodeModule 
         return { status: 'failure', error: { code: returnedCode, message: returnedMessage } };
       },
     };
-    registry.register(module);
+    if (!registry.registerFromPack(module)) {
+      hostOwnedSkipped.push(module.typeId);
+      continue;
+    }
     if (!firstReturned) firstReturned = module;
   }
+  logHostOwnedSkipped(manifest, hostOwnedSkipped);
   if (servedByRuntimeFloor.length > 0) {
     log.warn('pack nodes no build classified are SERVED on replay by the runtime manifest floor (ADR 1048 D5)', {
       pack: manifest.name,
@@ -265,6 +270,7 @@ function registerRefusalStubs(
 
   const registry = getNodeRegistry();
   let firstReturned: NodeModule | null = null;
+  const hostOwnedSkipped: string[] = [];
   for (const declared of manifest.nodes ?? []) {
     if (!declared || typeof declared.typeId !== 'string') continue;
     const stub: NodeModule = {
@@ -275,10 +281,26 @@ function registerRefusalStubs(
         return { status: 'failure', error: { code, message } };
       },
     };
-    registry.register(stub);
+    if (!registry.registerFromPack(stub)) {
+      hostOwnedSkipped.push(stub.typeId);
+      continue;
+    }
     if (!firstReturned) firstReturned = stub;
   }
+  logHostOwnedSkipped(manifest, hostOwnedSkipped);
   return firstReturned;
+}
+
+/** #5808 — a pack declaring a typeId the host registered itself loads the rest
+ *  of its nodes; the host's node keeps the id. Logged, not thrown, so one
+ *  overlapping alias never takes a whole pack down. */
+function logHostOwnedSkipped(manifest: PackManifest, typeIds: string[]): void {
+  if (typeIds.length === 0) return;
+  log.warn('pack nodes NOT registered: the host owns these typeIds', {
+    pack: manifest.name,
+    version: manifest.version,
+    typeIds,
+  });
 }
 
 /**

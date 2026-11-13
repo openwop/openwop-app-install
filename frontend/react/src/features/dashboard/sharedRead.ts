@@ -30,6 +30,8 @@ export const RECENT_RUNS_KEY = 'dashboard:runs:recent';
 export const MY_RUNS_KEY = 'dashboard:runs:mine';
 export const CHAT_SESSIONS_KEY = 'dashboard:chat-sessions';
 export const CONNECTIONS_KEY = 'dashboard:connections';
+/** Names for run rows only (issue 5788): rarely change, so home-activity invalidation leaves them. */
+export const WORKFLOW_SUMMARIES_KEY = 'dashboard:workflow-summaries';
 
 /**
  * Drop the caller's activity reads (runs, chats, connections) so the home

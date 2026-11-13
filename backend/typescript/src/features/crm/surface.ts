@@ -71,6 +71,7 @@ import { LEAD_INTEL_RUN_STAMP, LEAD_INTEL_TOGGLE, QUALIFY_LEAD_WORKFLOW_ID, ROUT
 import { freezeQualificationRead, getQualificationRead, getLeadBindingId, getPendingGrade, getLeadGrade, getLeadRoutingDecision, getPendingLeadRoute } from './leadIntel/leadStore.js';
 import { assertLeadDispatchMatches } from './leadIntel/runReservation.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
+import { tenantToggleSubject } from '../../host/operatorPlanExemption.js';
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { createBookingLink as svcCreateBookingLink, type BookingLinkStatus } from './entities/bookingLinks.js';
 import { assertBookingOwnerEligible } from './bookingService.js';
@@ -139,16 +140,31 @@ export const CRM_SURFACE_POLICY: FeatureSurfaceOrgPolicy = {
 };
 
 /**
+ * CC-AUTH-6 (ADR 1108) — the `crm` AND `crm.lead-intelligence` gate every
+ * lead-intelligence surface op shares, resolved with the RUN's tenant-only toggle
+ * subject: the operator plan exemption applies only while its stamp still holds
+ * (`operatorPlanExempt` re-checks the allowlist and the person), never for an
+ * actorless child or a customer. A plan refusal is worded as one, not "disabled".
+ */
+async function assertLeadIntelEnabled(scope: BundleScope, disabledMessage: string): Promise<void> {
+  const subject = tenantToggleSubject(scope);
+  const [parent, sub] = await Promise.all([resolveOne('crm', subject), resolveOne(LEAD_INTEL_TOGGLE, subject)]);
+  if (parent?.enabled && sub?.enabled) return;
+  if (parent?.blockedBy === 'plan' || sub?.blockedBy === 'plan') {
+    throw new OpenwopError('forbidden', "Lead intelligence is not included in this workspace's plan.", 403, { reason: 'not_entitled', feature: parent?.blockedBy === 'plan' ? 'crm' : LEAD_INTEL_TOGGLE });
+  }
+  throw new OpenwopError('forbidden', disabledMessage, 403, { reason: 'feature_disabled', feature: LEAD_INTEL_TOGGLE });
+}
+
+/**
  * ADR 0954 — the gates every lead-intelligence surface op shares: the
  * `crm.lead-intelligence` sub-toggle AND `crm` (ADR 0941 D5), a run, and the
  * run's host-written lead stamp naming THIS client and lead (`wrong_client`
  * otherwise). Returns the run id.
  */
-async function assertLeadRun(tenantId: string, runId: string | undefined, orgId: string, contactId: string, routingEpoch: number): Promise<string> {
-  const [parent, sub] = await Promise.all([resolveOne('crm', { tenantId }), resolveOne(LEAD_INTEL_TOGGLE, { tenantId })]);
-  if (!parent?.enabled || !sub?.enabled) {
-    throw new OpenwopError('forbidden', 'Lead intelligence is not enabled for this workspace.', 403, { reason: 'feature_disabled', feature: LEAD_INTEL_TOGGLE });
-  }
+async function assertLeadRun(scope: BundleScope, runId: string | undefined, orgId: string, contactId: string, routingEpoch: number): Promise<string> {
+  const tenantId = scope.tenantId;
+  await assertLeadIntelEnabled(scope, 'Lead intelligence is not enabled for this workspace.');
   if (!runId) throw new OpenwopError('validation_error', 'Lead operations run inside a run.', 400, {});
   const run = await hostExtStorage().getRun(runId);
   const stamp = (run?.tenantId === tenantId ? (run.metadata as Record<string, unknown> | undefined)?.[LEAD_INTEL_RUN_STAMP] : undefined) as { orgId?: unknown; contactId?: unknown; bindingId?: unknown; routingEpoch?: unknown } | undefined;
@@ -174,9 +190,9 @@ async function assertLeadRun(tenantId: string, runId: string | undefined, orgId:
 
 /** Qualification uses the same primary reservation as grade dispatch, including
  * its exact definition, immutable model, live binding and initiating principal. */
-async function qualificationFrame(tenantId: string, runId: string | undefined, orgId: string, contactId: string, args: Record<string, unknown>) {
-  const [parent, sub] = await Promise.all([resolveOne('crm', { tenantId }), resolveOne(LEAD_INTEL_TOGGLE, { tenantId })]);
-  if (!parent?.enabled || !sub?.enabled) throw new OpenwopError('forbidden', 'Lead intelligence is disabled.', 403, { reason: 'feature_disabled' });
+async function qualificationFrame(scope: BundleScope, runId: string | undefined, orgId: string, contactId: string, args: Record<string, unknown>) {
+  const tenantId = scope.tenantId;
+  await assertLeadIntelEnabled(scope, 'Lead intelligence is disabled.');
   if (!runId) throw new OpenwopError('validation_error', 'Qualification runs inside an admitted run.', 400, {});
   const run = await hostExtStorage().getRun(runId);
   const replay = run?.forkMode === 'replay' && typeof run.parentRunId === 'string';
@@ -427,10 +443,7 @@ export function buildCrmSurface(scope: BundleScope): FeatureSurface {
     gradeLead: async (args) => {
       const orgId = requireStr(args.orgId, 'orgId');
       const contactId = requireStr(args.contactId, 'contactId');
-      const [parent, sub] = await Promise.all([resolveOne('crm', { tenantId }), resolveOne(LEAD_INTEL_TOGGLE, { tenantId })]);
-      if (!parent?.enabled || !sub?.enabled) {
-        throw new OpenwopError('forbidden', 'Lead intelligence is not enabled for this workspace.', 403, { reason: 'feature_disabled', feature: LEAD_INTEL_TOGGLE });
-      }
+      await assertLeadIntelEnabled(scope, 'Lead intelligence is not enabled for this workspace.');
       if (!scope.runId) throw new OpenwopError('validation_error', 'gradeLead runs inside a run.', 400, {});
       const run = await hostExtStorage().getRun(scope.runId);
       const stamp = (run?.tenantId === tenantId ? (run.metadata as Record<string, unknown> | undefined)?.[LEAD_INTEL_RUN_STAMP] : undefined) as { orgId?: unknown; contactId?: unknown; bindingId?: unknown; modelId?: unknown; modelVersion?: unknown; modelHash?: unknown; definitionHash?: unknown } | undefined;
@@ -455,7 +468,7 @@ export function buildCrmSurface(scope: BundleScope): FeatureSurface {
      * the node event. This is an org writer, not an unrecorded read cache. */
     leadEvidence: async (args) => {
       const orgId = requireStr(args.orgId, 'orgId'); const contactId = requireStr(args.contactId, 'contactId');
-      const frame = await qualificationFrame(tenantId, scope.runId, orgId, contactId, { modelId: args.modelId, modelVersion: args.modelVersion });
+      const frame = await qualificationFrame(scope, scope.runId, orgId, contactId, { modelId: args.modelId, modelVersion: args.modelVersion });
       if (frame.replay) throw new OpenwopError('conflict', 'The replay engine must serve the completed evidence outcome.', 409, { reason: 'replay_source_missing' });
       const evidence = await readLeadEvidence(tenantId, orgId, contactId);
       if (!evidence) throw new OpenwopError('not_found', 'Lead not found.', 404, {});
@@ -469,7 +482,7 @@ export function buildCrmSurface(scope: BundleScope): FeatureSurface {
      * A strict replay reads the exact source snapshot; branch forks cannot write. */
     qualificationEvidence: async (args) => {
       const orgId = requireStr(args.orgId, 'orgId'); const contactId = requireStr(args.contactId, 'contactId');
-      const frame = await qualificationFrame(tenantId, scope.runId, orgId, contactId, { modelId: args.modelId, modelVersion: args.modelVersion });
+      const frame = await qualificationFrame(scope, scope.runId, orgId, contactId, { modelId: args.modelId, modelVersion: args.modelVersion });
       const { read } = await recordedQualificationRead(tenantId, orgId, contactId, frame);
       return { criteria: frame.content.criteria, evidenceBlock: wrapForLLMPrompt({ contentTrust: 'untrusted', source: 'crm.lead-evidence', eventType: 'lead.evidence',
         payload: read.evidence.map((e) => `[${e.ref}] (${e.kind}) ${e.label}: ${e.text}`).join('\n') || '(no evidence)' }) };
@@ -477,7 +490,7 @@ export function buildCrmSurface(scope: BundleScope): FeatureSurface {
 
     recordAssessment: async (args) => {
       const orgId = requireStr(args.orgId, 'orgId'); const contactId = requireStr(args.contactId, 'contactId');
-      const frame = await qualificationFrame(tenantId, scope.runId, orgId, contactId, { modelId: args.modelId, modelVersion: args.modelVersion });
+      const frame = await qualificationFrame(scope, scope.runId, orgId, contactId, { modelId: args.modelId, modelVersion: args.modelVersion });
       const { read, events } = await recordedQualificationRead(tenantId, orgId, contactId, frame);
       const fresh = frame.replay ? new Map(read.evidence.map((e) => [e.ref, e.fingerprint]))
         : new Map((await readLeadEvidence(tenantId, orgId, contactId) ?? []).map((e) => [e.ref, e.fingerprint]));
@@ -507,7 +520,7 @@ export function buildCrmSurface(scope: BundleScope): FeatureSurface {
       const contactId = requireStr(args.contactId, 'contactId');
       const routingEpoch = typeof args.routingEpoch === 'number' && Number.isInteger(args.routingEpoch) && args.routingEpoch > 0 ? args.routingEpoch : 0;
       if (!routingEpoch) throw new OpenwopError('validation_error', '`routingEpoch` must be a positive integer.', 400, { field: 'routingEpoch' });
-      const runId = await assertLeadRun(tenantId, scope.runId, orgId, contactId, routingEpoch);
+      const runId = await assertLeadRun(scope, scope.runId, orgId, contactId, routingEpoch);
       // Exclusions come only from the host's frozen source-child stamp, never
       // from node args or caller metadata. The primary compares the same hash.
       const stamp = (await hostExtStorage().getRun(runId))?.metadata?.[LEAD_INTEL_RUN_STAMP] as Record<string, unknown> | undefined;
@@ -528,7 +541,7 @@ export function buildCrmSurface(scope: BundleScope): FeatureSurface {
       const orgId = requireStr(args.orgId, 'orgId');
       const contactId = requireStr(args.contactId, 'contactId');
       const routingEpoch = typeof args.routingEpoch === 'number' && Number.isInteger(args.routingEpoch) ? args.routingEpoch : 0;
-      await assertLeadRun(tenantId, scope.runId, orgId, contactId, routingEpoch);
+      await assertLeadRun(scope, scope.runId, orgId, contactId, routingEpoch);
       const out = await svcCheckFirstTouch(tenantId, orgId, contactId, routingEpoch);
       return { success: true, touched: out.touched, ...(out.firstTouchAt ? { firstTouchAt: out.firstTouchAt } : {}) };
     },
@@ -539,7 +552,7 @@ export function buildCrmSurface(scope: BundleScope): FeatureSurface {
       const orgId = requireStr(args.orgId, 'orgId');
       const contactId = requireStr(args.contactId, 'contactId');
       const routingEpoch = typeof args.routingEpoch === 'number' && Number.isInteger(args.routingEpoch) ? args.routingEpoch : 0;
-      const runId = await assertLeadRun(tenantId, scope.runId, orgId, contactId, routingEpoch);
+      const runId = await assertLeadRun(scope, scope.runId, orgId, contactId, routingEpoch);
       const rung = args.rung === 1 || args.rung === 2 || args.rung === 3 ? args.rung : null;
       if (!rung) throw new OpenwopError('validation_error', '`rung` is 1, 2 or 3.', 400, { field: 'rung' });
       const out = await fireSlaRung({ tenantId, orgId, contactId, routingEpoch, rung, runId, ...(scope.orgScopeSubject ? { causedBy: scope.orgScopeSubject } : {}) });

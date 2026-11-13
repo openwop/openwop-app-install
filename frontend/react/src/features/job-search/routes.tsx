@@ -5,7 +5,7 @@
  * the entitlement gate.
  */
 import { lazy } from 'react';
-import { ShieldIcon } from '../../ui/icons/index.js';
+import { ShieldIcon, ListIcon, BriefcaseIcon, MessageSquareIcon, BarChartIcon, HelpCircleIcon } from '../../ui/icons/index.js';
 import type { FeatureRoute } from '../../chrome/featureTypes.js';
 import type { FrontendFeature } from '../registry.js';
 
@@ -23,9 +23,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Access & data',
-      label: 'Job listings', labelKey: 'listingsTitle',
-      icon: ShieldIcon,
-      hint: 'Postings found across your boards, deduped by content', hintKey: 'listingsLede',
+      labelKey: 'jobListingsLabel',
+      icon: ListIcon,
+      hintKey: 'jobListingsHint',
       order: 61,
       featureId: 'job-search',
     },
@@ -36,9 +36,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Access & data',
-      label: 'Answer once', labelKey: 'bankTitle',
-      icon: ShieldIcon,
-      hint: 'Answer the questions applications ask, once', hintKey: 'bankLede',
+      labelKey: 'jobAnswersLabel',
+      icon: MessageSquareIcon,
+      hintKey: 'jobAnswersHint',
       order: 59,
       featureId: 'job-search',
     },
@@ -49,9 +49,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Access & data',
-      label: 'What is working', labelKey: 'funnelTitle',
-      icon: ShieldIcon,
-      hint: 'Response rates, follow-ups due, and drafts waiting', hintKey: 'funnelLede',
+      labelKey: 'jobFunnelLabel',
+      icon: BarChartIcon,
+      hintKey: 'jobFunnelHint',
       order: 57,
       featureId: 'job-search',
     },
@@ -62,9 +62,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Access & data',
-      label: 'Questions waiting', labelKey: 'excTitle',
-      icon: ShieldIcon,
-      hint: 'The whole interruption budget of a campaign, in one place', hintKey: 'excLede',
+      labelKey: 'jobExceptionsLabel',
+      icon: HelpCircleIcon,
+      hintKey: 'jobExceptionsHint',
       order: 58,
       featureId: 'job-search',
     },
@@ -75,9 +75,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Access & data',
-      label: 'Applications', labelKey: 'appsTitle',
-      icon: ShieldIcon,
-      hint: 'Applications sent for you, and the verification links you have shared', hintKey: 'appsLede',
+      labelKey: 'jobApplicationsLabel',
+      icon: BriefcaseIcon,
+      hintKey: 'jobApplicationsHint',
       order: 60,
       featureId: 'job-search',
     },
@@ -88,9 +88,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Access & data',
-      label: 'Auto-apply authority', labelKey: 'title',
+      labelKey: 'jobAuthorityLabel',
       icon: ShieldIcon,
-      hint: 'Bounded, revocable consent for automatic job applications', hintKey: 'lede',
+      hintKey: 'jobAuthorityHint',
       order: 62,
       featureId: 'job-search',
     },

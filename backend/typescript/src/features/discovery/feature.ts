@@ -1,6 +1,6 @@
 /**
  * Discovery (ADR 0275 / MERCH-C) — faceted product search + collections + pin/boost/
- * bury merchandising rules, COMPOSING commerce `listProducts` + the shared bucketing
+ * bury merchandising rules, COMPOSING commerce `listProductsPage` + the shared bucketing
  * primitive (holdout). Toggle OFF ⇒ zero behavior change. Depends on commerce (no
  * catalog ⇒ nothing to search/curate). Host-extension — no RFC.
  *
@@ -12,6 +12,7 @@ import { buildDiscoverySurface } from './surface.js';
 import { registerDiscoveryAgentTools } from './agentTools.js';
 import { onProductDeleted } from '../commerce/productLifecycleSeam.js';
 import { pruneProductRefs } from './discoveryService.js';
+import { startEmbeddingRefreshSweep } from './productEmbeddingIndex.js';
 
 export const discoveryFeature: BackendFeature = {
   id: 'discovery',
@@ -25,6 +26,8 @@ export const discoveryFeature: BackendFeature = {
     onProductDeleted('discovery', async ({ tenantId, orgId, productId }) => {
       await pruneProductRefs(tenantId, orgId, productId);
     });
+    // ADR 1110 P3 — re-embed catalogs too large to rebuild inside a search request.
+    startEmbeddingRefreshSweep();
   },
   // ADR 1025 D3 — writes need workspace:write (the ADR 0832 floor is membership only).
   surface: { id: 'discovery', build: buildDiscoverySurface, orgPolicy: { methodScopes: { createCollection: 'workspace:write', createMerchRule: 'workspace:write' } } },

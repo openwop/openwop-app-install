@@ -18,7 +18,7 @@ import {
   countCommerceShowcase,
 } from '../src/host/commerceShowcaseSeed.js';
 import { COMMERCE_SHOWCASE_ACTOR, SHOWCASE_COUPON } from '../src/host/seed-data/commerceShowcase.js';
-import { listProducts, listOrders, listCoupons, createProduct } from '../src/features/commerce/commerceService.js';
+import { collectCatalog, listOrders, listCoupons, createProduct } from '../src/features/commerce/commerceService.js';
 import { resolveOne } from '../src/host/featureToggles/service.js';
 
 let server: http.Server;
@@ -51,7 +51,7 @@ describe('commerce showcase seeder', () => {
       // countCommerceShowcase is itself toggle-gated (it answers 0 whenever off), so read
       // the stores directly — and assert the toggle is STILL off (never flipped).
       expect((await resolveOne('commerce', { tenantId: TENANT }))?.enabled).toBe(false);
-      expect((await listProducts(TENANT, TENANT)).filter((p) => p.createdBy === COMMERCE_SHOWCASE_ACTOR)).toHaveLength(0);
+      expect((await collectCatalog(TENANT, TENANT, () => true)).filter((p) => p.createdBy === COMMERCE_SHOWCASE_ACTOR)).toHaveLength(0);
     } finally {
       await setToggle('on');
     }
@@ -64,7 +64,7 @@ describe('commerce showcase seeder', () => {
 
     // No orgs exist for this tenant → org falls back to the tenant id.
     const orgId = TENANT;
-    const products = (await listProducts(TENANT, orgId)).filter((p) => p.createdBy === COMMERCE_SHOWCASE_ACTOR);
+    const products = (await collectCatalog(TENANT, orgId, () => true)).filter((p) => p.createdBy === COMMERCE_SHOWCASE_ACTOR);
     expect(products).toHaveLength(4);
     expect(new Set(products.map((p) => p.type))).toEqual(new Set(['physical', 'digital', 'service']));
 
@@ -107,7 +107,7 @@ describe('commerce showcase seeder', () => {
     const cleared = await clearCommerceShowcase(TENANT);
     expect(cleared.cleared).toBe(4 + 1 + 3);
     expect(await countCommerceShowcase(TENANT)).toBe(0);
-    const remaining = await listProducts(TENANT, orgId);
+    const remaining = await collectCatalog(TENANT, orgId, () => true);
     expect(remaining.map((p) => p.productId)).toEqual([userProduct.productId]);
   });
 });

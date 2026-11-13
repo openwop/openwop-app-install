@@ -101,7 +101,13 @@ const log = createLogger('run-dispatch');
 // to ask a person a question. Only the agent-clarification run-start contributor
 // writes it, from the tenant's toggle; a caller who could set it would turn the
 // feature on for their own run.
-const RESERVED_RUN_METADATA_KEYS = ['definitionRevision', 'definitionResolvedFrom', 'launchResolved', 'costUsd', 'costTokens', 'costByNode', 'debug', 'eval', 'redriveOf', 'onlineEvalScored', 'compaction', 'personalTenant', 'owner', 'traceContext', 'nodePinMismatches', 'teamLedger', 'orgScopeSubject', 'intentLedger', 'intentLedgerApprovals', 'campaignGoal', 'campaignAutonomy', 'campaignForkPosture', 'openwop-app.experiments', 'openwop-app.agentBindings', 'clientContext', 'openwop-app.playbook', 'openwop-app.clientReportPeriod', 'openwop-app.agentClarification'] as const;
+// `planExempt` (ADR 1108) GRANTS: it carries the listed operator's plan
+// exemption into the req-less lanes. Stamped from `isListedSuperadmin(req)` at
+// the creating request (`planExemptStampOf`), or not at all.
+// `planExemptPersonalTenant` (ADR 1108 D7) is a sub-workflow child's record of its
+// operator's personal tenant, read ONLY by the exemption's re-check; the dispatcher
+// writes it from the parent row. Reserved so no caller can pick that person.
+const RESERVED_RUN_METADATA_KEYS = ['definitionRevision', 'definitionResolvedFrom', 'launchResolved', 'costUsd', 'costTokens', 'costByNode', 'debug', 'eval', 'redriveOf', 'onlineEvalScored', 'compaction', 'personalTenant', 'owner', 'traceContext', 'nodePinMismatches', 'teamLedger', 'orgScopeSubject', 'intentLedger', 'intentLedgerApprovals', 'campaignGoal', 'campaignAutonomy', 'campaignForkPosture', 'openwop-app.experiments', 'openwop-app.agentBindings', 'clientContext', 'openwop-app.playbook', 'openwop-app.clientReportPeriod', 'openwop-app.agentClarification', 'planExempt', 'planExemptPersonalTenant'] as const;
 /**
  * The run-attribution blocks (`heartbeat`/`schedule`/`kanban`/`approval`) are
  * host-written: the scheduler, the kanban trigger, the heartbeat and approval
@@ -174,6 +180,9 @@ export interface BuildRunRecordParams {
    *  onto `metadata.personalTenant` (ADR 0627 D3 / review S2) so the tool lane
    *  can apply the HTTP lane's implicit-owner rule without a request. */
   personalTenant?: string;
+  /** ADR 1108 — `planExemptStampOf(req)`: stamped onto the reserved
+   *  `metadata.planExempt` when the creating request is the listed operator. */
+  planExempt?: true;
   /** RFC 0165 §B (ADR 0625) — the run's owner + Subject, minted by
    *  `host/runOwner.ts` from the caller; stamped onto the RESERVED
    *  `metadata.owner` key (a client value is stripped first). */
@@ -206,6 +215,7 @@ export function buildRunRecord(params: BuildRunRecordParams): RunRecord {
       ...stripReservedRunMetadata(params.metadata),
       ...(params.actingUserId ? { actingUserId: params.actingUserId } : {}),
       ...(params.personalTenant ? { personalTenant: params.personalTenant } : {}),
+      ...(params.planExempt === true ? { planExempt: true } : {}),
       ...(params.owner ? { owner: params.owner } : {}),
     },
     configurable: params.configurable ?? {},

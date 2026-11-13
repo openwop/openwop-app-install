@@ -990,6 +990,7 @@ export const messages = {
   // ADR 0153 Phase 1 — lienzo de diapositivas
   slidesInvalid: 'No se pudo representar esta presentación (datos de diapositivas no válidos).',
   slidesDeckLabel: 'Presentación',
+  slidesTableLabel: 'Tabla: {{columns}}',
   slidesNotesLabel: 'Notas:',
   // ADR 0153 Phase 2 — lienzo del constructor de apps
   appBuilderInvalid: 'No se pudo representar este diseño de app (datos no válidos).',

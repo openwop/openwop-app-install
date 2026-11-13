@@ -21,6 +21,9 @@ import { registerWorkflowsFeature } from '../../host/workflowFeatureGate.js';
 import { registerNotebooksRoutes } from './routes.js';
 import { registerNotebooksAgentTools } from './agentTools.js';
 import { buildNotebooksSurface } from './surface.js';
+import { registerSubjectDependent } from '../../host/subjectDependents.js';
+import { onKnowledgeDocumentChanged } from '../../host/knowledgeLifecycle.js';
+import { countNotebookSourceState, purgeNotebookSourceState, onNotebookSourceChanged } from './notebooksService.js';
 
 export const notebooksFeature: BackendFeature = {
   id: 'notebooks',
@@ -34,11 +37,21 @@ export const notebooksFeature: BackendFeature = {
     // toggle + notebook-access honesty lives inside each tool's run().
     registerNotebooksAgentTools({ storage: deps.storage, hostSuite: deps.hostSuite });
     registerNotebooksRoutes(deps);
+    // ADR 1103 D8 — the per-source levels + summaries go with their project, on both
+    // delete doors (`deleteProject` runs every registered dependent first).
+    registerSubjectDependent('project', 'notebookSourceState', {
+      count: async (tenantId, subject) => countNotebookSourceState(tenantId, subject.id),
+      purge: async (tenantId, subject) => purgeNotebookSourceState(tenantId, subject.id),
+    });
+    // ADR 1103 D7 — a deleted or revised source takes its derived state with it, so a
+    // stale summary never keeps grounding the chat.
+    onKnowledgeDocumentChanged('notebooks', onNotebookSourceChanged);
   },
   // ctx.features.notebooks (ADR 0084 / ADR 0014) — list/get sources, list notes,
-  // grounded search, per-source context levels (reads) + the one justified
-  // setSourceSummary write the summarize workflow makes; tenant-trusted + org-visible
-  // notebooks only (subjectless run, the strategy isShared precedent).
+  // grounded search, per-source context levels (reads) + the narrow writes the
+  // notebook chains make. ADR 1103 D2: it acts for the run's person through the same
+  // rule as the HTTP door; a run with no person reads org-visible notebooks only and
+  // writes nothing.
   surface: { id: 'notebooks', build: buildNotebooksSurface },
   toggleDefault: {
     id: 'notebooks',

@@ -7,30 +7,25 @@
  * campaign-ops `authorizeClient`) and the sub-toggle `campaign-ops.external-collab`
  * AND-gated with `campaign-ops` (ADR 0941 D5).
  *
- * ACCEPT (`/collab/invites/accept`): a signed-in caller in ANY tenant, never a
- * member of the agency. The invite is a single-use `collab_invite` sharing link
- * (ADR 0448 D3: one home for links). The caller's own home `User` must hold the
- * invite email, IdP-verified (`emailProvenance: 'idp'` EXACTLY, stricter than
- * `isEmailVouched`, which also takes `'admin'`: here the vouching admin would be
- * the vendor's own). Binding is the host CAS; the link is purged after it.
- * Every refusal is the same 404, except the two the person can fix (sign in;
- * use the invited, verified address), which name the remedy.
+ * ACCEPT (`/collab/invites/accept`), "Shared with me" and the grant view are the
+ * COLLABORATOR's side. ADR 1099 D2 moved them to the host route table
+ * (`routes/externalCollaborators.ts`), with the expiry-notice tick
+ * (`host/externalCollaboratorExpiry.ts`), because a grant's kind, not
+ * campaign-ops, decides which surface it runs under. Campaign-ops registers the
+ * DEFAULT surface (`feature.ts`): `collabEnabledFor` below and an active client.
  *
  * @see docs/adr/0958-vendor-and-guest-collaboration.md
  */
 import type { Request } from 'express';
-import { startCollaboratorExpiryNotices } from './expiryNotices.js';
 import { OpenwopError } from '../../../types.js';
 import type { RouteDeps } from '../../../routes/registerAllRoutes.js';
 import { requireFeatureEnabled } from '../../featureRoute.js';
-import { resolveCallerUser } from '../../users/usersGuards.js';
 import { resolveOne } from '../../../host/featureToggles/service.js';
-import { createLink, purgeLinksForResource, resolveActiveResource } from '../../sharing/sharingService.js';
+import { createLink, purgeLinksForResource } from '../../sharing/sharingService.js';
 import {
-  bindCollaborator, checkGrantUse, createCollaborator, getCollaborator, grantAccess, grantResourceKind, listCollaborationAudit, listCollaborators, listGrantableResources, listGrants,
-  revokeGrant, setCollaboratorStatus, usableGrantsForUser, type ExternalCollaborator, type GrantUse,
+  createCollaborator, getCollaborator, grantAccess, listCollaborationAudit, listCollaborators, listGrantableResources, listGrants,
+  revokeGrant, setCollaboratorStatus, type ExternalCollaborator,
 } from '../../../host/externalCollaborators.js';
-import { getOrg } from '../../../host/accessControlService.js';
 import { authorizeClient } from '../routes.js';
 import { getClient } from '../clientService.js';
 import { assertCollaboratorMaySuspend, getApprover, revokeApprover } from '../portal.js';
@@ -65,20 +60,8 @@ export async function collabEnabledFor(tenantId: string): Promise<boolean> {
   }
 }
 
-/** What a collaborator sees of a usable grant: both toggles on the GRANT's tenant,
- *  then the owning feature's projection. `null` = not presentable (read as 404). */
-async function present(use: GrantUse): Promise<{ title: string; clientName?: string; body: Record<string, unknown> } | null> {
-  if (!(await collabEnabledFor(use.tenantId))) return null;
-  const kind = grantResourceKind(use.grant.resource.kind);
-  const projected = kind ? await kind.project(use.tenantId, use.orgId, use.grant.resource.id) : null;
-  if (!projected) return null;
-  const org = await getOrg(use.orgId);
-  return { title: projected.title, body: projected.body, ...(org && org.tenantId === use.tenantId ? { clientName: org.name } : {}) };
-}
-
 export function registerCollaborationRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  startCollaboratorExpiryNotices(collabEnabledFor);
 
   app.get(BASE, async (req, res, next) => {
     try {
@@ -180,74 +163,6 @@ export function registerCollaborationRoutes(deps: RouteDeps): void {
       const c = await setCollaboratorStatus(tenantId, orgId, req.params.collaboratorId, status, userId);
       if (status === 'revoked') await purgeLinksForResource(tenantId, 'collab_invite', c.collaboratorId);
       res.json({ collaborator: view(c) });
-    } catch (err) { next(err); }
-  });
-
-  // ── The collaborator's side (ADR 0958 P2). A signed-in person in THEIR OWN home
-  // tenant; every answer is derived from a grant they are bound to, so nothing here
-  // reads the caller's session tenant, and nothing names the agency's ids. ──
-
-  /** "Shared with me": every grant usable right now, across agencies. */
-  app.get('/host/openwop-app/collab/shared', async (req, res, next) => {
-    try {
-      // ADR 0887 S4 — freshness IS the revocation mechanism: never cached.
-      res.set('Cache-Control', 'no-store');
-      const user = await resolveCallerUser(req);
-      const items: Array<Record<string, unknown>> = [];
-      for (const use of await usableGrantsForUser(user.userId)) {
-        const shown = await present(use);
-        if (shown) items.push({ grantId: use.grant.grantId, resourceKind: use.grant.resource.kind, title: shown.title, clientName: shown.clientName, actions: use.grant.actions, expiresAt: use.grant.expiresAt });
-      }
-      res.json({ items });
-    } catch (err) { next(err); }
-  });
-
-  /** One granted resource, through the one per-use check. Uniform 404 otherwise. */
-  app.get('/host/openwop-app/collab/grants/:grantId', async (req, res, next) => {
-    try {
-      res.set('Cache-Control', 'no-store'); // ADR 0887 S4
-      const user = await resolveCallerUser(req);
-      let use: GrantUse;
-      try {
-        use = await checkGrantUse({ grantId: req.params.grantId, via: { userId: user.userId }, action: 'view' });
-      } catch {
-        throw new OpenwopError('not_found', 'Not found.', 404, {});
-      }
-      const shown = await present(use);
-      if (!shown) throw new OpenwopError('not_found', 'Not found.', 404, {});
-      res.json({
-        grant: { grantId: use.grant.grantId, resourceKind: use.grant.resource.kind, actions: use.grant.actions, expiresAt: use.grant.expiresAt },
-        title: shown.title, clientName: shown.clientName, resource: shown.body,
-      });
-    } catch (err) { next(err); }
-  });
-
-  /** ADR 0958 D2 — accept while signed in to your own account. */
-  app.post('/host/openwop-app/collab/invites/accept', async (req, res, next) => {
-    try {
-      const token = typeof (req.body ?? {}).token === 'string' ? (req.body as { token: string }).token : '';
-      if (!token) throw new OpenwopError('validation_error', '`token` is required.', 400, { field: 'token' });
-      // Signed in first: an anonymous caller is told to sign in, not "not found".
-      const user = await resolveCallerUser(req);
-      const link = await resolveActiveResource(token, 'collab_invite');
-      if (!(await collabEnabledFor(link.tenantId))) throw new OpenwopError('not_found', 'Invite not found.', 404, {});
-      // ADR 0958 D7 — an archived client takes no new collaborator. Otherwise an
-      // invite accepted during the archive would bind as `active`, and
-      // un-archiving would bring its grants back with no member decision (the
-      // class of the D2 MEDIUM). The link is kept: after an un-archive the
-      // invitee can accept, which is the ordinary flow.
-      if ((await getClient(link.tenantId, link.orgId))?.status !== 'active') throw new OpenwopError('not_found', 'Invite not found.', 404, {});
-      const c = await getCollaborator(link.tenantId, link.orgId, link.resourceId);
-      if (!c || c.status !== 'invited') throw new OpenwopError('not_found', 'Invite not found.', 404, {});
-      const email = (user.email ?? '').trim().toLowerCase();
-      if (email !== c.email || user.emailProvenance !== 'idp') {
-        throw new OpenwopError('forbidden', 'This invite was sent to a different email address. Sign in with the account that receives that address, through your identity provider, so the address is verified.', 403, { reason: 'invite_email_mismatch' });
-      }
-      const bound = await bindCollaborator(link.tenantId, link.orgId, c.collaboratorId, user.userId);
-      // Single use: the link dies once the binding holds. A failure above leaves it
-      // usable for a corrected retry.
-      await purgeLinksForResource(link.tenantId, 'collab_invite', c.collaboratorId);
-      res.json({ collaborator: { collaboratorId: bound.collaboratorId, kind: bound.kind, displayName: bound.displayName, status: bound.status } });
     } catch (err) { next(err); }
   });
 

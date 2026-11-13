@@ -10,7 +10,8 @@
  * No silent caps: the list says how many more fit.
  */
 
-import { projectSourceOutput, sourceOutputForWire } from '../schema/sourceOutput.js';
+import { sourceOutputForWire } from '../schema/sourceOutput.js';
+import { projectSourceOutputForKind } from '../canvas/sourceOutputForKind.js';
 import { useState } from 'react';
 import { BaseEdge, EdgeLabelRenderer, getBezierPath, type EdgeProps } from '@xyflow/react';
 import { useTranslation } from 'react-i18next';
@@ -42,7 +43,7 @@ export function PairEdge(props: EdgeProps): JSX.Element {
   const tgt = nodes.find((n) => n.id === target);
 
   const binding = { sourcePort: data.sourcePort ?? 'out', ...(data.canonicalSourceOutput !== undefined ? { canonicalSourceOutput: data.canonicalSourceOutput } : {}) };
-  const srcType = projectSourceOutput(binding, src ? catalogEntry(src.kind)?.outputs ?? [] : []).type;
+  const srcType = projectSourceOutputForKind(binding, src?.kind).type;
   const sourceOutput = sourceOutputForWire(binding);
   const tgtType = tgt ? catalogEntry(tgt.kind)?.inputs.find((p) => p.name === data.targetPort)?.type : undefined;
   const fits = open

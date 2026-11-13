@@ -2,7 +2,7 @@ import { createContext, useContext, type ReactNode } from 'react';
 
 export interface AdminParentRoute {
   path: string;
-  label: string;
+  label?: string;
   labelKey?: string;
 }
 

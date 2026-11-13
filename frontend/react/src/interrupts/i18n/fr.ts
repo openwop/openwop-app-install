@@ -6,7 +6,11 @@ export const messages = {
   // ADR 0755 D3 — the resume token is projected only to an approvals:respond holder.
   noRespondPermission: 'Vous pouvez voir cette étape, mais vous n’avez pas l’autorisation d’y répondre.',
   // RenderInterrupt fallback — neutral copy; never instructs users to edit source (DEMO-14)
-  unknownKindBody: 'Cette étape ne peut pas être affichée ici ({{kind}}). Demandez à votre administrateur de mettre à jour l’application.',
+  unknownKindBody: 'Cette application ne sait pas encore répondre à ce type d’étape ({{kind}}) : elle ne peut donc pas être terminée ici.',
+  timerWaits: 'Cette exécution attend un minuteur et reprend d’elle-même.',
+  timerWaitsUntil: 'Cette exécution attend un minuteur et reprend d’elle-même le {{when}}.',
+  walkthroughStepBody: 'Cette exécution est une étape d’une visite guidée ; elle continue lorsque quelqu’un lance la visite.',
+  walkthroughStepLink: 'Ouvrir les Visites guidées',
 
   // Approval card
   approvalRequired: 'Approbation requise',
@@ -20,6 +24,7 @@ export const messages = {
   cuRejectConfirmTitle: 'Rejeter cette action et mettre fin à la session de navigation ?',
   cuRejectConfirmBody: 'L’agent de navigation n’effectuera pas cette action et la session s’arrête ici. Ce qu’il a déjà fait sur le site reste fait.',
   actionRequestChanges: 'Demander des modifications',
+  actionRefine: 'Affiner',
   actionDefer: 'Reporter',
   actionEscalate: 'Escalader',
   resolvedElsewhere: 'Cette revue vient d’être résolue ailleurs.',

@@ -16,9 +16,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Planning',
-      label: 'Board of Advisors', labelKey: 'advisoryBoardLabel',
+      labelKey: 'advisoryBoardLabel',
       icon: ScaleIcon,
-      hint: 'Councils of advisor agents', hintKey: 'advisoryBoardHint',
+      hintKey: 'advisoryBoardHint',
       order: 39,
       featureId: 'advisory-board',
     },

@@ -36,13 +36,20 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { getOrg } from '../src/host/accessControlService.js';
 import { createProduct, updateProduct } from '../src/features/commerce/commerceService.js';
-import { buildProductFeed, renderFeedXml, pushCatalog, saveFeedSettings, variantItemId } from '../src/features/campaign-connectors/catalogFeed.js';
+import { __setPushChangeCapForTest, feedBatches, renderFeedXml, pushCatalog, saveFeedSettings, variantItemId, type ProductFeed } from '../src/features/campaign-connectors/catalogFeed.js';
 import { buildMerchantProductInput } from '../src/host/adsWire.js';
 import { DurableCollection } from '../src/host/hostExtPersistence.js';
 import { getFeedSettings } from '../src/features/campaign-connectors/catalogFeed.js';
 import { __resetConnectionsStore, createSecretConnection } from '../src/features/connections/connectionsService.js';
 import { registerProvider } from '../src/features/connections/providerRegistry.js';
 import { nodes as nodePack } from '../../../packs/feature.campaign-connectors.nodes/index.mjs';
+
+/** ADR 1110 P3 — the whole feed of a small test catalog, collected from its batches. */
+async function collectFeed(tenantId: string, orgId: string, base: string): Promise<ProductFeed> {
+  const out: ProductFeed = { items: [], excluded: [] };
+  for await (const b of feedBatches(tenantId, orgId, base)) { out.items.push(...b.items); out.excluded.push(...b.excluded); }
+  return out;
+}
 
 let BASE = '';
 let server: http.Server;
@@ -129,7 +136,7 @@ describe('ADR 0952 P7 — the feed is generated from the commerce catalog', () =
     await updateProduct(tenantId, orgId, off.productId, { active: false });
     const mug = await createProduct({ tenantId, orgId, createdBy: 'u1', type: 'physical', name: 'Mug', price: 12, currency: 'EUR', imageAssetTokens: ['img-6'], variants: [{ name: 'Red', price: 12.5, inventory: 3 }, { name: 'Blue', inventory: 0 }] });
 
-    const feed = await buildProductFeed(tenantId, orgId, 'https://shop.example');
+    const feed = await collectFeed(tenantId, orgId, 'https://shop.example');
     expect(feed.excluded).toEqual(expect.arrayContaining([{ productId: noImg.productId, reason: 'no_image' }, { productId: free.productId, reason: 'no_price' }]));
     expect(feed.items.map((i) => i.title)).not.toContain('Retired');
     const s = feed.items.find((i) => i.id === shirt.productId);
@@ -300,6 +307,21 @@ describe('ADR 0952 P7 — API push (fixture-only)', () => {
     hits = [];
     expect(await pushCatalog(deps, tenantId, orgId, 'meta', 'https://shop.example')).toMatchObject({ sent: 0, removed: 0, unchanged: 1 });
     expect(hits).toHaveLength(0); // the removal moved the ledger: not deleted twice
+  });
+
+  it('ADR 1110 P3 — one push sends at most the cap as one change set; the next push sends the rest', async () => {
+    const { tenantId, orgId, deps } = await setup('u-cap');
+    await saveFeedSettings(tenantId, orgId, { enabled: true, metaCatalogId: '888' });
+    for (const name of ['C1', 'C2', 'C3']) await createProduct({ tenantId, orgId, createdBy: 'u1', type: 'digital', name, price: 3, currency: 'USD', imageAssetTokens: [`i-${name}`] });
+    __setPushChangeCapForTest(2);
+    try {
+      hits = []; metaRefuse = new Set();
+      expect(await pushCatalog(deps, tenantId, orgId, 'meta', 'https://shop.example')).toMatchObject({ outcome: 'pushed', sent: 2, remaining: 1 });
+      expect(hits).toHaveLength(1); // ONE change set, so ONE approval covers what was sent
+      const second = await pushCatalog(deps, tenantId, orgId, 'meta', 'https://shop.example');
+      expect(second).toMatchObject({ outcome: 'pushed', sent: 1, unchanged: 2 });
+      expect('remaining' in second).toBe(false);
+    } finally { __setPushChangeCapForTest(null); }
   });
 
   it('INTWF-1: commerce off refuses the push typed and NEVER pushes an empty feed (that would delete the platform catalog)', async () => {

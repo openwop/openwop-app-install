@@ -74,6 +74,7 @@ describe('bento count through StatValue', () => {
 const isMotionGuard = (p: string): boolean => /^@media\b[^{]*\(prefers-reduced-motion:\s*no-preference\)/.test(p);
 const SUPPORTS = '@supports (animation-timeline: view())';
 const FORCED = '@media (forced-colors: none)';
+const ALT_TEXT = '@supports (content: "" / "")';
 /** The block preludes still open at `index` (comments blanked to keep offsets). */
 function openAt(text: string, index: number): string[] {
   const s = text.replace(/\/\*[\s\S]*?\*\//g, (m) => ' '.repeat(m.length));
@@ -115,10 +116,12 @@ describe('one count-up block, stats unchanged', () => {
     const blocks = sels.map((sel) => {
       const at = once(css, sel);
       const guards = openAt(css, at).filter((p) => p.startsWith('@'));
-      expect(guards, sel).toHaveLength(3);
+      expect(guards, sel).toHaveLength(4);
       expect(guards[0], sel).toBe(SUPPORTS);
       expect(isMotionGuard(guards[1] ?? ''), `${sel} under ${guards[1]}`).toBe(true);
       expect(guards[2], sel).toBe(FORCED);
+      // ACT-1 — the digit is hidden only where the overlay's alt text parses.
+      expect(guards[3], sel).toBe(ALT_TEXT);
       // The forced-colours block this rule sits in (the same one for all five).
       return css.lastIndexOf(`${FORCED} {`, at);
     });

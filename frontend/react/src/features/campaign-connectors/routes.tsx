@@ -16,9 +16,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Marketing',
-      label: 'Performance', labelKey: 'campaignConnectorsLabel',
+      labelKey: 'campaignConnectorsLabel',
       icon: ActivityIcon,
-      hint: 'Ad performance import & KPIs', hintKey: 'campaignConnectorsHint',
+      hintKey: 'campaignConnectorsHint',
       order: 40,
       featureId: 'campaign-connectors',
       // ADR 0200 Phase 2 — collapse into the Campaign Studio console when `campaigns` is on.

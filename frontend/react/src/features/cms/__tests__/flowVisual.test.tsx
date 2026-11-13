@@ -110,6 +110,17 @@ describe('grading fixes', () => {
     expect(screen.getByRole('status').textContent).toContain('at least two steps');
     expect(screen.getByRole('combobox', { name: 'Step 1 mark' })).toBeTruthy();
   });
+
+  it('cannot remove a step below two (FLOW-1: one click would delete the picture)', () => {
+    const two = [{ label: 'Brief' }, { label: 'Draft' }];
+    const { unmount } = render(<SectionFields section={{ sectionId: 's', type: 'hero', data: { heading: 'H', visual: 'flow', flow: { nodes: two } } }} assets={[]} onChange={vi.fn<DataChange>()} />);
+    const remove = screen.getByRole('button', { name: 'Remove step 1' }) as HTMLButtonElement;
+    expect(remove.disabled).toBe(true);
+    expect(remove.title).toBe('A flow keeps at least two steps.');
+    unmount();
+    render(<SectionFields section={{ sectionId: 's', type: 'hero', data: { heading: 'H', visual: 'flow', flow: { nodes: [...two, { label: 'Ship' }] } } }} assets={[]} onChange={vi.fn<DataChange>()} />);
+    expect((screen.getByRole('button', { name: 'Remove step 1' }) as HTMLButtonElement).disabled).toBe(false);
+  });
 });
 
 describe('a columns flow', () => {

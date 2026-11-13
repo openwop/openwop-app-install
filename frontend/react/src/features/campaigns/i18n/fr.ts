@@ -1,7 +1,5 @@
 /** `campaigns` namespace (FR) — Campaign Studio console (ADR 0200). */
 export const messages = {
-  navLabel: 'Campaign Studio',
-  navHint: 'Briefs, campagnes, performance et intelligence au même endroit',
   eyebrow: 'Marketing',
   title: 'Campaign Studio',
   lede: 'Planifiez, lancez, mesurez et optimisez vos campagnes marketing — briefs, orchestration, performance et intelligence au même endroit.',

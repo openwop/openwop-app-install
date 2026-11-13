@@ -21,6 +21,7 @@ import { Notice } from '../../ui/Notice.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { Skeleton, SkeletonRows } from '../../ui/Skeleton.js';
 import { Field } from '../../ui/Field.js';
+import { Combobox, type ComboboxOption } from '../../ui/Combobox.js';
 import { DataTable, type DataColumn } from '../../ui/DataTable.js';
 import { StatusBadge } from '../../ui/StatusBadge.js';
 import { KeyFigureBand } from '../../ui/KeyFigure.js';
@@ -99,6 +100,25 @@ function Section({ id, title, children }: { id: string; title: string; children:
 }
 
 /** A labelled specimen row: the literal state identifier + the rendering. */
+/** A Combobox over a fixed list: the specimen searches locally, so the gallery needs no backend. */
+const COMBO_OPTIONS: ComboboxOption[] = [
+  { id: 'oak', label: 'Oak flooring', hint: 'SKU 1042' },
+  { id: 'tile', label: 'Porcelain tile', hint: 'SKU 2210' },
+  { id: 'brass', label: 'Brass tap', hint: 'SKU 3318' },
+];
+function ComboboxSpecimen({ label, help }: { label: string; help: string }): JSX.Element {
+  const [value, setValue] = useState<ComboboxOption | null>(COMBO_OPTIONS[0] ?? null);
+  return (
+    <Combobox
+      label={label}
+      help={help}
+      value={value}
+      onChange={setValue}
+      load={(q) => Promise.resolve(COMBO_OPTIONS.filter((o) => o.label.toLowerCase().includes(q.trim().toLowerCase())))}
+    />
+  );
+}
+
 function Specimen({ label, children }: { label: string; children: React.ReactNode }): JSX.Element {
   return (
     <div className="u-grid u-gap-1">
@@ -267,6 +287,7 @@ export function GalleryPage(): JSX.Element {
           </Field>
         </div>
         <Field label={t('fieldTextarea')}>{(p) => <textarea {...p} rows={2} defaultValue="Multiline content" />}</Field>
+        <ComboboxSpecimen label={t('fieldCombobox')} help={t('fieldComboboxHelp')} />
       </Section>
 
       <Section id="table" title={t('table')}>

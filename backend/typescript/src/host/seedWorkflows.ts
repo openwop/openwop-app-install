@@ -41,6 +41,7 @@ const log = createLogger('seed-workflows');
 // ADR 0794 — the seeded id is minted by the one mint module; re-exported for its callers.
 export { seedWorkflowId } from './workflowId.js';
 import { seedWorkflowId } from './workflowId.js';
+import { RETIRED_CHAIN_ALIASES } from '../features/walkthroughs/walkthroughIds.js';
 
 /** ADR 0507 — a chain carrying `x-openwop-sensitive` is the ONE input that makes
  *  deferred expansion produce different node ids than expansion-time (sensitive
@@ -84,6 +85,11 @@ export async function seedZeroConfigWorkflows(tenantId: string): Promise<{ seede
     // marked closed; prod ran 503/503) — a FUTURE chain made internal needs the
     // same treatment, since this loop still only skips.
     if (chain.internal === true) continue;
+    // CC-CHAIN-4 — a retired alias (kept registered only so old runs replay) is never
+    // seeded: it would list beside its replacement in /builder and the `/` picker.
+    // Tenants seeded before this keep their wf.seed copy (this loop skips, it does not
+    // retract — the same retro note as `internal` above).
+    if (RETIRED_CHAIN_ALIASES.has(chain.chainId)) continue;
     if (!isZeroConfig(chain.parameters)) continue;
     const workflowId = seedWorkflowId(chain.chainId);
     if (forked.has(workflowId)) continue;
@@ -601,11 +607,36 @@ export interface InternalSeedRetractResult {
 export async function retractInternalSeedOwnership(
   opts: { yieldEvery?: number } = {},
 ): Promise<InternalSeedRetractResult> {
+  return retractSeedOwnershipWhere((chain) => chain.internal === true, opts);
+}
+
+/**
+ * CC-CHAIN-4b — the same non-destructive ownership retract for RETIRED chain
+ * aliases (`RETIRED_CHAIN_ALIASES`, e.g. `tour.campaign-studio.first-brief`). The
+ * seeder skips them since CC-CHAIN-4, but tenants seeded before keep a
+ * `wf.seed.*` copy listed beside the replacement. The alias stays registered, so
+ * every run stamped with it still replays and forks; edited or scheduled copies
+ * are kept, exactly as for internal chains. Run by its own background job
+ * (`retired-alias-seed-retract`) because `internal-seed-retract` is already
+ * marked done on every install that ran it.
+ */
+export async function retractRetiredAliasSeedOwnership(
+  opts: { yieldEvery?: number } = {},
+): Promise<InternalSeedRetractResult> {
+  return retractSeedOwnershipWhere((chain) => RETIRED_CHAIN_ALIASES.has(chain.chainId), opts);
+}
+
+/** The shared retract: `select` names the zero-config chains whose seeds go
+ *  (`internalSeedIds` counts that population, whatever the reason). */
+async function retractSeedOwnershipWhere(
+  select: (chain: ReturnType<typeof listChains>[number]['chain']) => boolean,
+  opts: { yieldEvery?: number } = {},
+): Promise<InternalSeedRetractResult> {
   const r: InternalSeedRetractResult = { internalSeedIds: 0, examined: 0, retracted: 0, keptEdited: 0, keptScheduled: 0, skippedUnexpandable: 0, failed: 0 };
   if (listChains().length === 0) loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() });
   const pristine = new Map<string, string>();
   for (const { chain } of listChains()) {
-    if (chain.internal !== true || !isZeroConfig(chain.parameters)) continue;
+    if (!select(chain) || !isZeroConfig(chain.parameters)) continue;
     const workflowId = seedWorkflowId(chain.chainId);
     try {
       const expanded = expandChain(chain, { deferred: true });

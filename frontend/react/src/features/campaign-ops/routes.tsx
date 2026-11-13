@@ -17,9 +17,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Marketing',
-      label: 'Operations', labelKey: 'campaignOpsLabel',
+      labelKey: 'campaignOpsLabel',
       icon: InboxIcon,
-      hint: 'Ask for, review and approve client page changes', hintKey: 'campaignOpsHint',
+      hintKey: 'campaignOpsHint',
       order: 29,
       featureId: 'campaign-ops',
       hiddenWhenFeature: 'campaigns',

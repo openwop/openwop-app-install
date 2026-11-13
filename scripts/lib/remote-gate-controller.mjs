@@ -105,6 +105,13 @@ export async function runRemoteGate({ repo, home, commit, main, trust, workRoot,
       return dest;
     } catch (error) { logError = String(error.message); return null; }
   };
+  // A fetched job already carries its gate log, so a green one keeps it from the
+  // fetch rather than a second transfer (shadow 14, 2026-11-11: a green gate came
+  // home with no log, so its lanes could not be compared with a local gate's).
+  const keepFetchedLog = src => {
+    if (!logDir) return null;
+    try { const dest = join(logDir, `${id}.log.gz`); copyFileSync(src, dest); return dest; } catch (error) { logError = String(error.message); return null; }
+  };
   try {
     // The worker replies only after rebuilding and verifying the candidate, which
     // takes minutes for a full-history bundle: wait up to the receiver's maximum.
@@ -174,9 +181,11 @@ export async function runRemoteGate({ repo, home, commit, main, trust, workRoot,
         resultBytes: readFileSync(p['result.json']), gateLog: readFileSync(p['gate.log.gz']),
         evidenceBytes: readFileSync(p['evidence.json']), browserLedger: readFileSync(p['browser.tsv']),
         authenticatedHostKey: fetched.authenticatedHostKey });
-      return { verdict: 'green', id, accepted };
+      const log = keepFetchedLog(p['gate.log.gz']);
+      return { verdict: 'green', id, accepted, log, ...(logError ? { logError } : {}) };
     } catch (error) {
-      return fallback('remote evidence refused', { id, detail: String(error.message) });
+      const log = keepFetchedLog(fetched.frame.paths['gate.log.gz']);
+      return fallback('remote evidence refused', { id, detail: String(error.message), log, ...(logError ? { logError } : {}) });
     } finally { rmSync(fetched.frame.work, { recursive: true, force: true }); }
   } catch (error) {
     await abandon();

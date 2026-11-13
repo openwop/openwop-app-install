@@ -94,4 +94,12 @@ export const messages = {
   'error_account-erased': 'This account no longer exists.',
   'error_session-revoked': 'Your session was signed out on every device. Sign in again to continue.',
   cannotBeUndone: 'This cannot be undone.',
+  // ADR 1110 P2 — the shared Combobox (ui/Combobox.tsx).
+  comboboxLoading: 'Searching…',
+  comboboxFailed: "Could not load the list. Press Down to try again.",
+  comboboxNoResults: 'No matches',
+  comboboxResults_one: '{{count}} match',
+  comboboxResults_other: '{{count}} matches',
+  comboboxResultsMore_one: "{{count}}+ match; type to narrow",
+  comboboxResultsMore_other: "{{count}}+ matches; type to narrow",
 } as const;

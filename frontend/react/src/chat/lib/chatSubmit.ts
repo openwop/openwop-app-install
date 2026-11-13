@@ -41,6 +41,12 @@ export interface CoreSubmitContext {
   baseSendOptions?: () => Partial<SendOptions>;
   /** Fired when an `@`-mention activates an agent (e.g. persist it as a participant). */
   onAgentActivated?: (agentId: string) => void;
+  /** CC-CHAT-4 — fired when a plain turn goes to the ALREADY-selected agent (e.g. a
+   *  `?agent=` deep-link scope that never went through an `@`-mention), so the
+   *  surface can persist it as a member: a reopened conversation then lists it in
+   *  the lineup (re-added as a member, NOT selected — the Assistant still answers
+   *  until the user picks it; ADR 0140 restore never changes the voice). */
+  onAgentRouted?: (agentId: string) => void;
 }
 
 /** An interceptor runs after command/workflow, before the `@`-mention + send tail.
@@ -123,6 +129,7 @@ export async function runCoreSubmit(
   const activeAgentId =
     routedAgentId ??
     (!boardSummoned && ctx.activeAgents.currentAgentId !== DEFAULT_ASSISTANT_ID ? ctx.activeAgents.currentAgentId : undefined);
+  if (!routedAgentId && activeAgentId) ctx.onAgentRouted?.(activeAgentId);
   await ctx.send(text, ctx.config, {
     attachments,
     ...(ctx.baseSendOptions ? ctx.baseSendOptions() : {}),

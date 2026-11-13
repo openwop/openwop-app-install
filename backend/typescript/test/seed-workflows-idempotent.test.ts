@@ -21,6 +21,7 @@ import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/h
 import { loadWorkflowChainPacks, listChains, _resetChainRegistryForTest } from '../src/host/workflowChainPackLoader.js';
 import { seedZeroConfigWorkflows } from '../src/host/seedWorkflows.js';
 import { listOwned } from '../src/host/workflowOwnership.js';
+import { RETIRED_CHAIN_ALIASES } from '../src/features/walkthroughs/walkthroughIds.js';
 import type { Storage } from '../src/storage/storage.js';
 
 const REPO_ROOT = join(__dirname, '..', '..', '..');
@@ -30,9 +31,9 @@ let storage: Storage;
 
 /** The seeder's own population, counted from the CURRENT registry: zero-config
  *  AND not RFC 0135 `internal` (the ADR 0788 D3 MCP projection chains are
- *  internal and zero-config). */
+ *  internal and zero-config) and not a retired alias (CC-CHAIN-4). */
 function zeroConfigCount(): number {
-  return listChains().filter(({ chain }) => chain.internal !== true).filter(
+  return listChains().filter(({ chain }) => chain.internal !== true && !RETIRED_CHAIN_ALIASES.has(chain.chainId)).filter(
     ({ chain }) => !Array.isArray((chain.parameters as { required?: unknown }).required)
       || ((chain.parameters as { required?: string[] }).required ?? []).length === 0,
   ).length;

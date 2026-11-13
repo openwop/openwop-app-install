@@ -71,8 +71,12 @@ function ItemHead({ persona, role, ringColor, avatarUrl, theme, age }: {
   );
 }
 
-export function NeedsYouInbox({ onResolved, focusApprovalId, onApprovalFocused }: {
+export function NeedsYouInbox({ onResolved, focusApprovalId, onApprovalFocused, workflowRequests = 0 }: {
   onResolved?: () => void;
+  /** ADR 1109 D6 — the page's own "Action needed" count (workflow requests). The
+   *  all-clear line counted roster approvals and waiting agents only, so it read
+   *  "all caught up" beside a tab showing eleven. */
+  workflowRequests?: number;
   /** ADR 0862 — `/inbox?approval=<id>`: scroll to + focus THIS approval's card (the one
    *  that shows its fields and its decide buttons), once the list has loaded. */
   focusApprovalId?: string;
@@ -205,6 +209,9 @@ export function NeedsYouInbox({ onResolved, focusApprovalId, onApprovalFocused }
   const total = (approvals?.length ?? 0) + blockers.length;
 
   // All clear → a single quiet line (don't dominate the inbox with an empty card).
+  // ADR 1109 D6 — only when no workflow request waits either; those render in the
+  // list below, so with none of this card's own items there is nothing to show.
+  if (approvals !== null && total === 0 && !error && workflowRequests > 0) return null;
   if (approvals !== null && total === 0 && !error) {
     return (
       <div className="surface-card u-flex u-flex-row u-items-center u-gap-2 u-fs-12">

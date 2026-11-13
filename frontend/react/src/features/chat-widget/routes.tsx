@@ -1,5 +1,5 @@
 import { lazy } from 'react';
-import { ActivityIcon } from '../../ui/icons/index.js';
+import { MessageCircleIcon } from '../../ui/icons/index.js';
 import type { FeatureRoute } from '../../chrome/featureTypes.js';
 import type { FrontendFeature } from '../registry.js';
 
@@ -15,9 +15,10 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Workspace',
-      label: 'Chat widgets', labelKey: 'chatWidgetLabel',
-      icon: ActivityIcon,
-      hint: 'Embeddable chat widgets', hintKey: 'chatWidgetHint',
+      labelKey: 'chatWidgetLabel',
+      order: 55,
+      icon: MessageCircleIcon,
+      hintKey: 'chatWidgetHint',
       // ADR 0820 §8.2 — `chat-widget` has a toggle again (default ON, Support bundle).
       featureId: 'chat-widget',
       // ADR 0145 — subsumed by the Chat deployment console once enabled.

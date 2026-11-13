@@ -31,7 +31,7 @@ import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
 import { cleanString } from '../../host/boundedStrings.js';
 import { subjectKeyForms } from '../../host/subjectErasureRedaction.js';
-import { listProducts, listOrders, quantizeMoney, CURRENCIES, ORDER_IDEM_STALE_MS, type Order, type Product } from '../commerce/commerceService.js';
+import { getProducts, listOrders, quantizeMoney, CURRENCIES, ORDER_IDEM_STALE_MS, type Order, type Product } from '../commerce/commerceService.js';
 import type { OrderDiscountContext, OrderDiscountResult, AppliedPromotion } from '../commerce/promotionSeam.js';
 import { resolveSegmentMembers } from '../crm/segmentsService.js';
 import { resolveToggle } from '../../host/featureToggles/service.js';
@@ -664,8 +664,9 @@ function usageWithHolds(rows: Map<string, BudgetLedger | null>, orders: Order[],
 
 /** One deterministic pass over the active promotions against a given usage. */
 async function evaluatePromotions(ctx: OrderDiscountContext, active: Promotion[], usage: Map<string, PromotionUsage>): Promise<OrderDiscountResult> {
-  // Load scoped products once for category matching (bounded per-org catalog).
-  const products = new Map<string, Product>((await listProducts(ctx.tenantId, ctx.orgId)).map((p) => [p.productId, p]));
+  // The order's own products, once, for category matching (ADR 1110 P2: point reads of
+  // the line ids, never the catalog — every lookup below is keyed by a line's product).
+  const products = new Map<string, Product>((await getProducts(ctx.tenantId, ctx.orgId, ctx.items.map((i) => i.productId))).map((p) => [p.productId, p]));
   const applied: AppliedPromotion[] = [];
   let total = 0;
   let subtotalRemaining = ctx.subtotalAfterCoupon;

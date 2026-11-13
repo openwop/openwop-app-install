@@ -43,7 +43,7 @@ export interface LaunchResult { runId: string; campaignId: string; reused: boole
 
 export async function launchAutopilot(
   deps: StartRunDeps,
-  input: { tenantId: string; campaign: MarketingCampaign; actingUserId: string; ai?: unknown },
+  input: { tenantId: string; campaign: MarketingCampaign; actingUserId: string; ai?: unknown; personalTenant?: string; planExempt?: true },
 ): Promise<LaunchResult> {
   const { tenantId, campaign, actingUserId } = input;
   if (!campaign.briefId) {
@@ -75,6 +75,10 @@ export async function launchAutopilot(
       // ADR 0941 D2b — the run tag, composed by its one writer.
       [CAMPAIGN_RUN_TAG_KEY]: stampCampaignRun(campaign, { role: 'spine' }),
     },
+    // CC-AUTH-4 / ADR 1108 — the listed operator's run keeps the exemption the
+    // route granted (re-checked downstream); its stages inherit it below.
+    ...(input.personalTenant ? { personalTenant: input.personalTenant } : {}),
+    ...(input.planExempt === true ? { planExempt: true as const } : {}),
   }).catch((err: unknown) => {
     log.warn('campaign_autopilot_dispatch_threw', { tenantId, campaignId: campaign.id, error: err instanceof Error ? err.message : String(err) });
     return null;

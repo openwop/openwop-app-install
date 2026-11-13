@@ -45,22 +45,39 @@ export async function eraseEntitiesSubject(tenantId: string, subjectKey: string)
   const { forms } = subjectKeyForms(subjectKey);
   let touched = 0;
 
-  for (const t of await types.listForTenantIndexed(tenantId)) {
+  const tenantTypes = await types.listForTenantIndexed(tenantId);
+  for (const t of tenantTypes) {
     if (!forms.has(t.createdBy)) continue;
     await types.put({ ...t, createdBy: ERASED });
     touched += 1;
   }
 
-  for (const r of await records.listForTenantIndexed(tenantId)) {
-    const created = forms.has(r.createdBy);
-    const updated = forms.has(r.updatedBy);
-    if (!created && !updated) continue;
-    await records.put({
-      ...r,
-      ...(created ? { createdBy: ERASED } : {}),
-      ...(updated ? { updatedBy: ERASED } : {}),
-    });
-    touched += 1;
+  // ADR 1110 P3 — every row of the tenant, one type and one page at a time: a type can
+  // hold millions of rows (commerce.product), so the tenant is never read whole. Every
+  // row's key starts with its type's id, and the type id embeds the tenant. Walking the
+  // tenant's types is complete: a type with rows cannot be deleted (`deleteEntityType`
+  // refuses), and a namespace purge deletes rows before types. This write
+  // bypasses the declared-index hooks on purpose: no index projection carries
+  // `createdBy` or `updatedBy` (systemIndex.ts), so no marker changes.
+  for (const t of tenantTypes) {
+    let afterId: string | undefined;
+    for (;;) {
+      const page = await records.listByPrefixPage(`${t.typeId}|`, { ...(afterId !== undefined ? { afterId } : {}), limit: 500 });
+      for (const r of page.items) {
+        if (r.tenantId !== tenantId) continue;
+        const created = forms.has(r.createdBy);
+        const updated = forms.has(r.updatedBy);
+        if (!created && !updated) continue;
+        await records.put({
+          ...r,
+          ...(created ? { createdBy: ERASED } : {}),
+          ...(updated ? { updatedBy: ERASED } : {}),
+        });
+        touched += 1;
+      }
+      if (!page.lastId) break;
+      afterId = page.lastId;
+    }
   }
 
   log.info('entities_subject_erased', { tenantId, rows: touched, values: 'untouched-by-design' });

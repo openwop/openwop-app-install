@@ -39,7 +39,7 @@ import { resolveComputedProjectHealth } from '../../host/projectHealthProviders.
 import type { Request } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { requireString } from '../featureRoute.js';
+import { requireString, requireFeatureEnabled } from '../featureRoute.js';
 import { resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
 import { subjectBoardId } from '../../host/kanbanService.js';
 import { addSubjectNote, listSubjectNotes, removeSubjectNote } from '../../host/subjectMemory.js';
@@ -51,7 +51,7 @@ import {
   type ProjectRole,
 } from './projectsService.js';
 import { MAX_MULTI_PARTY_PARTICIPANTS } from '../../host/multiPartyConversation.js';
-import { deleteNotebook, getNotebook } from '../notebooks/notebooksService.js';
+import { deleteNotebook, getNotebook, isNotebookProject, NOTEBOOK_RESEARCHER_AGENT_ID } from '../notebooks/notebooksService.js';
 import { deleteConversationCompletely } from '../../host/conversationCascade.js';
 import {
   getProjectKnowledge, bindCollection, unbindCollection, createBoundCollection,
@@ -64,7 +64,7 @@ import {
   listProjectSchedules, createProjectSchedule, updateProjectSchedule, deleteProjectSchedule,
 } from './projectScheduleService.js';
 import {
-  subjectConversationId, ensureConversationMeta, getConversationMeta, addParticipant, removeParticipant, refreshEntityChatTitle,
+  subjectConversationId, ensureConversationMeta, getConversationMeta, addParticipant, removeParticipant, refreshEntityChatTitle, agentRef,
 } from '../../host/conversationStore.js';
 import { getRosterEntry } from '../../host/rosterService.js';
 
@@ -614,8 +614,23 @@ export function registerProjectsRoutes(deps: RouteDeps): void {
       // responding. This targets NON-members only (`!want.has(ref)`); a member outside
       // the top-cap cohort is never pruned, so a grandfathered >cap room is not
       // silently trimmed.
+      //
+      // ADR 1103 D9 — the ONE non-member this prune keeps: the notebook researcher,
+      // when the project is a notebook and the feature is on. The notebook door seats
+      // it in this SAME room (`notebooks/routes.ts` `/:id/chat`); without this, opening
+      // the project chat unseated it and opening the notebook chat re-seated it.
+      // Only "off" / "not on this plan" reads as false; a fault reading the toggle
+      // propagates instead of quietly unseating the researcher.
+      const keepResearcher = (await isNotebookProject(tenantId, p))
+        && (await requireFeatureEnabled(req, 'notebooks', 'Research Notebooks').then(() => true, (err: unknown) => {
+          if (err instanceof OpenwopError && [402, 403, 404].includes(err.httpStatus)) return false;
+          throw err;
+        }));
+      const researcherRef = agentRef(NOTEBOOK_RESEARCHER_AGENT_ID);
       for (const ref of have) {
-        if (ref.startsWith('agent:') && !want.has(ref)) await removeParticipant(tenantId, sessionId, ref);
+        if (ref.startsWith('agent:') && !want.has(ref) && !(keepResearcher && ref === researcherRef)) {
+          await removeParticipant(tenantId, sessionId, ref);
+        }
       }
       res.status(201).json({ sessionId });
     } catch (err) { next(err); }

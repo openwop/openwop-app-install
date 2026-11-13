@@ -12,9 +12,9 @@ const routes: FeatureRoute[] = [
     tier: 'admin', archetype: 'admin',
     nav: {
       group: 'Analytics & usage',
-      label: 'LLM usage', labelKey: 'usageAnalyticsLabel',
+      labelKey: 'usageAnalyticsLabel',
       icon: ActivityIcon,
-      hint: 'Per-model token usage', hintKey: 'usageAnalyticsHint',
+      hintKey: 'usageAnalyticsHint',
       featureId: 'usage-analytics',
     },
   },

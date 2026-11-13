@@ -218,7 +218,7 @@ function VendorsTab({ orgId }: { orgId: string }): JSX.Element {
           {visibleVendors.length === 0 ? (
             <StateCard title={t('vendorsNoMatchTitle')} body={t('vendorsNoMatchBody')} action={<Button variant="secondary" onClick={clearVendorFilters}>{t('clearFilters')}</Button>} />
           ) : (
-            <DataTable columns={columns} rows={visibleVendors} rowKey={(v) => v.vendorId} />
+            <DataTable caption={t('tabVendors')} columns={columns} rows={visibleVendors} rowKey={(v) => v.vendorId} />
           )}
         </>
       )}
@@ -467,7 +467,7 @@ function PlansTab({ orgId }: { orgId: string }): JSX.Element {
           {visiblePlans.length === 0 ? (
             <StateCard title={t('plansNoMatchTitle')} body={t('plansNoMatchBody')} action={<Button variant="secondary" onClick={() => setQuery('')}>{t('clearFilters')}</Button>} />
           ) : (
-            <DataTable columns={columns} rows={visiblePlans} rowKey={(p) => p.planId} onRowClick={(p) => setOpenId(p.planId)} />
+            <DataTable caption={t('tabPlans')} columns={columns} rows={visiblePlans} rowKey={(p) => p.planId} onRowClick={(p) => setOpenId(p.planId)} />
           )}
         </>
       )}

@@ -13,9 +13,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'CRM',
-      label: 'Email', labelKey: 'emailLabel',
+      labelKey: 'emailLabel',
       icon: SendIcon,
-      hint: 'Templated campaigns over CRM contacts', hintKey: 'emailHint',
+      hintKey: 'emailHint',
       featureId: 'email',
     },
   },

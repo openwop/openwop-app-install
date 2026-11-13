@@ -11,6 +11,11 @@ type NodePackResolver = (typeId: string) => Promise<NodeModule | null>;
 type NodePackIndexProbe = (typeId: string) => boolean;
 
 const inProcess = new Map<string, NodeModule>();
+/** typeIds the host registered itself (`register`). A pack never replaces one
+ *  (#5808): `core.openwop.flow` aliases `core.delay` to its own `waitNode`, and
+ *  the first flow-pack load used to swap the reserved node out for every later
+ *  run on the instance. */
+const hostOwned = new Set<string>();
 let resolver: NodePackResolver | null = null;
 let indexProbe: NodePackIndexProbe | null = null;
 
@@ -18,6 +23,14 @@ export function getNodeRegistry() {
   return {
     register(node: NodeModule): void {
       inProcess.set(node.typeId, node);
+      hostOwned.add(node.typeId);
+    },
+    /** A pack's node. Refused (returns false) when the host owns the typeId;
+     *  a later pack load still replaces an earlier pack's module. */
+    registerFromPack(node: NodeModule): boolean {
+      if (hostOwned.has(node.typeId)) return false;
+      inProcess.set(node.typeId, node);
+      return true;
     },
     has(typeId: string): boolean {
       return inProcess.has(typeId);

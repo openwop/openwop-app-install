@@ -8,7 +8,7 @@ import { render, cleanup, screen, waitFor, act, fireEvent } from '@testing-libra
 import { MemoryRouter } from 'react-router-dom';
 
 const api = vi.hoisted(() => ({
-  listOrgs: vi.fn(), listProducts: vi.fn(), listOrders: vi.fn(),
+  listOrgs: vi.fn(), listProductsPage: vi.fn(), listOrdersPage: vi.fn(),
   listQuotes: vi.fn(), listProductFields: vi.fn(), listPriceLists: vi.fn(),
   listCoupons: vi.fn(), getPaymentsReadiness: vi.fn(), startClientPayments: vi.fn(), syncClientPayments: vi.fn(),
 }));
@@ -34,8 +34,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   access.useFeatureAccess.mockReturnValue(makeFeatureAccess({ enabled: true, loading: false }));
   api.listOrgs.mockResolvedValue([{ orgId: 'o1', name: 'Org One' }]);
-  api.listProducts.mockResolvedValue([]);
-  api.listOrders.mockResolvedValue([]);
+  api.listProductsPage.mockResolvedValue({ products: [] });
+  api.listOrdersPage.mockResolvedValue({ orders: [] });
   api.listQuotes.mockResolvedValue([]);
   api.listProductFields.mockResolvedValue([]);
   api.listPriceLists.mockResolvedValue([]);

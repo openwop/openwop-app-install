@@ -21,6 +21,7 @@ import { Notice } from '../../ui/index.js';
 import { useReviewStatusByRunNode } from '../reviews/reviewStatusStore.js';
 import { confirm } from '../../ui/confirm.js';
 import i18n from '../../i18n/index.js';
+import { approvalResumeValue } from '../../interrupts/approvalResumeValue.js';
 
 interface ApprovalOption {
   key: string;
@@ -88,6 +89,7 @@ const ACTION_LABEL_KEYS: Record<string, string> = {
   approve: 'interrupts:actionApprove',
   reject: 'interrupts:actionReject',
   'request-changes': 'interrupts:actionRequestChanges',
+  refine: 'interrupts:actionRefine',
   defer: 'interrupts:actionDefer',
   escalate: 'interrupts:actionEscalate',
 };
@@ -149,7 +151,7 @@ function ApprovalCard({ payload, onAction, isLoading, context, autoFocus }: Card
       danger: true,
       confirmLabel: t('interrupts:actionReject'),
     }))) return;
-    await onAction('resolve', { action, comment: comment || undefined });
+    await onAction('resolve', approvalResumeValue(action, comment));
   }
 
   return (

@@ -31,7 +31,6 @@
  */
 
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
 import { resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { assertEffectAllowed } from '../../host/runEffectContext.js';
@@ -46,9 +45,9 @@ import { readCampaignLinks } from './campaignLinks.js';
 import { CAMPAIGN_RUN_TAG_KEY, stampCampaignRun } from './campaignRunTag.js';
 import { ORCHESTRATION_ID } from './orchestrationWorkflow.js';
 import { readableCampaignAutonomy } from './autonomyAccess.js';
-import { autonomyTogglesOn } from './autonomyStamp.js';
-import { projectPolicyForModel } from '../../host/autonomyPolicy/index.js';
-import { untrustedToolError, launchRefusalResult } from '../../host/agentToolKit.js';
+import { AUTONOMY_TOGGLE, projectPolicyForModel } from '../../host/autonomyPolicy/index.js';
+import { untrustedToolError, launchRefusalResult, resolveFeatureAccess, resolveFeatureToggle, featureUnavailable, type ToolAccessScope } from '../../host/agentToolKit.js';
+import { forwardedPlanExemption, launchPlanExemptSubject } from '../../host/operatorPlanExemption.js';
 import { assertWorkflowFeatureLaunchable, WorkflowFeatureRefusedError } from '../../host/workflowFeatureGate.js';
 import { CHANNEL_WORKFLOW_IDS } from '../campaign-channels/channelWorkflows.js';
 import { OpenwopError } from '../../types.js';
@@ -76,9 +75,9 @@ function toolError(error: string, message: string, extra?: Record<string, unknow
 }
 
 /** Per-call toggle honesty (ADR 0308 D2): per-tenant, dynamic, fail-closed. */
-async function orchestrationEnabled(tenantId: string, actingUserId: string | undefined): Promise<boolean> {
-  const assignment = await resolveOne(TOGGLE_ID, { tenantId, ...(actingUserId ? { userId: actingUserId } : {}) }).catch(() => null);
-  return Boolean(assignment?.enabled);
+async function orchestrationEnabled(scope: ToolAccessScope): Promise<boolean> {
+  // ADR 1108 — the kit's subject: the route's shape plus the operator exemption.
+  return resolveFeatureToggle(TOGGLE_ID, scope);
 }
 
 /** The SAME predicate the Campaign Studio routes enforce (`routes.ts`
@@ -130,7 +129,7 @@ async function projectBrief(tenantId: string, brief: CampaignBrief): Promise<Rec
 export async function runStatusTool(input: Record<string, unknown>, scope: BundleScope): Promise<ToolResult> {
   const empty = JSON.stringify({ campaigns: [], brief: null });
   if (!scope.actingUserId) return { content: empty };
-  if (!(await orchestrationEnabled(scope.tenantId, scope.actingUserId))) return { content: empty };
+  if (!(await orchestrationEnabled(scope))) return { content: empty };
 
   const briefId = str(input.briefId);
   if (briefId) {
@@ -165,14 +164,13 @@ export async function runStatusTool(input: Record<string, unknown>, scope: Bundl
 export async function runGetCampaignTool(input: Record<string, unknown>, scope: BundleScope): Promise<ToolResult> {
   const empty = JSON.stringify({ campaign: null });
   if (!scope.actingUserId) return { content: empty };
-  if (!(await orchestrationEnabled(scope.tenantId, scope.actingUserId))) return { content: empty };
+  if (!(await orchestrationEnabled(scope))) return { content: empty };
   const campaignId = str(input.campaignId);
   const briefId = str(input.briefId);
   const campaign = campaignId ? await getCampaign(scope.tenantId, campaignId) : briefId ? await getCampaignByBrief(scope.tenantId, briefId) : null;
   if (!campaign || !(await hasOrgScope(scope.tenantId, scope.actingUserId, campaign.orgId, 'workspace:read'))) return { content: empty };
-  const actingUserId = scope.actingUserId;
-  const enabled = async (featureId: string): Promise<boolean> =>
-    Boolean((await resolveOne(featureId, { tenantId: scope.tenantId, userId: actingUserId }).catch(() => null))?.enabled);
+  // ADR 1108 — each linked feature through the kit's subject (operator exemption included).
+  const enabled = async (featureId: string): Promise<boolean> => resolveFeatureToggle(featureId, scope);
   const links = await readCampaignLinks(campaign, enabled);
   const count = (s: { status: string; items?: unknown[] }): number | string => (s.status === 'ok' ? (s.items ?? []).length : s.status);
   return {
@@ -203,7 +201,11 @@ export async function runGetCampaignTool(input: Record<string, unknown>, scope: 
  */
 export async function runOrchestrationRunTool(deps: StartRunDeps, input: Record<string, unknown>, scope: BundleScope): Promise<ToolResult> {
   if (!scope.actingUserId) return toolError('acting_user_required', 'A campaign can only be run from a human-initiated turn.');
-  if (!(await orchestrationEnabled(scope.tenantId, scope.actingUserId))) return toolError('feature_disabled', 'Campaign Studio is turned off for this workspace.');
+  // ADR 1108 — a plan refusal is named as one (`not_entitled`), not as a toggle.
+  const access = await resolveFeatureAccess(TOGGLE_ID, scope);
+  if (!access?.enabled) {
+    return access?.blockedBy ? featureUnavailable(access, 'Campaign Studio') : toolError('feature_disabled', 'Campaign Studio is turned off for this workspace.');
+  }
 
   const briefId = str(input.briefId);
   if (!briefId) return toolError('validation_error', 'Pass the `briefId` of the confirmed brief to run.');
@@ -230,7 +232,9 @@ export async function runOrchestrationRunTool(deps: StartRunDeps, input: Record<
   // what the dispatcher evaluates (`subWorkflowDispatcher.ts`). Advisory: the
   // gate runs again at dispatch, so a toggle or plan change in between still
   // ends the run with `subworkflow_feature_refused`.
-  const childRefusal = await firstChildRefusal(scope.tenantId);
+  // ADR 1108 — with the operator's plan exemption, which the dispatcher now
+  // carries from the parent row too (`childPlanExemptionStamp`).
+  const childRefusal = await firstChildRefusal(scope);
   if (childRefusal?.reason === 'not_entitled') {
     return toolError('forbidden', 'Campaign Studio generates its channels with Campaign Channels, which this workspace\'s plan does not include, so the campaign was not started. Upgrade the plan or ask an admin.', { reason: childRefusal.reason, feature: childRefusal.featureId });
   }
@@ -266,6 +270,8 @@ export async function runOrchestrationRunTool(deps: StartRunDeps, input: Record<
   const runId = await startWorkflowRun(deps, {
     tenantId: scope.tenantId,
     workflowId: ORCHESTRATION_ID,
+    // ADR 1108 — the started run keeps the operator exemption this turn holds.
+    ...forwardedPlanExemption(scope),
     inputs: { briefId, createdBy: scope.actingUserId },
     ...(ai ? { configurable: campaignLaunchConfigurable(ai) } : {}),
     metadata: {
@@ -293,14 +299,34 @@ export async function runOrchestrationRunTool(deps: StartRunDeps, input: Record<
   await recordIgnitionRun(scope.tenantId, key, runId);
   await surfaceDispatchedRun(scope, deps.storage, { runId, agentId: scope.agentProfileId ?? STRATEGIST_AGENT_ID, workflowId: ORCHESTRATION_ID, workflowName: 'Campaign orchestration' }, 'campaign-orchestration-run');
   log.info('campaign_orchestration_dispatched', { tenantId: scope.tenantId, briefId, runId });
-  return { content: JSON.stringify({ runId, briefId, campaignId: campaign.id, workflowId: ORCHESTRATION_ID }) };
+  return { content: JSON.stringify({ runId, briefId, campaignId: campaign.id, workflowId: ORCHESTRATION_ID, steps: ORCHESTRATION_RUN_STEPS }) };
 }
 
+/**
+ * CC-AGENT-1 — what the started run does, in order, so the model reports the run
+ * instead of guessing (it once told a user an approved kernel would be reused).
+ * Mirrors `examples/workflow-chain-packs/campaign-orchestration/pack.json`
+ * (validate → kernel → kernel-approve → promote-kernel → channel dispatch →
+ * production-plan → consistency → finalize); pinned by the CC-AGENT-1 test.
+ */
+export const ORCHESTRATION_RUN_STEP_NODES: ReadonlyArray<{ readonly nodes: readonly string[]; readonly text: string }> = [
+  { nodes: ['validate'], text: 'Validate the brief.' },
+  { nodes: ['kernel'], text: 'Generate a NEW messaging kernel from the brief, even if the brief already has an approved kernel.' },
+  { nodes: ['kernel-approve', 'promote-kernel'], text: 'Gate that new kernel per the campaign\'s review policy (usually an approval); it replaces the brief\'s kernel only once approved.' },
+  { nodes: ['channel-supervisor', 'channel-dispatch'], text: 'Generate each channel the brief enables, in parallel; each channel draft goes through its own review step.' },
+  { nodes: ['production-plan'], text: 'Draft a production plan.' },
+  { nodes: ['consistency'], text: 'Check the channels for consistency with the kernel.' },
+  { nodes: ['finalize'], text: 'Finalize the campaign.' },
+];
+/** What the model is told (the `steps` field). Pinned to the chain's node order by
+ *  `cc-agent-1-strategist-run-truth.test.ts` via ORCHESTRATION_RUN_STEP_NODES. */
+export const ORCHESTRATION_RUN_STEPS: readonly string[] = ORCHESTRATION_RUN_STEP_NODES.map((s) => s.text);
+
 /** ADR 1020 D4 — the first channel child this tenant may not launch, or null. */
-async function firstChildRefusal(tenantId: string): Promise<{ featureId: string; reason: string } | null> {
+async function firstChildRefusal(scope: ToolAccessScope): Promise<{ featureId: string; reason: string } | null> {
   for (const id of CHANNEL_WORKFLOW_IDS) {
     try {
-      await assertWorkflowFeatureLaunchable(tenantId, id, null, {});
+      await assertWorkflowFeatureLaunchable(scope.tenantId, id, null, launchPlanExemptSubject(scope));
     } catch (err) {
       if (err instanceof WorkflowFeatureRefusedError) return { featureId: err.featureId, reason: String(err.details?.reason ?? 'feature_disabled') };
       throw err;
@@ -320,8 +346,13 @@ async function firstChildRefusal(tenantId: string): Promise<{ featureId: string;
 export async function runAutonomyTool(input: Record<string, unknown>, scope: BundleScope): Promise<ToolResult> {
   const empty = JSON.stringify({ autonomy: null });
   if (!scope.actingUserId) return { content: empty };
-  if (!(await orchestrationEnabled(scope.tenantId, scope.actingUserId))) return { content: empty };
-  if (!(await autonomyTogglesOn(scope.tenantId))) return { content: empty };
+  if (!(await orchestrationEnabled(scope))) return { content: empty };
+  // CC-AGENT-1 — the sub-toggle resolves with the tool's OWN subject, like the
+  // parent above (ADR 1108: the operator exemption rides it, re-checked against
+  // the allowlist). The old tenant-only `autonomyTogglesOn(tenantId)` applied the
+  // workspace plan to the operator and answered `null` while the review-policy
+  // panel showed the effective policy.
+  if (!(await resolveFeatureToggle(AUTONOMY_TOGGLE, scope))) return { content: empty };
   const campaignId = str(input.campaignId);
   if (!campaignId) return { content: JSON.stringify({ autonomy: null, note: 'Pass the `campaignId` (from status: `existingCampaign.id`, or an org\'s campaign list).' }) };
   const found = await readableCampaignAutonomy(scope.tenantId, { subject: scope.actingUserId }, campaignId);

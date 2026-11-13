@@ -974,3 +974,31 @@ describe('Postgres parity (real DB): chat message order == append order (same-ms
     expect(await s.countChatSessionMessages('pg-order-conc')).toBe(20);
   });
 });
+
+// ADR 1114 (#5868) — the jsonb merge pg-mem cannot model, on a real Postgres 16.
+describe('Postgres parity (real DB): ADR 1114 request retirement — jsonb merge', () => {
+  it.skipIf(skipNoDocker)('resolveRequestNotifications stamps only open request rows', async () => {
+    const s = storage!;
+    const t = `rr-pg-${Math.random().toString(36).slice(2)}`;
+    const base = { tenantId: t, type: 'openwop-app.workflow.approval-needed', priority: 'high' as const, status: 'unread' as const, title: 't', message: 'm', createdAt: new Date().toISOString(), runId: 'run-1' };
+    await s.insertNotification({ ...base, notificationId: `${t}-a`, interruptId: 'i1', metadata: { kind: 'approval' } });
+    await s.insertNotification({ ...base, notificationId: `${t}-b`, interruptId: 'i2' });
+    await s.insertNotification({ ...base, notificationId: `${t}-c`, type: 'workflow.failed' });
+    await s.insertNotification({ ...base, notificationId: `${t}-d`, interruptId: 'i3', status: 'archived' });
+    const at = '2026-11-13T01:00:00.000Z';
+
+    expect(await s.resolveRequestNotifications({ tenantId: t, runId: 'run-1', interruptId: 'i1', resolution: { state: 'approved', at } })).toBe(1);
+    const a = await s.getNotification(`${t}-a`);
+    expect(a?.status).toBe('read');
+    expect(a?.readAt).toBe(at);
+    expect(a?.metadata).toEqual({ kind: 'approval', resolution: { state: 'approved', at } });
+    expect((await s.getNotification(`${t}-b`))?.status).toBe('unread');
+
+    expect(await s.resolveRequestNotifications({ tenantId: t, runId: 'run-1', resolution: { state: 'run-ended', at } })).toBe(1);
+    expect((await s.getNotification(`${t}-b`))?.metadata).toEqual({ resolution: { state: 'run-ended', at } });
+    expect((await s.getNotification(`${t}-a`))?.metadata?.resolution).toEqual({ state: 'approved', at });
+    expect((await s.getNotification(`${t}-c`))?.metadata?.resolution).toBeUndefined();
+    expect((await s.getNotification(`${t}-d`))?.metadata?.resolution).toBeUndefined();
+    expect(await s.resolveRequestNotifications({ tenantId: t, runId: 'run-1', resolution: { state: 'run-ended', at } })).toBe(0);
+  });
+});

@@ -25,6 +25,7 @@ import { PageHeader } from '../../ui/PageHeader.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { Tabs, TabPanel, useUrlTab, type TabItem } from '../../ui/Tabs.js';
 import { tabIdOf, visibleHubRoutes } from '../../chrome/hubProjection.js';
+import { navLabel } from '../../chrome/navText.js';
 
 export function ChatDeploymentHubPage(): JSX.Element {
   const { t } = useTranslation('chat-deployment');
@@ -37,7 +38,7 @@ export function ChatDeploymentHubPage(): JSX.Element {
 
   const items: TabItem[] = routes.map((r) => {
     const id = tabIdOf(r);
-    return { id, label: t(`tab_${id}`, { defaultValue: r.nav?.label ?? id }) };
+    return { id, label: t(`tab_${id}`, { defaultValue: (r.nav ? navLabel(r.nav) : '') || id }) };
   });
   const activeRoute = routes.find((r) => tabIdOf(r) === active);
 

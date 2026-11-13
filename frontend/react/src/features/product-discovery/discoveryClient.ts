@@ -50,6 +50,9 @@ export interface SearchResponse {
   truncated: boolean;
   /** Operator console only — the public route does not send it. */
   hiddenByRules?: number;
+  /** ADR 1110 P2 — the search read a bounded candidate set and more existed, so `total`
+   *  and the facet counts are floors ("1,000+"). REQUIRED for the same reason as `total`. */
+  candidatesTruncated: boolean;
 }
 export interface Org { orgId: string; name: string }
 

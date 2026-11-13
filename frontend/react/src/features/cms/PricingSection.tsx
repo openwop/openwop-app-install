@@ -387,7 +387,7 @@ export function PricingSection({ tierFilter, ctaLabel, ctaUrl, contactUrl }: {
               </div>
               {tt.display?.blurb ? <p className="fp-tier__blurb">{tt.display.blurb}</p> : null}
               {tt.features === '*' ? (
-                <ul className="fp-tier__features">
+                <ul role="list" className="fp-tier__features">
                   <li>{t('pricingAllFeatures', { defaultValue: 'Everything included' })}</li>
                 </ul>
               ) : (
@@ -398,7 +398,7 @@ export function PricingSection({ tierFilter, ctaLabel, ctaUrl, contactUrl }: {
                       : t('pricingEverythingIn', { defaultValue: 'Everything in {{plan}}', plan: prev.name })}</p>
                   ) : null}
                   {own.length > 0 ? (
-                    <ul className="fp-tier__features">
+                    <ul role="list" className="fp-tier__features">
                       {own.slice(0, FEATURE_CARD_CAP).map((f) => <li key={f}>{label(f)}</li>)}
                       {own.length > FEATURE_CARD_CAP ? (
                         <li className="fp-tier__features-more">{t('pricingMoreFeatures', { defaultValue: 'and {{n}} more', n: own.length - FEATURE_CARD_CAP })}</li>
@@ -460,7 +460,7 @@ export function PricingSection({ tierFilter, ctaLabel, ctaUrl, contactUrl }: {
         <section className="fp-pricing__credits" aria-labelledby={creditsId}>
           <h3 id={creditsId} className="fp-pricing__addons-title">{t('pricingCreditsTitle', { defaultValue: 'AI credits' })}</h3>
           <p className="fp-pricing__addons-note">{t('pricingCreditsLede', { defaultValue: 'Paid plans include monthly AI credits. Need more? Top up with a one-time pack.' })}</p>
-          <ul className="fp-credits">
+          <ul role="list" className="fp-credits">
             {packs.map((p) => (
               <li key={`${p.credits}:${p.price}`} className="fp-credits__pack">
                 <span className="fp-credits__amount">{t('pricingCreditsAmount', { defaultValue: '{{n}} credits', n: fmt.number(p.credits) })}</span>
@@ -471,7 +471,7 @@ export function PricingSection({ tierFilter, ctaLabel, ctaUrl, contactUrl }: {
           </ul>
         </section>
       ) : null}
-      {anyPrice ? <ul className="fp-pricing__facts" aria-label={t('pricingFactsLabel', { defaultValue: 'Good to know' })}>
+      {anyPrice ? <ul role="list" className="fp-pricing__facts" aria-label={t('pricingFactsLabel', { defaultValue: 'Good to know' })}>
         <li>{t('pricingFactSeats', { defaultValue: 'Every plan and bundle is priced per workspace, with unlimited seats.' })}</li>
         <li>{t('pricingFactCancel', { defaultValue: 'Change or cancel any time from Billing — your data stays, paid features pause.' })}</li>
       </ul> : null}

@@ -79,9 +79,7 @@ function WeekOverWeek(): JSX.Element {
         </Notice>
       ) : !week ? <Skeleton /> : (
         <>
-          <div className="table-scroll">
             <DataTable columns={columns} rows={WEEK_ROWS} rowKey={(r) => r.key} density="compact" caption={t('funnelWeekCaption')} stackHeaders />
-          </div>
           {week.bundles.length > 0 ? (
             <ul className="u-list-plain u-m-0 u-p-0 u-grid u-gap-1">
               {week.bundles.map((b) => (
@@ -158,7 +156,6 @@ export function PaywallFunnelPanel(): JSX.Element {
               started: n(data.totals.checkoutsStarted), completed: n(data.totals.checkoutsCompleted),
             })}
           </p>
-          <div className="table-scroll">
             <DataTable
               columns={columns}
               rows={data.bundles}
@@ -168,7 +165,6 @@ export function PaywallFunnelPanel(): JSX.Element {
               stackHeaders
               empty={<p className="u-m-0 u-p-3 muted">{t('funnelEmpty')}</p>}
             />
-          </div>
           {data.plans.length > 0 ? (
             <ul className="u-list-plain u-m-0 u-p-0 u-grid u-gap-1">
               {data.plans.map((p) => (

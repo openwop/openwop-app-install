@@ -76,7 +76,9 @@ describe('user-visible copy cites no ADR / RFC numbers (all locales, all namespa
       expect(CATALOGS.filter((p) => localeOf(p) === l).length, l).toBeGreaterThanOrEqual(128);
     }
     expect(ROUTE_MANIFESTS.length).toBeGreaterThanOrEqual(84); // 88 until KickTodo's route manifests left (ADR 1031 P3)
-    expect(ROUTE_MANIFESTS.flatMap((f) => lines(f, NAV_COPY_LINE)).length).toBeGreaterThanOrEqual(132); // 153 until KickTodo's nav copy left (ADR 1031 P3)
+    // No floor on manifest nav literals any more: since the ADR 0874 P3 NAV-1 follow-up every
+    // host entry is keyed (chrome/__tests__/navCopyRatchet.test.ts), so its English lives only in
+    // the catalogs scanned above. The manifest scan stays for an adopter's literal-only entries.
   });
 
   it('positive control: the matcher flags the copy this guard exists for', () => {

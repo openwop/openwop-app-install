@@ -19,7 +19,7 @@ import { listOpenInterrupts, type OpenInterrupt } from '../../client/interruptsC
 import { pollEvents } from '../../client/runsClient.js';
 import type { SubscribeOptions } from '../../client/streamsClient.js';
 import { mergeOpenInterrupts, removeInterruptByNode } from '../lib/interruptResolution.js';
-import { isRecord } from '../lib/typeGuards.js';
+import { resolvedResumeValue } from '../lib/resolvedDecision.js';
 import type { ChatMessage, ChatSession, WorkflowRunState } from '../types.js';
 import { isInterruptResolvedEvent } from '../lib/interruptResolvedEvent';
 import { readSkippedTerminals } from '../lib/skippedTerminals.js';
@@ -384,10 +384,10 @@ export function makeWorkflowRunHandlers(
             // event (see executor.ts:780). Unwrap it back so the
             // HitlDecisionCard sees the raw shape the ApprovalCard
             // emitted (`{action, content, selectedKey, comment}`).
-            const nodeOutput = prev.nodeOutputs[resolvedNode];
-            const resumeValue = isRecord(nodeOutput) && 'output' in nodeOutput
-              ? nodeOutput.output
-              : nodeOutput;
+            // CC-CHAT-2 — a REJECTED gate fails its node and has no
+            // node.completed output; the event's own `decision`/`action` says
+            // it was rejected (it read "Approved" before, live on 373d4863a).
+            const resumeValue = resolvedResumeValue(prev.nodeOutputs[resolvedNode], payload);
             const next = history.slice();
             next[idx] = { ...next[idx]!, resolvedAt, resumeValue };
             return { ...prev, interruptHistory: next };

@@ -20,10 +20,8 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Platform',
-      label: 'Entities',
       labelKey: 'entitiesLabel',
       icon: DatabaseIcon,
-      hint: 'User-defined content types',
       hintKey: 'entitiesHint',
       featureId: 'entities',
     },

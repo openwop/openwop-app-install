@@ -29,6 +29,12 @@ interface ProviderModel {
    *  AND `{type:"disabled"}` with a 400; the documented request omits `thinking`
    *  (equivalent to `{type:"adaptive"}`). Read through `isAdaptiveThinkingOnly`. */
   adaptiveThinkingOnly?: boolean;
+  /** Anthropic models that THINK when the request omits `thinking` (adaptive by
+   *  default: every Claude generation-5 model, per the vendor's thinking table).
+   *  A `quick`-class model must not carry it: the quick callers send tiny output
+   *  budgets (chat auto-title 24 tokens) that thinking would use up. Pinned by
+   *  test/model-catalog-quick-class.test.ts. */
+  thinksByDefault?: boolean;
   /** Does this model do NATIVE web search? Present in providers.json but was
    *  absent from this type, so the SSoT and the type disagreed. Read through
    *  `host/webSearchCapability.ts`, never inline. */

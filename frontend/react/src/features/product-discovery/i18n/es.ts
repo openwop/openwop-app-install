@@ -76,7 +76,11 @@ export const messages = {
   noRulesTitle: "Sin reglas de merchandising",
   noRulesBody: "Las reglas ocultan productos de tu tienda. No hay ninguna activa, así que los compradores lo ven todo.",
   productsTruncated: "Mostrando las primeras {{shown}} de {{total}} coincidencias.",
+  // ADR 1110 P2 — the search read a bounded set
+  productsTruncatedFloor: "Mostrando las primeras {{shown}} de más de {{total}} coincidencias.",
   facetsTruncated: "Los {{shown}} valores principales de {{total}} por faceta.",
+  // ADR 1110 round fix
+  facetsFloor: "Los recuentos cubren las primeras 1.000 coincidencias.",
   fieldCategoryHelp: "Los productos de esta categoría se añaden a la colección automáticamente.",
   fieldHideCategoryHelp: "Los productos de esta categoría dejan de aparecer en tu tienda mientras esta regla esté activa.",
   colEffect: "Efecto",

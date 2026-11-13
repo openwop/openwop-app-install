@@ -18,9 +18,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Studio',
-      label: 'Production', labelKey: 'productionLabel',
+      labelKey: 'productionLabel',
       icon: PackageIcon,
-      hint: 'Vendors + AI production planning', hintKey: 'productionHint',
+      hintKey: 'productionHint',
       order: 46,
       featureId: 'production',
     },

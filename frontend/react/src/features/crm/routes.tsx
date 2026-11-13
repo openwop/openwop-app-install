@@ -32,9 +32,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'data-dense-index',
     nav: {
       group: 'CRM',
-      label: 'CRM', labelKey: 'crmLabel',
+      labelKey: 'crmLabel',
       icon: BriefcaseIcon,
-      hint: 'Contacts + triage', hintKey: 'crmHint',
+      hintKey: 'crmHint',
       order: 40,
       featureId: 'crm',
     },

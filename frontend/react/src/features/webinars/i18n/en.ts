@@ -1,6 +1,4 @@
 export const messages = {
-  webinarsLabel: 'Webinars',
-  webinarsHint: 'Zoom webinars → CRM attendance',
   eyebrow: 'Marketing',
   title: 'Webinars',
   lede: 'Run Zoom webinars as a CRM conversion surface — attendance flows into the contact timeline and can enroll journeys.',

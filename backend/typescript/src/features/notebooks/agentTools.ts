@@ -10,9 +10,8 @@
  * conversational-tool provider resolved, so `resolveAgentTools` silently dropped
  * them and the analyst loaded toothless (CHAT-FIRST-PORT-AUDIT #1). The nodes stay
  * the workflow-lane surface; these are the chat-lane projection over the same
- * `notebooksService` behind the SAME access predicate the routes use
- * (`resolveProjectAccess` on the notebook's backing project, ADR 0084 / ADR 0054
- * D5). Read tools fail EMPTY without an acting human or notebook access; the write
+ * `notebooksService` behind the SAME access rule the routes and the run surface use
+ * (`notebookAccess`, ADR 1103 D1 — one function, so the three lanes cannot drift). Read tools fail EMPTY without an acting human or notebook access; the write
  * tool fails TYPED and only starts the run when the caller holds `workspace:write`.
  *
  * The notebook is resolved from an explicit `notebookId` OR, when the tool runs in
@@ -25,7 +24,7 @@ import { PREAUTHORIZED_CALLER } from '../../host/subjectAccess.js'; // KBC-1 (AD
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { resolveFeatureToggle, str, toolError, untrustedToolError } from '../../host/agentToolKit.js';
 import { surfaceOptCount } from '../../host/featureSurfaces.js';
-import { resolveProjectAccess, projectSubject } from '../projects/projectsService.js';
+import { projectSubject } from '../projects/projectsService.js';
 import { getConversationMeta } from '../../host/conversationStore.js';
 import { composeKnowledgeForSubject } from '../../host/agentKnowledgeComposition.js';
 import { startWorkflowRun, type StartRunDeps } from '../../host/runStarter.js';
@@ -34,10 +33,11 @@ import { makeTurn } from '../../host/conversation.js';
 import { persistExchangedPair } from '../../host/exchange/persistExchange.js';
 import { loadTurns } from '../../host/exchange/loadTurns.js';
 import { getDocument, DEFAULT_TOP_K } from '../kb/kbService.js';
-import { getNotebook, searchNotebook } from './notebooksService.js';
+import { notebookAccess, searchNotebook, NOTEBOOK_RESEARCHER_AGENT_ID } from './notebooksService.js';
 import { getTransformation, NOTEBOOK_TRANSFORMATIONS } from './transformations.js';
 import { NOTEBOOKS_TRANSFORM_ID } from './transformWorkflow.js';
 import { createLogger } from '../../observability/logger.js';
+import { forwardedPlanExemption } from '../../host/operatorPlanExemption.js';
 
 /** The notebooks agent tools NARROW the host retrieval cap (`kbService` MAX.topK,
  *  50) to keep a chat turn's grounded context bounded. Named once so the schema
@@ -71,7 +71,7 @@ export const NOTEBOOKS_SEARCH_TOOL_ID = 'openwop:notebooks.search';
 export const NOTEBOOKS_ASK_TOOL_ID = 'openwop:notebooks.ask';
 export const NOTEBOOKS_WRITE_TRANSFORMATION_TOOL_ID = 'openwop:notebooks.write-transformation';
 
-const RESEARCHER_AGENT_ID = 'vendor.openwop-app.notebooks.agents.researcher';
+const RESEARCHER_AGENT_ID = NOTEBOOK_RESEARCHER_AGENT_ID;
 
 /** Per-call toggle honesty (ADR 0308 D2): acting-subject shape (CFPT-1b), fail-closed. */
 async function notebooksEnabled(scope: BundleScope): Promise<boolean> {
@@ -169,8 +169,7 @@ export function registerNotebooksAgentTools(deps: StartRunDeps): void {
       if (!(await notebooksEnabled(scope))) return notAnAnswer('Research Notebooks is not enabled for this workspace — NOT a statement about any notebook\'s sources.');
       const notebookId = await resolveNotebookId(scope, input);
       if (!notebookId) return notAnAnswer('Pass a `notebookId`, or run this inside a notebook chat — no notebook was searched.');
-      if ((await resolveProjectAccess(scope.tenantId, notebookId, scope.actingUserId)) === 'none') return notAnAnswer('Notebook not found or not accessible — no notebook was searched.');
-      const nb = await getNotebook(scope.tenantId, notebookId);
+      const nb = (await notebookAccess(scope.tenantId, notebookId, scope.actingUserId))?.notebook;
       if (!nb) return notAnAnswer('Notebook not found or not accessible — no notebook was searched.');
       const query = str(input.query) ?? '';
       const parsedTopK = readTopK(input.topK);
@@ -212,8 +211,7 @@ export function registerNotebooksAgentTools(deps: StartRunDeps): void {
       if (!(await notebooksEnabled(scope))) return notAnAnswer('Research Notebooks is not enabled for this workspace — NOT a statement about any notebook\'s sources.');
       const notebookId = await resolveNotebookId(scope, input);
       if (!notebookId) return notAnAnswer('Pass a `notebookId`, or run this inside a notebook chat — no notebook was consulted.');
-      if ((await resolveProjectAccess(scope.tenantId, notebookId, scope.actingUserId)) === 'none') return notAnAnswer('Notebook not found or not accessible — no notebook was consulted.');
-      const nb = await getNotebook(scope.tenantId, notebookId);
+      const nb = (await notebookAccess(scope.tenantId, notebookId, scope.actingUserId))?.notebook;
       if (!nb) return notAnAnswer('Notebook not found or not accessible — no notebook was consulted.');
       const query = str(input.query) ?? '';
       const parsedTopK = readTopK(input.topK);
@@ -238,10 +236,11 @@ export function registerNotebooksAgentTools(deps: StartRunDeps): void {
     def: {
       name: NOTEBOOKS_WRITE_TRANSFORMATION_TOOL_ID,
       description:
-        'Apply a transformation TEMPLATE to one of the notebook\'s sources and persist the result as a notebook-owned '
-        + `Document. \`templateId\` is one of: ${templateIds.join(', ')}. \`sourceId\` is a source's \`documentId\` (get one `
-        + 'from `search`/`ask` citations first). Starts the real `notebooks.transform` run (read source → LLM applies the '
-        + 'template → write Document); returns the started `runId`. Requires notebook write access.',
+        'START a run that applies a transformation TEMPLATE to one of the notebook\'s sources and saves the result as a '
+        + `notebook-owned Document. \`templateId\` is one of: ${templateIds.join(', ')}. \`sourceId\` is a source's \`documentId\` `
+        + '(get one from `search`/`ask` citations first). Returns the started `runId` as soon as the run starts — the '
+        + 'Document does NOT exist yet. It appears in the notebook\'s Transformations when the run completes, and the run '
+        + 'can still fail; never tell the user it is saved. Requires notebook write access.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -258,11 +257,10 @@ export function registerNotebooksAgentTools(deps: StartRunDeps): void {
       if (!(await notebooksEnabled(scope))) return toolError('feature_disabled', 'Research Notebooks is not enabled for this workspace.');
       const notebookId = await resolveNotebookId(scope, input);
       if (!notebookId) return toolError('notebook_required', 'Pass a `notebookId`, or run this inside a notebook chat.');
-      const level = await resolveProjectAccess(scope.tenantId, notebookId, scope.actingUserId);
-      if (level === 'none') return toolError('not_found', 'Notebook not found.');
-      if (level !== 'write') return toolError('forbidden_scope', 'You need write access to this notebook to author a transformation.');
-      const nb = await getNotebook(scope.tenantId, notebookId);
-      if (!nb) return toolError('not_found', 'Notebook not found.');
+      const access = await notebookAccess(scope.tenantId, notebookId, scope.actingUserId);
+      if (!access) return toolError('not_found', 'Notebook not found.');
+      if (access.level !== 'write') return toolError('forbidden_scope', 'You need write access to this notebook to author a transformation.');
+      const nb = access.notebook;
 
       const templateId = str(input.templateId) ?? '';
       const tpl = getTransformation(templateId);
@@ -285,6 +283,8 @@ export function registerNotebooksAgentTools(deps: StartRunDeps): void {
 
       const runId = await startWorkflowRun(deps, {
         tenantId: scope.tenantId,
+        // CC-CHAN-1 / ADR 1108 — keep the listed operator's exemption on the started run.
+        ...forwardedPlanExemption(scope),
         workflowId: NOTEBOOKS_TRANSFORM_ID,
         inputs: {
           notebookId: nb.id,
@@ -300,6 +300,8 @@ export function registerNotebooksAgentTools(deps: StartRunDeps): void {
           ...(scope.conversationId ? { chatSessionId: scope.conversationId } : {}),
           notebookTransform: { notebookId: nb.id, sourceId, templateId },
         },
+        // ADR 1103 D3 — the reserved stamp rides the starter input (metadata strips it).
+        ...(scope.personalTenant ? { personalTenant: scope.personalTenant } : {}),
       }).catch((err) => {
         // DATA-4 — a startWorkflowRun THROW must also release the claim; coerce to
         // null so the shared failure handler below runs.
@@ -316,7 +318,7 @@ export function registerNotebooksAgentTools(deps: StartRunDeps): void {
       const agentId = scope.agentProfileId ?? RESEARCHER_AGENT_ID;
       if (scope.conversationId) await appendWorkflowRunTurn(deps.storage, scope.tenantId, scope.conversationId, runId, agentId);
       log.info('notebook_transformation_dispatched', { tenantId: scope.tenantId, notebookId: nb.id, sourceId, templateId, runId });
-      return { content: JSON.stringify({ runId, templateId, sourceId }) };
+      return { content: JSON.stringify({ runId, templateId, sourceId, status: 'started', note: 'The Document is written when this run completes; it is not saved yet.' }) };
     },
   });
 }

@@ -315,6 +315,7 @@ export function DiscoveryPage(): JSX.Element {
                 {/* Review M2 — `totalValues > 3 ⟺ values.length > 3` for every input (the
                     server cap is 30), so keying the CONDITION off it changed nothing. The
                     point of the field is the NUMBER: say "of how many". */}
+                {preview.candidatesTruncated ? <span className="u-text-sm muted">{t('facetsFloor')}</span> : null}
                 {preview.facets.some((f) => (f.totalValues ?? f.values.length) > FACET_CAP)
                   ? <span className="u-text-sm muted">{t('facetsTruncated', { shown: FACET_CAP, total: formatNumber(Math.max(...preview.facets.map((f) => f.totalValues ?? f.values.length))) })}</span>
                   : null}
@@ -344,7 +345,7 @@ export function DiscoveryPage(): JSX.Element {
                     convincingly than before it was "fixed". Use the real match count. */}
                 {preview.total > PRODUCT_CAP ? (
                   <p className="u-text-sm muted u-m-0">
-                    {t('productsTruncated', { shown: Math.min(PRODUCT_CAP, preview.products.length), total: formatNumber(preview.total) })}
+                    {t(preview.candidatesTruncated ? 'productsTruncatedFloor' : 'productsTruncated', { shown: Math.min(PRODUCT_CAP, preview.products.length), total: formatNumber(preview.total) })}
                   </p>
                 ) : null}
                 {/* …and a preview shortened by HIDE rules says so: "where did that

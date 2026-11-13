@@ -24,8 +24,7 @@
  */
 
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
-import { toolFailLog } from '../../host/agentToolKit.js';
+import { toolFailLog, resolveFeatureToggle, type ToolAccessScope } from '../../host/agentToolKit.js';
 import { createLogger } from '../../observability/logger.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { OpenwopError } from '../../types.js';
@@ -49,9 +48,9 @@ const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim
 
 /** Per-call toggle honesty (ADR 0308 D2) — per-tenant + per-user subject, the
  *  SAME `{tenantId, userId}` the routes' `subjectOf` builds. */
-async function csmEnabled(tenantId: string, actingUserId: string | undefined): Promise<boolean> {
-  const assignment = await resolveOne(TOGGLE_ID, { tenantId, ...(actingUserId ? { userId: actingUserId } : {}) }).catch(() => null);
-  return Boolean(assignment?.enabled);
+async function csmEnabled(scope: ToolAccessScope): Promise<boolean> {
+  // ADR 1108 — the kit's subject: the route's shape plus the operator exemption.
+  return resolveFeatureToggle(TOGGLE_ID, scope);
 }
 
 export const CSM_RENEWALS_DUE_TOOL_ID = 'openwop:feature.csm.nodes.renewals-due';
@@ -62,7 +61,7 @@ export const CSM_RENEWALS_DUE_TOOL_ID = 'openwop:feature.csm.nodes.renewals-due'
  * a ToolResult to send back, or null when the caller may read.
  */
 async function gateRead(scope: BundleScope, empty: Record<string, unknown>): Promise<ToolResult | null> {
-  if (!(await csmEnabled(scope.tenantId, scope.actingUserId))) {
+  if (!(await csmEnabled(scope))) {
     return toolError('feature_disabled', 'CSM is not enabled for this workspace — tell the user you cannot read customer-success accounts here.');
   }
   // FAIL EMPTY — a scheduled/system turn with no human principal must not

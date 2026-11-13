@@ -292,9 +292,11 @@ function prettifyTypeId(typeId: string): string {
  * losing its pack metadata to that skip.
  */
 function mergeWithStatic(node: ServerCatalogNode): NodeCatalogEntry {
-  const dynamic = toCatalogEntry(node);
+  const full = toCatalogEntry(node);
   const staticEntry = STATIC_BY_TYPEID.get(node.typeId);
-  if (!staticEntry) return dynamic;
+  if (!staticEntry) return full;
+  // CC-BLD-1 — curated outputs are authoritative: drop the schema-derived names.
+  const { declaredOutputs: _schemaOutputs, ...dynamic } = full;
   return {
     ...dynamic,
     kind: staticEntry.kind,            // keep the friendly slug ('noop', 'delay')
@@ -329,6 +331,7 @@ function toCatalogEntry(node: ServerCatalogNode): NodeCatalogEntry {
     accent,
     inputs: portsFromSchema(node.inputSchema, 'in', node.ports),
     outputs: portsFromSchema(node.outputSchema, 'out'),
+    declaredOutputs: declaredOutputNames(node.outputSchema),
     configFields: configFieldsFromSchema(node.configSchema),
     ...(node.packName ? { packName: node.packName } : {}),
     ...(node.version ? { version: node.version } : {}),
@@ -339,6 +342,21 @@ function toCatalogEntry(node: ServerCatalogNode): NodeCatalogEntry {
       ? { missingHostSurfaces: node.missingHostSurfaces }
       : {}),
   };
+}
+
+/**
+ * CC-BLD-1 — every output name a node's schema declares (required or optional),
+ * and whether the list is closed. Ports carry only the REQUIRED names
+ * (`portsFromSchema`), and JSON Schema allows extra properties unless
+ * `additionalProperties: false`, so an optional, extra or schema-less output is
+ * not missing just because it has no port. Exported for tests.
+ */
+export function declaredOutputNames(schema: unknown): { names: readonly string[]; closed: boolean } {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return { names: [], closed: false };
+  const s = schema as Record<string, unknown>;
+  const props = s.properties;
+  const names = props && typeof props === 'object' && !Array.isArray(props) ? Object.keys(props) : [];
+  return { names, closed: s.additionalProperties === false };
 }
 
 /**

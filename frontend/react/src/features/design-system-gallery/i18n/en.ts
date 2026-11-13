@@ -34,6 +34,8 @@ export const messages = {
   fieldError: 'That does not look like an email address.',
   fieldSelect: 'Select',
   fieldTextarea: 'Textarea',
+  fieldCombobox: 'Search and pick',
+  fieldComboboxHelp: 'Type to search; arrow keys move through the matches.',
   table: 'Data table',
   tableCaption: 'Specimen rows',
   tableEmptyCaption: 'Specimen empty table',

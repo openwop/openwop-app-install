@@ -2,7 +2,7 @@
  * Product-embedding derived index (ADR 0275 / MERCH-C, PR 2 Part B) — semantic recall
  * over the SHARED `host.db.vector` surface, reusing the deterministic `embedText`
  * embedder (the `subjectMemory.ts` pattern; NO second vector store). A DERIVED cache:
- * rebuildable from `listProducts`, replay-irrelevant, non-authoritative.
+ * rebuildable from the catalog (`iterateCatalog`), replay-irrelevant, non-authoritative.
  *
  * Namespace = `commerce:product:${tenantId}:${orgId}` — query filters to it, so
  * cross-tenant recall is impossible at the vector layer (/architect finding 3, IDOR).
@@ -14,7 +14,22 @@
  */
 import { buildHostSurfaceBundle } from '../../host/inMemorySurfaces.js';
 import { embedText, effectiveEmbedDims } from '../../aiProviders/localEmbedding.js';
-import { listProducts, type Product } from '../commerce/commerceService.js';
+import { catalogSize, iterateCatalog, type Product } from '../commerce/commerceService.js';
+import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('discovery.productEmbeddings');
+
+/** ADR 1110 P3 — the largest catalog a search request may re-embed itself. A larger
+ *  org is queued and re-embedded off the request path by `refreshQueuedEmbeddings`. */
+let SYNC_REBUILD_MAX = 5000;
+/** Test-only: lower the in-request rebuild limit. */
+export function __setSyncRebuildMaxForTest(n: number | null): void { SYNC_REBUILD_MAX = n ?? 5000; }
+const UPSERT_BATCH = 500;
+
+/** Orgs whose embeddings went stale while too large to rebuild in a request. */
+interface StaleRow { k: string; tenantId: string; orgId: string; at: string }
+const staleQueue = new DurableCollection<StaleRow>('discovery:embedding-stale', (r) => r.k, undefined, undefined, undefined, undefined, { tenantKeyed: true, derived: true });
 
 const namespaceOf = (tenantId: string, orgId: string): string => `commerce:product:${tenantId}:${orgId}`;
 const productText = (p: Product): string => [p.name, p.description ?? '', ...(p.categories ?? []), ...(p.tags ?? [])].join(' ').trim();
@@ -39,6 +54,13 @@ export async function ensureProductEmbeddingsFresh(tenantId: string, orgId: stri
   const key = freshKey(tenantId, orgId);
   const deadline = freshUntil.get(key);
   if (deadline && Date.parse(deadline) > Date.now()) return;
+  if ((await catalogSize(tenantId, orgId)) > SYNC_REBUILD_MAX) {
+    // ADR 1110 P3 — too large to re-embed inside a request: search with what is indexed
+    // and queue the org; the background refresh rebuilds it.
+    await staleQueue.put({ k: key, tenantId, orgId, at: new Date().toISOString() });
+    freshUntil.set(key, new Date(Date.now() + TTL_MS).toISOString());
+    return;
+  }
   try {
     await rebuildProductEmbeddings(tenantId, orgId);
     freshUntil.set(key, new Date(Date.now() + TTL_MS).toISOString());
@@ -52,16 +74,63 @@ export function invalidateProductEmbeddings(tenantId: string, orgId: string): vo
   freshUntil.delete(freshKey(tenantId, orgId));
 }
 
-/** Rebuild the embedding index for one org from its ACTIVE catalog (idempotent). */
+/** Rebuild the embedding index for one org from its ACTIVE catalog (idempotent), one
+ *  batch of products at a time (ADR 1110 P3), so a rebuild never holds the catalog. */
 export async function rebuildProductEmbeddings(tenantId: string, orgId: string): Promise<number> {
-  const products = (await listProducts(tenantId, orgId)).filter((p) => p.active !== false);
-  if (products.length === 0) return 0;
   const vector = buildHostSurfaceBundle({ tenantId }).db.vector;
-  await vector.upsert({
-    namespace: namespaceOf(tenantId, orgId),
-    items: products.map((p) => ({ id: p.productId, vector: embedText(productText(p), effectiveEmbedDims()), metadata: { productId: p.productId } })),
-  });
-  return products.length;
+  let batch: Product[] = [];
+  let total = 0;
+  const flush = async (): Promise<void> => {
+    if (batch.length === 0) return;
+    await vector.upsert({
+      namespace: namespaceOf(tenantId, orgId),
+      items: batch.map((p) => ({ id: p.productId, vector: embedText(productText(p), effectiveEmbedDims()), metadata: { productId: p.productId } })),
+    });
+    total += batch.length;
+    batch = [];
+  };
+  for await (const p of iterateCatalog(tenantId, orgId, UPSERT_BATCH)) {
+    if (p.active === false) continue;
+    batch.push(p);
+    if (batch.length >= UPSERT_BATCH) await flush();
+  }
+  await flush();
+  return total;
+}
+
+/** ADR 1110 P3 — re-embed up to `limit` queued orgs, oldest key first. Each row is
+ *  claimed by deleting it first, so two instances never rebuild the same org at once; a
+ *  failed rebuild puts it back. */
+export async function refreshQueuedEmbeddings(limit = 1): Promise<number> {
+  const page = await staleQueue.listByPrefixPage('', { limit });
+  let done = 0;
+  for (const row of page.items) {
+    if (!(await staleQueue.compareAndDelete(row))) continue; // another instance claimed it
+    try {
+      await rebuildProductEmbeddings(row.tenantId, row.orgId);
+      done += 1;
+    } catch (err) {
+      await staleQueue.put(row);
+      log.warn('embedding_refresh_failed', { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return done;
+}
+
+let refreshStarted = false;
+/** ADR 1110 P3 — the background re-embed of large catalogs (the reservation-sweep shape:
+ *  feature-owned, bounded, unref'd, idempotent start). One org per tick. */
+export function startEmbeddingRefreshSweep(pollMs = 5 * 60 * 1000): { stop: () => void } | null {
+  if (refreshStarted) return null;
+  refreshStarted = true;
+  let running = false;
+  const timer = setInterval(() => {
+    if (running) return;
+    running = true;
+    void refreshQueuedEmbeddings(1).catch((err: unknown) => log.warn('embedding_refresh_tick_failed', { error: err instanceof Error ? err.message : String(err) })).finally(() => { running = false; });
+  }, pollMs);
+  if (typeof timer.unref === 'function') timer.unref();
+  return { stop: () => { clearInterval(timer); refreshStarted = false; } };
 }
 
 /** Semantic recall: product ids ranked by embedding cosine for a query, most-similar

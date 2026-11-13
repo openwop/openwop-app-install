@@ -1,6 +1,4 @@
 export const messages = {
-  creativeVideoLabel: 'Vidéo IA',
-  creativeVideoHint: 'Générer des vidéos avatar',
   eyebrow: 'Canvas',
   title: 'Vidéo IA',
   lede: 'Générez une vidéo avatar à partir d’un script — le résultat arrive comme un fichier dans votre bibliothèque de médias et se compose dans les workflows.',

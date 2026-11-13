@@ -15,6 +15,7 @@
  * on registration is rejected BEFORE persist (ADR 0072 "capability-gate honesty").
  */
 
+import { normalizeEdgeLoopback, planLoopbacks } from '../executor/loopback.js';
 import { OpenwopError } from '../types.js';
 import { agentDeploymentEnabled } from './agentDeploymentFlag.js';
 import { parseNodeRef } from './chainPinRule.js';
@@ -616,6 +617,9 @@ export function validateWorkflowDefinition(raw: unknown): WorkflowDefinition {
       // register route honestly honors the shape it advertises. ADR 0207 §Phase 2.
       if (e.condition !== undefined) out.condition = normalizeEdgeCondition(e.condition, edgeId);
       if (typeof e.label === 'string') out.label = e.label;
+      // ADR 1058 / RFC 0258 §A — a declared loopback is validated, never dropped:
+      // dropping it would leave a plain cycle the author did not ask for.
+      if (e.loopback !== undefined) out.loopback = normalizeEdgeLoopback(e.loopback, e, edgeId);
       return out;
     });
   }
@@ -627,6 +631,8 @@ export function validateWorkflowDefinition(raw: unknown): WorkflowDefinition {
   // only; the engine validates deeper at run time.
   const def: Mutable<WorkflowDefinition> = { workflowId, nodes };
   if (edges) def.edges = edges;
+  // RFC 0258 §B — the region rules (ancestor, closed region, no overlap).
+  planLoopbacks(def);
   if (obj.metadata !== undefined) {
     if (typeof obj.metadata !== 'object' || obj.metadata === null || Array.isArray(obj.metadata)) {
       throw new OpenwopError('validation_error', 'Field `metadata` MUST be an object when present.', 400, { field: 'metadata' });

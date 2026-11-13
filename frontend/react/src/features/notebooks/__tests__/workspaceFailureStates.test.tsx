@@ -111,7 +111,9 @@ describe('NBU-5 — a failed Ask never leaves the previous answer under the new 
     expect(screen.queryByText('Biology paper', { selector: '.chip' })).toBeNull();
     // …and the surface says so rather than going quietly blank.
     expect(screen.getByText(/couldn't run that search/i)).toBeTruthy();
-    expect(screen.getByText('search backend is down')).toBeTruthy();
+    // ADR 1103 D9 (`NBK92-12`) — in the user's locale, never the server's English.
+    expect(screen.getByText('Search failed.')).toBeTruthy();
+    expect(screen.queryByText('search backend is down')).toBeNull();
   });
 
   it('the stale answer is gone WHILE THE NEW ASK IS IN FLIGHT, before any failure is known', async () => {
@@ -196,10 +198,13 @@ describe('NBU-2 — a failed list read resolves to a stated failure, never a per
     await renderWorkspace();
 
     expect(await screen.findByText(/couldn't load your sources/i)).toBeTruthy();
-    expect(screen.getByText('sources read 500')).toBeTruthy();
     // Both failures are named — the single shared string used to erase all but one.
     expect(screen.getByText(/couldn't load your notes/i)).toBeTruthy();
-    expect(screen.getByText('notes read 500')).toBeTruthy();
+    // ADR 1103 D9 (`NBK92-12`) — each body is the localized sentence, never the
+    // server's English.
+    expect(screen.getAllByText('Failed to load.').length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByText('sources read 500')).toBeNull();
+    expect(screen.queryByText('notes read 500')).toBeNull();
 
     // A failed read must NEVER make the positive claim (StateCard's own rule).
     expect(screen.queryByText(/no sources yet/i)).toBeNull();
@@ -262,7 +267,7 @@ describe('NBU-20 (ADR 0601 § Corrections / LOW-9) — a failed Ask announces ON
 
     // The card is the channel…
     expect(await screen.findByText(/couldn't run that search/i)).toBeTruthy();
-    expect(screen.getByText('search backend is down')).toBeTruthy();
+    expect(screen.getByText('Search failed.')).toBeTruthy();
     // …and it is the ONLY channel.
     expect(toast.error).not.toHaveBeenCalled();
   });
@@ -314,11 +319,13 @@ describe('NBU-19 (ADR 0601 § Corrections / LOW-10) — a retry gives feedback i
     await renderWorkspace();
     await screen.findByText(/couldn't load your sources/i);
 
+    const callsBefore = listSources.mock.calls.length;
     listSources.mockRejectedValueOnce(new Error('sources read 500 again'));
     fireEvent.click(screen.getAllByRole('button', { name: /try again/i })[0]!);
 
-    // The failure text changes, so this also witnesses that the retry RAN.
-    expect(await screen.findByText('sources read 500 again')).toBeTruthy();
+    // The retry RAN (the body no longer echoes server text, so count the read).
+    await waitFor(() => expect(listSources.mock.calls.length).toBe(callsBefore + 1));
+    await screen.findByText(/couldn't load your sources/i);
     const retry = screen.getAllByRole<HTMLButtonElement>('button', { name: /try again/i })[0]!;
     expect(retry.getAttribute('aria-busy')).toBeNull();
     expect(retry.disabled).toBe(false);

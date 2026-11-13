@@ -9,8 +9,11 @@
  */
 
 import { setNotificationBackend } from '../notifications/emitter.js';
+import { installRequestRetirement } from '../notifications/retireRequests.js';
 import type { Storage } from '../storage/storage.js';
 
 export function ensureNotificationEmitterInstalled(storage: Storage): void {
   setNotificationBackend(storage);
+  // ADR 1114 (#5868) — a request is retired when its step resolves or its run ends.
+  installRequestRetirement(storage);
 }

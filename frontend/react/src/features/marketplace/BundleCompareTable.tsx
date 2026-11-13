@@ -7,6 +7,7 @@
 import { useTranslation } from 'react-i18next';
 import { compareCell, formatLike, planPrice, planWorth, type Cadence, type CompareCell } from './bundleStoreModel.js';
 import type { BundleCommerce, FeatureBundleInfo, PublicPlanTier } from './marketplaceClient.js';
+import { TableScroll } from '../../ui/DataTable.js';
 
 const CELL_CLASS: Record<CompareCell, string> = {
   included: 'chip chip--success',
@@ -30,7 +31,7 @@ export function BundleCompareTable({
   };
   const worths = plans.map((p) => planWorth(p, bundles, commerceById));
   return (
-    <div className="table-scroll fstore-compare">
+    <TableScroll className="fstore-compare" label={t('storeCompareCaption')}>
       <table className="data-table data-table--stack-headers">
         <caption className="sr-only">{t('storeCompareCaption')}</caption>
         <thead>
@@ -81,6 +82,6 @@ export function BundleCompareTable({
         </tbody>
       </table>
       <p className="muted u-text-sm u-mt-2">{t('storeCompareLegend')}</p>
-    </div>
+    </TableScroll>
   );
 }

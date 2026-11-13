@@ -8,19 +8,18 @@
  * from the SSoT vocabularies (parity-tested) — never a hand-copied list.
  */
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
 import { AGGREGATES, TIME_BUCKETS } from './metricTypes.js';
 import { projectBiCatalog } from './surface.js';
 import { runMetric } from './biService.js';
-import { resolveReadOrgScope } from '../../host/agentToolKit.js';
+import { resolveReadOrgScope, resolveFeatureToggle, type ToolAccessScope } from '../../host/agentToolKit.js';
 import { OpenwopError } from '../../types.js';
 
 export const BI_LIST_METRICS_TOOL_ID = 'openwop:bi.list-metrics';
 export const BI_RUN_METRIC_TOOL_ID = 'openwop:bi.run-metric';
 
-async function biEnabled(tenantId: string, userId?: string): Promise<boolean> {
-  const assignment = await resolveOne('bi', { tenantId, ...(userId ? { userId } : {}) }).catch(() => null);
-  return assignment?.enabled === true;
+async function biEnabled(scope: ToolAccessScope): Promise<boolean> {
+  // ADR 1108 — the kit's subject: the route's shape plus the operator exemption.
+  return resolveFeatureToggle('bi', scope);
 }
 
 export function registerBiAgentTools(): void {
@@ -54,7 +53,7 @@ export function registerBiAgentTools(): void {
       },
     },
     async run(input, scope) {
-      if (!scope.actingUserId || !(await biEnabled(scope.tenantId, scope.actingUserId))) {
+      if (!scope.actingUserId || !(await biEnabled(scope))) {
         return { content: JSON.stringify({ metrics: [], note: 'BI metrics unavailable for this workspace/run' }) };
       }
       // ADR 1052 D0 — the catalog is per org: the SAME org gate the route applies.
@@ -93,7 +92,7 @@ export function registerBiAgentTools(): void {
       },
     },
     async run(input, scope) {
-      if (!scope.actingUserId || !(await biEnabled(scope.tenantId, scope.actingUserId))) {
+      if (!scope.actingUserId || !(await biEnabled(scope))) {
         return { content: JSON.stringify({ result: null, note: 'BI metrics unavailable for this workspace/run' }) };
       }
       // BI-SCOPE-1 — the SAME org gate the route applies (`authorizeOrgScope`,

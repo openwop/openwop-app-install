@@ -793,6 +793,9 @@ export interface AgentToolCallScope {
    *  `run.metadata.orgScopeSubject`. Read only by org-membership floors; the
    *  tools still act for nobody. */
   orgScopeSubject?: string | undefined;
+  /** ADR 1108 — the run's reserved `metadata.planExempt` stamp (the listed
+   *  operator created it, in person). Honoured only via `operatorPlanExempt`. */
+  planExempt?: boolean | undefined;
   /** The conversation the call runs inside (ADR 0309 — the unforgeable
    *  delivery destination for schedule-followup). */
   conversationId?: string | undefined;
@@ -819,6 +822,7 @@ export function createScopedAgentToolProvider(
     ...(scope.actingUserId ? { actingUserId: scope.actingUserId } : {}),
     ...(scope.personalTenant ? { personalTenant: scope.personalTenant } : {}),
     ...(scope.orgScopeSubject ? { orgScopeSubject: scope.orgScopeSubject } : {}),
+    ...(scope.planExempt === true ? { planExempt: true } : {}),
     ...(scope.conversationId ? { conversationId: scope.conversationId } : {}),
     ...(scope.onRunDispatched ? { onRunDispatched: scope.onRunDispatched } : {}),
     ...(scope.onClarificationAsk ? { onClarificationAsk: scope.onClarificationAsk } : {}),

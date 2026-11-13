@@ -24,10 +24,8 @@ const routes: FeatureRoute[] = [
     tier: 'admin', archetype: 'admin',
     nav: {
       group: 'Access & data',
-      label: 'Access',
       labelKey: 'accessHubLabel',
       icon: LockIcon,
-      hint: 'Credentials, connections & access in one place',
       hintKey: 'accessHubHint',
       order: 0,
       activeFor: ['/keys', '/orgs', '/connections', '/capability-firewall', '/access/voice', '/access/endpoints', '/access/channels'],

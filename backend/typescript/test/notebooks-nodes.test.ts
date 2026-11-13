@@ -125,25 +125,28 @@ describe('feature.notebooks.nodes — review fixes', () => {
     expect(out.outputs.messages).toEqual([{ role: 'user', content: 'the source body' }]);
   });
 
-  it('write-transformation DROPS a non-project ownerSubject (a chat agent cannot own a Document to a user/agent subject)', async () => {
+  it('write-transformation writes WHERE THE NOTEBOOK IS, and refuses an input that names another owner (ADR 1103 D5)', async () => {
     const created: Array<Record<string, unknown>> = [];
     const docs = {
       createDocument: async (args: Record<string, unknown>) => { created.push(args); return { document: { documentId: 'doc-1' } }; },
       addVersion: async () => ({}),
     };
-    const write = (ownerSubject: { kind: string; id: string }) => pack.writeTransformation(
-      { runId: 'r1', nodeId: 'write', inputs: { orgId: 'o1', title: 'X', kind: 'notebook-summary', content: 'body', ownerSubject }, features: { documents: docs } },
+    const notebooks = { transformTarget: async () => ({ orgId: 'o1', ownerSubject: { kind: 'project', id: 'nb-1' } }) };
+    const write = (extra: Record<string, unknown>) => pack.writeTransformation(
+      { runId: 'r1', nodeId: 'write', inputs: { notebookId: 'nb-1', title: 'X', kind: 'notebook-summary', content: 'body', ...extra }, features: { documents: docs, notebooks } },
     );
-    // Control: a project owner IS forwarded — without this, an implementation that
-    // dropped every owner would pass the assertion below. (The standalone "honors"
-    // case was cut: `notebooks-writer-replay.test.ts` › leg 7 carries it too.)
-    expect((await write({ kind: 'project', id: 'nb-1' })).outputs.written).toBe(true);
-    expect(created[0]?.ownerSubject).toEqual({ kind: 'project', id: 'nb-1' });
-    // still written (the artifact is created), but UN-owned — never mis-attributed to the user subject.
-    const out = await write({ kind: 'user', id: 'someone-else' });
-    expect(out.outputs.written).toBe(true);
+    // Control: agreeing (or absent) legacy inputs write to the notebook's own org + owner.
+    expect((await write({ orgId: 'o1', ownerSubject: { kind: 'project', id: 'nb-1' } })).outputs.written).toBe(true);
+    expect((await write({})).outputs.written).toBe(true);
+    expect(created.map((c) => [c.orgId, c.ownerSubject])).toEqual([
+      ['o1', { kind: 'project', id: 'nb-1' }],
+      ['o1', { kind: 'project', id: 'nb-1' }],
+    ]);
+    // A copied input aimed elsewhere is refused, never chosen and never silently dropped.
+    await expect(write({ ownerSubject: { kind: 'user', id: 'someone-else' } })).rejects.toMatchObject({ code: 'target_mismatch' });
+    await expect(write({ ownerSubject: { kind: 'project', id: 'nb-OTHER' } })).rejects.toMatchObject({ code: 'target_mismatch' });
+    await expect(write({ orgId: 'o2' })).rejects.toMatchObject({ code: 'target_mismatch' });
     expect(created).toHaveLength(2);
-    expect(created[1]?.ownerSubject).toBeUndefined();
   });
 });
 

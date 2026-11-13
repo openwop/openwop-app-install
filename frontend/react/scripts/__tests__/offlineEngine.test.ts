@@ -18,6 +18,14 @@
  * One build-side double guard: `checkOfflineShape` refuses a `'/'` navigation by
  * `p === '/'` AND by `p.endsWith('/')`, so dropping the first alone stays green (probe
  * w51g1-oe-shape-root-dbl); the shared `endsWith` arm is probed (w51g1-oe-shape-root).
+ *
+ * Later layers (wave 107 probes): OFF-PROD-1 — hand the precache's unread Response to
+ * the store instead of reading its body, and the HTTP/2-window case reports "hung"
+ * inside its own 1 s bound (not the test timeout). ADR 0873 D13 — the legacy purge's
+ * empty-config skip, its parse (trim, dedupe, sort, both refusals), its exact-name vs
+ * prefix match, the claim-before-navigate order, the "nothing deleted → nobody
+ * reloaded" early return, and its inclusion beside the engine each red a case below.
+ * ADR 1031 — the adopter-feature `routes.tsx` requirement in findOfflineDeclarationFiles.
  */
 import { describe, expect, it } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -69,7 +77,16 @@ describe('ADR 0873 D4 — the never-cache set is derived from the hosting config
 
   it('from the real firebase.json: every Cloud Run rewrite, including /', () => {
     const real = deriveNeverCache(REAL_FIREBASE, 'app');
-    expect(real.length).toBeGreaterThanOrEqual(37);
+    // Exactly the `run` rewrites of the `app` block, read independently of the
+    // deriver (a floor let a dropped rewrite through: 37 asserted, 43 measured).
+    // `hosting` is one block or an array of blocks (it is one block today).
+    type HostingBlock = { target?: string; rewrites?: { source?: unknown; run?: unknown }[] };
+    const hosting = (JSON.parse(readFileSync(join(REPO, 'firebase.json'), 'utf8')) as { hosting: HostingBlock | HostingBlock[] }).hosting;
+    const appBlock = (Array.isArray(hosting) ? hosting : [hosting]).find((b) => b.target === 'app');
+    expect(appBlock, 'firebase.json has an app hosting block').toBeDefined();
+    const runSources = (appBlock?.rewrites ?? []).filter((r) => r.run !== undefined && typeof r.source === 'string').map((r) => r.source);
+    expect(runSources.length).toBeGreaterThan(0);
+    expect(real.map((r) => r.glob)).toEqual(runSources);
     expect(real.map((r) => r.glob)).toEqual(expect.arrayContaining(['/', '/api/**', '/v1/**', '/.well-known/**', '/runs/**']));
     expect(real.map((r) => r.glob)).not.toContain('**');
   });
@@ -569,19 +586,20 @@ describe('ADR 0873 D13 — VITE_SW_LEGACY_CACHE_PURGE, the caches a previous wor
   // What MyndHyve's Workbox worker (vite-plugin-pwa) left at its origin.
   const MYNDHYVE = 'workbox-*,js-chunks-v4,google-fonts-stylesheets,google-fonts-webfonts,firebase-api,images';
 
-  /** Boot a worker with open window clients; records each client's navigate(). */
+  /** Boot a worker with open window clients; records each claim() and navigate() in order. */
   function bootWithWindows(source: string, caches: FakeCacheStorage, urls: string[]) {
     const listeners: Record<string, ((e: unknown) => void)[]> = {};
     const navigated: string[] = [];
-    let claimed = 0;
-    const windows = urls.map((url) => ({ url, navigate: async (to: string) => { navigated.push(to); return undefined; } }));
+    const events: string[] = [];
+    const windows = urls.map((url) => ({ url, navigate: async (to: string) => { navigated.push(to); events.push(`navigate ${to}`); return undefined; } }));
     const self = {
       location: new URL(ORIGIN),
       addEventListener: (type: string, fn: (e: unknown) => void) => { (listeners[type] ??= []).push(fn); },
       skipWaiting: () => undefined,
       clients: {
-        claim: async () => { claimed += 1; },
-        matchAll: async (opts?: { type?: string }) => (opts?.type === 'window' ? windows : []),
+        claim: async () => { events.push('claim'); },
+        // ClientQueryOptions.type defaults to 'window', as in a browser.
+        matchAll: async (opts?: { type?: string }) => ((opts?.type ?? 'window') === 'window' ? windows : []),
         openWindow: async () => undefined,
       },
       registration: { navigationPreload: { enable: async () => undefined, disable: async () => undefined }, showNotification: async () => undefined },
@@ -592,7 +610,7 @@ describe('ADR 0873 D13 — VITE_SW_LEGACY_CACHE_PURGE, the caches a previous wor
       for (const fn of listeners.activate ?? []) fn({ waitUntil: (p: Promise<unknown>) => waits.push(p) });
       await Promise.all(waits);
     }
-    return { navigated, activate, claims: () => claimed };
+    return { navigated, activate, events: () => [...events] };
   }
 
   it('unset or blank adds nothing: the worker text is byte-identical for every existing adopter', () => {
@@ -629,7 +647,9 @@ describe('ADR 0873 D13 — VITE_SW_LEGACY_CACHE_PURGE, the caches a previous wor
     // The D11 purge still removes the worker's own offline caches; D13 removes the legacy ones; nothing else.
     expect((await caches.keys()).sort()).toEqual(['images-v2', 'someone-elses-cache']);
     expect(w.navigated).toEqual([`${ORIGIN}/`, `${ORIGIN}/dashboard?x=1`]);
-    expect(w.claims()).toBeGreaterThanOrEqual(2); // the push handlers' claim, and D13's before navigate()
+    // The push handlers' own claim (sync, at dispatch), then D13 claims the tabs
+    // BEFORE it navigates them: navigate() rejects on a client this worker does not control.
+    expect(w.events()).toEqual(['claim', 'claim', `navigate ${ORIGIN}/`, `navigate ${ORIGIN}/dashboard?x=1`]);
 
     // A second activation (the next deploy) finds nothing and reloads nobody.
     const again = bootWithWindows(source, caches, [`${ORIGIN}/`]);

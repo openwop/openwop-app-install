@@ -18,9 +18,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Sales',
-      label: 'Dealers', labelKey: 'dealersLabel',
+      labelKey: 'dealersLabel',
       icon: BuildingIcon,
-      hint: 'Dealer network, outlets & partner registrations', hintKey: 'dealersHint',
+      hintKey: 'dealersHint',
       order: 49,
       featureId: 'dealers',
     },

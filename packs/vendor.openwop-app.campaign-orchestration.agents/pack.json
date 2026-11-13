@@ -1,6 +1,6 @@
 {
   "name": "vendor.openwop-app.campaign-orchestration.agents",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "kind": "node",
   "description": "Campaign Studio agent pack — the Campaign Strategist, the chat-driven orchestrator. It reads campaign readiness (openwop:campaign-orchestration.status), reads existing campaigns (openwop:campaign-orchestration.get-campaign) and each campaign's review policy (openwop:campaign-orchestration.get-autonomy: which steps run on their own and which wait for whose approval), and runs the full campaign conversationally by igniting the orchestration workflow (openwop:campaign-orchestration.run): validate → generate the messaging kernel → its review gate → generate each enabled channel → cross-asset consistency check → finalize the marketing campaign. Every gate follows the campaign's review policy and renders as an inline HITL card when it waits. No tool can change, loosen or approve a policy.",
   "author": "OpenWOP App",

@@ -22,7 +22,7 @@ import { clientIp } from '../../host/clientIp.js';
 import { suspendCollaboratorsForOrg } from '../../host/externalCollaborators.js';
 import { resolveCallerUser } from '../users/usersGuards.js';
 import { createClient, getClient, listClients, updateClient } from './clientService.js';
-import { addAsset, getAsset, listAssets, refreshAsset, removeAsset } from './assetService.js';
+import { addAsset, getAsset, listAssets, listPageCandidates, refreshAsset, removeAsset } from './assetService.js';
 import { adapterFor } from './adapters/registry.js';
 import { APPROVAL_POLICY_MODES, EXTERNAL_AGENTS_LEVELS, type ApprovalPolicyMode, type ClientAccount, type ClientMode, type ClientStatus, type ExternalAgentsAccess } from './types.js';
 import { addApprover, countActiveApprovers, decideFromPortal, listApprovers, portalEnabled, revokeAllLinksForClient, revokeApprover, sendApprovalLinks } from './portal.js';
@@ -548,6 +548,14 @@ export function registerCampaignOpsRoutes(deps: RouteDeps): void {
       const { tenantId } = await authorizeClient(req, 'workspace:read');
       const campaignId = typeof req.query.campaignId === 'string' && req.query.campaignId ? req.query.campaignId : undefined;
       res.json({ assets: await listAssets(tenantId, req.params.orgId, campaignId) });
+    } catch (err) { next(err); }
+  });
+
+  /** CC-OPS-1 — the client org's CMS pages that can be registered, with their editable field paths. */
+  app.get(`${BASE}/clients/:orgId/asset-candidates`, async (req, res, next) => {
+    try {
+      const { tenantId } = await authorizeClient(req, 'workspace:read');
+      res.json({ pages: await listPageCandidates(tenantId, req.params.orgId) });
     } catch (err) { next(err); }
   });
 

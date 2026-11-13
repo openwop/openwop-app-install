@@ -7,6 +7,7 @@ import type { HostAdapterSuite } from '../../../host/index.js';
 import { OpenwopError, type RunRecord } from '../../../types.js';
 import { resolveEffectiveAccess } from '../../../host/accessControlService.js';
 import { startWorkflowRun } from '../../../host/runStarter.js';
+import { WorkflowFeatureRefusedError } from '../../../host/workflowFeatureGate.js';
 import { getChainBackedWorkflow } from '../../../host/chainBackedWorkflows.js';
 import { definitionHashOf } from '../../../host/definitionHash.js';
 import type { IdempotentEndpoint } from '../../../host/idempotentResponse.js';
@@ -19,6 +20,9 @@ import { assertLeadDispatchMatches, leadDispatchInputs, leadDispatchStamp } from
 export interface LeadDispatchInput {
   mode: 'grade' | 'route' | 'qualify'; tenantId: string; orgId: string; contactId: string; userId: string;
   requestKeyHash?: string; personalTenant?: string;
+  /** CC-AUTH-5 / ADR 1108 — the listed operator's exemption, decided at the request
+   *  (`planExemptStampOf(req)`) or copied from a parent whose exemption holds. */
+  planExempt?: true;
   responseCommit?: { endpoint: IdempotentEndpoint; key: string; claimToken: string };
 }
 export interface LeadDispatchResponse { runId: string; modelId: string; modelVersion: number; routingEpoch?: number }
@@ -93,6 +97,14 @@ export async function admitLeadDispatch(deps: { storage: Storage; hostSuite: Hos
   return startReservedLeadDispatch(deps, input, pending, needsGradeStamp);
 }
 
+/** CC-LEAD-1 — a run-start refusal decided before the insert: the owning-feature
+ *  gate (plan / toggle / unresolvable) or a spent workflow budget. Anything else
+ *  thrown by the start (an insert or acknowledgement fault) stays ambiguous. */
+function isDefiniteLaunchRefusal(err: unknown): boolean {
+  if (err instanceof WorkflowFeatureRefusedError) return true;
+  return err instanceof OpenwopError && err.details?.reason === 'workflow_budget_exhausted';
+}
+
 async function startReservedLeadDispatch(deps: { storage: Storage; hostSuite: HostAdapterSuite }, input: LeadDispatchInput,
   pending: { runId: string; pin: GradeReservationPin }, needsGradeStamp = false): Promise<LeadDispatchResponse> {
   const { storage, hostSuite } = deps; const { mode, tenantId, orgId, contactId, userId } = input;
@@ -126,6 +138,10 @@ async function startReservedLeadDispatch(deps: { storage: Storage; hostSuite: Ho
   } else {
     // A thrown insert/acknowledgement is ambiguous: retain this reservation
     // so a retry reconciles the SAME run and frozen model, never an old stamp.
+    // CC-LEAD-1 — a launch REFUSAL is not ambiguous: it is decided before any
+    // insert, so no run can exist under this id. Release the reservation and
+    // rethrow, or the lead stays locked with nothing that could ever free it
+    // (live on 373d4863a after a plan refusal).
     const started = await startWorkflowRun({ storage, hostSuite }, {
       tenantId,
       workflowId,
@@ -136,6 +152,11 @@ async function startReservedLeadDispatch(deps: { storage: Storage; hostSuite: Ho
       metadata: { [LEAD_INTEL_RUN_STAMP]: stamp },
       orgScopeSubject: userId,
       ...(input.personalTenant ? { personalTenant: input.personalTenant } : {}),
+      // CC-AUTH-5 / ADR 1108 — re-checked against the allowlist by the starter.
+      ...(input.planExempt === true ? { planExempt: true as const } : {}),
+    }).catch(async (err: unknown) => {
+      if (isDefiniteLaunchRefusal(err)) await releasePending(runId);
+      throw err;
     });
     if (!started) {
       await releasePending(runId);
@@ -203,6 +224,9 @@ export async function admitLeadReroute(deps: { storage: Storage; hostSuite: Host
       throw err;
     }
   }
+  // ADR 1108 D7 (CC-AUTH-5 review) — a reroute child is timer-started and acts for
+  // nobody, so it carries neither the parent's `personalTenant` (an implicit-owner
+  // grant at assertTenantScope/assertOrgScope) nor a plan exemption.
   return startReservedLeadDispatch(deps, { mode: 'route', tenantId, orgId, contactId, userId }, pending);
 }
 

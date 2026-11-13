@@ -73,7 +73,8 @@ export function CatalogFeedCard({ orgId }: { orgId: string }): JSX.Element | nul
     const name = t(`feedPlatform_${p.platform}`);
     const r = p.result;
     switch (r.outcome) {
-      case 'pushed': return t('feedPushed', { platform: name, sent: r.sent, unchanged: r.unchanged, removed: r.removed, failed: r.failed });
+      case 'pushed': return `${t('feedPushed', { platform: name, sent: r.sent, unchanged: r.unchanged, removed: r.removed, failed: r.failed })}${r.remaining ? ` ${t('feedPushRemaining', { count: r.remaining })}` : ''}`;
+      case 'catalog_too_large': return t('feedPushTooLarge', { platform: name, max: r.max });
       case 'unsupported': return t('feedPushNotVerified', { platform: name });
       case 'no_connection': return t('feedPushNoConnection', { platform: name });
       case 'disabled': return t('feedPushDisabled');
@@ -81,7 +82,7 @@ export function CatalogFeedCard({ orgId }: { orgId: string }): JSX.Element | nul
     }
   };
   const pushVariant = (r: CatalogPushResult): 'success' | 'warning' =>
-    r.outcome === 'pushed' && r.failed === 0 ? 'success' : 'warning';
+    r.outcome === 'pushed' && r.failed === 0 && !r.remaining ? 'success' : 'warning';
 
   if (!orgId) return null;
   return (
@@ -96,8 +97,8 @@ export function CatalogFeedCard({ orgId }: { orgId: string }): JSX.Element | nul
         <>
           <CheckboxField label={t('feedEnabled')} checked={feed.enabled} disabled={busy} onChange={(e) => void toggle(e.target.checked)} />
           <p className="u-fs-13 u-mb-2">
-            {t('feedItemCount', { count: feed.items })}
-            {feed.excluded.length > 0 ? ` ${t('feedExcludedCount', { count: feed.excluded.length })}` : ''}
+            {t(feed.itemsCapped ? 'feedItemCountFloor' : 'feedItemCount', { count: feed.items })}
+            {feed.excluded.length > 0 ? ` ${t('feedExcludedCount', { count: feed.excludedTotal ?? feed.excluded.length })}` : ''}
           </p>
           {feed.excluded.length > 0 ? (
             <details className="u-mb-3 u-fs-13">
@@ -105,6 +106,7 @@ export function CatalogFeedCard({ orgId }: { orgId: string }): JSX.Element | nul
               <ul className="u-m-0 u-mt-1">
                 {feed.excluded.slice(0, 20).map((x) => <li key={x.productId}><code>{x.productId}</code>: {t(`feedExcluded_${x.reason}`)}</li>)}
               </ul>
+              {(feed.excludedTotal ?? feed.excluded.length) > 20 ? <p className="muted u-m-0 u-mt-1">{t('feedExcludedFirst', { shown: 20, total: feed.excludedTotal ?? feed.excluded.length })}</p> : null}
             </details>
           ) : null}
           {feed.feedUrl ? (

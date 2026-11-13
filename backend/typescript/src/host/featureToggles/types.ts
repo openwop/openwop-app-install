@@ -89,7 +89,10 @@ export interface ToggleSubject {
   tier?: 'anon' | 'user';
   /** ADR 0819 §1 — the caller is this host's listed operator acting in person
    *  (`isListedSuperadmin(req)`), so the plan paywall does not apply to them in
-   *  any workspace. Set only by `toggleSubjectOf(req)`; a daemon never has it. */
+   *  any workspace. Set by `toggleSubjectOf(req)` on the HTTP lane and, since
+   *  ADR 1108, by `scopeToggleSubject` in the req-less lanes (chat tools, in-run
+   *  `ctx.features`) from the request-stamped `run.metadata.planExempt`,
+   *  re-checked against the allowlist. A daemon never has it. */
   planExempt?: boolean;
 }
 

@@ -37,6 +37,7 @@
  * @see ../../../schemas/v2/workflow-chain-pack-manifest.schema.json (RFC 0177 — v2-signed manifests; WHD-15)
  */
 
+import { normalizeEdgeLoopback } from '../executor/loopback.js';
 import { verifyInstalledPack } from '../packs/registryInstaller.js';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -162,6 +163,14 @@ interface FragmentEdge {
   // wire enum and `EdgeDef.triggerRule` are the identical string set. Absent ⇒
   // `all_success` (the executor's default) = today's behavior.
   triggerRule?: EdgeDef['triggerRule'];
+  // ADR 1058 / RFC 0258 §F — a declared refine loopback, carried through
+  // expansion VERBATIM (validated by the same `normalizeEdgeLoopback` the
+  // register route uses, so a chain cannot admit a shape a hand-authored edge
+  // could not). RFC 0258's FragmentEdge exclusion is `condition` and
+  // `triggerRule` only (a fragment edge has no port fields; ports ride
+  // `from`/`to`). The vendored manifest schema refuses the field until RFC
+  // 0258's `FragmentEdge.loopback` is vendored, so this is dormant until then.
+  loopback?: unknown;
 }
 /** RFC 0133 §1 — a child chain a parent composes. `ref` is a SIBLING chainId in
  *  the same pack, or an external `{packName, chainId, version}` published chain. A
@@ -1750,6 +1759,9 @@ export function expandChain(authoredChain: WorkflowChain, opts: ExpandOptions = 
       // upstream still completes the run — ADR 0247 OQ-2). The expanded WorkflowEdge is
       // then validated + scheduled exactly like a hand-authored one.
       ...(e.triggerRule ? { triggerRule: e.triggerRule } : {}),
+      ...(e.loopback !== undefined
+        ? { loopback: normalizeEdgeLoopback(e.loopback, { condition: e.condition, triggerRule: e.triggerRule }, `e${i + 1}`) }
+        : {}),
     };
   });
 

@@ -268,6 +268,14 @@ const ASSETS = 'dist/assets';
 // ADR 0874 P2 (`modulePreload: false`, -7.2 kB) was MEASURED and REJECTED
 // (2026-10-12): it adds one network round trip to the first visit of every route
 // (+~600 ms on Fast 3G, +~175 ms on Fast 4G). Do not reach for it to buy headroom.
+// ═══ 2026-11-13: KEPT at 129 kB (ADR 0874 P3; user decision, over D4). ═══
+// The nav manifest carried an English literal beside 90 catalog keys (label + hint),
+// a second copy of words the eager `nav` catalog already holds. Dropping them, and
+// reading every entry through `chrome/navText.ts`, took the entry 129.0 -> 126.6 kB
+// gzip on 7b9bb8138 (main had 9 B of headroom). D4 would lower the ceiling to 128 kB;
+// the user chose to "raise the budget a little" instead, so it stays at 129 kB and the
+// reclaimed ~2.4 kB is headroom. `navCopyRatchet.test.ts` keeps a literal from coming
+// back beside a key.
 const ENTRY_GZIP_BUDGET = 129 * 1024;
 
 /**

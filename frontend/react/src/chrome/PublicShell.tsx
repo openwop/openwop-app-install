@@ -81,7 +81,7 @@ type NavGroupId = (typeof NAV_GROUP_ORDER)[number];
 /** The groups a page may NAME in its `siteNav` (server-validated, ADR 1049). */
 const AUTHORED_GROUPS: ReadonlySet<string> = new Set(['product', 'audience', 'resources', 'trust', 'company', 'legal']);
 interface NavGroup { id: NavGroupId; heading: string; links: NavLink[] }
-interface NavEntry extends NavLink { group: NavGroupId; order: number; primary: boolean; cta?: string; utility?: boolean }
+interface NavEntry extends NavLink { group: NavGroupId; order: number; primary: boolean; cta?: string; utility?: boolean; groupLabel?: string }
 
 /**
  * Primary actions owned by a public page (for example, "Open app") belong in
@@ -124,7 +124,37 @@ export function PublicMenuActions({ children }: { children: ReactNode }): JSX.El
 interface PublishedPage {
   slug: string;
   title: string;
-  nav?: { group?: Exclude<NavGroupId, 'pages'>; label?: string; description?: string; order?: number; primary?: boolean; cta?: string; utility?: boolean };
+  nav?: { group?: Exclude<NavGroupId, 'pages'>; label?: string; description?: string; order?: number; primary?: boolean; cta?: string; utility?: boolean; groupLabel?: string; links?: AuthoredLink[] };
+}
+
+/** ADR 1113 — one entry a page authors for a destination that is not a CMS
+ *  page (an app route, or a `#fragment` on the owning page). */
+interface AuthoredLink { label: string; href: string; group: Exclude<NavGroupId, 'pages'>; description?: string; order?: number; groupLabel?: string }
+
+const FRAGMENT_HREF = /^#[A-Za-z][A-Za-z0-9_-]{0,79}$/;
+
+/** Defensive read of `nav.links`, like {@link readNav}: an entry missing its
+ *  label, group or a safe href is dropped, never rendered. */
+function readLinks(raw: unknown): AuthoredLink[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const s = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+  const links = raw.flatMap((e): AuthoredLink[] => {
+    if (!e || typeof e !== 'object') return [];
+    const r = e as Record<string, unknown>;
+    const label = s(r.label);
+    const href = s(r.href);
+    if (!label || !href || !(FRAGMENT_HREF.test(href) || isInternalHref(href))) return [];
+    if (typeof r.group !== 'string' || !AUTHORED_GROUPS.has(r.group)) return [];
+    const description = s(r.description);
+    const groupLabel = s(r.groupLabel);
+    return [{
+      label, href, group: r.group as Exclude<NavGroupId, 'pages'>,
+      ...(description ? { description } : {}),
+      ...(typeof r.order === 'number' && Number.isFinite(r.order) ? { order: r.order } : {}),
+      ...(groupLabel ? { groupLabel } : {}),
+    }];
+  });
+  return links.length > 0 ? links : undefined;
 }
 
 /** Defensive read of one `nav` value: the server validates it, but a stale or
@@ -142,6 +172,11 @@ function readNav(raw: unknown): PublishedPage['nav'] {
   // ADR 1056 — the grouped footer's call to action + bottom-bar utility links.
   if (typeof r.cta === 'string' && r.cta.trim()) nav.cta = r.cta.trim();
   if (r.utility === true) nav.utility = true;
+  // ADR 1105 D11 — an authored heading for the page's group (only with a group).
+  if (nav.group && typeof r.groupLabel === 'string' && r.groupLabel.trim()) nav.groupLabel = r.groupLabel.trim();
+  // ADR 1113 — authored entries for app routes and fragments.
+  const links = readLinks(r.links);
+  if (links) nav.links = links;
   return Object.keys(nav).length > 0 ? nav : undefined;
 }
 
@@ -164,7 +199,7 @@ function readFeatured(raw: unknown): FeaturedCard | null {
   // fragment grammar or the shared internal-path check (which also refuses
   // `/\host` and control characters, both of which a browser can resolve
   // off-site). Anything else falls back to the owning page.
-  const to = !href ? page : /^#[A-Za-z][A-Za-z0-9_-]{0,79}$/.test(href) ? `${page}${href}` : isInternalHref(href) ? href : page;
+  const to = !href ? page : FRAGMENT_HREF.test(href) ? `${page}${href}` : isInternalHref(href) ? href : page;
   const eyebrow = s(r.eyebrow);
   const meta = s(r.meta);
   return { to, title, ...(eyebrow ? { eyebrow } : {}), ...(meta ? { meta } : {}) };
@@ -222,8 +257,9 @@ function usePublicNav(): { groups: NavGroup[]; flat: NavLink[]; primary: NavLink
   const hasDocs = useDocsAvailable();
   const hasBlog = useBlogAvailable();
   const { pages: published, featured } = usePublishedPages();
-  const grouped = published.some((p) => p.nav?.group !== undefined);
-  const hasResources = published.some((p) => p.nav?.group === 'resources');
+  // ADR 1113 — a page's authored links always name a group, so they count too.
+  const grouped = published.some((p) => p.nav?.group !== undefined || (p.nav?.links?.length ?? 0) > 0);
+  const hasResources = published.some((p) => p.nav?.group === 'resources' || p.nav?.links?.some((l) => l.group === 'resources'));
   // ADR 1062 D3 — `/pricing` renders the CMS `pricing` page when one is
   // published, so that page's `siteNav` (label, description, group, order,
   // primary, cta, utility) places the ONE `/pricing` entry. The slug stays
@@ -260,6 +296,7 @@ function usePublicNav(): { groups: NavGroup[]; flat: NavLink[]; primary: NavLink
         primary: p.nav?.primary === true,
         ...(p.nav?.cta ? { cta: p.nav.cta } : {}),
         ...(p.nav?.utility ? { utility: true } : {}),
+        ...(p.nav?.groupLabel ? { groupLabel: p.nav.groupLabel } : {}),
       };
     }),
     // `/pricing` is an app route that renders on every install, so it stays
@@ -273,12 +310,31 @@ function usePublicNav(): { groups: NavGroup[]; flat: NavLink[]; primary: NavLink
       primary: pricingNav?.primary === true,
       ...(pricingNav?.cta ? { cta: pricingNav.cta } : {}),
       ...(pricingNav?.utility ? { utility: true } : {}),
+      ...(pricingNav?.groupLabel ? { groupLabel: pricingNav.groupLabel } : {}),
     },
     // The automatic `/blog` entry sits under Resources when the site has that
     // group (a blog is a resource), else under Company as before (ADR 1049).
     ...(hasBlog ? [{ to: '/blog', label: t('navBlog'), group: !grouped ? 'product' as const : hasResources ? 'resources' as const : 'company' as const, order: 50, primary: false }] : []),
     ...(hasDocs ? [{ to: '/docs', label: t('navDocs'), group: 'product' as const, order: 60, primary: false }] : []),
   ];
+  // ADR 1113 — each page's authored links join as ordinary entries in their own
+  // groups (so they sort, take a group heading, and reach the footer like any
+  // page). A fragment lands on the owning page. A destination that is already
+  // listed keeps its first entry, so a link can never duplicate a page.
+  const listed = new Set(entries.map((e) => e.to));
+  for (const p of published) {
+    const page = p.slug === 'pricing' ? '/pricing' : `/p/${p.slug}`;
+    for (const l of p.nav?.links ?? []) {
+      const to = FRAGMENT_HREF.test(l.href) ? `${page}${l.href}` : l.href;
+      if (listed.has(to)) continue;
+      listed.add(to);
+      entries.push({
+        to, label: l.label, group: l.group, order: l.order ?? DEFAULT_PAGE_ORDER, primary: false,
+        ...(l.description ? { description: l.description } : {}),
+        ...(l.groupLabel ? { groupLabel: l.groupLabel } : {}),
+      });
+    }
+  }
 
   const headings: Record<NavGroupId, string> = {
     product: t('navGroupProduct'),
@@ -290,8 +346,14 @@ function usePublicNav(): { groups: NavGroup[]; flat: NavLink[]; primary: NavLink
     legal: t('navGroupLegal'),
   };
   const toLink = ({ to, label, description }: NavEntry): NavLink => ({ to, label, ...(description ? { description } : {}) });
+  // ADR 1105 D11 — in grouped mode a group's heading is the first page in it
+  // (by order, then label) that sets `siteNav.groupLabel`, else the stock one.
   const groups: NavGroup[] = NAV_GROUP_ORDER
-    .map((id) => ({ id, heading: headings[id], links: entries.filter((e) => e.group === id).sort(byOrderThenLabel).map(toLink) }))
+    .map((id) => {
+      const inGroup = entries.filter((e) => e.group === id).sort(byOrderThenLabel);
+      const authored = grouped ? inGroup.find((e) => e.groupLabel)?.groupLabel : undefined;
+      return { id, heading: authored ?? headings[id], links: inGroup.map(toLink) };
+    })
     .filter((g) => g.links.length > 0);
 
   // Keep the decision-making links visible on wide screens. By default that is

@@ -9,7 +9,7 @@
 
 | Bucket | Count | Meaning |
 |---|---|---|
-| Declared (`dependsOn`) | 16 | real hard deps, disable-lock active |
+| Declared (`dependsOn`) | 17 | real hard deps, disable-lock active |
 | Undeclared → always-on target | 119 | correctly undeclared — an always-on dep can never lock (ADR 0439) |
 | **[1] Primitive** (undeclared → toggleable) | **0** | misfiled cross-cutting infra → **extract to a `host/` seam** |
 | **[2] Soft-read** (undeclared → toggleable) | **105** | domain read, target vacuous-when-off → **leave documented** (no lock) |
@@ -113,7 +113,7 @@ _None._
 | `orgs` | `email` | static | emailService, brokeredProvider | emailService self-gates ONLY inside its CRM merge-lifecycle subscriber (emailFeatureLive → relink work-avoidance, #3326); all 33 exported send/read functions are ungated, so no consumer breaks when email is off ⇒ [2] (ADR 0446 F file-vs-symbol, target-level) |
 | `bi` | `entities` | static | entitiesService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `cms` | `entities` | static | entitiesService, kernelAdapter | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
-| `commerce` | `entities` | static | entitiesService, kernelAdapter | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
+| `commerce` | `entities` | static | entitiesService, kernelAdapter, systemIndex | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `service-desk` | `entities` | static | entitiesService, kernelAdapter | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `tutorials` | `entities` | static | entitiesService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `crm` | `forms` | static | submissionSinks, formsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |

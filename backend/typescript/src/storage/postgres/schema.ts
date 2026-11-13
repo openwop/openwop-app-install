@@ -1066,6 +1066,13 @@ export const MIGRATIONS: Record<number, (client: Queryable) => Promise<void>> = 
     // Mirrors sqlite mig 52.
     await client.query(`CREATE INDEX IF NOT EXISTS idx_messaging_delivery_log_at ON messaging_delivery_log (at);`);
   },
+  51: async (client) => {
+    // ADR 1114 (#5868) — retiring a finished step's requests looks rows up by
+    // run (`resolveRequestNotifications`), on every interrupt resolution and run
+    // end. Partial: only rows that name an interrupt are ever requests.
+    // Mirrors sqlite mig 53.
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_notifications_tenant_run_request ON notifications (tenant_id, run_id) WHERE interrupt_id IS NOT NULL;`);
+  },
 };
 
 /** Highest defined migration — DERIVED from MIGRATIONS, never a hand-bumped cap.

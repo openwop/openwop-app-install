@@ -10,7 +10,7 @@
  * deliberate deviation from the ADR's "neutral chip" sketch — no partial
  * information surface at all).
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { listReviews, type ReviewRequest } from './reviewClient.js';
 import { ReviewCard } from './ReviewCard.js';
@@ -40,11 +40,31 @@ export function ConversationReviewsStrip({ conversationId, isSending }: {
     if (fellIdle) load();
   }, [isSending, load]);
 
-  if (reviews.length === 0) return null;
+  // CC-CHAT-3 — the strip's list is read only on mount and when a turn settles,
+  // so a gate resolved elsewhere (the in-feed card, the Reviews tab, another
+  // person) kept live buttons here and a click answered 409. Follow the ONE
+  // shared live status (the `review.updated` frames + local decisions feed it):
+  // a review it knows is terminal — by id, or by the run+node a run-scoped card
+  // resolved — is dropped. (The chat shell — ChatSidebar / TabChatDeck — keeps
+  // the store connected to the signal bus while chat is open; the strip only reads.)
+  const statusById = useReviewStatusStore((s) => s.statusById);
+  const live = useMemo(() => {
+    const terminal = Object.values(statusById).filter((e) => e.status !== 'pending');
+    if (terminal.length === 0) return reviews;
+    return reviews.filter((r) => {
+      // The review's OWN entry wins (a pending entry keeps it, e.g. a reopened row);
+      // the run+node match is only a fallback when the store has none for this id.
+      const own = statusById[r.reviewId];
+      if (own) return own.status === 'pending';
+      return !(r.runId && r.nodeId && terminal.some((e) => e.runId === r.runId && e.nodeId === r.nodeId));
+    });
+  }, [reviews, statusById]);
+
+  if (live.length === 0) return null;
   return (
     <section aria-label={t('conversationReviewsHeading')} className="u-flex u-flex-col u-gap-2 u-pad-2-4">
       <h4 className="muted u-fs-12 u-m-0">{t('conversationReviewsHeading')}</h4>
-      {reviews.map((r) => (
+      {live.map((r) => (
         <ReviewCard
           key={r.reviewId}
           review={r}

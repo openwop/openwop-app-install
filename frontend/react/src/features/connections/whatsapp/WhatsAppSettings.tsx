@@ -15,6 +15,7 @@
  */
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { TableScroll } from '../../../ui/DataTable.js';
 import { Link } from 'react-router-dom';
 import { Button } from '../../../ui/Button.js';
 import { Notice } from '../../../ui/Notice.js';
@@ -265,7 +266,7 @@ function FailuresCard({ orgId, connections }: { orgId: string; connections: Load
       ) : load.value.length === 0 ? (
         <StateCard icon={<AlertIcon />} title={t('wa_failuresEmptyTitle')} body={t('wa_failuresEmptyBody')} />
       ) : (
-        <div className="u-overflow-x-auto">
+        <TableScroll label={t('wa_failuresHeading')}>
           <table className="data-table">
             <caption className="sr-only">{t('wa_failuresHeading')}</caption>
             <thead>
@@ -295,7 +296,7 @@ function FailuresCard({ orgId, connections }: { orgId: string; connections: Load
               ))}
             </tbody>
           </table>
-        </div>
+        </TableScroll>
       )}
     </section>
   );

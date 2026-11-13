@@ -17,9 +17,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Marketing',
-      label: 'Playbooks', labelKey: 'campaignPlaybooksLabel',
+      labelKey: 'campaignPlaybooksLabel',
       icon: BookOpenIcon,
-      hint: 'Roll out your campaign methods to every client', hintKey: 'campaignPlaybooksHint',
+      hintKey: 'campaignPlaybooksHint',
       order: 30,
       featureId: 'campaign-playbooks',
       hiddenWhenFeature: 'campaigns',

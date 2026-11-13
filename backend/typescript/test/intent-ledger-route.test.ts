@@ -10,6 +10,14 @@
  * (sabotage-probed, /grade-tests w29): dropping either guard, approve not stamping
  * `approved`/`approvedBy`, the approved-edit 409, a 500 on a goal-less draft, or a
  * reckoning computed without a stamped run.
+ *
+ * ADR 0896 (re-graded w106): each case founds its own tenant and a second person
+ * JOINS it as an editor, so the write floor (`workspace:write`) passes and the case
+ * reaches the predicate it is about. Decisions name the version they reviewed
+ * (`ledgerId`, `revision`, `digest`); the stale-version 409s are
+ * `adr0896-intent-ledger-authority.test.ts`'s claim, not this file's. The
+ * edit-after-approve 409 is the TRANSITION rule (`details.reason:
+ * 'illegal_transition'`), which a lost CAS (`ledger_changed`) cannot satisfy.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -17,6 +25,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { addParticipant, userRef } from '../src/host/conversationStore.js';
 import type { IntentLedger } from '../src/features/intent-ledger/types.js';
+import { detailOf } from './helpers/errorEnvelope.js';
 
 let BASE: string; let server: http.Server;
 beforeAll(async () => {
@@ -26,11 +35,12 @@ beforeAll(async () => {
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-type Ledgered = { ledger: IntentLedger | null };
-type Errored = { error: string; message?: string }; // the flat error envelope (H27)
+/** The wire row: the stored ledger plus the contract digest a decision echoes (ADR 0896 D1). */
+type Ledgered = { ledger: (IntentLedger & { digest: string }) | null };
+type Errored = { error: string; message?: string; details?: Record<string, unknown> }; // the flat error envelope (H27)
 function client() {
   let cookie = '';
   return async <B = unknown>(method: string, path: string, body?: unknown): Promise<{ status: number; body: B }> => {
@@ -67,13 +77,15 @@ async function join(owner: ReturnType<typeof client>, c: ReturnType<typeof clien
   return userId;
 }
 /** ADR 0896 D1 — the version a decision names. */
-const seen = (l: IntentLedger | null | undefined): { ledgerId?: string; revision?: number; digest?: string } => ({ ledgerId: l?.ledgerId, revision: l?.revision, digest: (l as { digest?: string } | null | undefined)?.digest });
+const seen = (l: Ledgered['ledger'] | undefined): { ledgerId?: string; revision?: number; digest?: string } => ({ ledgerId: l?.ledgerId, revision: l?.revision, digest: l?.digest });
 
 describe('intent-ledger routes (ADR 0136, always-on)', () => {
   it('unknown conversation ⇒ 404 (always-on, IDOR-safe — no toggle gate)', async () => {
     const c = client();
     await login(c, 'il-off@test.dev');
-    expect((await c('GET', u('any'))).status).toBe(404);
+    const r = await c<Errored>('GET', u('any'));
+    expect(r.status).toBe(404);
+    expect(r.body.error).toBe('not_found');
   });
 
   it('draft (user goal) → approve → get reflects approved; edit-after-approve 409', async () => {
@@ -96,6 +108,7 @@ describe('intent-ledger routes (ADR 0136, always-on)', () => {
     const put = await c<Errored>('PUT', u(conv), { goal: 'changed' });
     expect(put.status).toBe(409);
     expect(put.body.error).toBe('conflict');
+    expect(detailOf(put.body, 'reason')).toBe('illegal_transition'); // the transition rule, not a lost CAS
     expect((await c<Ledgered>('GET', u(conv))).body.ledger?.goal).toBe('Draft Q3 report');
   });
 
@@ -129,8 +142,12 @@ describe('intent-ledger routes (ADR 0136, always-on)', () => {
     const mine = await owner<Ledgered>('POST', u(conv, '/draft'), { goal: 'mine' });
     const other = client();
     await join(owner, other, 'il-b@test.dev');
-    expect((await other('POST', u(conv, '/draft'), { goal: 'sneaky' })).status).toBe(404);
-    expect((await other('POST', u(conv, '/approve'), seen(mine.body.ledger))).status).toBe(404);
+    const draft = await other<Errored>('POST', u(conv, '/draft'), { goal: 'sneaky' });
+    expect(draft.status).toBe(404);
+    expect(draft.body.error).toBe('not_found');
+    const approve = await other<Errored>('POST', u(conv, '/approve'), seen(mine.body.ledger));
+    expect(approve.status).toBe(404);
+    expect(approve.body.error).toBe('not_found');
     const after = await owner<Ledgered>('GET', u(conv));
     expect(after.body.ledger).toMatchObject({ goal: 'mine', status: 'draft' });
   });

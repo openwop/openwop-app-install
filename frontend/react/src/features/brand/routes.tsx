@@ -5,7 +5,7 @@
  * identity is edited separately at Admin → Appearance (Phase 6), not here.
  */
 import { lazy } from 'react';
-import { MegaphoneIcon } from '../../ui/icons/index.js';
+import { PipetteIcon } from '../../ui/icons/index.js';
 import type { FeatureRoute } from '../../chrome/featureTypes.js';
 import type { FrontendFeature } from '../registry.js';
 
@@ -18,9 +18,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Marketing',
-      label: 'Brand', labelKey: 'brandLabel',
-      icon: MegaphoneIcon,
-      hint: 'Define & enforce brand voice', hintKey: 'brandHint',
+      labelKey: 'brandLabel',
+      icon: PipetteIcon,
+      hintKey: 'brandHint',
       order: 10,
     },
   },

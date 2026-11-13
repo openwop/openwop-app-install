@@ -148,9 +148,16 @@ export const messages = {
   feedEnabled: "Publier le flux de produits",
   feedItemCount_one: "{{count}} article dans le flux.",
   feedItemCount_other: "{{count}} articles dans le flux.",
+  // ADR 1110 P3 — the count stopped at its cap
+  feedItemCountFloor: "Plus de {{count}} articles figurent dans le flux.",
+  feedPushRemaining_one: "{{count}} autre modification attend le prochain envoi.",
+  feedPushRemaining_other: "{{count}} autres modifications attendent le prochain envoi.",
+  feedPushTooLarge: "Ce catalogue compte plus de {{max}} produits, trop pour un seul envoi vers {{platform}}. Donnez à {{platform}} l'URL du flux ci-dessus ; il la récupère selon son propre calendrier.",
   feedExcludedCount_one: "{{count}} produit est exclu.",
   feedExcludedCount_other: "{{count}} produits sont exclus.",
   feedExcludedShow: "Voir ce qui est exclu",
+  // ADR 1110 round fix
+  feedExcludedFirst: "Les {{shown}} premiers des {{total}} exclus.",
   feedExcluded_no_image: "aucune image",
   feedExcluded_no_price: "aucun prix",
   feedExcluded_invalid_currency: "devise non prise en charge",

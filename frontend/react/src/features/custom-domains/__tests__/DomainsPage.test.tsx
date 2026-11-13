@@ -9,7 +9,11 @@
  *  - the page shows the HTTPS chip and a plain-language issue, "Check again"
  *    only where it can change something, force-remove only after 3 failed
  *    releases, a manual deployment as operator-managed, and an unready edge as
- *    a warning (never hidden).
+ *    a warning (never hidden);
+ *  - ADR 1030 P2: the site-brand card offers only the brands with an app
+ *    identity, saves the choice (and `null` for the default look), says how to
+ *    get one when there is none, and a failed read is announced with a retry,
+ *    never shown as "no brand" (ADR 0598).
  *
  * Sabotage-witnessed (wave 55/56 probes, each red here): the apex rule moved
  * (3 labels); an apex with no LB IP falling back to a CNAME; the alternative
@@ -17,7 +21,10 @@
  * `active` added to, or `awaiting_dns` / `provisioning` removed from, the
  * retryable set; retry called without the hostname; the force-remove threshold
  * moved either way; Delete enabled while releasing; the unready-edge warning
- * hidden; a raw issue code shown.
+ * hidden; a raw issue code shown. Re-probed in wave 107 (`w107g2-dom-*`), plus the
+ * site brand: the saved value not written back, `''` sent instead of `null`, the
+ * choices dropped, the no-brand hint gone, a failed read shown as an empty brand
+ * list, and the retry wired to nothing.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent, within } from '@testing-library/react';
@@ -102,6 +109,10 @@ beforeEach(() => {
   // Reset the client mocks' RETURNS too (clearAllMocks keeps a resolved value
   // from one case into the next); useFeatureAccess / confirm keep their impls.
   for (const m of [listOrgs, listDomainPage, retryDomain, forceRemoveDomain]) m.mockReset();
+  // vitest 4 `mockReset` restores the impl given to `vi.fn(impl)`, so a case's
+  // `getSiteBrand` choices never leak into the next one.
+  getSiteBrand.mockReset();
+  setSiteBrand.mockReset();
 });
 
 describe('DomainsPage — HTTPS axis', () => {
@@ -148,7 +159,7 @@ describe('DomainsPage — HTTPS axis', () => {
       base('b.example.com', { edge: { provider: 'gcp-certificate-manager', tls: 'releasing', releaseIntent: 'delete', releaseAttempts: 3, checkedAt: '' } }),
     ], GCP);
     expect(screen.queryByRole('button', { name: 'Force remove a.example.com' })).toBeNull();
-    expect((screen.getByRole('button', { name: 'Delete domain a.example.com' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Delete domain a.example.com' }).disabled).toBe(true);
     forceRemoveDomain.mockResolvedValue(undefined);
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Force remove b.example.com' })); });
     expect(forceRemoveDomain).toHaveBeenCalledWith('o1', 'b.example.com');
@@ -177,7 +188,7 @@ describe('DomainsPage — the site brand (ADR 1030 P2)', () => {
   it('offers the workspace brands with an app identity, and saves the choice', async () => {
     getSiteBrand.mockResolvedValue({ brandId: null, choices: [{ id: 'brand:green', name: 'Green' }] });
     await mount([], null);
-    const select = screen.getByLabelText('Site brand') as HTMLSelectElement;
+    const select = screen.getByLabelText<HTMLSelectElement>('Site brand');
     expect([...select.options].map((o) => o.textContent)).toEqual(['The default look', 'Green']);
     await act(async () => { fireEvent.change(select, { target: { value: 'brand:green' } }); });
     expect(setSiteBrand).toHaveBeenCalledWith('o1', 'brand:green');
@@ -198,9 +209,14 @@ describe('DomainsPage — a failed site-brand read', () => {
     getSiteBrand.mockRejectedValueOnce(new Error('down'));
     await mount([], null);
     expect(screen.getByText('The site brand could not be read')).toBeTruthy();
+    // A failed read is not an answer: neither the picker nor the "no brand yet" hint.
+    expect(screen.queryByLabelText('Site brand')).toBeNull();
+    expect(screen.queryByText(/No brand in this workspace has an app identity yet/)).toBeNull();
     getSiteBrand.mockResolvedValueOnce({ brandId: null, choices: [] });
     const retries = screen.getAllByRole('button', { name: 'Try again' });
     await act(async () => { fireEvent.click(retries[retries.length - 1]!); });
     expect(screen.getByLabelText('Site brand')).toBeTruthy();
+    expect(screen.queryByText('The site brand could not be read')).toBeNull();
+    expect(getSiteBrand).toHaveBeenCalledTimes(2);
   });
 });

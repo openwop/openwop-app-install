@@ -18,6 +18,105 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+### Added
+
+- `OPENWOP_CMS_OVERLAY_REALIGN` (`report` or `apply`, unset by default): a one-shot background job, `cms-overlay-realign`, that puts the base's item states back into stored CMS translations saved before ADR 1038 D8 and ADR 1112 D6 aligned them (DG-1112-6). Until it runs, such a translation shows its own lock weeks, lead days and states. `report` logs the counts (`app_bg_job_cms_overlay_realign`) and writes nothing; `apply` repairs each page with a compare-and-swap, keeping its version, author and translation stamps, and marks the job done. The daily `staleItemOverlays` gauge then reads 0.
+- A page's `siteNav.links` adds menu entries for destinations that are not CMS pages: an app route (`/discover`) or a `#fragment` on that page (ADR 1113). Each entry has its own label, group, optional description, order and group heading, so a site with two pages can fill a four-column mega menu and its grouped footer. Up to 12 per page; an external href is refused.
+- CMS AI rewrite (improve, shorten, fix, …) handles larger `scheduleSim` sections the way translation does (ADR 1112 P6): words and ids only, up to 8 parts, joined by id, under one 45 s deadline. Translate and rewrite now share one parts runner.
+- CMS AI translation handles larger `scheduleSim` sections (ADR 1112 P3): the model is sent the words and ids only, and a section still too large for one reply is translated in up to 8 parts (about 340 decisions), joined by id. Larger ones are still refused, with the number of parts they would take. The submit sweep counts each part against its budget.
+- CMS `scheduleSim` reads a real catalog (ADR 1112 P2, #5816): up to 1,500 decisions on 40 milestones (fewer once translated: each translation is a whole copy, so about 1,500 with one translation and about 775 with three), grouped by `phases`, `categories` and `roles` (each a `key` and a `label`; a decision names them by key). Visitors set lateness per role, per phase × category cell, or per decision. A scenario's role-only rules fill the role controls. A grid counts each cell's decisions and its late ones; an open cell or milestone lists 12 decisions, then "Show all". Crawlers get milestone dates and counts by phase. Decisions no longer need `options`.
+- CMS `scheduleSim` replays its schedule and reports what was missed (ADR 1112 P1, #5816). Set how late decisions come in, then play the result: a week every 0.6 s, stopping at the finish; under reduced motion a "next missed lock" step replaces the animation. The summary adds the locks missed, each naming the decision that held it longest and its rework, and the late decisions and late orders. The section opens on the first milestone that owns a decision.
+- CMS `statusTable` can sit beside its copy (ADR 1080 D17, #5765): an optional `points` list under the head, and `head: 'split'` puts the head and its points in the first column and the table in the second. Unset, a section is unchanged.
+- CMS `scheduleSim` can open on the scenario controls (`startMode: 'whatIf'`) and keep its summary in view while answers change (`stickySummary: true`), below the public site's sticky header (#5779 B5, ADR 1080 D18).
+- CMS hero `visual: 'queue'` can set a photo: the queue card sits over the photo's lower edge from 900px and stacks under it on a phone (#5779 B7, ADR 1080 D19).
+- A page's `siteNav.groupLabel` names its nav group in the public menu and the grouped footer, in place of the stock heading (Product, Who it's for, …); the first page in the group, by order, that sets it wins (ADR 1105 D11, #5779 item 8). It needs `siteNav.group`, and like every nav label it serves in the site's base language.
+- CMS `marginCalc` and `allowanceGap` sections (ADR 1105 P1): a margin worksheet (cost and markup to client price and gross margin, and the markup a target margin needs) and an allowance worksheet (an allowance beside the expected spend, line by line, with the overrun total; lines under their allowance are not netted). The authored figures are starting values the reader edits, and crawlers get the worked answer.
+- CMS `partyViews` and `stageChart` sections (ADR 1105 P2): a switch between the parties on a project, showing what each needs and a sample of what each sees, and a chart of counts by stage, grouped, with totals in the legend. Every party and every count reaches crawlers; a stage's count and group follow the base layer in a locale overlay.
+- **Commerce catalog index (ADR 1110 P1).** The content kernel keeps declared indexes for
+  system types, written inside its own writes and repaired after a crash, and
+  `commerce.product` declares one: name order, category, tag, search token and low stock.
+  The per-org product cap now reads a maintained counter instead of loading the catalog on
+  every create, and the kernel's at-the-cap recount counts in the database. New reads for
+  the next phase: `listProductsPage` (paged, filtered, searched), `getProducts` and
+  `iterateCatalog`. A catalog-index sweep repairs unfinished index writes each tick and
+  checks every tenant for drift hourly (a drifted one is rebuilt in the background); the `commerce-catalog-index` integrity gauge
+  reports drift and the backlog. No caller moves yet and the cap is unchanged (5,000).
+
+### Changed
+
+- **Nav words have one source (ADR 0874 P3).** A menu entry carries a `nav` catalog key, or an English literal when it has no key (an adopter's feature), never both. Every menu surface reads it through `chrome/navText.ts`. The 198 duplicate literals were a second copy of the catalog's English in the entry chunk: 129.0 → 126.6 kB gzip. The entry ceiling stays at 129 kB by the user's decision, leaving about 2.4 kB of headroom. `FeatureNav.label` and `hint` are now optional: an adopter entry that sets `labelKey` drops its literal, and one without a key keeps it.
+- CMS `scheduleSim` (ADR 1112 P1): the live "answer against the clock" mode is removed; it could not be played and never ended. `startMode` and the decisions' `choices` are no longer stored. A lead time is counted back from a lock only when the decision sets `back: true`; otherwise the lock is the decide-by date, so decisions on existing pages that set a lead time now fall due later. A decision with an unknown lead time is dated to its lock and can be late. Two milestones or two decisions sharing an id are now refused (400): the model keys both by id.
+- CMS `scheduleSim` locale overlays change words only (ADR 1112 P2): a translation is matched to the base by id (an item the base lacks is dropped, one it lacks is the base's copy, so every language has the same decisions and finish), then ids, keys, references, numbers and flags (`back`, `leadUnknown`, `dependsOn`, …) follow the base. A decision's `decider` stays translatable, and a scenario rule that names one takes its translated name. Every saved decision gets an id. `startDate` is base-only; an impossible one is dropped. A section whose base and translations together pass 850 kB is refused with its size (a page saves as one 1 MB request, and each translation carries a whole copy of the decisions). A translation that leaves the milestones out, or was written before the base grew, now saves.
+- CMS pages whose sections pass 975 kB are refused with their size (a page saves as one 1 MB request). AI translation and rewriting refuse a section over 12,000 characters up front, instead of failing after two full-size model calls; the publish-time auto-translate skips such a section and goes on. (About 40 scheduleSim decisions fit; a larger catalog is translated by hand for now.)
+
+- A locale overlay can no longer change a number in a list item (ADR 1105 D5). A columns stat tile's `count` (ADR 1063) now follows the base layer like an item's `state`, as do the new worksheet figures; an overlay that set a different count is corrected on its next write.
+- **Product lists are paged (ADR 1110 P2).** The admin product list, the public storefront,
+  the UCP catalog, the Store Assistant's `list-products` tool and the commerce workflow
+  surface return one page instead of the whole catalog. The admin list and storefront take
+  `limit` and `cursor` and return `nextCursor`; the UCP catalog uses UCP's
+  `pagination: {has_next_page, cursor}`; the tool returns 50 and a `nextCursor`; the
+  workflow node returns the first 200 matches. The Products tab searches and filters on the
+  server, says "Showing X of Y" and loads more on request; product pickers search as you
+  type (a new shared `Combobox`).
+- **Product search matches names, tags, categories and variant names, not descriptions**
+  (ADR 1110 D3). Storefront search still finds products by description where semantic
+  recall runs. Discovery search reads at most 1,000 candidates and says when a count is a
+  floor.
+
+- **No whole-catalog read remains (ADR 1110 P3).** `listProducts` is deleted. The
+  data export pages products with a cursor (the export door accepts a paged exporter and
+  the download follows `nextCursor`); the public product feed streams in batches; the
+  feed settings count up to 10,000 items; a catalog push sends at most 10,000 changes per
+  approved push and reports how many remain; product embeddings rebuild in batches, and a
+  catalog over 5,000 products is re-embedded by a background sweep instead of inside a
+  search; demo seeders and entities erasure read a page at a time.
+
+- **The product cap is a setting (ADR 1110 P4).** `OPENWOP_COMMERCE_MAX_PRODUCTS_PER_ORG`
+  sets how many products a workspace may hold: default 5,000, up to 500,000. An invalid
+  value is logged and the default stays; the cap error names the setting.
+
+- **Legacy env-key ids no longer match (ADR 1045, CHAN-F14).** An issuer id in the
+  old `bearer:<first 8 key characters>` form now matches no configured key, even when
+  only one key has that prefix. Records still carrying one (delegations an env key
+  minted, run actors, scheduled jobs, env-key-created org members) lose operator
+  standing until rewritten. **If you have not run the rewrite:** set
+  `OPENWOP_LEGACY_BEARER_REWRITE=report`, read the `legacy_bearer_rewrite` log line,
+  then set `apply`, before or after upgrading. The job is kept for this.
+
+- **Order lists are paged (ADR 1110 P5).** The order cap counts live orders from a
+  maintained index instead of loading them. The admin order list returns one page, newest
+  first (`cursor`, `limit`, `total`), and filters by status on the server; the Store
+  Assistant's `list-orders` tool returns 50 with a `nextCursor`; the workflow surface
+  returns the newest 200; the data export pages orders. The Orders tab loads more on
+  request and finds a full order id directly.
+
+### Fixed
+
+- **Spanish, French and Portuguese visitors saw the app's frame in English.** With one of those languages saved, the nav, the rail, the admin menu and the shell's notices were English while feature pages were translated. The lazy catalog backend answers a lazy locale's frame catalogs with an empty set, and boot took that empty set as "already loaded", so the real catalogs were never fetched (reproduced on app.openwop.dev). Boot now checks the catalog has content.
+- A wide table no longer widens the whole page on a phone. Text kept for screen readers inside a table cell was positioned against the card rather than the table's scroller, so it escaped the scroller's clip: `/capabilities` measured 543 px wide on a 380 px screen and arrow keys scrolled the page instead of the table. The scroller is now the containing block.
+- A CMS page's size limit (975 kB with its shared sections resolved) now also holds when content reaches readers outside a publish: approving a review (refused before the review is consumed), starting or promoting a page experiment, and editing a shared section that a published page uses (the refusal names that page, in the editor's language). ADR 1112 residue, DG-1112-13.
+- The CMS editor's History list no longer downloads every saved version's content. A version can hold up to ~975 kB since ADR 1112, so a page at the 50-version cap could send ~48 MB to open its History. The list now asks `GET …/pages/:pageId/versions?summary=1` (title, slug, who and when) and Compare reads one version through the new `GET …/pages/:pageId/versions/:versionId`, with a busy button and a localized error toast. The list without `?summary=1` is unchanged, so an editor loaded before the deploy keeps working (ADR 1112 residue, DG-1112-12).
+- CMS page history no longer reads every workspace's saved versions to show, cap or record one page's (ADR 1112 data residue, DG-1112-11). Version rows now have a per-workspace index carrying only what the list sorts on; reads switch to it once the hourly reconcile has verified it. A saved version can be up to about 975 kB since ADR 1112, and a publish read all of them three times.
+- **Nine menu entries were English in every language** (`/webinars`, `/ai-video`, `/campaign-studio` and six `/job-search/*`). They now have `nav` catalog keys in all four locales, and every host menu entry must carry a key (`navCopyRatchet`). **Seven wide tables could not be scrolled from the keyboard** (sales map ×2, commission statements, territories, WhatsApp failures, CAD bill of materials, slide-deck tables, analytics nav report): they now render through `<TableScroll>`, and a `u-overflow-auto` div around a `<table>` is refused by `tableScrollRatchet` (grade residue NAV-1, A11Y-TS-3).
+- A CMS page holding a `scheduleSim` saved before ADR 1112's id rules (two decisions or milestones sharing an id, a reference to a milestone, decision or group that no longer exists) can be published, scheduled, unpublished and erased again (ADR 1112 P4). The author's next save still names the problem.
+- CMS `scheduleSim` grade residue (ADR 1112): a page whose shared sections resolve past the 975 kB page limit is refused at publish (`publish_blocked`, rule `too_large`); the section and page size refusals carry `details.reason` and the editor shows them, and the AI too-large and timeout failures, in its own language; a section may set `currency` (ISO 4217) for the cost of delay, which no longer hard-codes "$"; a decision in an open cell names its milestone; a page-lane save measures a section's bytes once, not twice.
+- CMS submit with `autoTranslateOnPublish` no longer runs past the hosting proxy's 60 s (ADR 1112 P5): the auto-translate sweep stops at 40 s, keeps what it drafted, and the editor says the time limit was reached.
+- CMS `scheduleSim` month axis no longer draws the month and year on top of each other at the year change (#5779 B6): the year sits on its own line under January, and a long plan labels every other month (at most about 12 labels), counted from January.
+- **Catalog index hardening (ADR 1110 round fixes).** A workspace whose catalog was read or
+  emptied can be deleted again (index rows no longer count as its data). A large existing
+  catalog is indexed in the background after deploy instead of inside the first request,
+  and is served by the previous read path meanwhile. An index is checked before it is
+  trusted, so merging an anonymous sandbox into a signed-in workspace re-indexes it.
+  Account deletion purges the index a page at a time. Discovery, recommendations and the
+  feed settings stop after a page budget; a push of a catalog over 20,000 products points
+  to the feed URL instead; the feed stream respects slow fetchers. Product pickers say
+  "20+ matches", open on typing, can be cleared and retry a failed list; product and order
+  filters no longer drop keyboard focus; a failed "Load more" keeps the list.
+- **Products created in an anonymous sandbox are readable after sign-in.** The sign-in
+  fold rewrites a stored row's top-level tenant only, so a folded product kept the
+  anonymous tenant inside its stored copy and `getProduct` refused it. The product read
+  now takes the tenant and org from the row (ADR 1110).
+
 ## [0.13.0] — 2026-11-11
 
 A MINOR release under ADR 0052. It adds a public trial entry, unlisted

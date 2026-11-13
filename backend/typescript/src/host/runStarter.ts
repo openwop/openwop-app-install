@@ -27,6 +27,7 @@ import { recordRunAttribution } from './agentRunActivityIndex.js';
 import { chargedAdmission, insertRunWithStartContext } from './runInsert.js';
 import { stripReservedRunMetadata, failRunClosedOnDispatchError } from './runDispatch.js';
 import { inheritedRunMetadata } from './inheritedRunMetadata.js';
+import { launchPlanExemptSubject } from './operatorPlanExemption.js';
 import { workflowBudgetExhausted } from './workflowBudgets.js';
 import { seedRunVariables } from './variablesRuntime.js';
 import { assertEffectAllowed } from './runEffectContext.js';
@@ -89,6 +90,10 @@ export async function startWorkflowRun(
      *  short-circuit (the HTTP lane's `isOwnPersonalWorkspace`); grants nothing in a
      *  workspace that is not that personal tenant. */
     personalTenant?: string;
+    /** ADR 1108 — a tool starting a run for the listed operator forwards the
+     *  exemption it still holds (`forwardedPlanExemption`); stamped onto the
+     *  reserved `run.metadata.planExempt` after the strip. Daemons never pass it. */
+    planExempt?: true;
   },
 ): Promise<string | null> {
   const { storage, hostSuite } = deps;
@@ -113,7 +118,14 @@ export async function startWorkflowRun(
   assertEffectAllowed('dispatch', `run-start ${input.workflowId}`);
   // ADR 0474 P1b — every starter-driven launch (schedules, heartbeats, agent
   // dispatch, approved proposals) is a PRODUCTION launch: published-when-present.
-  const wf = await resolveLaunchWorkflow(hostSuite.workflowCatalog, input.tenantId, input.workflowId, { launch: input.launch ?? 'published' });
+  // ADR 1108 — the launch gate honours the operator exemption this start
+  // forwards (re-checked against the allowlist); every other caller is unchanged.
+  const planSubject = launchPlanExemptSubject({
+    tenantId: input.tenantId,
+    ...(input.personalTenant ? { personalTenant: input.personalTenant } : {}),
+    ...(input.planExempt === true ? { planExempt: true } : {}),
+  });
+  const wf = await resolveLaunchWorkflow(hostSuite.workflowCatalog, input.tenantId, input.workflowId, { launch: input.launch ?? 'published', ...(planSubject.planExempt ? { subject: planSubject } : {}) });
   if (!wf) {
     log.warn('run_starter_workflow_not_found', { workflowId: input.workflowId });
     return null;
@@ -165,6 +177,7 @@ export async function startWorkflowRun(
       launchResolved: wf.launchResolved,
       ...(input.orgScopeSubject ? { orgScopeSubject: input.orgScopeSubject } : {}),
       ...(input.personalTenant ? { personalTenant: input.personalTenant } : {}),
+      ...(input.planExempt === true ? { planExempt: true } : {}),
     },
     configurable: input.configurable ?? {},
     createdAt: now,

@@ -145,7 +145,7 @@ export function buildCmsSurface(scope: BundleScope): FeatureSurface {
         const raw = (typeof args.data === 'object' && args.data !== null ? args.data : {}) as Record<string, unknown>;
         // ADR 1038 D8 — a locale overlay's list-item states come from the base
         // (a drafted translation turns "waiting" into prose, which the cleaner drops).
-        const cleaned = sanitizeSectionOverlay(section.type, locale ? restoreItemStates(section.data, raw) : raw);
+        const cleaned = sanitizeSectionOverlay(section.type, locale ? restoreItemStates(section.data, raw, section.type) : raw);
         if (Object.keys(cleaned).length === 0) return { updated: false, reason: 'empty' };
         const settings = await getContentLanguageSettings(tenantId, orgId);
         const sections = page.sections.map((s) => {

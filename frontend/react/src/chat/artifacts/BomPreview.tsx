@@ -7,6 +7,7 @@
  */
 import { useTranslation } from 'react-i18next';
 import { Notice } from '../../ui/index.js';
+import { TableScroll } from '../../ui/DataTable.js';
 import { formatNumber } from '../../i18n/format.js';
 import type { ArtifactRendererProps } from './rendererRegistry.js';
 
@@ -52,11 +53,12 @@ export function BomPreview({ content }: ArtifactRendererProps): JSX.Element {
   const { t } = useTranslation('cad');
   const bom = parseBom(content);
   if (!bom) return <Notice variant="error">{t('bomInvalid')}</Notice>;
+  const bomLabel = t('bomCaption', { name: bom.modelName ? ` — ${bom.modelName}` : '' });
   return (
     <figure className="canvas-cad">
-      <div className="u-overflow-auto">
+      <TableScroll label={bomLabel}>
         <table className="data-table" data-density="compact">
-          <caption className="sr-only">{t('bomCaption', { name: bom.modelName ? ` — ${bom.modelName}` : '' })}</caption>
+          <caption className="sr-only">{bomLabel}</caption>
           <thead>
             <tr>
               <th scope="col">{t('bomColLabel')}</th>
@@ -99,7 +101,7 @@ export function BomPreview({ content }: ArtifactRendererProps): JSX.Element {
             </tr>
           </tfoot>
         </table>
-      </div>
+      </TableScroll>
       <figcaption className="canvas-cad__caption">
         {bom.modelName ? <span className="canvas-cad__name">{bom.modelName}</span> : null}
         <span className="canvas-cad__meta">{t('bomMeta', { parts: bom.totals.parts, units: bom.units })}</span>

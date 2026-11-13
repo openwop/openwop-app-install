@@ -24,7 +24,8 @@
  */
 
 import { resolveOne } from './featureToggles/service.js';
-import type { ResolvedAssignment, ToggleSubject } from './featureToggles/types.js';
+import type { ResolvedAssignment } from './featureToggles/types.js';
+import { scopeToggleSubject, type PlanExemptScope } from './operatorPlanExemption.js';
 import type { BundleScope } from './inMemorySurfaces.js';
 import { listOrgs, resolveEffectiveAccess, type Scope } from './accessControlService.js';
 import type { Logger } from '../observability/logger.js';
@@ -70,7 +71,7 @@ export const str = (v: unknown): string | undefined => (typeof v === 'string' &&
  *  routes' subject shape `{ tenantId, userId? }` so a `user`-bucketed / beta
  *  toggle resolves for the same principal the HTTP route would. Fail-closed:
  *  a resolver throw ⇒ `false` (feature treated as off). */
-export async function resolveFeatureToggle(featureId: string, scope: BundleScope): Promise<boolean> {
+export async function resolveFeatureToggle(featureId: string, scope: ToolAccessScope): Promise<boolean> {
   return Boolean((await resolveFeatureAccess(featureId, scope))?.enabled);
 }
 
@@ -78,13 +79,17 @@ export async function resolveFeatureToggle(featureId: string, scope: BundleScope
  *  ADR 0419 plan (ADR 0819 §1 — `resolveOne` is the access resolver), so a
  *  caller can tell the model WHY a feature is unavailable. Fail-closed: a
  *  resolver throw ⇒ null. */
-export async function resolveFeatureAccess(featureId: string, scope: BundleScope): Promise<ResolvedAssignment | null> {
-  const subject: ToggleSubject = {
-    tenantId: scope.tenantId,
-    ...(scope.actingUserId ? { userId: scope.actingUserId } : {}),
-  };
-  return resolveOne(featureId, subject).catch(() => null);
+export async function resolveFeatureAccess(featureId: string, scope: ToolAccessScope): Promise<ResolvedAssignment | null> {
+  // ADR 1108 — the route's subject shape PLUS the listed operator's plan
+  // exemption the run was created under (re-checked against the allowlist), so
+  // a tool does not paywall the person the HTTP route serves.
+  return resolveOne(featureId, scopeToggleSubject(scope)).catch(() => null);
 }
+
+/** The scope fields feature access reads — a `BundleScope` satisfies it, and so
+ *  does every feature file's local `ToolScope` (the runtime object is always the
+ *  composer's full scope). */
+export type ToolAccessScope = PlanExemptScope;
 
 /** The typed refusal for an unavailable feature: `not_entitled` when the toggle
  *  is on but the plan excludes it (ADR 0819 §1), `feature_unavailable` when the

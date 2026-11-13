@@ -13,11 +13,12 @@
 import type { Request } from 'express';
 import { OpenwopError } from '../../../types.js';
 import type { RouteDeps } from '../../../routes/registerAllRoutes.js';
-import { requireFeatureEnabled } from '../../featureRoute.js';
+import { launchSubjectOf, requireFeatureEnabled } from '../../featureRoute.js';
 import { authorizeClient } from '../routes.js';
 import { syncReportSchedule } from './schedule.js';
 import { startClientReportRun } from '../runLauncher.js';
 import { personalTenantOf } from '../../../host/requestSubject.js';
+import { planExemptStampOf } from '../../../host/operatorPlanExemption.js';
 import {
   createDefinition, createReport, getDefinition, getReport, listDefinitions, listReports, parseDefinition, resolvePeriod, updateDefinition,
 } from './reportService.js';
@@ -46,7 +47,7 @@ export function registerClientReportRoutes(deps: RouteDeps): void {
   app.post(`${BASE}/report-definitions`, async (req, res, next) => {
     try {
       const { tenantId, orgId, userId } = await gate(req, 'workspace:write');
-      const input = await parseDefinition(tenantId, orgId, req.body);
+      const input = await parseDefinition(tenantId, orgId, req.body, launchSubjectOf(req));
       const def = await createDefinition(tenantId, orgId, input, userId);
       await syncReportSchedule(def, userId); // D2 — one scheduler job per definition
       res.status(201).json({ definition: def });
@@ -69,7 +70,7 @@ export function registerClientReportRoutes(deps: RouteDeps): void {
       if (!def) throw notFound('Report definition', req.params.definitionId);
       const body = (req.body ?? {}) as Record<string, unknown>;
       const expected = typeof body.expectedVersion === 'number' ? body.expectedVersion : undefined;
-      const input = await parseDefinition(tenantId, orgId, body);
+      const input = await parseDefinition(tenantId, orgId, body, launchSubjectOf(req));
       const next = await updateDefinition(def, input, expected, userId);
       await syncReportSchedule(next, userId); // re-arm: the job pins the new version
       res.json({ definition: next });
@@ -84,7 +85,7 @@ export function registerClientReportRoutes(deps: RouteDeps): void {
       if (!def) throw notFound('Report definition', req.params.definitionId);
       const body = (req.body ?? {}) as Record<string, unknown>;
       const period = resolvePeriod(def.period.kind, { start: body.periodStart, end: body.periodEnd });
-      res.status(201).json({ report: await createReport(def, period, userId) });
+      res.status(201).json({ report: await createReport(def, period, userId, { subject: launchSubjectOf(req) }) });
     } catch (err) { next(err); }
   });
 
@@ -104,6 +105,9 @@ export function registerClientReportRoutes(deps: RouteDeps): void {
         ...(typeof body.periodStart === 'string' ? { periodStart: body.periodStart } : {}),
         ...(typeof body.periodEnd === 'string' ? { periodEnd: body.periodEnd } : {}),
         ...(personal ? { personalTenant: personal } : {}),
+        // CC-AUTH-3 / ADR 1108 — the listed operator's run keeps the exemption
+        // (re-checked downstream against the allowlist), as `POST /runs` does.
+        ...(planExemptStampOf(req) ? { planExempt: true as const } : {}),
       });
       res.status(202).json({ runId });
     } catch (err) { next(err); }

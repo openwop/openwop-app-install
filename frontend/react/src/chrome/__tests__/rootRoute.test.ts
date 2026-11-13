@@ -85,7 +85,9 @@ describe('shouldShowFrontPage', () => {
  * Sabotage that turns it red: return `o.authLoading || o.frontPageLoading`
  * (the first case fails); drop the `!o.frontPageEnabled &&` guard (same); drop
  * the auth term entirely (the pointer-off case fails, flashing an empty page
- * before the app shell takes over).
+ * before the app shell takes over); make the pointer term depend on the
+ * last-known pointer (`frontPageLoading && !frontPageEnabled`) or drop it (the
+ * pointer-resolving case fails).
  */
 describe('rootSplashPending', () => {
   const settled = { authLoading: false, frontPageLoading: false, frontPageEnabled: true };
@@ -97,6 +99,9 @@ describe('rootSplashPending', () => {
   it('splashes while the pointer itself is resolving', () => {
     expect(rootSplashPending({ ...settled, frontPageLoading: true, frontPageEnabled: false })).toBe(true);
     expect(rootSplashPending({ ...settled, frontPageLoading: true, authLoading: true, frontPageEnabled: false })).toBe(true);
+    // A re-resolving pointer whose last value was ON still splashes: the splash
+    // waits for the pointer, whatever it last said.
+    expect(rootSplashPending({ ...settled, frontPageLoading: true })).toBe(true);
   });
 
   it('pointer OFF: holds the splash until auth settles, so the app shell can take over without a flash', () => {

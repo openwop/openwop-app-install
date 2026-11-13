@@ -927,6 +927,29 @@ export const BACKGROUND_APP_JOBS: readonly BackgroundAppJob[] = [
     },
   },
   {
+    // CC-CHAIN-4b — retract the `wf.seed.*` OWNERSHIP rows of RETIRED chain
+    // aliases (the seeder skips them since CC-CHAIN-4 but never retracts). Same
+    // contract as `internal-seed-retract`: ownership only (the alias stays
+    // registered, so old runs replay and fork), edited or scheduled copies kept,
+    // idempotent over a partial run, never "done" on an empty corpus. Its own id
+    // because `internal-seed-retract` is already marked done where it ran.
+    id: 'retired-alias-seed-retract',
+    async run(): Promise<{ complete: boolean }> {
+      const { retractRetiredAliasSeedOwnership } = await import('./seedWorkflows.js');
+      const { listChains } = await import('./workflowChainPackLoader.js');
+      const r = await retractRetiredAliasSeedOwnership();
+      log.info('app_bg_job_retired_alias_seed_retract', { ...r });
+      const corpusLoaded = listChains().length > 0;
+      if (!corpusLoaded) {
+        log.error('app_bg_job_retired_alias_seed_retract_no_corpus', { note: 'the chain corpus is empty — not marked done; the next boot retries' });
+      } else if (r.internalSeedIds === 0) {
+        log.warn('app_bg_job_retired_alias_seed_retract_vacuous', { note: 'no retired zero-config alias in the loaded corpus — nothing to retract' });
+      }
+      if (r.failed > 0) log.error('app_bg_job_retired_alias_seed_retract_incomplete', { failed: r.failed, note: 'not marked done — the next boot resumes it' });
+      return { complete: r.failed === 0 && corpusLoaded };
+    },
+  },
+  {
     // ADR 1045 CHAN-F14 — rewrite stored legacy env-key ids (`bearer:<8>`) to the
     // id the same key presents today. Off unless OPENWOP_LEGACY_BEARER_REWRITE is
     // `report` (counts only, stays pending) or `apply` (rewrites; done when no row
@@ -938,6 +961,26 @@ export const BACKGROUND_APP_JOBS: readonly BackgroundAppJob[] = [
       if (mode === null) return { complete: false };
       const r = await runLegacyBearerIdRewrite(storage, mode);
       return { complete: mode === 'apply' && r.conflicts === 0 && r.failures === 0 };
+    },
+  },
+  {
+    // ADR 1112 DG-1112-6 / RI-1112-1 — a stored locale overlay whose item states differ
+    // from its base (written before ADR 1038 D8 / ADR 1112 D6 aligned them) keeps serving
+    // its own numbers until someone saves the page; a serve-time restore would break the
+    // RFC 0103 §C byte-identical merge. This puts the base's states back, the write path's
+    // own `restoreItemStates`, the same test the CMS integrity gauge counts. Off unless
+    // OPENWOP_CMS_OVERLAY_REALIGN is `report` (counts, stays pending) or `apply` (CAS per
+    // page; done when nothing conflicted and no tenant was truncated). Idempotent: an
+    // aligned page no longer matches.
+    id: 'cms-overlay-realign',
+    async run(): Promise<{ complete: boolean }> {
+      const v = process.env.OPENWOP_CMS_OVERLAY_REALIGN?.trim().toLowerCase();
+      const mode = v === 'report' || v === 'apply' ? v : null;
+      if (mode === null) return { complete: false };
+      const { realignStoredOverlays } = await import('../features/cms/cmsService.js');
+      const r = await realignStoredOverlays(mode);
+      log.info('app_bg_job_cms_overlay_realign', { mode, ...r });
+      return { complete: mode === 'apply' && r.conflicts === 0 && r.truncatedTenants === 0 };
     },
   },
 ];

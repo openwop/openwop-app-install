@@ -7,6 +7,7 @@ export const messages = {
   errCanonicalSourceOutput: "The saved source output binding is invalid. Reload the workflow before saving.",
   defaultSourceOutput: "Default output",
   missingSourceOutput: "Missing output: {{name}}",
+  undeclaredSourceOutput: "{{name}} (not declared by the node)",
   defaultSourceOutputHelp: "Uses the output property when present; otherwise passes the source output map.",
   sourceOutputDescription: "Source output: {{name}} ({{type}})",
 

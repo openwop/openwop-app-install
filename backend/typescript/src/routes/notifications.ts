@@ -263,6 +263,41 @@ export function registerNotificationRoutes(app: Express, deps: Deps): void {
     }
   });
 
+  // ADR 1114 (#5868) — `:archive-resolved` archives every request in the
+  // caller's scope whose step is over: stamped `metadata.resolution` by the
+  // retire subscriber, or (rows from before it) whose interrupt is resolved or
+  // gone. A row that names no interrupt is not a request and is left alone.
+  app.post(new RegExp(`^${BASE.replace(/\//g, '\\/')}:archive-resolved$`), async (req, res, next) => {
+    try {
+      const tenantId = resolveTenantFromReq(req);
+      if (!tenantId) {
+        res.json({ updated: 0 });
+        return;
+      }
+      const recipient = recipientFilter(req);
+      const rows = await storage.listNotifications({
+        tenantId,
+        ...(recipient ? { recipientUserId: recipient, recipientRoles: await callerTenantRoles(req) } : {}),
+        includeArchived: false,
+        limit: 500,
+      });
+      const now = new Date().toISOString();
+      let updated = 0;
+      for (const n of rows) {
+        if (!n.interruptId) continue;
+        let over = n.metadata?.resolution !== undefined;
+        if (!over) {
+          const interrupt = await storage.getInterrupt(n.interruptId);
+          over = !interrupt || interrupt.resolvedAt !== undefined;
+        }
+        if (over && await storage.updateNotificationStatus(n.notificationId, 'archived', now)) updated++;
+      }
+      res.json({ updated });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // `:bulk-read` marks an EXPLICIT id set read (the tab's loaded rows) — the
   // client owns the tab predicate, the server only enforces ownership per row.
   // Silently skips rows that vanished or are not the caller's (`updated` tells

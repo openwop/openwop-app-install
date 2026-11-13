@@ -41,7 +41,7 @@ export function countCmsIntegrity(pages: readonly Page[]): CmsIntegrityCounts {
       if (section.type === 'hero' && isObj(data.flow) && data.visual !== 'flow') dormantHeroFlows += 1;
       for (const overlay of Object.values(section.localizations ?? {})) {
         if (!isObj(overlay)) continue;
-        if (JSON.stringify(restoreItemStates(data, overlay)) !== JSON.stringify(overlay)) {
+        if (JSON.stringify(restoreItemStates(data, overlay, section.type)) !== JSON.stringify(overlay)) {
           staleItemOverlays += 1;
           stalePages.add(`${page.tenantId}\u0000${page.pageId}`);
         }

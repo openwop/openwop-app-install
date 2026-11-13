@@ -11,7 +11,7 @@
  *
  * @see docs/adr/0941-campaign-studio-program-and-canonical-campaign.md
  */
-import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { Button } from '../../ui/Button.js';
@@ -19,12 +19,12 @@ import { Notice } from '../../ui/Notice.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { InlineState } from '../../ui/InlineState.js';
 import { Modal } from '../../ui/Modal.js';
-import { SelectField } from '../../ui/Field.js';
+import { SelectField, TextField } from '../../ui/Field.js';
 import { useFeatureVisible } from '../../featureToggles/FeatureAccessContext.js';
 import { useOrgSelection } from '../../ui/useOrgSelection.js';
 import { formatCurrencyMinor, formatDateTime, formatNumber } from '../../i18n/format.js';
 import { ArrowLeftIcon, MegaphoneIcon, PackageIcon, SparklesIcon } from '../../ui/icons/index.js';
-import { listProducts, type Product } from '../commerce/commerceClient.js';
+import { getProductsByIds, listProductsPage, type Product } from '../commerce/commerceClient.js';
 import { CampaignLedgerSection } from './CampaignLedgerSection.js';
 import { StatusChip } from './CampaignStatusChip.js';
 import {
@@ -248,20 +248,53 @@ function ProductsSection({ t, campaign, links, linksFailed, onSaved, onRetry }: 
 type RoleChoice = '' | CampaignProductRef['role'];
 
 function ProductPicker({ t, campaign, onClose, onSaved }: { t: TFn; campaign: MarketingCampaign; onClose: () => void; onSaved: (c: MarketingCampaign) => void }): JSX.Element {
-  const [products, setProducts] = useState<Product[] | null>(null);
+  const [found, setFound] = useState<Product[] | null>(null);
+  const [linked, setLinked] = useState<Product[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | undefined>(undefined);
+  const [loadingMore, setLoadingMore] = useState(false);
+  // The search a page belongs to: a newer search retires an older page's answer.
+  const searchSeq = useRef(0);
+  const [query, setQuery] = useState('');
+  const [debounced, setDebounced] = useState('');
   const [loadError, setLoadError] = useState<string | null>(null);
   const [choice, setChoice] = useState<Record<string, RoleChoice>>(() =>
     Object.fromEntries((campaign.productRefs ?? []).map((r) => [r.productId, r.role])));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  useEffect(() => { const timer = setTimeout(() => setDebounced(query.trim()), 250); return () => clearTimeout(timer); }, [query]);
+  // The products already linked lead the list, whatever the search (ADR 1110 P2: they
+  // are read by id, not found by scanning the catalog).
   useEffect(() => {
     let live = true;
-    // The catalog of the CAMPAIGN's org: a product of another client cannot be linked.
-    void listProducts(campaign.orgId)
-      .then((p) => { if (live) setProducts(p); })
-      .catch(() => { if (live) { setProducts([]); setLoadError(t('productsCatalogFailed')); } });
+    const ids = (campaign.productRefs ?? []).map((r) => r.productId);
+    void getProductsByIds(campaign.orgId, ids).then((p) => { if (live) setLinked(p); }).catch(() => { /* still listed by search */ });
     return () => { live = false; };
-  }, [campaign.orgId, t]);
+  }, [campaign.orgId, campaign.productRefs]);
+  // The catalog of the CAMPAIGN's org, a page at a time: a product of another client
+  // cannot be linked, and a large catalog is searched, never loaded whole.
+  useEffect(() => {
+    let live = true;
+    searchSeq.current += 1;
+    setFound(null); setLoadError(null);
+    void listProductsPage(campaign.orgId, { ...(debounced ? { q: debounced } : {}), limit: 20 })
+      .then((page) => { if (live) { setFound(page.products); setNextCursor(page.nextCursor); } })
+      .catch(() => { if (live) { setFound([]); setNextCursor(undefined); setLoadError(t('productsCatalogFailed')); } });
+    return () => { live = false; };
+  }, [campaign.orgId, debounced, t]);
+  const more = (): void => {
+    if (!nextCursor || loadingMore) return;
+    const mine = searchSeq.current;
+    setLoadingMore(true);
+    void listProductsPage(campaign.orgId, { ...(debounced ? { q: debounced } : {}), limit: 20, cursor: nextCursor })
+      .then((page) => {
+        if (mine !== searchSeq.current) return; // a newer search replaced this one
+        setFound((cur) => [...(cur ?? []), ...page.products.filter((p) => !(cur ?? []).some((c) => c.productId === p.productId))]);
+        setNextCursor(page.nextCursor);
+      })
+      .catch(() => { if (mine === searchSeq.current) setLoadError(t('productsCatalogFailed')); })
+      .finally(() => setLoadingMore(false));
+  };
+  const products = found === null ? null : [...linked, ...found.filter((p) => !linked.some((l) => l.productId === p.productId))];
   const refs: CampaignProductRef[] = Object.entries(choice)
     .filter((e): e is [string, CampaignProductRef['role']] => e[1] === 'primary' || e[1] === 'secondary')
     .map(([productId, role]) => ({ productId, role }));
@@ -277,13 +310,15 @@ function ProductPicker({ t, campaign, onClose, onSaved }: { t: TFn; campaign: Ma
       <h2 className="u-mt-0">{t('productsPickerTitle')}</h2>
       <p className="muted">{t('productsPickerHint')}</p>
       <form onSubmit={(e) => { e.preventDefault(); if (!busy) void save(); }}>
+        <TextField type="search" label={t('productsSearchLabel')} value={query} onChange={(e) => setQuery(e.target.value)}
+          placeholder={t('productsSearchPlaceholder')} />
         {products === null ? <InlineState kind="loading" />
-          : products.length === 0 && !loadError ? <InlineState kind="empty" message={t('productsCatalogEmpty')} />
+          : products.length === 0 && !loadError ? <InlineState kind="empty" message={debounced ? t('productsSearchEmpty') : t('productsCatalogEmpty')} />
           : (
             <ul className="u-list-none u-m-0 u-p-0">
               {products.map((p) => (
                 <li key={p.productId} className="list-row">
-                  <span className="list-row-name">{p.name}</span>
+                  <span className="list-row-name">{p.name}{linked.some((l) => l.productId === p.productId) ? <> <span className="chip">{t('productsLinkedChip')}</span></> : null}</span>
                   <SelectField label={t('productsRoleFor', { name: p.name })} value={choice[p.productId] ?? ''} className="u-mb-0"
                     onChange={(e) => setChoice((cur) => ({ ...cur, [p.productId]: e.target.value as RoleChoice }))}>
                     <option value="">{t('productRole_none')}</option>
@@ -294,6 +329,7 @@ function ProductPicker({ t, campaign, onClose, onSaved }: { t: TFn; campaign: Ma
               ))}
             </ul>
           )}
+        {nextCursor ? <Button variant="secondary" size="sm" disabled={loadingMore} onClick={more}>{t('productsLoadMore')}</Button> : null}
         {primaries > 1 ? <p className="u-fs-13" role="alert">{t('productsOnePrimary')}</p> : null}
         <div className="action-bar u-flex u-gap-2 u-justify-end">
           <Button variant="secondary" size="sm" disabled={busy} onClick={onClose}>{t('common:cancel')}</Button>

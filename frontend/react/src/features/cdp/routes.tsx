@@ -12,9 +12,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Customer Data Platform',
-      label: 'CDP', labelKey: 'cdpLabel',
+      labelKey: 'cdpLabel',
       icon: UsersIcon,
-      hint: 'Resolve a customer by any identifier', hintKey: 'cdpHint',
+      hintKey: 'cdpHint',
       featureId: 'cdp',
     },
   },

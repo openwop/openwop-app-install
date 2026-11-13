@@ -12,16 +12,25 @@
  * test until someone classifies it — complete-by-construction, rather than a
  * grep for a fence that a new spelling evades.
  *
- * HONEST CEILING (wave 61): the MODEL_FACING check is a substring presence of
- * `toModelToolResult(` in the caller's source, so a comment naming it would
- * satisfy it. That is the limit of a source ratchet; the fence's behaviour is
- * covered where it is applied (agentDispatch / the voice tool bridge tests).
- * The anti-vacuity case now pins the found caller set to EXACTLY the
- * classified rows (MEASURED 2026-10-23: 12 = 12), not a `> 4` floor.
+ * ADR 0999 D2 widened the population to both seam spellings (`executeTool`, and
+ * the provider dispatcher's `onToolUse`), and TOC2CD-14 made the two provider
+ * dispatchers model-facing. Each MODEL_FACING row names the ONE fence entry point
+ * it must call (`FENCE_OF`), and the check reads the source with comments
+ * stripped (`helpers/stripComments`), so a docblock naming the fence no longer
+ * satisfies it (wave 107; it did before). It is still a source ratchet: it proves
+ * the call is in the code, not what the call does. The fence's behaviour is
+ * covered where it is applied (agentDispatch, the voice tool bridge, the
+ * toc2cd14-* tests). The anti-vacuity case pins the found caller set to EXACTLY
+ * the classified rows (MEASURED at 356b3109f: 17 = 17).
+ *
+ * Red when (probe-witnessed, w107): a model-facing caller drops its fence call or
+ * leaves it only in a comment; a new file names `executeTool` or `onToolUse`
+ * without a row; a classified file stops naming the seam.
  */
 import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { stripComments } from './helpers/stripComments.js';
 
 const SRC = join(process.cwd(), 'src');
 
@@ -68,6 +77,21 @@ const CLASSIFIED: Record<string, 'MODEL_FACING' | 'PROGRAMMATIC'> = {
   // The compaction seam — names `onToolUse` in prose; transforms a result but
   // never builds a model message (fencing is deliberately NOT folded into it).
   'host/toolResultTransform.ts': 'PROGRAMMATIC',
+};
+
+/**
+ * MODEL_FACING file → the fence entry point of `host/toModelToolResult.ts` it
+ * must call. One spelling per file: accepting any of the three would let a file
+ * lose its own fence while an unrelated call to another one stays.
+ */
+const FENCE_OF: Record<string, 'toModelToolResult(' | 'toModelWorkflowToolResult(' | 'fenceThrownToolError('> = {
+  'host/agentDispatch.ts': 'toModelToolResult(',
+  'features/voice/realtime/toolBridge.ts': 'toModelToolResult(',
+  // ADR 0999 D2 — the workflow-as-tool lane.
+  'bootstrap/nodes.ts': 'toModelWorkflowToolResult(',
+  // TOC2CD-14 — the import-free leaf the provider dispatchers use.
+  'providers/dispatchAnthropicTools.ts': 'fenceThrownToolError(',
+  'providers/dispatchMiniMaxTools.ts': 'fenceThrownToolError(',
 };
 
 function walk(d: string): string[] {
@@ -117,16 +141,13 @@ describe('RFC 0137 §F1 — every executeTool caller is classified', () => {
   });
 
   it('every MODEL_FACING caller actually routes through toModelToolResult', () => {
-    for (const [file, kind] of Object.entries(CLASSIFIED)) {
-      if (kind !== 'MODEL_FACING') continue;
-      const src = readFileSync(join(SRC, file), 'utf8');
-      // ADR 0999 D2 — either fence entry point of the ONE module that owns the
-      // RFC 0021 threat model (`host/toModelToolResult.ts`).
-      expect(
-        // TOC2CD-14: `fenceThrownToolError` is the import-free leaf the provider dispatchers use.
-        src.includes('toModelToolResult(') || src.includes('toModelWorkflowToolResult(') || src.includes('fenceThrownToolError('),
-        `${file} is MODEL_FACING but never calls toModelToolResult / toModelWorkflowToolResult`,
-      ).toBe(true);
+    // Every MODEL_FACING row names its fence, and nothing else does.
+    const modelFacing = Object.entries(CLASSIFIED).filter(([, k]) => k === 'MODEL_FACING').map(([f]) => f);
+    expect(modelFacing.sort()).toEqual(Object.keys(FENCE_OF).sort());
+    for (const file of modelFacing) {
+      // Comments stripped: prose naming the fence is not a call to it.
+      const code = stripComments(readFileSync(join(SRC, file), 'utf8'));
+      expect(code, `${file} is MODEL_FACING but never calls ${FENCE_OF[file]}`).toContain(FENCE_OF[file]);
     }
   });
 

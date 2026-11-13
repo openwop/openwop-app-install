@@ -342,3 +342,18 @@ export function resolveBrandFromEnv(
     },
   };
 }
+
+/**
+ * The `<link rel="preconnect">` hints index.html carries for its font stylesheet
+ * (`{{BRAND_FONTS_PRECONNECT}}`). A preconnect opens a TLS connection whether or not
+ * anything is fetched from it, so the Google hosts are hinted ONLY when `fontsHref`
+ * is the Google Fonts stylesheet. A deployment that self-hosts its fonts
+ * (a same-origin `VITE_BRAND_FONTS_HREF`) gets no hint and contacts no third party.
+ */
+export function fontPreconnectLinks(fontsHref: string): string {
+  let host: string;
+  try { host = new URL(fontsHref).host; } catch { return ''; }
+  if (host !== 'fonts.googleapis.com') return '';
+  return '<link rel="preconnect" href="https://fonts.googleapis.com" />\n'
+    + '    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />';
+}

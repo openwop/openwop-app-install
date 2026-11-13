@@ -30,13 +30,12 @@
  */
 import { registerFeatureAgentTool } from '../../../host/agentToolProvider.js';
 import type { BundleScope } from '../../../host/inMemorySurfaces.js';
-import { resolveOne } from '../../../host/featureToggles/service.js';
 import { listOrgs, resolveEffectiveAccess } from '../../../host/accessControlService.js';
 import type { Scope } from '../../../host/accessControlService.js';
 import { getApproval } from '../../../host/approvalService.js';
 import { OpenwopError } from '../../../types.js';
 import { listPurchases, getPurchase, trackPurchase, buildPurchaseDraft, checkoutPurchase } from './ucpBuyerService.js';
-import { untrustedToolError } from '../../../host/agentToolKit.js';
+import { untrustedToolError, resolveFeatureToggle, type ToolAccessScope } from '../../../host/agentToolKit.js';
 
 const BUYER_TOGGLE = 'commerce-ucp-buyer';
 const NS = 'openwop:feature.commerce.buyer.nodes.';
@@ -61,9 +60,9 @@ const toolError = (error: string, message: string): ToolResult => ({ content: JS
 const isResult = (v: unknown): v is ToolResult => typeof (v as { content?: unknown }).content === 'string';
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 
-async function buyerEnabled(tenantId: string, userId?: string): Promise<boolean> {
-  const a = await resolveOne(BUYER_TOGGLE, { tenantId, ...(userId ? { userId } : {}) }).catch(() => null);
-  return a?.enabled === true;
+async function buyerEnabled(scope: ToolAccessScope): Promise<boolean> {
+  // ADR 1108 — the kit's subject: the route's shape plus the operator exemption.
+  return resolveFeatureToggle(BUYER_TOGGLE, scope);
 }
 
 const INTERNAL = new Set(['tenantId', 'createdBy']);
@@ -99,7 +98,7 @@ export function registerCommerceBuyerAgentTools(): void {
     },
     async run(input, scope) {
       if (!scope.actingUserId) return empty('No acting user on this turn — purchase access is resolved per signed-in user.');
-      if (!(await buyerEnabled(scope.tenantId, scope.actingUserId))) return empty('UCP buyer (agent purchasing) is not enabled for this workspace.');
+      if (!(await buyerEnabled(scope))) return empty('UCP buyer (agent purchasing) is not enabled for this workspace.');
       const org = await resolveOrg(scope, input.orgId, 'workspace:read');
       if (isResult(org)) return org;
       const purchases = (await listPurchases(scope.tenantId, org.orgId)).map(project);
@@ -125,7 +124,7 @@ export function registerCommerceBuyerAgentTools(): void {
     },
     async run(input, scope) {
       if (!scope.actingUserId) return empty('No acting user on this turn — purchase access is resolved per signed-in user.');
-      if (!(await buyerEnabled(scope.tenantId, scope.actingUserId))) return empty('UCP buyer (agent purchasing) is not enabled for this workspace.');
+      if (!(await buyerEnabled(scope))) return empty('UCP buyer (agent purchasing) is not enabled for this workspace.');
       const org = await resolveOrg(scope, input.orgId, 'workspace:read');
       if (isResult(org)) return org;
       const purchaseId = str(input.purchaseId);
@@ -187,7 +186,7 @@ export function registerCommerceBuyerAgentTools(): void {
     },
     async run(input, scope) {
       if (!scope.actingUserId) return toolError('acting_user_required', 'A cart can only be prepared from a human-initiated turn.');
-      if (!(await buyerEnabled(scope.tenantId, scope.actingUserId))) return toolError('feature_disabled', 'UCP buyer (agent purchasing) is not enabled for this workspace.');
+      if (!(await buyerEnabled(scope))) return toolError('feature_disabled', 'UCP buyer (agent purchasing) is not enabled for this workspace.');
       const org = await resolveOrg(scope, input.orgId, 'workspace:write');
       if (isResult(org)) return org;
       try {
@@ -236,7 +235,7 @@ export function registerCommerceBuyerAgentTools(): void {
     },
     async run(input, scope) {
       if (!scope.actingUserId) return toolError('acting_user_required', 'Checkout can only be requested from a human-initiated turn.');
-      if (!(await buyerEnabled(scope.tenantId, scope.actingUserId))) return toolError('feature_disabled', 'UCP buyer (agent purchasing) is not enabled for this workspace.');
+      if (!(await buyerEnabled(scope))) return toolError('feature_disabled', 'UCP buyer (agent purchasing) is not enabled for this workspace.');
       const org = await resolveOrg(scope, input.orgId, 'workspace:write');
       if (isResult(org)) return org;
       const purchaseId = str(input.purchaseId);

@@ -102,6 +102,8 @@ export async function deriveRecordedResolutions(input: {
   suspend: ReturnType<typeof getSuspendManager>;
   run: RunRecord;
   suspendedNodeIds: readonly string[];
+  /** ADR 1058 — a looping fork's loopback visit per node (absent = 0). */
+  visitOf?: (nodeId: string) => number;
 }): Promise<DerivedResolution[]> {
   const { storage, suspend, run, suspendedNodeIds } = input;
   if (run.forkMode !== 'replay' || !run.parentRunId || suspendedNodeIds.length === 0) return [];
@@ -133,7 +135,10 @@ export async function deriveRecordedResolutions(input: {
     const sourceValue = unwrapDerived(sourceRow?.resolvedValue);
     const derivedValue = { [DERIVED_MARKER]: run.parentRunId, value: sourceValue ?? null };
     // Deterministic, so a redelivery finds the row it already derived.
-    const derivedId = createHash('sha256').update(`replay-derived\0${run.runId}\0${nodeId}`).digest('hex').slice(0, 32);
+    // ADR 1058 — past visit 0 the visit joins the id, so a later visit of a
+    // looped gate never finds an earlier visit's derived row (unchanged at 0).
+    const visit = input.visitOf?.(nodeId) ?? 0;
+    const derivedId = createHash('sha256').update(`replay-derived\0${run.runId}\0${nodeId}${visit > 0 ? `\0v${visit}` : ''}`).digest('hex').slice(0, 32);
     let conflict = false;
     let row = await storage.getInterrupt(derivedId);
     const open = row ? null : await storage.getInterruptByNode(run.runId, nodeId);

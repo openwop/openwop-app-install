@@ -22,10 +22,17 @@ import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createLink } from '../src/features/sharing/sharingService.js';
-import { buildProductFeed } from '../src/features/campaign-connectors/catalogFeed.js';
+import { feedBatches, type ProductFeed } from '../src/features/campaign-connectors/catalogFeed.js';
 import { isPubliclyListed, refuseUnlistedProduct, type Product, type Order } from '../src/features/commerce/commerceService.js';
 import type { Quote } from '../src/features/commerce/quotes.js';
 import type { Contact } from '../src/features/crm/contactsService.js';
+
+/** ADR 1110 P3 — the whole feed of a small test catalog, collected from its batches. */
+async function collectFeed(tenantId: string, orgId: string, base: string): Promise<ProductFeed> {
+  const out: ProductFeed = { items: [], excluded: [] };
+  for await (const b of feedBatches(tenantId, orgId, base)) { out.items.push(...b.items); out.excluded.push(...b.excluded); }
+  return out;
+}
 
 function portOf(s: { address(): string | AddressInfo | null }): number {
   const a = s.address();
@@ -133,7 +140,7 @@ describe('ADR 1098 — unlisted products, route behaviour', () => {
     const { owner, orgId, tenantId } = await shopOwner();
     const hidden = await owner.post<Product>(c(orgId, '/products'), { type: 'service', name: 'Retainer', price: 2500, currency: 'USD', unlisted: true });
     const shown = await owner.post<Product>(c(orgId, '/products'), { type: 'service', name: 'Consult', price: 100, currency: 'USD' });
-    const feed = await buildProductFeed(tenantId, orgId, 'https://shop.example');
+    const feed = await collectFeed(tenantId, orgId, 'https://shop.example');
     const text = JSON.stringify(feed);
     expect(text).not.toContain(hidden.body.productId);
     expect(text).toContain(shown.body.productId);
@@ -195,7 +202,8 @@ function walk(dir: string, out: string[] = []): string[] {
   return out;
 }
 describe('ADR 1098 — every product reader is classified', () => {
-  const readers = walk(SRC).filter((p) => /\b(listProducts|getProduct|getProductInTenant)\s*\(/.test(readFileSync(p, 'utf8')))
+  // ADR 1110 adds the paged readers; a file reading through them is a reader too.
+  const readers = walk(SRC).filter((p) => /\b(listProducts|listProductsPage|getProduct|getProducts|getProductInTenant|iterateCatalog|collectCatalog)\s*\(/.test(readFileSync(p, 'utf8')))
     .map((p) => relative(SRC, p).split('\\').join('/')).sort();
   it('finds the readers it expects (the census is not vacuous)', () => {
     expect(readers.length).toBeGreaterThan(15);

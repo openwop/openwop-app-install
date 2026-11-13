@@ -41,8 +41,10 @@ export interface BudgetPlan {
   expectedConversions: number;
   confidence: 'high' | 'medium' | 'low';
   platforms: PlatformPlan[];
-  /** Even weekly pacing over the horizon (minor units per week) + each week's
-   *  share of the expected conversions (largest-remainder; sums exactly). */
+  /** Weekly pacing over the horizon, proportional to the days in each week
+   *  (a partial last week gets a partial share — CC-PERF-1): minor units per
+   *  week + each week's share of the expected conversions. Each column sums
+   *  exactly; remainders go to the earliest weeks. */
   pacing: Array<{ week: number; budgetMinor: number; expectedConversions: number }>;
   /** English prose mirror of `noteCode` — kept for API back-compat only. */
   note?: string;
@@ -132,18 +134,29 @@ export function planBudget(records: CampaignPerformanceRecord[], goal: BudgetGoa
   const confidence: BudgetPlan['confidence'] = totalDays >= 60 ? 'high' : totalDays >= 21 ? 'medium' : 'low';
 
   const weeks = Math.max(1, Math.ceil(goal.horizonDays / 7));
-  // Even pacing: floor share per week, BOTH remainders to the EARLIEST weeks
-  // (FU-DATA-5 — budget used to lump its remainder on the LAST week while
-  // conversions front-loaded theirs, skewing the implied weekly CPA at the
-  // ends). Each column still sums EXACTLY to its total.
-  const perWeek = Math.floor(goal.totalBudgetMinor / weeks);
-  const budgetRemainder = goal.totalBudgetMinor % weeks;
-  const convPerWeek = Math.floor(expected / weeks);
-  const convRemainder = expected % weeks;
+  // Pacing ∝ days in each weekly bucket (CC-PERF-1): a 30-day horizon is
+  // 7,7,7,7,2 days, so week 5 carries 2/7 of a full week, not an even 1/5
+  // share. Floor each share in integer minor units, then BOTH remainders go
+  // to the EARLIEST weeks (FU-DATA-5 — budget used to lump its remainder on
+  // the LAST week while conversions front-loaded theirs, skewing the implied
+  // weekly CPA at the ends). Each column still sums EXACTLY to its total; a
+  // horizon that is a whole number of weeks paces evenly, as before.
+  const dayWeights = Array.from({ length: weeks }, (_, i) => Math.min(7, Math.max(0, goal.horizonDays - 7 * i)));
+  const weightSum = dayWeights.reduce((s, d) => s + d, 0);
+  const weights = weightSum > 0 ? dayWeights : dayWeights.map(() => 1);
+  const totalWeight = weightSum > 0 ? weightSum : weeks;
+  const spread = (total: number): number[] => {
+    const shares = weights.map((w) => Math.floor((total * w) / totalWeight));
+    let residual = total - shares.reduce((s, v) => s + v, 0);
+    for (let i = 0; residual > 0; i = (i + 1) % weeks, residual -= 1) shares[i] = shares[i]! + 1;
+    return shares;
+  };
+  const budgetShares = spread(goal.totalBudgetMinor);
+  const convShares = spread(expected);
   const pacing = Array.from({ length: weeks }, (_, i) => ({
     week: i + 1,
-    budgetMinor: perWeek + (i < budgetRemainder ? 1 : 0),
-    expectedConversions: convPerWeek + (i < convRemainder ? 1 : 0),
+    budgetMinor: budgetShares[i]!,
+    expectedConversions: convShares[i]!,
   }));
 
   return { verdict, impliedCpaMinor, blendedHistoricalCpaMinor: blended, expectedConversions: expected, confidence, platforms, pacing };

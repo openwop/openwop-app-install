@@ -16,7 +16,9 @@ export interface ExportableFeature { featureId: string; label: string; access: '
 interface ExportPage {
   featureId: string; readOnly: true; access: string; exportedAt: string;
   sections: Record<string, unknown[]>;
-  page?: { offset: number; limit: number; totals: Record<string, number>; nextOffset: number | null };
+  /** `nextCursor` (ADR 1110 P3) is set by a feature that pages itself; the client walks it
+   *  instead of `nextOffset`, which such a feature leaves null. */
+  page?: { offset: number; limit: number; totals: Record<string, number>; nextOffset: number | null; nextCursor?: string };
 }
 
 async function readJson<T>(res: Response, what: string): Promise<T> {
@@ -35,16 +37,18 @@ export async function listExportableFeatures(): Promise<ExportableFeature[]> {
 }
 
 /** Every page of one feature's export, merged into ONE JSON document. The server
- *  pages each section (bounded responses); this walks `nextOffset` to the end. */
+ *  pages each section (bounded responses); this walks `nextCursor` (a feature that pages
+ *  itself, ADR 1110) or `nextOffset` to the end. */
 export async function fetchFeatureExport(featureId: string): Promise<ExportPage> {
   const url = `${root}/${encodeURIComponent(featureId)}`;
   let merged: ExportPage | null = null;
-  let offset: number | null = 0;
-  for (let guard = 0; offset !== null && guard < 1000; guard += 1) {
-    const page: ExportPage = await readJson<ExportPage>(await fetch(`${url}?offset=${offset}`, fetchOpts({ headers: authedHeaders() })), 'export');
+  let next: string | null = 'offset=0';
+  for (let guard = 0; next !== null && guard < 5000; guard += 1) {
+    const page: ExportPage = await readJson<ExportPage>(await fetch(`${url}?${next}`, fetchOpts({ headers: authedHeaders() })), 'export');
     if (!merged) merged = { ...page, sections: { ...page.sections } };
     else for (const [k, rows] of Object.entries(page.sections)) merged.sections[k] = [...(merged.sections[k] ?? []), ...rows];
-    offset = page.page?.nextOffset ?? null;
+    next = page.page?.nextCursor ? `cursor=${encodeURIComponent(page.page.nextCursor)}`
+      : page.page?.nextOffset !== null && page.page?.nextOffset !== undefined ? `offset=${page.page.nextOffset}` : null;
   }
   if (!merged) throw new Error('export returned no page');
   const { page: _page, ...doc } = merged;

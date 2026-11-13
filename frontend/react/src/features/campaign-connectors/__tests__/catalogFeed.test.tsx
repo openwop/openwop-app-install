@@ -61,6 +61,13 @@ describe('CatalogFeedCard (ADR 0952 D6)', () => {
     expect((await screen.findByLabelText(/feed url/i) as HTMLInputElement).value).toBe(URL1);
   });
 
+  it('ADR 1110 P3 — a capped count reads as a floor, and the left-out total is the server\'s', async () => {
+    getCatalogFeed.mockResolvedValue(feed({ items: 10000, itemsCapped: true, excludedTotal: 340 }));
+    render(<CatalogFeedCard orgId="org-1" />);
+    expect(await screen.findByText(/More than 10000 items are in the feed/)).toBeTruthy();
+    expect(screen.getByText(/340 products are left out/)).toBeTruthy();
+  });
+
   it('rotating asks first and does nothing on cancel', async () => {
     getCatalogFeed.mockResolvedValue(feed({ enabled: true, feedUrl: URL1 }));
     confirmMock.mockResolvedValueOnce(false).mockResolvedValueOnce(true);

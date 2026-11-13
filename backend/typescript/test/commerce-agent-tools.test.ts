@@ -20,12 +20,13 @@ import { createAgentToolProvider, builtinAgentToolIds } from '../src/host/agentT
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createOrg } from '../src/host/accessControlService.js';
-import { createProduct } from '../src/features/commerce/commerceService.js';
+import { createOrder, createProduct } from '../src/features/commerce/commerceService.js';
 import { getQuote } from '../src/features/commerce/quotes.js';
 import { getPurchase } from '../src/features/commerce/ucpBuyer/ucpBuyerService.js';
 import {
   COMMERCE_STORE_TOOL_IDS,
   COMMERCE_LIST_PRODUCTS_TOOL_ID,
+  COMMERCE_LIST_ORDERS_TOOL_ID,
   COMMERCE_CREATE_QUOTE_TOOL_ID,
 } from '../src/features/commerce/agentTools.js';
 import {
@@ -92,6 +93,36 @@ describe('CFP-1 — Store Assistant reads gate on toggle + acting user', () => {
     expect(out.isError).toBeFalsy();
     const body = parse(out.content) as { products: { productId: string }[] };
     expect(body.products.some((p) => p.productId === productId)).toBe(true);
+  });
+
+  it('ADR 1110 P2 — list-products pages: 50 at a time, then `nextCursor` reads the rest', async () => {
+    // Its own tenant: the other cases rely on this suite's tenant having exactly one org.
+    const BIG = `${TENANT}-paging`;
+    const big = await createOrg({ tenantId: BIG, createdBy: 'u-1', name: 'Big', ownerSubject: 'u-1' });
+    const pager = () => createAgentToolProvider({ tenantId: BIG, actingUserId: 'u-1' });
+    for (let i = 0; i < 55; i += 1) await createProduct({ tenantId: BIG, orgId: big.orgId, createdBy: 'u-1', type: 'digital', name: `Item ${String(i).padStart(2, '0')}`, price: 1, currency: 'USD' });
+    const first = parse((await pager().executeTool({ name: COMMERCE_LIST_PRODUCTS_TOOL_ID, input: { orgId: big.orgId } })).content) as { products: unknown[]; total?: number; truncated?: boolean; nextCursor?: string };
+    expect(first.products).toHaveLength(50);
+    expect(first.total).toBe(55);
+    expect(first.truncated).toBe(true);
+    const second = parse((await pager().executeTool({ name: COMMERCE_LIST_PRODUCTS_TOOL_ID, input: { orgId: big.orgId, cursor: first.nextCursor } })).content) as { products: unknown[]; nextCursor?: string };
+    expect(second.products).toHaveLength(5);
+    expect(second.nextCursor).toBeUndefined();
+  });
+
+  it('ADR 1110 P5 — list-orders pages: 50 at a time, newest first, with the true total', async () => {
+    const BIG = `${TENANT}-orders`;
+    const big = await createOrg({ tenantId: BIG, createdBy: 'u-1', name: 'Busy', ownerSubject: 'u-1' });
+    const p = await createProduct({ tenantId: BIG, orgId: big.orgId, createdBy: 'u-1', type: 'digital', name: 'Pass', price: 1, currency: 'USD' });
+    for (let i = 0; i < 52; i += 1) await createOrder({ tenantId: BIG, orgId: big.orgId, createdBy: 'u-1', lines: [{ productId: p.productId, quantity: 1 }] });
+    const pager = () => createAgentToolProvider({ tenantId: BIG, actingUserId: 'u-1' });
+    const first = parse((await pager().executeTool({ name: COMMERCE_LIST_ORDERS_TOOL_ID, input: { orgId: big.orgId } })).content) as { orders: unknown[]; total: number; truncated?: boolean; nextCursor?: string };
+    expect(first.orders).toHaveLength(50);
+    expect(first.total).toBe(52);
+    expect(first.truncated).toBe(true);
+    const second = parse((await pager().executeTool({ name: COMMERCE_LIST_ORDERS_TOOL_ID, input: { orgId: big.orgId, cursor: first.nextCursor } })).content) as { orders: unknown[]; nextCursor?: string };
+    expect(second.orders).toHaveLength(2);
+    expect(second.nextCursor).toBeUndefined();
   });
 
   it('list-products fails EMPTY (a note, not an error) without an acting user', async () => {

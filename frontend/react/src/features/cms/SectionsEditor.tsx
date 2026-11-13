@@ -46,6 +46,11 @@ export function blankSection(type: SectionType): Section {
                     : type === 'decisionTree' ? { trees: [] }
                     : type === 'scheduleSim' ? { milestones: [], decisions: [] }
                     : type === 'films' ? { films: [] }
+                    // ADR 1105 — example figures so the worksheet shows a worked answer at once.
+                    : type === 'marginCalc' ? { cost: 4000, markup: 25 }
+                    : type === 'allowanceGap' ? { lines: [] }
+                    : type === 'partyViews' ? { parties: [] }
+                    : type === 'stageChart' ? { stages: [] }
                     : { columns: [{ text: '' }] };
   return { sectionId: `new:${Math.random().toString(36).slice(2)}`, type, data };
 }
@@ -280,7 +285,7 @@ export function SectionFields(props: { section: Section; assets: MediaAssetRef[]
 
 /** ADR 0920 D1 / ADR 1050 D5 — the section types whose validator keeps `tone`
  *  (cmsService's `...tone()` cases; pinned by adr1029-mirror-parity). */
-const TONED_TYPES = ['richText', 'image', 'cta', 'columns', 'faq', 'quotes', 'video', 'statusTable', 'dateCalc', 'conversation', 'featureIndex', 'decisionTree', 'scheduleSim', 'films'] as const satisfies readonly SectionType[];
+const TONED_TYPES = ['richText', 'image', 'cta', 'columns', 'faq', 'quotes', 'video', 'statusTable', 'dateCalc', 'conversation', 'featureIndex', 'decisionTree', 'scheduleSim', 'films', 'marginCalc', 'allowanceGap', 'partyViews', 'stageChart'] as const satisfies readonly SectionType[];
 
 const ACTIVITY_MAX_ROWS = 6; // mirrors the server's MAX.activityItems (ADR 1029 D5)
 const FLOW_MAX_STEPS = 6; // mirrors the server's MAX.flowNodes (ADR 1038 D8)
@@ -374,7 +379,7 @@ function FlowFields({ value, onChange, showState }: { value: unknown; onChange: 
             <input aria-label={t('flowLabelAria', { n })} value={str(r.label)} onChange={(e) => setNode(i, { label: e.target.value })} placeholder={t('flowLabelPlaceholder')} />
             <input aria-label={t('flowTextAria', { n })} value={str(r.text)} onChange={(e) => setNode(i, { text: e.target.value })} placeholder={t('flowTextPlaceholder')} />
             <FlowStepState n={n} status={str(r.status)} state={str(r.state)} showState={showState} onChange={(patch) => setNode(i, patch)} />
-            <Button variant="quiet" className="u-w-auto" onClick={() => setNodes(nodes.filter((_, j) => j !== i))} aria-label={t('flowRemoveAria', { n })}><TrashIcon /> {t('removeItem')}</Button>
+            <Button variant="quiet" className="u-w-auto" disabled={nodes.length <= 2} title={nodes.length <= 2 ? t('flowMinStepsHint') : undefined} onClick={() => setNodes(nodes.filter((_, j) => j !== i))} aria-label={t('flowRemoveAria', { n })}><TrashIcon /> {t('removeItem')}</Button>
           </div>
         );
       })}
@@ -939,7 +944,7 @@ function SectionFieldsBody({ section, assets, onChange, onPickMedia, baseData }:
     case 'video':
       return <VideoSectionFields d={d} set={set} />;
     // ADR 1080 — the design section types edit as JSON.
-    case 'statusTable': case 'dateCalc': case 'conversation': case 'featureIndex': case 'decisionTree': case 'scheduleSim': case 'films':
+    case 'statusTable': case 'dateCalc': case 'conversation': case 'featureIndex': case 'decisionTree': case 'scheduleSim': case 'films': case 'marginCalc': case 'allowanceGap': case 'partyViews': case 'stageChart':
       return <DesignJsonFields d={d} set={set} head={<HeadFields d={d} set={set} />} />;
     default:
       return <span className="u-label-sm">{t('unknownSection')}</span>;
@@ -1191,7 +1196,7 @@ function ProductGridEditor({ storeOrgId, productIds, onStore, onProducts }: { st
             : productsError ? <span className="u-label-sm muted">{t('productGridLoadError')}</span>
             : products.length === 0 ? <span className="u-label-sm muted">{t('productGridNoProducts')}</span>
             : (
-              <ul className="u-grid u-gap-1 u-list-none u-p-0 u-m-0">
+              <ul role="list" className="u-grid u-gap-1 u-list-none u-p-0 u-m-0">
                 {products.map((p) => (
                   <li key={p.productId}>
                     <label className="action-bar u-gap-1 u-items-center">
@@ -1802,6 +1807,10 @@ export function SectionsEditor({ sections, assets, onChange, baseLocale = 'en', 
                 ) : null}
                 {s.localizations?.[active] !== undefined
                   ? <Button variant="quiet" className="u-w-auto" onClick={() => patchOverlay(i, active, {})}>{t('clearOverlay')}</Button>
+                  : null}
+                {/* ADR 1112 P3 — a large schedule is translated in parts and can take up to a minute. */}
+                {s.type === 'scheduleSim' && translating === `${s.sectionId}:${active}`
+                  ? <span className="u-label-sm muted">{t('translatingLongHint')}</span>
                   : null}
               </div>
             ) : null}

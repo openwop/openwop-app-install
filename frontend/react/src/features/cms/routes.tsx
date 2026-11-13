@@ -41,9 +41,9 @@ const routes: FeatureRoute[] = [
     // ADMIN-tier group; a workspace item there would mint a stray group).
     nav: {
       group: 'Studio',
-      label: 'Translations', labelKey: 'cmsTranslateLabel',
+      labelKey: 'cmsTranslateLabel',
       icon: FileTextIcon,
-      hint: 'Translate page content you were granted', hintKey: 'cmsTranslateHint',
+      hintKey: 'cmsTranslateHint',
       order: 21,
       featureId: 'cms-localization',
     },
@@ -54,9 +54,9 @@ const routes: FeatureRoute[] = [
     tier: 'admin', archetype: 'admin',
     nav: {
       group: 'Content',
-      label: 'CMS', labelKey: 'cmsLabel',
+      labelKey: 'cmsLabel',
       icon: FileTextIcon,
-      hint: 'Pages + page builder', hintKey: 'cmsHint',
+      hintKey: 'cmsHint',
       order: 20,
     },
   },

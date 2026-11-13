@@ -279,6 +279,18 @@ function approverRefsPayload(config) {
   return out;
 }
 
+/** ADR 1109 D1 — the gate's own words on `interrupt.data`. They reached only the chat
+ *  card, so the inbox fell back to "<workflow id> needs your input" and the wire
+ *  title to `Approve <nodeId>`. Blank or non-string values are dropped. */
+function wordsPayload(config) {
+  const out = {};
+  for (const key of ['title', 'prompt']) {
+    const v = config[key];
+    if (typeof v === 'string' && v.trim() !== '') out[key] = v;
+  }
+  return out;
+}
+
 /** WF-UP-2 — the quorum keys the host's resolver reads off `interrupt.data`. */
 function quorumPayload(config) {
   const out = {};
@@ -311,6 +323,17 @@ export async function approvalGate(ctx) {
     ? [...config.actions]
     : undefined;
 
+  // ADR 1058 / RFC 0258 — when this gate is the source of a declared loopback
+  // edge, the HOST owns the round count (folded from the event log, replayed
+  // and forked with the run) and re-runs the producer. This node then keeps
+  // none of its own: no `_loopbackCount` / `_feedbackHistory` writes (the
+  // variable bag does not replay), no `maxRequestChangesIterations` (whose 0
+  // means unlimited), and only the protocol verbs. `decidedAt` keeps its
+  // wall-clock fallback (the output schema requires it); the node is
+  // `side-effectful`, so a replay fork serves its recorded outputs rather than
+  // re-reading the clock.
+  const loopback = ctx.loopback && typeof ctx.loopback === 'object' ? ctx.loopback : undefined;
+
   const loopbackKey = `_loopbackCount:${ctx.nodeId}`;
   const feedbackKey = `_feedbackHistory:${ctx.nodeId}`;
   const previousKey = `_previousArtifact:${ctx.nodeId}`;
@@ -325,8 +348,8 @@ export async function approvalGate(ctx) {
         artifactType,
         ...(actions ? { actions } : {}),
         artifact: inputs.artifact,
-        loopbackCount: ctx.variables?.get?.(loopbackKey) ?? 0,
-        feedbackHistory: ctx.variables?.get?.(feedbackKey) ?? [],
+        loopbackCount: loopback ? loopback.round : (ctx.variables?.get?.(loopbackKey) ?? 0),
+        ...(loopback ? { loopback: { round: loopback.round, maxIterations: loopback.maxIterations, exhausted: loopback.exhausted } } : { feedbackHistory: ctx.variables?.get?.(feedbackKey) ?? [] }),
       },
       idempotencyKey: deriveIdempotencyKey([
         String(ctx.runId), String(ctx.nodeId), 'approval-card',
@@ -362,6 +385,7 @@ export async function approvalGate(ctx) {
     // `core.approvalGate` forward (`bootstrap/nodes.ts`). Only a positive integer
     // / a known policy is forwarded; anything else stays the single-approver gate.
     ...quorumPayload(config),
+    ...wordsPayload(config),
   });
 
   // Resume payload shape: { action | decision, approved?, feedback?,
@@ -405,6 +429,24 @@ export async function approvalGate(ctx) {
       ? APPROVAL_VERBS[rawVerb]
       : undefined;
 
+  // ADR 1058 — under a declared loopback only the protocol verbs are honoured.
+  // A legacy spelling (`request-changes`) or an unknown verb would read as
+  // `refine` here but would NOT take the host's loopback (the host reads the
+  // resolution's protocol `action`), so the gate would complete with
+  // `decision: 'refine'` and release its forward edges. Refuse it typed instead.
+  if (loopback) {
+    const PROTOCOL = new Set(['accept', 'approve', 'edit-accept', 'reject', 'refine', 'ask']);
+    if (rawVerb === undefined ? resumePayload?.approved !== true && !resumePayload?.editedArtifact : !PROTOCOL.has(rawVerb)) {
+      return {
+        status: 'failure',
+        error: {
+          code: 'approval_action_unknown',
+          message: `Gate '${ctx.nodeId}' has a declared loopback, so its resolution must use a protocol action (accept | edit-accept | reject | refine | ask); received ${JSON.stringify(rawVerb ?? null)}.`,
+        },
+      };
+    }
+  }
+
   // Classify into the 5-action union (accept | edit-accept | refine | ask |
   // reject). An EXPLICIT verb always wins over the legacy `approved` boolean:
   // a payload carrying both a verb and a contradicting flag must honour the
@@ -420,8 +462,8 @@ export async function approvalGate(ctx) {
 
   const approved = action === 'accept' || action === 'edit-accept';
 
-  // Loopback bookkeeping for refine.
-  if (action === 'refine' && ctx.variables) {
+  // Loopback bookkeeping for refine (the legacy, host-less loop only).
+  if (action === 'refine' && ctx.variables && !loopback) {
     const prevCount = ctx.variables.get(loopbackKey) ?? 0;
     const nextCount = prevCount + 1;
     if (maxRequestChangesIterations > 0 && nextCount > maxRequestChangesIterations) {

@@ -14,10 +14,10 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Workspace',
-      label: 'Documents', labelKey: 'documentsLabel',
+      labelKey: 'documentsLabel',
       icon: FileTextIcon,
       order: 30,
-      hint: 'Business documents + templates (SOW, PRD, RFP, agendas)', hintKey: 'documentsHint',
+      hintKey: 'documentsHint',
       featureId: 'documents',
     },
   },

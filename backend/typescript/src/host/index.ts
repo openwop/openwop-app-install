@@ -10,6 +10,7 @@
  * identity), swap the impl here. Route handlers stay unchanged.
  */
 
+import { normalizeEdgeLoopback, planLoopbacks } from '../executor/loopback.js';
 import { agentChannelsServed } from './agentChannelPin.js';
 import { oauthAdvertisementSnapshot } from '../features/connections/oauthAdvertisement.js';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -108,10 +109,17 @@ const conformanceFixtures = new Map<string, WorkflowDefinition>();
         // so the positive control (`ok: true`) wrongly ended with no terminal. A
         // condition that cannot be mapped throws, and the fixture is skipped as
         // malformed, rather than registered with a dead edge.
+        // ADR 1058 / RFC 0258 — a fixture's declared loopback edge goes through
+        // the same `normalizeEdgeLoopback` as every authored edge. With the host
+        // flag off it throws `capability_required`, so the fixture is skipped
+        // and never advertised (`conformance-loopback-refine[-fail]`); with it
+        // on, the graph is admitted exactly as a registered one would be.
         const normalizedEdges = Array.isArray(parsed.edges)
-          ? parsed.edges.map((e, i) => (e.condition
-            ? { ...e, condition: normalizeEdgeCondition(e.condition, `${id}#${e.edgeId ?? (e as { id?: string }).id ?? i}`) }
-            : e))
+          ? parsed.edges.map((e, i) => {
+            const edgeRef = `${id}#${e.edgeId ?? (e as { id?: string }).id ?? i}`;
+            const withCondition = e.condition ? { ...e, condition: normalizeEdgeCondition(e.condition, edgeRef) } : e;
+            return e.loopback !== undefined ? { ...withCondition, loopback: normalizeEdgeLoopback(e.loopback, e, edgeRef) } : withCondition;
+          })
           : parsed.edges;
         conformanceFixtures.set(id, {
           ...parsed,
@@ -278,6 +286,7 @@ function fixtureNeedsUnimplementedMemoryAction(def: WorkflowDefinition): boolean
 export function fixtureGraphRefused(def: WorkflowDefinition): boolean {
   if (!Array.isArray(def.edges) || def.edges.length === 0) return false;
   try {
+    planLoopbacks(def); // ADR 1058 — the RFC 0258 §B region rules, as at run start
     topologicalOrder(def, buildGraph(def));
     return false;
   } catch {

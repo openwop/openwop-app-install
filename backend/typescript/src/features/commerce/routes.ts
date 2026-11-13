@@ -23,12 +23,13 @@ import { checkEntitlement } from '../../host/entitlementSeam.js';
 import { checkOwnerPublicAccess } from '../../host/publicLapse.js';
 import { createLogger } from '../../observability/logger.js';
 import {
-  listProducts, getProduct, createProduct, updateProduct, deleteProduct, isPubliclyListed,
-  listOrders, getOrder, createOrder, markAsPaid, refundOrder, cancelOrder, updateFulfillment,
+  listProductsPage, getProducts, getProduct, createProduct, updateProduct, deleteProduct, isPubliclyListed,
+  listOrdersPage, orderCount, getOrder, createOrder, markAsPaid, refundOrder, cancelOrder, updateFulfillment,
   listCoupons, createCoupon, getCart, setCartItem, clearCart, checkoutCart,
   listStockMovements, commerceSummary, partialRefundOrder, listOrderRefunds, orderChargeTotal,
   ORDER_STATUSES, FULFILLMENT_STATUSES, type OrderStatus, type FulfillmentStatus, type Order,
   getSavedPaymentMethodForOrder, captureSavedPmFromPaidIntent, liveStripeKeyFor, MAX_LINE_QUANTITY, listChildOrders, extendReservationForSca,
+  type ProductPageQuery,
 } from './commerceService.js';
 import { recordCommerceAction } from './telemetry.js';
 import { listPriceLists, createPriceList, updatePriceList, deletePriceList, resolvePrice, resolveSellable } from './pricing.js';
@@ -112,6 +113,19 @@ function funnelStepUrl(base: string, orgId: string, r: { funnel: Funnel; checkou
   return `${base}/fn/${encodeURIComponent(orgId)}/${encodeURIComponent(r.funnel.slug)}?step=${r.checkoutIx}`;
 }
 
+/** ADR 1110 P2 — the paged product read's query: `q`, `category`, `tag`, `cursor`, and
+ *  `limit` (1–200; `fallback` when absent or not a whole number). */
+function pageQuery(req: Request, fallback: number): ProductPageQuery {
+  const raw = Number(optionalString(req.query.limit));
+  const limit = Number.isInteger(raw) && raw > 0 ? Math.min(raw, 200) : fallback;
+  const state = optionalString(req.query.state);
+  return {
+    q: optionalString(req.query.q), category: optionalString(req.query.category), tag: optionalString(req.query.tag),
+    type: optionalString(req.query.type), cursor: optionalString(req.query.cursor), limit,
+    ...(state === 'active' ? { activeOnly: true } : state === 'archived' ? { archivedOnly: true } : {}),
+  };
+}
+
 export function registerCommerceRoutes(deps: RouteDeps): void {
   // ADR 0948 P2c — funnels derives an offer step's routing outcome from the paid
   // parent order; commerce owns orders, so it lends the read (funnels never imports it).
@@ -120,7 +134,15 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
 
   // ── Products ──
   app.get(`${BASE}/products`, async (req, res, next) => {
-    try { const ctx = await authz(req, 'workspace:read'); res.json({ products: await listProducts(ctx.tenantId, ctx.orgId, optionalString(req.query.q)) }); } catch (err) { next(err); }
+    try {
+      const ctx = await authz(req, 'workspace:read');
+      // ADR 1110 P2 — `?ids=a,b` reads those products by id (up to 200; a picker showing
+      // what is already chosen). Otherwise one page, never the whole catalog: `nextCursor`
+      // continues it, and `total` is the org's catalog size on an unfiltered read.
+      const ids = optionalString(req.query.ids);
+      if (ids) { res.json({ products: await getProducts(ctx.tenantId, ctx.orgId, ids.split(',').map((s) => s.trim()).filter(Boolean).slice(0, 200)) }); return; }
+      res.json(await listProductsPage(ctx.tenantId, ctx.orgId, pageQuery(req, 50)));
+    } catch (err) { next(err); }
   });
   app.post(`${BASE}/products`, async (req, res, next) => {
     try {
@@ -185,7 +207,17 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
 
   // ── Orders ──
   app.get(`${BASE}/orders`, async (req, res, next) => {
-    try { const ctx = await authz(req, 'workspace:read'); const s = optionalString(req.query.status); res.json({ orders: await listOrders(ctx.tenantId, ctx.orgId, s && (ORDER_STATUSES as readonly string[]).includes(s) ? s as OrderStatus : undefined) }); } catch (err) { next(err); }
+    try {
+      const ctx = await authz(req, 'workspace:read');
+      const s = optionalString(req.query.status);
+      // ADR 1110 P5 — one page, newest first; `nextCursor` continues it.
+      const raw = Number(optionalString(req.query.limit));
+      const status = s && (ORDER_STATUSES as readonly string[]).includes(s) ? s as OrderStatus : undefined;
+      const page = await listOrdersPage(ctx.tenantId, ctx.orgId, {
+        status, cursor: optionalString(req.query.cursor), limit: Number.isInteger(raw) && raw > 0 ? Math.min(raw, 200) : 50,
+      });
+      res.json({ ...page, ...(status ? {} : { total: await orderCount(ctx.tenantId, ctx.orgId) }) });
+    } catch (err) { next(err); }
   });
   app.post(`${BASE}/orders`, async (req, res, next) => {
     try {
@@ -511,16 +543,15 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
       const org = await publicStoreOrg(req.params.orgId);
       const tenantId = org.tenantId;
       // C6 — public browse facets: ?q= (name/description/tag match), ?category=, ?tag=.
-      const all = await listProducts(tenantId, req.params.orgId, optionalString(req.query.q), {
-        ...(optionalString(req.query.category) ? { category: optionalString(req.query.category)! } : {}),
-        ...(optionalString(req.query.tag) ? { tag: optionalString(req.query.tag)! } : {}),
-      });
+      // ADR 1110 P2 — one page of listed products (ADR 1098), never the whole catalog.
+      const page = await listProductsPage(tenantId, req.params.orgId, { ...pageQuery(req, 48), listedOnly: true });
+      const all = page.products;
       const fieldDefs = await listProductFieldDefs(tenantId, req.params.orgId); // fetch ONCE for label resolution
       // Only active, listed products (ADR 1098), and never expose internal/inventory operational fields.
       const store = all.filter(isPubliclyListed).map((p) => { const cf = publicCustomFields(fieldDefs, p.customFields); return { productId: p.productId, type: p.type, name: p.name, description: p.description, price: p.price, currency: p.currency, imageAssetTokens: p.imageAssetTokens, variants: p.variants, categories: p.categories ?? [], tags: p.tags ?? [], ...(p.attributes?.length ? { attributes: p.attributes } : {}), ...(cf.length ? { customFields: cf } : {}) }; });
       // grade-ux I9: the merchant's own name so the storefront has an identity
       // (the org display name is not sensitive — it's the public store's brand).
-      res.json({ products: store, store: { name: org.name } });
+      res.json({ products: store, store: { name: org.name }, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) });
     } catch (err) { next(err); }
   });
 

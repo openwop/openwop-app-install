@@ -82,8 +82,28 @@ describe('RenderInterrupt dispatcher', () => {
     render(<RenderInterrupt runId="r" active={mk('low-confidence', {})} onResolved={() => {}} />);
     // DEMO-14: neutral user-facing copy — carries the kind, never instructs
     // the user to edit source files.
-    expect(screen.getByText(/can't be shown here/i)).toBeTruthy();
+    expect(screen.getByText(/can't answer this kind of step/i)).toBeTruthy();
     expect(screen.getByText(/low-confidence/)).toBeTruthy();
     expect(screen.queryByText(/RenderInterrupt\.tsx/)).toBeNull();
+    // ADR 1109 D7 — a customer has no administrator to ask.
+    expect(screen.queryByText(/administrator/i)).toBeNull();
+  });
+
+  it('an unknown kind still says what the step asks, and offers no buttons (ADR 1109 D7)', () => {
+    render(<RenderInterrupt runId="r" active={mk('low-confidence', { title: 'Confirm the supplier', prompt: 'The quote changed since Monday.' })} onResolved={() => {}} />);
+    expect(screen.getByText('Confirm the supplier')).toBeTruthy();
+    expect(screen.getByText('The quote changed since Monday.')).toBeTruthy();
+    expect(screen.queryAllByRole('button')).toHaveLength(0);
+  });
+
+  it('an approval card is headed by the gate\'s own title (ADR 1109 D1)', () => {
+    render(<RenderInterrupt runId="r" active={mk('approval', { title: 'Approve the launch brief', prompt: 'Check the tone.' })} onResolved={() => {}} />);
+    expect(screen.getByRole('heading', { name: 'Approve the launch brief' })).toBeTruthy();
+    expect(screen.getByText('Check the tone.')).toBeTruthy();
+  });
+
+  it('an approval with no title keeps the generic heading', () => {
+    render(<RenderInterrupt runId="r" active={mk('approval', { prompt: 'Approve?' })} onResolved={() => {}} />);
+    expect(screen.getByRole('heading', { name: 'Approval required' })).toBeTruthy();
   });
 });

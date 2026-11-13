@@ -20,6 +20,20 @@
  *  - CSM-UX-5: six of the seven PATCHable fields had no editor, so the remedy
  *    for a typo or an ARR change was delete-and-recreate — which mints a new
  *    accountId and destroys the CRM link and the health history.
+ *  - ADR 0882 D3: the owner is a workspace MEMBER (`ownerUserId`). An edit sends
+ *    the owner only when it changed, and the legacy typed `owner` is cleared only
+ *    when the operator asks (it used to ride every save, so dropping the text box
+ *    would have wiped it).
+ *
+ * Sabotage-probed at 3bcc187f9 (/grade-tests w106, `w106g3-m*`): an unscored
+ * account defaulted to a number, a failure that does not outrank the score, the
+ * stale score unlabelled, unmeasured ARR counted INTO "at risk" or its tile
+ * dropped / mis-summed, the unscored facet mapped to a tier, either formula /
+ * the count header dropped, the failure card replaced by skeletons or a dead
+ * Retry, the 403/404/500 map or the server detail dropped, the editor sending
+ * the wrong name / ARR / owner, an untouched owner or the legacy name sent on
+ * every save, a dead "Clear on save", a cleared score sent as 0, and a failed
+ * save that toasts raw text or closes the editor each turn a named case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react';
@@ -40,12 +54,12 @@ vi.mock('../csmClient.js', async () => {
     ...actual,
     listAccounts,
     updateAccount,
-    listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'Org One' }]),
-    listCrmCompanies: vi.fn(async () => [{ companyId: 'cmp:1', name: 'Acme Corp' }]),
-    createAccount: vi.fn(async () => ({})),
-    deleteAccount: vi.fn(async () => undefined),
+    listOrgs: vi.fn<typeof actual.listOrgs>(async () => [{ orgId: 'org-1', name: 'Org One' }]),
+    listCrmCompanies: vi.fn<typeof actual.listCrmCompanies>(async () => [{ companyId: 'cmp:1', name: 'Acme Corp' }]),
+    createAccount: vi.fn<typeof actual.createAccount>(async (input) => ({ accountId: 'n1', tenantId: 't1', name: input.name, createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z' })),
+    deleteAccount: vi.fn<typeof actual.deleteAccount>(async () => undefined),
     // ADR 0882 D3 — the owner picker's people list.
-    listAssignees: vi.fn(async () => ({ assignees: [{ subject: 'user:cs-1', displayName: 'Casey One' }, { subject: 'user:cs-2', displayName: 'Casey Two' }], me: ['user:cs-1'] })),
+    listAssignees: vi.fn<typeof actual.listAssignees>(async () => ({ assignees: [{ subject: 'user:cs-1', displayName: 'Casey One' }, { subject: 'user:cs-2', displayName: 'Casey Two' }], me: ['user:cs-1'] })),
   };
 });
 // ADR 0882 (CSM2UX-4) — write controls follow `workspace:write`; `writeAccess.value`
@@ -117,7 +131,8 @@ describe('CSM-UX-1 — "not measured" is a state, not a number', () => {
     // ...and the unmeasured half is stated out loud, with its ARR.
     expect(within(band).getByText(/health not measured/i)).toBeTruthy();
     expect(within(band).getByText(/1 account/i)).toBeTruthy();
-    expect(within(band).getByText(/excluded from arr at risk/i)).toBeTruthy();
+    // …WITH its ARR — the unmeasured account's 500,000, not the book's 501,000.
+    expect(within(band).getByText(/^\$500,000(\.00)? excluded from arr at risk$/i)).toBeTruthy();
   });
 
   it('the health facet can select the unscored accounts', async () => {
@@ -234,7 +249,9 @@ describe('CSM-UX-5 — the account editor', () => {
     fireEvent.change(within(panel).getByLabelText(/^arr$/i), { target: { value: '10' } });
     fireEvent.click(within(panel).getByRole('button', { name: /^save$/i }));
     await waitFor(() => expect(updateAccount).toHaveBeenCalledTimes(1));
-    // The owner has left (not in the people list) — still not rewritten or refused.
+    // The save itself happened, carrying the one field that changed…
+    expect(updateAccount.mock.calls[0]![1]).toMatchObject({ name: 'Kept Co', arr: 10 });
+    // …and the owner has left (not in the people list) — still not rewritten or refused.
     expect(updateAccount.mock.calls[0]![1]).not.toHaveProperty('ownerUserId');
     expect(updateAccount.mock.calls[0]![1]).not.toHaveProperty('owner');
 
@@ -244,6 +261,8 @@ describe('CSM-UX-5 — the account editor', () => {
     fireEvent.click(within(again).getByRole('button', { name: /^save$/i }));
     await waitFor(() => expect(updateAccount).toHaveBeenCalledTimes(2));
     expect(updateAccount.mock.calls[1]![1]).toMatchObject({ owner: null });
+    // Clearing the typed name does not touch the member owner.
+    expect(updateAccount.mock.calls[1]![1]).not.toHaveProperty('ownerUserId');
   });
 
   it('clearing the score field UN-ASSERTS it (sends null) rather than inventing another number', async () => {

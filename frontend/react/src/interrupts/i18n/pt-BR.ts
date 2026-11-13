@@ -6,7 +6,11 @@ export const messages = {
   // ADR 0755 D3 — the resume token is projected only to an approvals:respond holder.
   noRespondPermission: 'Você pode ver esta etapa, mas não tem permissão para respondê-la.',
   // RenderInterrupt fallback — neutral copy; never instructs users to edit source (DEMO-14)
-  unknownKindBody: 'Esta etapa não pode ser exibida aqui ({{kind}}). Peça ao administrador para atualizar o aplicativo.',
+  unknownKindBody: 'Este aplicativo ainda não consegue responder a este tipo de etapa ({{kind}}), então ela não pode ser concluída aqui.',
+  timerWaits: 'Esta execução está aguardando um temporizador e retoma sozinha.',
+  timerWaitsUntil: 'Esta execução está aguardando um temporizador e retoma sozinha em {{when}}.',
+  walkthroughStepBody: 'Esta execução é uma etapa de um walkthrough guiado; ela continua quando alguém reproduz o walkthrough.',
+  walkthroughStepLink: 'Abrir Walkthroughs guiados',
 
   // Approval card
   approvalRequired: 'Aprovação necessária',
@@ -20,6 +24,7 @@ export const messages = {
   cuRejectConfirmTitle: 'Rejeitar esta ação e encerrar a sessão de navegador?',
   cuRejectConfirmBody: 'O agente de navegador não realizará esta ação e a sessão termina aqui. O que ele já fez no site não é desfeito.',
   actionRequestChanges: 'Solicitar alterações',
+  actionRefine: 'Refinar',
   actionDefer: 'Adiar',
   actionEscalate: 'Escalonar',
   resolvedElsewhere: 'Esta revisão acabou de ser resolvida em outro lugar.',

@@ -17,10 +17,9 @@
  * EMPTY without an acting user; the draft write fails TYPED.
  */
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { toolFailLog, untrustedToolError } from '../../host/agentToolKit.js';
+import { toolFailLog, untrustedToolError, resolveFeatureAccess } from '../../host/agentToolKit.js';
 import { createLogger } from '../../observability/logger.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
 import { listOrgs, resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
 import { OpenwopError } from '../../types.js';
 import { listPromotions, createPromotion, previewPromotions, needsCurrency, PROMOTION_TYPES } from './promotionsService.js';
@@ -57,7 +56,7 @@ async function resolveToolOrg(
   const deny = (error: string, message: string): { empty: true } | { error: ToolResult } =>
     mode === 'read' ? { empty: true } : { error: toolError(error, message) };
 
-  const assignment = await resolveOne(FEATURE, { tenantId: scope.tenantId, ...(scope.actingUserId ? { userId: scope.actingUserId } : {}) }).catch(() => null);
+  const assignment = await resolveFeatureAccess(FEATURE, scope);
   if (!assignment?.enabled) return deny('feature_disabled', 'The Promotions feature is not enabled for this workspace.');
   const actingUserId = scope.actingUserId;
   if (!actingUserId) return deny('acting_user_required', 'This tool runs on behalf of a signed-in user.');

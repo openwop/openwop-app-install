@@ -299,6 +299,7 @@ export const messages = {
 
   // RunProvenancePanel
   provAwaitingHuman: 'En attente humaine',
+  provWaitingTimer: 'En attente d’un minuteur',
   provHumanResolved_one: 'Résolu par un humain {{count}}',
   provHumanResolved_other: 'Résolus par un humain {{count}}',
   provGateUnresolved_one: '{{count}} barrière, non résolue',

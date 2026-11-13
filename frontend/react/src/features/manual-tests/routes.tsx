@@ -20,7 +20,7 @@ const routes: FeatureRoute[] = [
     element: <ManualTestsPage />,
     tier: 'admin', archetype: 'admin',
     chrome: 'narrow',
-    nav: { group: 'Developer', label: 'Manual tests', labelKey: 'manualTestsLabel', icon: ClipboardIcon, hint: 'Human-run feature tests', hintKey: 'manualTestsHint', order: 95, featureId: 'developer-tools' },
+    nav: { group: 'Developer', labelKey: 'manualTestsLabel', icon: ClipboardIcon, hintKey: 'manualTestsHint', order: 95, featureId: 'developer-tools' },
   },
 ];
 

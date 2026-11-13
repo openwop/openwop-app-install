@@ -73,6 +73,9 @@ export const transformWorkflowDefinition: WorkflowDefinition = {
       nodeId: 'write',
       typeId: WRITE_TRANSFORMATION,
       inputs: {
+        // ADR 1103 D5 — the node asks the notebook where to write; orgId/ownerSubject
+        // stay for older definitions and must agree.
+        notebookId: { type: 'variable', variableName: 'notebookId' },
         orgId: { type: 'variable', variableName: 'orgId' },
         title: { type: 'variable', variableName: 'title' },
         kind: { type: 'variable', variableName: 'kind' },

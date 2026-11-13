@@ -4,8 +4,8 @@
  *
  * Source of truth: the FEATURES manifest in `src/chrome/features.tsx`. Each nav
  * entry carries a `labelKey`/`hintKey`; group headers carry a group→key map.
- * Consumers (Sidebar / AdminLayout / CommandPalette) resolve these via
- * `t(key, { defaultValue: englishFallback })`.
+ * Every surface reads them through `chrome/navText.ts` (ADR 0874 P3); the
+ * English lives only in `locales/en/nav.ts`.
  */
 export const messages = {
   siteNavMore: 'Más',
@@ -219,4 +219,23 @@ export const messages = {
   uiPluginsHint: 'Paquetes de plugins front-end aislados',
   claudeCodeLabel: 'Claude Code',
   claudeCodeHint: 'Tus dispositivos de Claude Code vinculados',
+  // ADR 0874 P3 follow-up (NAV-1): the nine entries whose words used to live only in a feature catalog.
+  webinarsLabel: 'Webinars',
+  webinarsHint: 'Webinars de Zoom → asistencia en CRM',
+  creativeVideoLabel: 'Vídeo con IA',
+  creativeVideoHint: 'Genera vídeos con avatar',
+  campaignStudioLabel: 'Campaign Studio',
+  campaignStudioHint: 'Briefs, campañas, rendimiento e inteligencia en un solo lugar',
+  jobListingsLabel: 'Ofertas de empleo',
+  jobListingsHint: 'Ofertas encontradas en tus portales, deduplicadas por contenido',
+  jobAnswersLabel: 'Responde una vez',
+  jobAnswersHint: 'Responde una sola vez a las preguntas de las candidaturas',
+  jobFunnelLabel: 'Qué está funcionando',
+  jobFunnelHint: 'Tasas de respuesta, seguimientos pendientes y borradores en espera',
+  jobExceptionsLabel: 'Preguntas pendientes',
+  jobExceptionsHint: 'Todas las interrupciones de una campaña, en un solo lugar',
+  jobApplicationsLabel: 'Candidaturas',
+  jobApplicationsHint: 'Candidaturas enviadas en tu nombre y los enlaces de verificación que has compartido',
+  jobAuthorityLabel: 'Autoridad de postulación automática',
+  jobAuthorityHint: 'Consentimiento acotado y revocable para candidaturas automáticas',
 } as const;

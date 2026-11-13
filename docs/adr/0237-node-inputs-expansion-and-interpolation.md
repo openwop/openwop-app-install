@@ -133,3 +133,16 @@ that fails when any chain binds these through `config` again.
   §WCP2). The reusable "values per run" ergonomic is now the separate,
   capability-gated **deferred mode** (RFC 0124 / WCP4), not this token model.
   See the ADR 0163 correction note for the timing decision and the collision fix.
+
+> **Correction (2026-11-12, CC-CHAIN-5 — "declared wins" must not be silent at run
+> creation).** Declared node inputs still win inside the executor. But on a workflow
+> instantiated from a chain, the declared value IS a frozen `{{params.X}}`, and a run
+> started with `inputs.X` set to something else was recorded with the given value while
+> the nodes acted on the bound one. MEASURED live on `373d4863a` (run `28eb5e4a`): a
+> Messaging-kernel copy bound to brief KT, run with `{briefId: MH}`, wrote a new kernel
+> onto KT. `POST /runs` now refuses such a run (400 `validation_error`, reason
+> `bound_param_conflict`, naming the parameter, the bound value and the given value)
+> when a node declared that parameter from `metadata.expandedFrom.params`. The same
+> value, or no value, runs as before. Helper: `host/chainParamBinding.ts`. Test:
+> `test/cc-chain-5-bound-param-run-input.test.ts`. Follow-up: the kernel approval gate
+> should name its target brief (CC-UI-3).

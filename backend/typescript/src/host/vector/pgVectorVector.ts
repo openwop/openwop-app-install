@@ -42,6 +42,7 @@ import { registerSurfaceAdapter, resolveBackendId } from '../surfaceBackends.js'
 import { registerVectorTenantPurger, registerVectorNamespacePurger } from './vectorTenantPurge.js';
 import { createLexicalIndexSql, createLexicalTableSql, createLexicalStateTableSql, lexicalStorageUpgradeSql, createPgLexical, setLexicalIndex } from './pgLexical.js';
 import { createLogger } from '../../observability/logger.js';
+import { jsonbStringify } from '../../storage/jsonbSafe.js';
 
 const log = createLogger('host.vector.pgvector');
 
@@ -171,7 +172,7 @@ export function createPgVectorVector(scope: BundleScope, deps: PgVectorDeps): Ve
       const ns = String(namespace ?? 'default');
       for (const it of arr) {
         checkDim(it.vector);
-        await deps.run(upsertSql(table), [tenant, ns, it.id, toVectorLiteral(it.vector), JSON.stringify(it.metadata ?? null)]);
+        await deps.run(upsertSql(table), [tenant, ns, it.id, toVectorLiteral(it.vector), jsonbStringify(it.metadata ?? null)]);
       }
       return { upserted: arr.length };
     },

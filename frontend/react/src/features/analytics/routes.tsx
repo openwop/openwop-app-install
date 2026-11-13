@@ -1,5 +1,5 @@
 import { lazy } from 'react';
-import { ActivityIcon } from '../../ui/icons/index.js';
+import { BarChartIcon } from '../../ui/icons/index.js';
 import type { FeatureRoute } from '../../chrome/featureTypes.js';
 import type { FrontendFeature } from '../registry.js';
 
@@ -15,9 +15,9 @@ const routes: FeatureRoute[] = [
       // funnel), not CRM, and stays on when CRM is off; it lives in the
       // always-present Marketing group so an opt-in CRM leaves no orphan group.
       group: 'Marketing',
-      label: 'Analytics', labelKey: 'analyticsLabel',
-      icon: ActivityIcon,
-      hint: 'Traffic + conversions on the public surface', hintKey: 'analyticsHint',
+      labelKey: 'analyticsLabel',
+      icon: BarChartIcon,
+      hintKey: 'analyticsHint',
       featureId: 'analytics',
     },
   },

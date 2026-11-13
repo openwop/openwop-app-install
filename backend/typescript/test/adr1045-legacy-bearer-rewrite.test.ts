@@ -12,7 +12,11 @@
  *      and rewrites `actingUserId` on a STAMPED run;
  *  (c) apply leaves: the ambiguous prefix's rows, an audit collection's row, an
  *      UNSTAMPED run (its owner echo derives from `actingUserId`), and counts each;
+ *  (c') apply leaves the ADR 0301 hash-chained audit log alone, and the chain
+ *      still verifies (a real `appendAudit` entry carrying the mapped id);
  *  (d) a second apply changes nothing (idempotent);
+ *  (f) the report's counts survive the log sink's PII masking (prod's
+ *      `values` count logged as `pii_…` because of its field name).
  *  (e) the job is off without the env, stays pending in report mode, and
  *      completes in apply mode.
  *
@@ -33,6 +37,11 @@ import { createMember, isWorkspaceMember } from '../src/host/accessControlServic
 import { issueApiKey } from '../src/features/developer-keys/apiKeyService.js';
 // Registers the real `brand:audit` collection (the walk sees only registered ones, as at boot).
 import '../src/features/brand/brandService.js';
+import { appendAudit, verifyChain, listChain } from '../src/host/auditChainService.js';
+import { maskPiiDeep } from '../src/host/dataClassification.js';
+// Every feature's PII-field declarations, as at boot: a name one feature declares
+// (forms' `values`) is masked in EVERY log line, which is how prod lost the count.
+import '../src/features/index.js';
 
 const KEY_A = 'sk-live-alpha-0001';
 const KEY_B = 'sk-live-bravo-0002';
@@ -71,6 +80,7 @@ beforeAll(async () => {
   await rows.put({ id: 'u', tenantId: T, ownerUserId: LEGACY_U, note: 'mentions bearer:uniq-key inline', history: [{ by: LEGACY_U }, { by: 'user:someone' }] });
   await rows.put({ id: 'a', tenantId: T, ownerUserId: LEGACY_AMBIG, note: '', history: [] });
   await storage.kvSet('hostext:brand:audit:f14', JSON.stringify({ id: 'f14', actor: LEGACY_U }));
+  await appendAudit(T, 'security.secret.reveal', { actor: LEGACY_U, ref: 'f14' });
   await createMember({ orgId: T, tenantId: T, displayName: 'Env key', subject: LEGACY_U, roles: ['owner'] });
   const now = new Date().toISOString();
   const base = { workflowId: 'wf', tenantId: T, status: 'completed' as const, inputs: null, configurable: {}, createdAt: now, updatedAt: now };
@@ -88,7 +98,7 @@ describe('(a) report mode', () => {
   it('counts what apply would change and writes nothing', async () => {
     const before = JSON.stringify(await storage.kvList('hostext'));
     const r = await runLegacyBearerIdRewrite(storage, 'report');
-    expect(r).toMatchObject({ mode: 'report', configuredKeys: 3, mappedPrefixes: 1, ambiguousPrefixes: 1, members: 1, runs: 1, unstampedRunsLeft: 1, auditRowsLeft: 1, conflicts: 0, failures: 0 });
+    expect(r).toMatchObject({ mode: 'report', configuredKeys: 3, mappedPrefixes: 1, ambiguousPrefixes: 1, members: 1, runs: 1, unstampedRunsLeft: 1, auditRowsLeft: 2, conflicts: 0, failures: 0 });
     expect(r.rowsByCollection).toEqual({ 'devkey:record': 1, 'adr1045-f14:row': 1 });
     expect(r.markers).toBe(1);
     expect(r.unmappedValues).toBeGreaterThanOrEqual(2); // the ambiguous row's owner + its marker
@@ -100,7 +110,7 @@ describe('(a) report mode', () => {
 describe('(b)–(c) apply mode', () => {
   it('rewrites the mapped id where it is an identity reference, and leaves the rest', async () => {
     const r = await runLegacyBearerIdRewrite(storage, 'apply');
-    expect(r).toMatchObject({ mode: 'apply', members: 1, runs: 1, unstampedRunsLeft: 1, auditRowsLeft: 1, conflicts: 0, failures: 0 });
+    expect(r).toMatchObject({ mode: 'apply', members: 1, runs: 1, unstampedRunsLeft: 1, auditRowsLeft: 2, conflicts: 0, failures: 0 });
 
     // (b) rewritten
     expect((await kvJson(delegationKey)).createdBy).toBe(NEW_U);
@@ -120,13 +130,28 @@ describe('(b)–(c) apply mode', () => {
     expect((await run('f14-ambig')).actingUserId).toBe(LEGACY_AMBIG);
     expect((await kvJson('hostext:brand:audit:f14')).actor).toBe(LEGACY_U);
     expect((await run('f14-unstamped')).actingUserId).toBe(LEGACY_U);
+
+    // (c') the hash chain: entry untouched, chain verifies
+    const chain = await listChain(T);
+    expect(chain.find((e) => e.kind === 'security.secret.reveal')?.payload).toEqual({ actor: LEGACY_U, ref: 'f14' });
+    expect(await verifyChain(T)).toEqual({ ok: true });
   });
 
   it('(d) a second apply changes nothing', async () => {
     const before = JSON.stringify(await storage.kvList('hostext'));
     const r = await runLegacyBearerIdRewrite(storage, 'apply');
-    expect(r).toMatchObject({ values: 0, members: 0, runs: 0, rowsByCollection: {}, markers: 0 });
+    expect(r).toMatchObject({ valueCount: 0, members: 0, runs: 0, rowsByCollection: {}, markers: 0 });
     expect(JSON.stringify(await storage.kvList('hostext'))).toBe(before);
+  });
+});
+
+describe('(f) the logged report', () => {
+  it('keeps every count readable through the sink\'s PII masking', async () => {
+    const r = await runLegacyBearerIdRewrite(storage, 'report');
+    const masked = maskPiiDeep({ ...r }, { heuristic: true, values: true }) as Record<string, unknown>;
+    for (const [k, v] of Object.entries(r)) {
+      if (typeof v === 'number') expect(masked[k], k).toBe(v);
+    }
   });
 });
 

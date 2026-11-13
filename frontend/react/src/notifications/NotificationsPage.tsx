@@ -38,7 +38,12 @@ import { relativeLabel } from './relativeLabel.js';
 import { priorityChip } from './priorityChip.js';
 import { formatDateTime } from '../i18n/format.js';
 import type { Notification } from './types.js';
-import { isActionNeeded, TYPE_LABEL_KEYS } from './types.js';
+import { isActionNeeded as isActionNeededFor, subjectProjectId, TYPE_LABEL_KEYS } from './types.js';
+import { archiveResolvedNotifications, requestResolutionOf } from './requestResolution.js';
+import type { RequestResolutionState } from './requestResolution.js';
+import { SubjectChip } from './SubjectChip.js';
+import { featureActionNeededTypes } from '../features/registry.js';
+import { listProjects } from '../features/projects/projectsClient.js';
 import { notificationTypeIcon } from './notificationIcons.js';
 import { actionLabelKeyFor, isSafeActionUrl } from './actionLabels.js';
 import {
@@ -48,6 +53,20 @@ import {
   inboxTabShows,
   type InboxTab,
 } from './notificationDeepLink.js';
+
+/** ADR 1109 D5 — the host's action-needed types plus every composed feature's. */
+const FEATURE_ACTION_TYPES = featureActionNeededTypes();
+const isActionNeeded = (n: Notification): boolean => isActionNeededFor(n, FEATURE_ACTION_TYPES);
+
+/** ADR 1114 — the chip a finished request shows in place of its type and priority. */
+const RESOLUTION_KEYS: Record<RequestResolutionState, string> = {
+  approved: 'endApproved',
+  rejected: 'endRejected',
+  'changes-requested': 'endChanges',
+  'timed-out': 'endTimedOut',
+  answered: 'endAnswered',
+  'run-ended': 'endRunEnded',
+};
 
 type Tab = InboxTab;
 
@@ -115,7 +134,7 @@ export function NotificationsPage(): JSX.Element {
   useEffect(() => {
     if (!target || autoTabbedFor.current === target.notificationId) return;
     autoTabbedFor.current = target.notificationId;
-    setTab((cur) => (inboxTabShows(cur, target) ? cur : canonicalInboxTabFor(target)));
+    setTab((cur) => (inboxTabShows(cur, target, FEATURE_ACTION_TYPES) ? cur : canonicalInboxTabFor(target, FEATURE_ACTION_TYPES)));
   }, [target]);
   const focusRef = useRef<HTMLDivElement | null>(null);
   // IB-G1 — every notification carries a `priority` ('low'|'normal'|'high'|
@@ -227,6 +246,19 @@ export function NotificationsPage(): JSX.Element {
 
   const actionNeededCount = counts['action-needed'];
 
+  // ADR 1109 D4 — names come from the projects THIS reader can list, never from the
+  // notification: a project they cannot see stays "a project", with no link.
+  const wantsProjectNames = useMemo(() => notifications.some((n) => subjectProjectId(n) !== undefined), [notifications]);
+  const [projectNames, setProjectNames] = useState<ReadonlyMap<string, string>>(new Map());
+  useEffect(() => {
+    if (!wantsProjectNames) return;
+    let live = true;
+    listProjects()
+      .then((ps) => { if (live) setProjectNames(new Map(ps.map((p) => [p.id, p.name]))); })
+      .catch(() => { /* no names: the chip reads "a project" */ });
+    return () => { live = false; };
+  }, [wantsProjectNames]);
+
   // The tab strip IS the key-figure band: each count both reports and filters
   // the queue below it (DESIGN §4.5 "stats are filters"). Action-needed reads
   // amber when there's anything waiting on the human.
@@ -277,7 +309,7 @@ export function NotificationsPage(): JSX.Element {
         <Notice variant="warning" announce={t('staleConnectionNotice')}>{t('staleConnectionNotice')}</Notice>
       ) : null}
 
-      <NeedsYouInbox onResolved={() => void refresh()} focusApprovalId={deepLink.approvalId} onApprovalFocused={onApprovalFocused} />
+      <NeedsYouInbox onResolved={() => void refresh()} focusApprovalId={deepLink.approvalId} onApprovalFocused={onApprovalFocused} workflowRequests={actionNeededCount} />
 
       {!(error && notifications.length === 0) && <KeyFigureBand
         figures={figures}
@@ -293,7 +325,10 @@ export function NotificationsPage(): JSX.Element {
       {(() => {
         const unreadInTab = tab !== 'archived' ? inTab.filter((n) => n.status === 'unread') : [];
         const readCount = notifications.filter((n) => n.status === 'read').length;
-        if ((tab !== 'action-needed' || unreadInTab.length === 0) && (tab === 'archived' || readCount === 0)) return null;
+        // ADR 1114 — offered while any request row is still in the inbox; the
+        // server decides which are over (older rows carry no resolution yet).
+        const hasRequests = tab !== 'archived' && notifications.some((n) => n.status !== 'archived' && Boolean(n.interruptId));
+        if ((tab !== 'action-needed' || unreadInTab.length === 0) && (tab === 'archived' || readCount === 0) && !hasRequests) return null;
         return (
           <div className="action-bar u-items-center u-gap-2 u-mb-2">
             {tab === 'action-needed' && unreadInTab.length > 0 ? (
@@ -305,6 +340,11 @@ export function NotificationsPage(): JSX.Element {
             {readCount > 0 ? (
               <Button variant="quiet" size="sm" onClick={() => void archiveRead()}>
                 <InboxIcon size={13} /> {t('archiveRead', { count: readCount })}
+              </Button>
+            ) : null}
+            {hasRequests ? (
+              <Button variant="quiet" size="sm" onClick={() => { void archiveResolvedNotifications().then(() => refresh(), (err: unknown) => useNotificationStore.setState({ error: err instanceof Error ? err.message : String(err) })); }}>
+                <InboxIcon size={13} /> {t('archiveResolved')}
               </Button>
             ) : null}
           </div>
@@ -370,6 +410,7 @@ export function NotificationsPage(): JSX.Element {
           <NotificationCard
             key={n.notificationId}
             notification={n}
+            projectNames={projectNames}
             active={n.notificationId === focusId}
             cursor={n.notificationId === cursorId}
             cardRef={n.notificationId === focusId ? focusRef : undefined}
@@ -411,6 +452,8 @@ export function NotificationsPage(): JSX.Element {
 
 interface NotificationCardProps {
   notification: Notification;
+  /** ADR 1109 D4 — the reader's visible projects, id → name. */
+  projectNames: ReadonlyMap<string, string>;
   /** Deep-link focus target (ADR 0336 Rec Phase 3) — draws the focus ring + is
    *  the scroll anchor; the row is programmatically focused. */
   active?: boolean | undefined;
@@ -426,6 +469,7 @@ interface NotificationCardProps {
 
 function NotificationCard({
   notification,
+  projectNames,
   active,
   cursor,
   cardRef,
@@ -437,6 +481,8 @@ function NotificationCard({
   const { t } = useTranslation('notifications');
   const { pathname } = useLocation();
   const isUnread = notification.status === 'unread';
+  // ADR 1114 — set once the host has retired this request (its step is over).
+  const resolution = requestResolutionOf(notification);
   const when = relativeLabel(notification.createdAt, t); // R2 IB-SP-7 — the ONE localized implementation
   // Prefer the entity-specific actionUrl, but never render a self-link: an
   // action-needed notification targets /inbox, which IS this page — there the
@@ -451,12 +497,19 @@ function NotificationCard({
       aria-current={active ? 'location' : undefined}
       className={`surface-card${active ? ' is-deeplink-focus' : ''}${cursor ? ' notifpage-card--cursor' : ''}`}
     >
-      <div className="u-flex u-items-center u-gap-2 u-mb-2">
+      <div className="u-flex u-flex-wrap u-items-center u-gap-2 u-mb-2">
         <span className="muted u-iflex" aria-hidden="true">{typeIcon(notification.type)}</span>
         <strong>{notification.title}</strong>
-        <span className="chip chip--muted">{t(TYPE_LABEL_KEYS[notification.type] ?? notification.type)}</span>
-        {priorityChip(notification.priority, t)}
+        {resolution ? (
+          <span className="chip chip--muted">{t(RESOLUTION_KEYS[resolution.state])}</span>
+        ) : (
+          <>
+            <span className="chip chip--muted">{t(TYPE_LABEL_KEYS[notification.type] ?? notification.type)}</span>
+            {priorityChip(notification.priority, t)}
+          </>
+        )}
         {isUnread && <span className="chip chip--accent">{t('cardUnread')}</span>}
+        <SubjectChip projectId={subjectProjectId(notification)} projectNames={projectNames} />
         <span className="muted u-ml-auto u-fs-12" title={formatDateTime(notification.createdAt)}>
           {when ?? formatDateTime(notification.createdAt)}
         </span>
@@ -473,7 +526,7 @@ function NotificationCard({
       ) : notification.runId ? (
         <div className="u-mb-2">
           <Link to={`/runs/${notification.runId}`} className="inline-link u-fs-12">
-            {t('cardRunLink', { id: notification.runId.slice(0, 12) })}
+            {t('cardRunLink')}
           </Link>
         </div>
       ) : null}

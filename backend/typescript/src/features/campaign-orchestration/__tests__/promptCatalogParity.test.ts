@@ -46,6 +46,18 @@ describe('campaign-strategist (orchestration) prompt parity — ADR 0942 P6', ()
     expect(prompt).toMatch(/set by the campaign's review\s+policy/);
   });
 
+  // CC-AGENT-2 — red before the fix: the prompt said to "narrate the gates as the
+  // run reaches each one", so the agent re-read status/get-campaign in a loop after
+  // `run` until it hit tool_rounds_exhausted.
+  it('after starting a run it reports the run, its steps and gates, then stops — no polling', () => {
+    const runStep = /\*\*Run it, report it, then stop\.\*\*([\s\S]*?)\n4\. /.exec(prompt)?.[1] ?? '';
+    expect(runStep).toContain(`\`${CAMPAIGN_ORCH_RUN_TOOL_ID}\``);
+    for (const word of ['`runId`', '`steps`', 'gates', 'end your turn']) expect(runStep).toContain(word);
+    expect(runStep).toMatch(/Do \*\*not\*\* call `openwop:campaign-orchestration\.status`\s+or `openwop:campaign-orchestration\.get-campaign` again to watch the run/);
+    expect(prompt).not.toMatch(/as the run reaches each gate/i);
+    expect(prompt).not.toMatch(/you narrate it/);
+  });
+
   it('sends people to the panel by its real title', () => {
     const en = readFileSync(join(ROOT, 'frontend/react/src/features/campaign-orchestration/i18n/en.ts'), 'utf8');
     const title = /\n {2}autTitle: "([^"]+)",/.exec(en)?.[1];

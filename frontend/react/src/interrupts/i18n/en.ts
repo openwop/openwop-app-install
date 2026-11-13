@@ -6,7 +6,11 @@ export const messages = {
   // ADR 0755 D3 — the resume token is projected only to an approvals:respond holder.
   noRespondPermission: 'You can see this step, but you don\'t have permission to respond to it.',
   // RenderInterrupt fallback — neutral copy; never instructs users to edit source (DEMO-14)
-  unknownKindBody: 'This step can\'t be shown here ({{kind}}). Ask your administrator to update the app.',
+  unknownKindBody: 'This app can\'t answer this kind of step ({{kind}}) yet, so it can\'t be completed here.',
+  timerWaits: 'This run is waiting on a timer and resumes on its own.',
+  timerWaitsUntil: 'This run is waiting on a timer and resumes on its own at {{when}}.',
+  walkthroughStepBody: 'This run is a guided walkthrough step; it continues as someone plays the walkthrough.',
+  walkthroughStepLink: 'Open Guided walkthroughs',
 
   // Approval card
   approvalRequired: 'Approval required',
@@ -20,6 +24,7 @@ export const messages = {
   cuRejectConfirmTitle: 'Reject this action and end the browser session?',
   cuRejectConfirmBody: 'The browser agent will not take this action, and the session ends here. Anything it already did on the site stays done.',
   actionRequestChanges: 'Request changes',
+  actionRefine: 'Refine',
   actionDefer: 'Defer',
   actionEscalate: 'Escalate',
   resolvedElsewhere: 'This review was just resolved elsewhere.',

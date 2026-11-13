@@ -23,9 +23,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Developer',
-      label: 'Claude Code', labelKey: 'claudeCodeLabel',
+      labelKey: 'claudeCodeLabel',
       icon: TerminalIcon,
-      hint: 'Your paired Claude Code devices', hintKey: 'claudeCodeHint',
+      hintKey: 'claudeCodeHint',
       order: 40,
       featureId: 'claude-code',
     },

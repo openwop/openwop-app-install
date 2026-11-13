@@ -28,6 +28,8 @@ const P = 'feature.notebooks.nodes.';
 
 /** Named explicitly, NOT derived from the `capabilities` field under test — deriving them
  *  from it would make every leg below vacuous. Each was confirmed by reading its impl. */
+/** ADR 1103 D5 — the node asks the notebook where to write. */
+const TARGET = { transformTarget: async () => ({ orgId: 'o1', ownerSubject: { kind: 'project', id: 'nb1' } }) };
 const WRITERS = ['store-summary', 'write-transformation', 'ingest-source', 'mcp-add-source', 'mcp-create-note'].map((n) => P + n);
 const READS = ['ask', 'search', 'read-source', 'list-notebooks', 'get-notebook', 'list-sources', 'list-notes'].map((n) => P + n);
 /** Write no durable app state; classifying them would land them in the generator's
@@ -67,10 +69,10 @@ describe('ADR 0678 D1 — notebooks writer classification', () => {
     }
   });
 
-  it('leg 5: the pack and the five changed nodes moved version together', () => {
-    expect(PACK.version).toBe('1.1.1');
+  it('leg 5: the pack and the five writers moved version together (ADR 0678 → 1.1.0, ADR 1103 D4 → 1.2.0)', () => {
+    expect(PACK.version).toBe('1.2.0');
     const byId = new Map(PACK.nodes.map((n) => [n.typeId, n]));
-    for (const id of WRITERS) expect(byId.get(id)?.version, id).toBe('1.1.0');
+    for (const id of WRITERS) expect(byId.get(id)?.version, id).toBe('1.2.0');
   });
 
   it('leg 6 (D1b): the transformation document id is CONTENT-derived, never runId-derived', async () => {
@@ -90,9 +92,9 @@ describe('ADR 0678 D1 — notebooks writer classification', () => {
     };
     const ctxFor = (content: string, runId: string) => ({
       runId, nodeId: 'write',
-      inputs: { orgId: 'o1', title: 'T', kind: 'notebook-transformation', sourceId: 's1', content,
+      inputs: { notebookId: 'nb1', orgId: 'o1', title: 'T', kind: 'notebook-transformation', sourceId: 's1', content,
                 ownerSubject: { kind: 'project', id: 'nb1' } },
-      features: { documents: docs },
+      features: { documents: docs, notebooks: TARGET },
     });
     const a = await nodes['feature.notebooks.nodes.write-transformation']!(ctxFor('same body', 'run-A'));
     const b = await nodes['feature.notebooks.nodes.write-transformation']!(ctxFor('same body', 'run-B'));
@@ -110,7 +112,8 @@ describe('ADR 0678 D1 — notebooks writer classification', () => {
   it('leg 7 (D1b): ownerSubject SURVIVES the dedupe — the prescribed cure would have dropped it', async () => {
     // `createDraftDocument` (the ADR 0166 owner, used by ADR 0676 D1 for strategy) does NOT
     // accept `ownerSubject`, so routing through it would have silently discarded the ADR 0084
-    // cross-subject hardening this node enforces. This leg pins that it is still passed.
+    // cross-subject hardening this node enforces. This leg pins that it is still passed —
+    // since ADR 1103 D5, the notebook's own owner, with no owner in the inputs at all.
     const mod = await import(join(REPO, 'packs', 'feature.notebooks.nodes', 'index.mjs'));
     const nodes = (mod.nodes ?? mod.default) as Record<string, (ctx: unknown) => Promise<{ outputs?: Record<string, unknown> }>>;
     let seen: unknown;
@@ -120,8 +123,8 @@ describe('ADR 0678 D1 — notebooks writer classification', () => {
     };
     await nodes['feature.notebooks.nodes.write-transformation']!({
       runId: 'r', nodeId: 'write',
-      inputs: { orgId: 'o1', title: 'T', kind: 'k', sourceId: 's', content: 'body', ownerSubject: { kind: 'project', id: 'nb1' } },
-      features: { documents: docs },
+      inputs: { notebookId: 'nb1', title: 'T', kind: 'k', sourceId: 's', content: 'body' },
+      features: { documents: docs, notebooks: TARGET },
     });
     expect(seen).toEqual({ kind: 'project', id: 'nb1' });
   });

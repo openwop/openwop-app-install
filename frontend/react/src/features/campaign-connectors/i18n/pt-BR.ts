@@ -148,9 +148,16 @@ export const messages = {
   feedEnabled: "Publicar o feed de produtos",
   feedItemCount_one: "{{count}} item no feed.",
   feedItemCount_other: "{{count}} itens no feed.",
+  // ADR 1110 P3 — the count stopped at its cap
+  feedItemCountFloor: "Há mais de {{count}} itens no feed.",
+  feedPushRemaining_one: "Mais {{count}} alteração aguarda o próximo envio.",
+  feedPushRemaining_other: "Mais {{count}} alterações aguardam o próximo envio.",
+  feedPushTooLarge: "Este catálogo tem mais de {{max}} produtos, demais para enviar ao {{platform}} de uma vez. Dê ao {{platform}} a URL do feed acima; ele busca o catálogo inteiro no próprio horário.",
   feedExcludedCount_one: "{{count}} produto ficou de fora.",
   feedExcludedCount_other: "{{count}} produtos ficaram de fora.",
   feedExcludedShow: "Ver o que ficou de fora",
+  // ADR 1110 round fix
+  feedExcludedFirst: "Os primeiros {{shown}} de {{total}} deixados de fora.",
   feedExcluded_no_image: "sem imagem",
   feedExcluded_no_price: "sem preço",
   feedExcluded_invalid_currency: "moeda não suportada",

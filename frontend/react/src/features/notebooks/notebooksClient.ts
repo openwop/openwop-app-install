@@ -55,6 +55,9 @@ export interface NotebookSearchHit {
   chunkIndex: number;
   text: string;
   score: number;
+  /** ADR 0904 D4 — the CALIBRATED relevance in [0, 1] (comparable across modes). `score`
+   *  is the mode's own scale and must not be shown as a percentage. */
+  relevance?: number;
 }
 
 /** A de-duplicated source citation for a search answer. */

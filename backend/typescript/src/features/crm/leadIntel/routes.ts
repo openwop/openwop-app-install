@@ -31,6 +31,7 @@ import {
   bindLead, getLeadGrade, getLeadProfile, LEAD_SOURCES, listLeadGrades, listLeadProfiles, type LeadSource,
 } from './leadStore.js';
 import { explainGrade } from './grading.js';
+import { planExemptStampOf } from '../../../host/operatorPlanExemption.js';
 
 const BASE = '/host/openwop-app/crm/clients/:orgId/leads';
 const GRADE_ENDPOINT = 'POST:/host/openwop-app/crm/clients/:orgId/leads/:contactId/grade' satisfies IdempotentEndpoint;
@@ -236,6 +237,8 @@ export function registerLeadIntelRoutes(deps: RouteDeps): void {
         const response = await admitLeadDispatch({ storage, hostSuite }, {
           mode, tenantId, orgId, contactId, userId, requestKeyHash,
           ...(personalTenantOf(req) ? { personalTenant: personalTenantOf(req) } : {}),
+          // CC-AUTH-5 / ADR 1108 — decided here, at the request, as `POST /runs` does.
+          ...(planExemptStampOf(req) ? { planExempt: true as const } : {}),
           ...(held ? { responseCommit: { endpoint, key: held.key, claimToken: held.claimToken } } : {}),
         });
         const { runId } = response;

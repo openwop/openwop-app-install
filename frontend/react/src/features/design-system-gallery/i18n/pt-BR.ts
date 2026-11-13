@@ -32,6 +32,8 @@ export const messages = {
   fieldError: 'Isso não parece um endereço de e-mail.',
   fieldSelect: 'Seletor',
   fieldTextarea: 'Área de texto',
+  fieldCombobox: 'Pesquisar e escolher',
+  fieldComboboxHelp: 'Digite para pesquisar; as setas percorrem os resultados.',
   table: 'Tabela de dados',
   tableCaption: 'Linhas de amostra',
   tableEmptyCaption: 'Tabela vazia de amostra',

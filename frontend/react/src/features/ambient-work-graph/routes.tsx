@@ -21,9 +21,10 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Workspace',
-      label: 'Work patterns', labelKey: 'ambientWorkGraphLabel',
+      labelKey: 'ambientWorkGraphLabel',
+      order: 60,
       icon: SparklesIcon,
-      hint: 'Recurring work → suggested workflows', hintKey: 'ambientWorkGraphHint',
+      hintKey: 'ambientWorkGraphHint',
     },
   },
 ];

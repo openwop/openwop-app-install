@@ -24,6 +24,7 @@ import {
   AutonomyDisabledError, LoosenRefusedError, PolicyConflictError, clearCampaignAutonomy, getAutonomy, saveAutonomy,
   type ActionRule, type AutonomyScope, type Condition, type Decision, type EffectiveRule, type Outcome, type PolicyView, type PresetId,
 } from './autonomyClient.js';
+import { TableScroll } from '../../../ui/DataTable.js';
 
 type TFn = ReturnType<typeof useTranslation>['t'];
 
@@ -290,7 +291,7 @@ function AutonomyPolicyEditor({ scope, bare = false }: AutonomyPolicyPanelProps)
             </fieldset>
           ) : null}
 
-          <div className="table-scroll table--stack u-mb-3">
+          <TableScroll className="table--stack u-mb-3" label={t('autTitle')}>
             <table className="data-table" aria-labelledby={headingId}>
               <thead>
                 <tr>
@@ -360,7 +361,7 @@ function AutonomyPolicyEditor({ scope, bare = false }: AutonomyPolicyPanelProps)
                 );
               })}
             </table>
-          </div>
+          </TableScroll>
           <p className="u-fs-12 muted u-mt-0">{t('autUnknownFacts')}</p>
 
           <div className="action-bar u-flex u-flex-wrap u-gap-2 u-mb-3">

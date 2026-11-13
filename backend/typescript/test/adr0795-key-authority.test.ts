@@ -28,6 +28,7 @@ import {
   resolveTenantLevelScopes,
 } from '../src/host/accessControlService.js';
 import { issueApiKey, revokeApiKey, verifyApiKey } from '../src/features/developer-keys/apiKeyService.js';
+import { envKeyPrincipalId } from '../src/middleware/envKeyPrincipal.js';
 
 const PERSONAL = 'user:adr0795personal';
 const SHARED = 'ws:adr0795-shared';
@@ -139,13 +140,19 @@ describe('ADR 0795 D1 / D6 — a shared workspace: the key follows its issuer', 
   });
 
   it('an operator-issued key resolves as the tenant’s own principal, narrowed — while that env key is still configured', async () => {
-    const k = await mint('ws:adr0795-op', 'bearer:abcd1234', ['workspace:read']);
+    const OP_KEY = 'abcd1234-rest-of-the-operator-key';
+    const k = await mint('ws:adr0795-op', envKeyPrincipalId(OP_KEY), ['workspace:read']);
+    // ADR 1045 (CHAN-F14): a key minted under the LEGACY id (`bearer:` + the
+    // env key's first 8 characters) is nobody, even while that env key is
+    // configured. The legacy match was deleted; prod's stored ids were rewritten.
+    const legacy = await mint('ws:adr0795-op', `bearer:${OP_KEY.slice(0, 8)}`, ['workspace:read']);
     // `<key>:ws:<id>` splits on the LAST colon (key `…:ws`, tenant `adr0795-op`),
     // so an env key cannot be configured for a `ws:` tenant at all; only the
     // wildcard reaches one. ADR 1045 (TST-FUD-GC-1 follow-up) binds this reader
     // to the delegation's tenant, which the mis-parsed config no longer passed.
-    process.env.OPENWOP_API_KEYS = 'abcd1234-rest-of-the-operator-key:*';
+    process.env.OPENWOP_API_KEYS = `${OP_KEY}:*`;
     expect((await resolveEffectiveAccess('ws:adr0795-op', { subject: k.subject })).scopes).toEqual(['workspace:read']);
+    expect((await resolveEffectiveAccess('ws:adr0795-op', { subject: legacy.subject })).scopes, 'a legacy bearer:<8> issuer matches nothing').toEqual([]);
     // Rotated out: what it minted must not stay the tenant's own principal.
     process.env.OPENWOP_API_KEYS = 'some-other-key:*';
     expect((await resolveEffectiveAccess('ws:adr0795-op', { subject: k.subject })).scopes).toEqual([]);

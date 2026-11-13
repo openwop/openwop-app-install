@@ -34,6 +34,7 @@ import { resolveHeadlessAi } from '../src/host/headlessAi.js';
 import { createApp } from '../src/index.js';
 import { createAgentToolProvider } from '../src/host/agentToolProvider.js';
 import { CMS_TRANSLATE_SECTION_TOOL_ID } from '../src/features/cms/agentTools.js';
+import { AI_TRANSLATE_DEADLINE_MS } from '../src/features/cms/translate.js';
 import { createOrg } from '../src/host/accessControlService.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
@@ -88,5 +89,22 @@ describe('CMSLWF-11 — chat-lane translate-section, toggle ON', () => {
     expect(body).toMatchObject({ error: 'translation_invalid' });
     expect(body).not.toHaveProperty('overlay');
     expect(dispatch).toHaveBeenCalledTimes(2); // initial + exactly ONE bounded repair
+  });
+
+  it('a section in parts that runs out of time is translation_timeout, so the agent can try again (ADR 1112 P3)', async () => {
+    const decisions = Array.from({ length: 200 }, (_, i) => ({ id: `DEC-${String(i).padStart(5, '0')}`, title: `What finish does item ${i} need`, element: `Kitchen zone ${i}`, milestone: 'm1' }));
+    const data = { milestones: [{ id: 'm1', label: 'Start', startWeek: 0, weeks: 4 }], decisions };
+    // Every part waits until it is aborted: the deadline is what ends it.
+    mockResolve.mockResolvedValue(vi.fn((_m: unknown, opts: { signal?: AbortSignal }) => new Promise<string>((_, reject) => opts.signal?.addEventListener('abort', () => reject(new Error('aborted'))))));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const pending = translate({ sectionType: 'scheduleSim', data, targetLocale: 'es' });
+      await vi.advanceTimersByTimeAsync(AI_TRANSLATE_DEADLINE_MS + 1);
+      const out = await pending;
+      expect(out.isError).toBe(true);
+      expect(JSON.parse(out.content)).toMatchObject({ error: 'translation_timeout' });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

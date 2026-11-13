@@ -3,7 +3,7 @@
  * `queue` picture and the richText `card` picture. Plain text only: no raw HTML,
  * links through `CtaLink` (the same guard as every other section).
  */
-import { useId, useState, type ReactNode } from 'react';
+import { useId, useState, type CSSProperties, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { Section } from './cmsClient.js';
 import { assetUrl } from './cmsClient.js';
@@ -13,6 +13,7 @@ import { CtaLink } from './CtaLink.js';
 import { useFormat } from '../../i18n/useFormat.js';
 import { Button } from '../../ui/Button.js';
 import { ProjectSimulator } from './ProjectSimulator.js';
+import { computeGaps, computeMargin } from './worksheetMath.js';
 import './designSections.css';
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
@@ -67,10 +68,20 @@ function StatusTable({ d, sx }: { d: Raw; sx: string }): JSX.Element {
   const columns = strings(d.columns);
   const body = rows(d.rows);
   const hasStatus = body.some((r) => str(r.status));
+  // #5765 — a ruled list under the head; with `head: 'split'` the head and the
+  // list take the first column and the table the second. Unset, the markup is
+  // unchanged (a fragment around the head alone).
+  const points = strings(d.points);
+  const intro = (
+    <>
+      <Head d={d} />
+      {points.length > 0 ? <ul role="list" className="fp-stable__points">{points.map((p, i) => <li key={i}>{p}</li>)}</ul> : null}
+    </>
+  );
   return (
     <section className={`cms-public-section fp-section fp-stable${sx}`}>
       <div className="fp-shell">
-        <Head d={d} />
+        {d.head === 'split' ? <div className="fp-stable__intro">{intro}</div> : intro}
         <div className="fp-stable__frame">
           {str(d.label) ? <p className="fp-stable__label">{str(d.label)}</p> : null}
           <div className="fp-stable__scroll" tabIndex={0} role="region" aria-label={str(d.heading) || str(d.label) || t('sectionType_statusTable')}>
@@ -135,6 +146,97 @@ function DateCalc({ d, sx }: { d: Raw; sx: string }): JSX.Element {
                 ? t('designDateExplain', { lead: leadN * 7, float: floatN, approve: approveN })
                 : label('unknownText', 'designDateUnknown')}
             </p>
+            {str(d.note) ? <p className="fp-calc__note">{str(d.note)}</p> : null}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/** ADR 1105 — a worksheet figure: money in the section's currency, else a plain number. */
+function useFigure(currency: string): (v: number | undefined) => string {
+  const { t } = useTranslation('cms');
+  const fmt = useFormat();
+  return (v) => (v === undefined ? t('designFigureNone') : currency ? fmt.currency(v, currency) : fmt.number(v, { maximumFractionDigits: 2 }));
+}
+
+/** ADR 1105 D3 — cost and markup to client price and gross margin, and the markup a target margin needs. */
+function MarginCalc({ d, sx }: { d: Raw; sx: string }): JSX.Element {
+  const { t } = useTranslation('cms');
+  const fmt = useFormat();
+  const initial = (v: unknown): string => (typeof v === 'number' ? String(v) : '');
+  const [cost, setCost] = useState(initial(d.cost));
+  const [markup, setMarkup] = useState(initial(d.markup));
+  const [target, setTarget] = useState(initial(d.target));
+  const n = (v: string): number | undefined => parseCount(v) ?? undefined;
+  const targetN = n(target);
+  const r = computeMargin({ cost: n(cost), markup: n(markup), target: targetN !== undefined && targetN < 100 ? targetN : undefined });
+  const money = useFigure(str(d.currency));
+  const pct = (v: number | undefined): string => (v === undefined ? t('designFigureNone') : fmt.percent(v / 100, { maximumFractionDigits: 1 }));
+  const label = (key: string, fallback: string): string => str(d[key]) || t(fallback);
+  return (
+    <section className={`cms-public-section fp-section fp-calc fp-calc--margin${sx}`}>
+      <div className="fp-shell">
+        <Head d={d} />
+        <div className="fp-calc__grid">
+          <div className="fp-calc__inputs">
+            <Field label={label('costLabel', 'designMarginCost')}><input type="number" min={0} step="any" inputMode="decimal" value={cost} onChange={(e) => setCost(e.target.value)} /></Field>
+            <Field label={label('markupLabel', 'designMarginMarkup')}><input type="number" min={0} step="any" inputMode="decimal" value={markup} onChange={(e) => setMarkup(e.target.value)} /></Field>
+            <Field label={label('targetLabel', 'designMarginTarget')}><input type="number" min={0} max={99} step="any" inputMode="decimal" value={target} onChange={(e) => setTarget(e.target.value)} /></Field>
+          </div>
+          <div className="fp-calc__result" aria-live="polite">
+            <div className="fp-calc__dates">
+              <div><p className="fp-calc__k">{t('designMarginPrice')}</p><p className="fp-calc__v">{money(r.price)}</p></div>
+              <div><p className="fp-calc__k">{t('designMarginMargin')}</p><p className="fp-calc__v">{pct(r.margin)}</p></div>
+              <div><p className="fp-calc__k">{t('designMarginForTarget')}</p><p className="fp-calc__v">{pct(r.markupForTarget)}</p></div>
+            </div>
+            {/* UXG-1105-3 — say why a target of 100% or more has no markup. */}
+            {targetN !== undefined && targetN >= 100 ? <p className="fp-calc__why">{t('designMarginTargetTooHigh')}</p> : null}
+            <p className="fp-calc__why">{t('designMarginExplain')}</p>
+            {str(d.note) ? <p className="fp-calc__note">{str(d.note)}</p> : null}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/** ADR 1105 D4 — an allowance beside the expected spend, line by line; overruns are never netted. */
+function AllowanceGap({ d, sx }: { d: Raw; sx: string }): JSX.Element {
+  const { t } = useTranslation('cms');
+  const initial = (v: unknown): string => (typeof v === 'number' ? String(v) : '');
+  const authored = rows(d.lines).filter((l) => str(l.name));
+  const [values, setValues] = useState(() => authored.map((l) => ({ allowance: initial(l.allowance), specified: initial(l.specified) })));
+  const money = useFigure(str(d.currency));
+  const n = (v: string | undefined): number | undefined => (v === undefined ? undefined : parseCount(v) ?? undefined);
+  const g = computeGaps(authored.map((l, i) => ({ name: str(l.name), allowance: n(values[i]?.allowance), specified: n(values[i]?.specified) })));
+  const set = (i: number, k: 'allowance' | 'specified', v: string): void => setValues((prev) => prev.map((x, j) => (j === i ? { ...x, [k]: v } : x)));
+  const col = { line: str(d.label) || t('designGapLine'), allowance: str(d.allowanceLabel) || t('designGapAllowance'), specified: str(d.specifiedLabel) || t('designGapSpecified') };
+  return (
+    <section className={`cms-public-section fp-section fp-calc fp-calc--gap${sx}`}>
+      <div className="fp-shell">
+        <Head d={d} />
+        <div className="fp-gap">
+          {/* Explicit roles: below 640px the cells are restyled as grids, and WebKit then drops native table semantics (DESIGN.md §11). */}
+          <table className="fp-gap__table" role="table">
+            <thead role="rowgroup"><tr role="row"><th scope="col" role="columnheader">{col.line}</th><th scope="col" role="columnheader">{col.allowance}</th><th scope="col" role="columnheader">{col.specified}</th><th scope="col" role="columnheader">{t('designGapOver')}</th></tr></thead>
+            <tbody role="rowgroup">
+              {g.rows.map((r, i) => (
+                <tr key={i} role="row">
+                  <th scope="row" role="rowheader">{r.name}</th>
+                  <td role="cell" data-label={col.allowance}><input type="number" min={0} step="any" inputMode="decimal" aria-label={`${r.name}: ${col.allowance}`} value={values[i]?.allowance ?? ''} onChange={(e) => set(i, 'allowance', e.target.value)} /></td>
+                  <td role="cell" data-label={col.specified}><input type="number" min={0} step="any" inputMode="decimal" aria-label={`${r.name}: ${col.specified}`} value={values[i]?.specified ?? ''} onChange={(e) => set(i, 'specified', e.target.value)} /></td>
+                  <td role="cell" data-label={t('designGapOver')} className={r.over !== undefined && r.over > 0 ? 'fp-gap__over fp-gap__over--late' : 'fp-gap__over'}>
+                    {r.over === undefined ? t('designFigureNone') : r.over > 0 ? money(r.over) : t('designGapWithin')}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="fp-calc__result" aria-live="polite">
+            <div><p className="fp-calc__k">{t('designGapTotal')}</p><p className="fp-calc__v">{money(g.totalOver)}</p></div>
+            <p className="fp-calc__why">{t('designGapExplain', { count: g.linesOver, total: g.rows.length })}{g.linesMissing > 0 ? ` ${t('designGapMissing', { count: g.linesMissing })}` : ''}</p>
             {str(d.note) ? <p className="fp-calc__note">{str(d.note)}</p> : null}
           </div>
         </div>
@@ -222,9 +324,94 @@ function FeatureIndex({ d, sx }: { d: Raw; sx: string }): JSX.Element {
   );
 }
 
+/** ADR 1105 D1/D9 — a project's parties. The ADR 1080 D4 picker: a labelled
+ *  group of pressed buttons, every panel in the DOM and the others hidden, so a
+ *  crawler and a no-JS reader get them all. Each party's sample view reuses the
+ *  hero queue card (the same rows-with-a-status shape). */
+function PartyViews({ d, sx }: { d: Raw; sx: string }): JSX.Element {
+  const { t } = useTranslation('cms');
+  const parties = rows(d.parties).filter((p) => str(p.label));
+  const start = typeof d.initial === 'number' && d.initial >= 0 && d.initial < parties.length ? d.initial : 0;
+  const [picked, setPicked] = useState(start);
+  const id = useId();
+  return (
+    <section className={`cms-public-section fp-section fp-parties${sx}`}>
+      <div className="fp-shell">
+        <Head d={d} />
+        <div className="fp-parties__pick" role="group" aria-label={str(d.label) || str(d.heading) || t('designPartiesPick')}>
+          {parties.map((p, i) => (
+            <Button key={i} variant="quiet" className="fp-parties__btn" aria-pressed={i === picked} aria-controls={`${id}-${i}`} onClick={() => setPicked(i)}>{str(p.label)}</Button>
+          ))}
+        </div>
+        {parties.map((p, i) => {
+          const needs = strings(p.needs).filter(Boolean);
+          const view = rows(p.rows).filter((r) => str(r.title));
+          return (
+            <div key={i} id={`${id}-${i}`} className="fp-parties__panel" hidden={i !== picked}>
+              {needs.length > 0 ? (
+                <div className="fp-parties__needs">
+                  <p className="fp-eyebrow">{str(p.needsLabel) || t('designPartiesNeeds')}</p>
+                  <ul role="list" className="fp-parties__list">{needs.map((n, j) => <li key={j}>{n}</li>)}</ul>
+                </div>
+              ) : null}
+              {view.length > 0 ? <HeroQueue queue={{ title: str(p.viewTitle) || t('designPartiesView', { party: str(p.label) }), label: str(p.viewLabel), rows: view, note: str(p.note) }} /> : null}
+              {view.length === 0 && str(p.note) ? <p className="fp-parties__note">{str(p.note)}</p> : null}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+/** ADR 1105 D2/D8 — counts by stage. A labelled list first: each stage's label
+ *  and count are text, drawn as bars below 900px and columns above. Groups show
+ *  in the legend with their totals, and by pattern as well as color. */
+function StageChart({ d, sx }: { d: Raw; sx: string }): JSX.Element {
+  const fmt = useFormat();
+  const groups = rows(d.groups).filter((g) => str(g.key) && str(g.label));
+  const stages = rows(d.stages).filter((x) => str(x.label) && typeof x.count === 'number');
+  const max = Math.max(1, ...stages.map((x) => x.count as number));
+  const unit = str(d.unit);
+  const count = (v: number): string => (unit ? `${fmt.number(v)} ${unit}` : fmt.number(v));
+  // In a column the unit is visually hidden (the legend carries it); it stays in the accessible text.
+  const countCell = (v: number): JSX.Element => <>{fmt.number(v)}{unit ? <span className="fp-schart__unit">{` ${unit}`}</span> : null}</>;
+  const totals = groups
+    .map((g, gi) => ({ gi, label: str(g.label), total: stages.filter((x) => x.group === g.key).reduce((sum, x) => sum + (x.count as number), 0) }))
+    .filter((g) => g.total > 0);
+  return (
+    <section className={`cms-public-section fp-section fp-schart${sx}`}>
+      <div className="fp-shell">
+        <Head d={d} />
+        <ol role="list" className="fp-schart__bars">
+          {stages.map((x, i) => {
+            const gi = groups.findIndex((g) => g.key === x.group);
+            return (
+              // The bar's length is geometry (the ADR 1080 scheduleSim tick precedent).
+              <li key={i} className={`fp-schart__stage${gi >= 0 ? ` fp-schart--g${gi}` : ''}`} style={{ '--v': String((x.count as number) / max) } as CSSProperties}>
+                <span className="fp-schart__count">{countCell(x.count as number)}</span>
+                <span className="fp-schart__bar" aria-hidden="true" />
+                <span className="fp-schart__label">{str(x.label)}{gi >= 0 ? <span className="sr-only">{` (${str(groups[gi]!.label)})`}</span> : null}</span>
+              </li>
+            );
+          })}
+        </ol>
+        {totals.length > 0 ? (
+          <ul role="list" className="fp-schart__legend">
+            {totals.map((g) => (
+              <li key={g.gi} className={`fp-schart__key fp-schart--g${g.gi}`}><span className="fp-schart__swatch" aria-hidden="true" />{g.label}{' '}<strong>{count(g.total)}</strong></li>
+            ))}
+          </ul>
+        ) : null}
+        {str(d.note) ? <p className="fp-schart__note">{str(d.note)}</p> : null}
+      </div>
+    </section>
+  );
+}
+
 // `films` (ADR 1082) is listed here for the editor preview and the type lists;
 // it renders in SectionRenderer beside `video`, whose player it reuses.
-export const DESIGN_SECTION_TYPES = ['statusTable', 'dateCalc', 'conversation', 'featureIndex', 'decisionTree', 'scheduleSim', 'films'] as const;
+export const DESIGN_SECTION_TYPES = ['statusTable', 'dateCalc', 'conversation', 'featureIndex', 'decisionTree', 'scheduleSim', 'films', 'marginCalc', 'allowanceGap', 'partyViews', 'stageChart'] as const;
 
 export function isDesignSection(type: string): boolean {
   return (DESIGN_SECTION_TYPES as readonly string[]).includes(type);
@@ -234,11 +421,19 @@ export function DesignSection({ section, sx }: { section: Section; sx: string })
   const d = section.data;
   switch (section.type) {
     case 'statusTable': return <StatusTable d={d} sx={sx} />;
-    case 'dateCalc': return <DateCalc d={d} sx={sx} />;
+    // CG-1105-1 — keyed on the authored values like the worksheets, so an author's
+    // edit in the Page Builder preview reaches the reader's seeded inputs.
+    case 'dateCalc': return <DateCalc key={JSON.stringify([d.needDate, d.leadWeeks, d.floatDays, d.approveDays])} d={d} sx={sx} />;
     case 'conversation': return <Conversation d={d} sx={sx} />;
     case 'featureIndex': return <FeatureIndex d={d} sx={sx} />;
     case 'decisionTree': return <DecisionTree d={d} sx={sx} />;
     case 'scheduleSim': return <ProjectSimulator d={d} sx={sx} />;
+    // Keyed on the authored figures: the reader's edits are local state seeded
+    // from them, so an author's change in the Page Builder preview remounts it.
+    case 'marginCalc': return <MarginCalc key={JSON.stringify([d.cost, d.markup, d.target])} d={d} sx={sx} />;
+    case 'allowanceGap': return <AllowanceGap key={JSON.stringify(d.lines ?? null)} d={d} sx={sx} />;
+    case 'partyViews': return <PartyViews d={d} sx={sx} />;
+    case 'stageChart': return <StageChart d={d} sx={sx} />;
     default: return null;
   }
 }

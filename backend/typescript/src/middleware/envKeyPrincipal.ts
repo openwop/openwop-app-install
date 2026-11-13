@@ -20,8 +20,6 @@
 import { createHash } from 'node:crypto';
 import { keyConfigSource, readKeyTenants } from './apiKeyTenants.js';
 
-/** The pre-ADR-1045 id took this many raw key characters. */
-const LEGACY_PREFIX_LENGTH = 8;
 /** `bearer:` + 16 lowercase hex — the only shape {@link envKeyPrincipalId} mints. */
 const NEW_FORM = /^bearer:[0-9a-f]{16}$/;
 
@@ -34,8 +32,6 @@ interface EnvKeyIndex {
   readonly source: string;
   /** new-form principal id → the tenants that key is configured for. */
   readonly byPrincipal: ReadonlyMap<string, readonly string[]>;
-  /** legacy raw prefix → the tenants of EVERY configured key with that prefix. */
-  readonly byLegacyPrefix: ReadonlyMap<string, ReadonlyArray<readonly string[]>>;
 }
 
 let cached: EnvKeyIndex | undefined;
@@ -46,15 +42,8 @@ function envKeyIndex(): EnvKeyIndex {
   const source = keyConfigSource();
   if (cached !== undefined && cached.source === source) return cached;
   const byPrincipal = new Map<string, readonly string[]>();
-  const byLegacyPrefix = new Map<string, Array<readonly string[]>>();
-  for (const [key, tenants] of readKeyTenants()) {
-    byPrincipal.set(envKeyPrincipalId(key), tenants);
-    const prefix = key.slice(0, LEGACY_PREFIX_LENGTH);
-    const bucket = byLegacyPrefix.get(prefix);
-    if (bucket) bucket.push(tenants);
-    else byLegacyPrefix.set(prefix, [tenants]);
-  }
-  cached = { source, byPrincipal, byLegacyPrefix };
+  for (const [key, tenants] of readKeyTenants()) byPrincipal.set(envKeyPrincipalId(key), tenants);
+  cached = { source, byPrincipal };
   return cached;
 }
 
@@ -63,29 +52,18 @@ function envKeyIndex(): EnvKeyIndex {
  * env key that is still configured (and, given `tenantId`, configured for that
  * tenant or for `*`)?
  *
- *  - NEW form (`bearer:` + 16 hex): matches only the one key whose
- *    {@link envKeyPrincipalId} it is.
- *  - LEGACY form (`bearer:` + a raw prefix of at most 8 chars): still present in
- *    stored delegations (`createdBy`), run actors and scheduled chats minted
- *    before this change. It matches ONLY when EXACTLY ONE configured key has
- *    that raw prefix, and the tenant binding is checked against that one key.
- *    An ambiguous prefix fails CLOSED: with two candidates there is no way to
- *    tell which key minted the record, and answering "yes" for either is the
- *    defect itself (the survivor would vouch for the removed key's grants). A
- *    legacy record whose prefix became ambiguous loses operator standing until
- *    one of the colliding keys is removed or the record is re-issued.
+ * Only the NEW form (`bearer:` + 16 hex) matches, and only the one key whose
+ * {@link envKeyPrincipalId} it is.
+ *
+ * CORRECTED 2026-11-12 (ADR 1045, CHAN-F14): a LEGACY id (`bearer:` + the
+ * key's first 8 raw characters) used to match when exactly one configured key
+ * had that prefix. That rule is deleted: it let a same-prefix rotation hand the
+ * old key's records to the new one. A legacy id now matches nothing (fails
+ * closed). Stored legacy ids are rewritten by the `legacy-bearer-id-rewrite`
+ * job (`host/legacyBearerIdRewrite.ts`), which openwop-dev ran on 2026-11-12.
  */
 export function isConfiguredEnvKeyIssuer(issuer: string, tenantId?: string): boolean {
-  if (!issuer.startsWith('bearer:')) return false;
-  const index = envKeyIndex();
-  const admits = (tenants: readonly string[]): boolean =>
-    tenantId === undefined || tenants.includes(tenantId) || tenants.includes('*');
-  if (NEW_FORM.test(issuer)) {
-    const tenants = index.byPrincipal.get(issuer);
-    return tenants !== undefined && admits(tenants);
-  }
-  const prefix = issuer.slice('bearer:'.length);
-  if (prefix.length === 0 || prefix.length > LEGACY_PREFIX_LENGTH) return false;
-  const candidates = index.byLegacyPrefix.get(prefix);
-  return candidates !== undefined && candidates.length === 1 && admits(candidates[0]!);
+  if (!NEW_FORM.test(issuer)) return false;
+  const tenants = envKeyIndex().byPrincipal.get(issuer);
+  return tenants !== undefined && (tenantId === undefined || tenants.includes(tenantId) || tenants.includes('*'));
 }

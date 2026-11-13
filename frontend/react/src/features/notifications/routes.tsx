@@ -23,9 +23,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Pinned',
-      label: 'Inbox', labelKey: 'notificationsLabel',
+      labelKey: 'notificationsLabel',
       icon: InboxIcon,
-      hint: 'What needs you — approvals, blockers, notifications', hintKey: 'notificationsHint',
+      hintKey: 'notificationsHint',
       // IA refresh: the action portal sits just under Chat (order 15) — "what
       // needs me" is a daily return surface, ahead of Agents (management, 20).
       order: 15,

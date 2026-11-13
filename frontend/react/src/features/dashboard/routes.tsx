@@ -46,9 +46,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Pinned',
-      label: 'Dashboard', labelKey: 'dashboardLabel',
+      labelKey: 'dashboardLabel',
       icon: LayoutGridIcon,
-      hint: 'Your customizable home', hintKey: 'dashboardHint',
+      hintKey: 'dashboardHint',
       order: 5, // leads the pinned cluster (Dashboard · Chat · Inbox · Agents)
       end: true,
     },

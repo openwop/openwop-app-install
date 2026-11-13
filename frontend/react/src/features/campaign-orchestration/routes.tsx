@@ -17,9 +17,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Marketing',
-      label: 'Campaigns', labelKey: 'campaignOrchestrationLabel',
+      labelKey: 'campaignOrchestrationLabel',
       icon: MegaphoneIcon,
-      hint: 'Run & manage marketing campaigns', hintKey: 'campaignOrchestrationHint',
+      hintKey: 'campaignOrchestrationHint',
       order: 30,
       featureId: 'campaign-orchestration',
       // ADR 0200 Phase 2 — collapse into the Campaign Studio console when `campaigns` is on.

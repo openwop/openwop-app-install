@@ -14,7 +14,7 @@ const routes: FeatureRoute[] = [
     path: '/promotions',
     element: <PromotionsPage />,
     tier: 'workspace', archetype: 'standard-index',
-    nav: { group: 'Commerce', label: 'Promotions', labelKey: 'promotionsLabel', icon: ZapIcon, hint: 'Promotions & loss-leaders', hintKey: 'promotionsHint', order: 62, featureId: 'promotions' },
+    nav: { group: 'Commerce', labelKey: 'promotionsLabel', icon: ZapIcon, hintKey: 'promotionsHint', order: 62, featureId: 'promotions' },
   },
 ];
 

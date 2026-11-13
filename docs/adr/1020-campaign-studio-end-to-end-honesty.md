@@ -182,6 +182,13 @@ on ADR 0964.
   refuse `kernel_unapproved` / `kernel_stale`. **Migration rule:** a present `kernel` counts as
   approved, because promotion becomes its only writer; the two seeders that call `setKernel`
   directly (`campaignShowcaseSeed.ts:252`, `demoContentMarketingSeed.ts:253`) stay approved writes.
+  > **Correction (2026-11-12, CC-KERNEL-1 — the funnel steps were a reader D8 missed).** The
+  > funnel step sub-chains read the brief through `get-brief` → `feature.funnels.nodes.offer-context`,
+  > which projected `brief.kernel` without looking at `brief.kernelStale`. Live on `373d4863a`, run
+  > `b3d2e0a3…` (`funnels.step.thankyou`, brief at revision 5 with its kernel marked stale) wrote copy
+  > from the stale kernel, created a CMS page and submitted it for review. `offer-context` now refuses
+  > `kernel_stale` with the channels' wording; a brief with no kernel still builds a context. Test:
+  > `test/cc-kernel-1-funnels-stale-kernel.test.ts`.
 - **D9 (`CS70WF-13`).** Every persisting step is a `role: "side-effect"` node (promotion is the
   natural cut), so a replay fork serves the recorded outcome instead of writing. Regenerate
   `executor/sideEffectFloor.generated.ts` (its `--check` runs in the gate).

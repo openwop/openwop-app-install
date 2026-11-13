@@ -26,11 +26,19 @@
  * region. Never both — that pairing is the DS-8 double-announce (`toast.tsx:80`:
  * "a double region made errors announce twice"), and making the two mutually
  * exclusive removes it by construction rather than by rule.
+ *
+ * DISMISS (CC-UI-1). Pass `onDismiss` + `dismissLabel` for a dismissible
+ * notice: this component renders the close control TRAILING the message. Do
+ * not put a close button or a second status icon in `children` — callers did,
+ * and the Campaign Brief validation read "✓ ✕ ✓ Ready to generate…". The
+ * button sits OUTSIDE the live region so its label is never part of what is
+ * announced (`aria-atomic` would otherwise read "Close" with every message).
  */
 
 import { useEffect } from 'react';
 import { announce as announceToScreenReader } from './announce.js';
-import { AlertIcon, CheckIcon } from './icons/index.js';
+import { Button } from './Button.js';
+import { AlertIcon, CheckIcon, XIcon } from './icons/index.js';
 
 export type NoticeVariant = 'success' | 'error' | 'info' | 'warning';
 
@@ -52,6 +60,14 @@ type NoticeProps = {
   variant?: NoticeVariant;
   children: React.ReactNode;
 } & (
+  | { onDismiss?: undefined; dismissLabel?: never }
+  | {
+      /** Renders a trailing close control that calls this. */
+      onDismiss: () => void;
+      /** Accessible name for the close control (it shows only an icon). */
+      dismissLabel: string;
+    }
+) & (
   | {
       /** Element id — lets a form control reference this notice via `aria-describedby`. */
       id: string;
@@ -71,7 +87,7 @@ type NoticeProps = {
     }
 );
 
-export function Notice({ variant = 'info', children, id, announce }: NoticeProps): JSX.Element {
+export function Notice({ variant = 'info', children, id, announce, onDismiss, dismissLabel }: NoticeProps): JSX.Element {
   // An error is announced ASSERTIVELY — a failed action must not be missed behind
   // a polite queue; the other variants stay polite (A11Y-2).
   const assertive = variant === 'error';
@@ -80,18 +96,28 @@ export function Notice({ variant = 'info', children, id, announce }: NoticeProps
     if (announce) announceToScreenReader(announce, { assertive });
   }, [announce, assertive]);
 
-  return (
-    <div
-      {...(id ? { id } : {})}
-      className={`alert ${variant} u-flex u-gap-2 u-items-start`}
-      // Delegating AND carrying a role would be two regions for one message.
-      {...(announce
-        ? {}
-        : { role: assertive ? 'alert' : 'status', 'aria-live': assertive ? 'assertive' : 'polite' })}
-      aria-atomic="true"
-    >
+  // Delegating AND carrying a role would be two regions for one message.
+  const region = {
+    ...(id ? { id } : {}),
+    ...(announce
+      ? {}
+      : { role: assertive ? 'alert' : 'status', 'aria-live': assertive ? ('assertive' as const) : ('polite' as const) }),
+    'aria-atomic': true,
+  };
+  const body = (
+    <>
       <span className="notice-icon"><VariantIcon variant={variant} /></span>
       <span>{children}</span>
+    </>
+  );
+
+  if (!onDismiss) {
+    return <div {...region} className={`alert ${variant} u-flex u-gap-2 u-items-start`}>{body}</div>;
+  }
+  return (
+    <div className={`alert ${variant} u-flex u-gap-2 u-items-start`}>
+      <div {...region} className="u-flex u-gap-2 u-items-start u-flex-1 u-min-w-0">{body}</div>
+      <Button variant="link" className="u-fs-11 u-shrink-0" onClick={onDismiss} aria-label={dismissLabel}><XIcon size={12} /></Button>
     </div>
   );
 }

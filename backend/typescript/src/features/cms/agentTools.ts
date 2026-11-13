@@ -27,7 +27,6 @@
  * repair.
  */
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { OpenwopError } from '../../types.js';
@@ -37,7 +36,7 @@ import { buildCmsSurface } from './surface.js';
 import { translateSectionData } from './translate.js';
 import { getLocaleGrant, SECTION_TYPES, type SectionType } from './cmsService.js';
 import { findCompactionMarkerPath, COMPACTION_MARKER_IN_INPUT } from '../../host/toolResultTransform.js';
-import { untrustedToolError } from '../../host/agentToolKit.js';
+import { untrustedToolError, resolveFeatureToggle, type ToolAccessScope } from '../../host/agentToolKit.js';
 
 export const CMS_GET_PAGE_TOOL_ID = 'openwop:cms.get-page';
 export const CMS_LIST_PAGES_TOOL_ID = 'openwop:cms.list-pages';
@@ -63,9 +62,9 @@ const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim
 /** Per-tenant `cms-localization` toggle (dynamic, fail-closed) — the SAME gate
  *  the `/translate-section` route enforces (`requireFeatureEnabled`). CMS itself
  *  is always-on (ADR 0027), so only the localization capability is gated. */
-async function cmsLocalizationEnabled(tenantId: string, actingUserId: string | undefined): Promise<boolean> {
-  const assignment = await resolveOne('cms-localization', { tenantId, ...(actingUserId ? { userId: actingUserId } : {}) }).catch(() => null);
-  return Boolean(assignment?.enabled);
+async function cmsLocalizationEnabled(scope: ToolAccessScope): Promise<boolean> {
+  // ADR 1108 — the kit's subject: the route's shape plus the operator exemption.
+  return resolveFeatureToggle('cms-localization', scope);
 }
 
 /** The org RBAC gate the HTTP editor path applies via `requireCmsScope` →
@@ -248,7 +247,7 @@ export function registerCmsAgentTools(): void {
       },
     },
     async run(input, scope) {
-      if (!(await cmsLocalizationEnabled(scope.tenantId, scope.actingUserId))) {
+      if (!(await cmsLocalizationEnabled(scope))) {
         return toolError('feature_disabled', 'Content localization is not enabled for this workspace — tell the user AI translation is unavailable here.');
       }
       const gate = await resolveOrgScope(scope, str(input.orgId), 'workspace:write');
@@ -278,6 +277,14 @@ export function registerCmsAgentTools(): void {
         // internal error and must NOT masquerade as "provider down".
         if (err instanceof ManagedProviderError) {
           return toolError('translation_unavailable', 'Automatic translation is unavailable right now — the section must be translated manually.');
+        }
+        if (err instanceof OpenwopError && err.code === 'translation_invalid' && err.details?.reason === 'too_large') {
+          // ADR 1112 P2 — refused before any model call; the message names the size and the limit.
+          return toolError('translation_too_large', err.message);
+        }
+        if (err instanceof OpenwopError && err.code === 'translation_invalid' && err.details?.reason === 'timeout') {
+          // ADR 1112 P3 — a section in parts ran out of time; trying again may succeed.
+          return toolError('translation_timeout', err.message);
         }
         if (err instanceof OpenwopError && err.code === 'translation_invalid') {
           return toolError('translation_invalid', 'Automatic translation returned unusable output (one repair was attempted) — the section must be translated manually.');

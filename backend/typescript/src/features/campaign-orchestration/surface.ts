@@ -31,6 +31,7 @@ import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface } from 
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { CampaignRunWrongClientError, readCampaignRunTag, type CampaignRunTag } from '../../host/campaignRefs.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
+import { tenantToggleSubject } from '../../host/operatorPlanExemption.js';
 import { runOrgScopeFilter, type Scope } from '../../host/accessControlService.js';
 import { getBrief } from '../campaign-brief/briefService.js';
 import { attachCampaignAssets, getCampaign, getCampaignByBrief, listCampaigns, finalizeFromBrief } from './campaignService.js';
@@ -95,7 +96,8 @@ async function taggedCampaign(scope: BundleScope): Promise<{ ok: true; campaign:
 
 export function buildCampaignStudioSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
-  const enabled = async (featureId: string): Promise<boolean> => Boolean((await resolveOne(featureId, { tenantId }).catch(() => null))?.enabled);
+  // ADR 1108 — tenant-only as before, plus the operator's plan exemption.
+  const enabled = async (featureId: string): Promise<boolean> => Boolean((await resolveOne(featureId, tenantToggleSubject(scope)).catch(() => null))?.enabled);
   const subject = scope.actingUserId ?? scope.orgScopeSubject;
   const cause = !scope.actingUserId && !!scope.orgScopeSubject;
   /** May this run use a row in `rowOrgId`? `orgId` given: the floor checked the

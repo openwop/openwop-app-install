@@ -16,7 +16,7 @@ import { render, cleanup, screen, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 const api = vi.hoisted(() => ({
-  listOrgs: vi.fn(), listProducts: vi.fn(), listOrders: vi.fn(),
+  listOrgs: vi.fn(), listProductsPage: vi.fn(), listOrdersPage: vi.fn(),
   listQuotes: vi.fn(), listProductFields: vi.fn(), listPriceLists: vi.fn(),
   listCoupons: vi.fn(), getPaymentsReadiness: vi.fn(),
 }));
@@ -41,8 +41,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   access.useFeatureAccess.mockReturnValue(makeFeatureAccess({ enabled: true, loading: false }));
   api.listOrgs.mockResolvedValue([{ orgId: 'o1', name: 'Org One' }]);
-  api.listProducts.mockRejectedValue(new Error('products_500'));
-  api.listOrders.mockResolvedValue([]);
+  api.listProductsPage.mockRejectedValue(new Error('products_500'));
+  api.listOrdersPage.mockResolvedValue({ orders: [] });
   api.listQuotes.mockResolvedValue([]);
   api.listProductFields.mockResolvedValue([]);
   api.listPriceLists.mockResolvedValue([]);
@@ -61,7 +61,7 @@ describe('CM-R2-2 — products retry keeps the error card while the read still f
     expect(await screen.findByRole('button', { name: /retry/i })).toBeTruthy();
     // Recovery polarity: a succeeding retry shows real rows.
     const widget: Product = { productId: 'p1', type: 'physical', name: 'Widget', price: 1, currency: 'USD', variants: [], active: true, updatedAt: '2026-07-01T00:00:00.000Z' };
-    api.listProducts.mockResolvedValue([widget]);
+    api.listProductsPage.mockResolvedValue({ products: [widget] });
     fireEvent.click(screen.getByRole('button', { name: /retry/i }));
     expect(await screen.findByText('Widget')).toBeTruthy();
   });
@@ -71,7 +71,7 @@ describe('CM-R2-2-WINDOW — a retry in flight is not an empty catalog', () => {
   it('products: while the retry is pending, "No products" is not shown over the failed read', async () => {
     render(<MemoryRouter><CommercePage /></MemoryRouter>);
     const retry = await screen.findByRole('button', { name: /retry/i });
-    api.listProducts.mockReturnValue(new Promise(() => {}));
+    api.listProductsPage.mockReturnValue(new Promise(() => {}));
     const before = skeletons();
     fireEvent.click(retry);
     // Positive: the in-flight retry IS the loading state…
@@ -83,12 +83,12 @@ describe('CM-R2-2-WINDOW — a retry in flight is not an empty catalog', () => {
   });
 
   it('orders: while the retry is pending, "No orders" is not shown over the failed read', async () => {
-    api.listProducts.mockResolvedValue([]);
-    api.listOrders.mockRejectedValue(new Error('orders_500'));
+    api.listProductsPage.mockResolvedValue({ products: [] });
+    api.listOrdersPage.mockRejectedValue(new Error('orders_500'));
     render(<MemoryRouter><CommercePage /></MemoryRouter>);
     fireEvent.click(await screen.findByRole('tab', { name: /orders/i }));
     const retry = await screen.findByRole('button', { name: /retry/i });
-    api.listOrders.mockReturnValue(new Promise(() => {}));
+    api.listOrdersPage.mockReturnValue(new Promise(() => {}));
     const before = skeletons();
     fireEvent.click(retry);
     expect(skeletons()).toBeGreaterThan(before);

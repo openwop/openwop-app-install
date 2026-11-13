@@ -37,6 +37,7 @@ import {
 import { useClientRegistration } from './useClientRegistration.js';
 import { ClientRegistrationDialog } from './ClientRegistrationDialog.js';
 import { ChangeDiff } from './ChangeDiff.js';
+import { AddPageDialog } from './AddPageDialog.js';
 import { ClientApproversPanel, SendToClient } from './ClientApproval.js';
 
 // ADR 0944 P4 — lazy: the memory panel is not needed to read the inbox.
@@ -418,6 +419,8 @@ function Composer({ orgId, assets, assetsFailed, onStatus, onDone }: {
   const [duplicate, setDuplicate] = useState(false);
   const [reason, setReason] = useState('');
   const reasonRef = useRef<HTMLInputElement>(null);
+  // CC-OPS-1 — register a client page from here instead of only through the API.
+  const [addPageOpen, setAddPageOpen] = useState(false);
   const selected = (assets ?? []).filter((a) => !excluded.has(a.assetId)).map((a) => a.assetId);
 
   useEffect(() => { if (duplicate) reasonRef.current?.focus(); }, [duplicate]);
@@ -465,7 +468,19 @@ function Composer({ orgId, assets, assetsFailed, onStatus, onDone }: {
             ))}
           </ul>
         ) : null}
+        {assets !== null ? (
+          <div>
+            <Button type="button" onClick={() => setAddPageOpen(true)}>{t('addPage')}</Button>
+          </div>
+        ) : null}
       </fieldset>
+      {addPageOpen ? (
+        <AddPageDialog
+          orgId={orgId}
+          onClose={() => setAddPageOpen(false)}
+          onAdded={() => { onStatus(t('addPageDone')); onDone(); }}
+        />
+      ) : null}
 
       {duplicate ? (
         <Notice variant="warning">

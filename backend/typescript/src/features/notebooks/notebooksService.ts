@@ -28,7 +28,7 @@ import type { KbEmitOptions } from '../kb/emit.js'; // ADR 0643 D3
 import { createLogger } from '../../observability/logger.js';
 import {
   createProject, getProject, listProjects, deleteProject, projectSubject, setNotebookCollectionId,
-  notebookCorpusToDelete, type Project,
+  notebookCorpusToDelete, resolveProjectAccess, listVisibleProjects, type Project,
 } from '../projects/projectsService.js';
 import {
   createCollection, deleteCollection, ingestDocument, listDocuments, getDocument, search,
@@ -84,6 +84,10 @@ interface StoredSourceSummary {
   sourceId: string;
   summary: string;
   createdAt: string;
+  /** ADR 1103 D4 — the source revision the summary was written from. A summary of a
+   *  revision that is no longer current is refused at write (`source_changed`). Absent
+   *  on rows written before ADR 1103 (none exist in prod). */
+  revision?: number;
 }
 
 const sourceSummaries = new DurableCollection<StoredSourceSummary>(
@@ -118,15 +122,25 @@ async function deriveContextProjection(
   tenantId: string,
   notebookId: string,
   titleOf: (sourceId: string) => string | undefined,
+  /** ADR 1103 D7 — the sources that exist NOW, with their current revision. A level
+   *  or summary row for any other source is a ghost (its document was deleted) and
+   *  contributes nothing; a summary written from a revision that is no longer current
+   *  is stale and contributes nothing (D4 — it would describe text that no longer
+   *  exists). So a missed lifecycle event, or a revision landing between a summary's
+   *  check and its write, can never keep wrong text in the model's context. */
+  liveRevisions: ReadonlyMap<string, number>,
 ): Promise<{ excludeDocumentIds: string[]; extraContext: Array<{ title?: string; content: string; contentTrust: 'untrusted' }> }> {
   const [levels, summaries] = await Promise.all([
     notebookLevels(tenantId, notebookId),
     notebookSummaries(tenantId, notebookId),
   ]);
-  const summaryById = new Map(summaries.map((s) => [s.sourceId, s.summary]));
+  const summaryById = new Map(summaries
+    .filter((s) => summaryIsCurrent(s, liveRevisions.get(s.sourceId)))
+    .map((s) => [s.sourceId, s.summary]));
   const excludeDocumentIds: string[] = [];
   const extraContext: Array<{ title?: string; content: string; contentTrust: 'untrusted' }> = [];
   for (const r of levels) {
+    if (!liveRevisions.has(r.sourceId)) continue; // ADR 1103 D7 — a ghost row
     if (r.level === 'excluded') {
       excludeDocumentIds.push(r.sourceId);
     } else if (r.level === 'summary') {
@@ -193,6 +207,43 @@ export async function getNotebook(tenantId: string, id: string): Promise<Noteboo
   const p = await getProject(tenantId, id);
   if (!p) return null;
   return toNotebook(tenantId, p);
+}
+
+/** The Notebook Research Analyst manifest agent (ADR 0084 Phase 4), seated in a
+ *  notebook's group chat. One constant for the notebook door, the chat tools and the
+ *  projects door's reconcile (ADR 1103 D9). */
+export const NOTEBOOK_RESEARCHER_AGENT_ID = 'vendor.openwop-app.notebooks.agents.researcher';
+
+/** ADR 1103 D9 — is this project a notebook (has a bound corpus)? The projects chat
+ *  door asks, so its reconcile stops unseating the researcher the notebook door seats
+ *  in the SAME room. */
+export async function isNotebookProject(tenantId: string, project: Project): Promise<boolean> {
+  return (await toNotebook(tenantId, project)) !== null;
+}
+
+/** ADR 1103 D1 — a resolved notebook plus the caller's access to it. */
+export interface NotebookAccess {
+  notebook: Notebook;
+  project: Project;
+  level: 'read' | 'write';
+}
+
+/**
+ * ADR 1103 D1 — THE notebook access rule. The HTTP door (`requireNotebook`), the
+ * three chat tools and the run surface all call this, so the three lanes cannot
+ * give three answers (the surface used to answer "org-visible ⇒ yes" for anyone).
+ * `null` = no such notebook, or the subject cannot read it — callers turn that into
+ * their own uniform not-found. `level` is the project rule (`resolveProjectAccess`,
+ * ADR 0054 D5) unchanged: write ⟺ `workspace:write` in the project's org.
+ */
+export async function notebookAccess(tenantId: string, id: string, subject: string | undefined): Promise<NotebookAccess | null> {
+  const project = await getProject(tenantId, id);
+  if (!project) return null;
+  const notebook = await toNotebook(tenantId, project);
+  if (!notebook) return null;
+  const level = await resolveProjectAccess(tenantId, id, subject);
+  if (level === 'none') return null;
+  return { notebook, project, level };
 }
 
 /** Create a notebook: a `facet:'notebook'` project + a KB collection + bind the
@@ -274,15 +325,26 @@ export async function ensureNotebookForProject(tenantId: string, id: string, act
   return notebook;
 }
 
-/** List the tenant's notebooks (every project with a bound KB collection), oldest-first.
- *  Org/visibility filtering is applied at the route via the project access gate. */
-export async function listNotebooks(tenantId: string): Promise<Notebook[]> {
-  // ADR 0084 correction — every project with a bound collection is a notebook (not
-  // only facet:'notebook'); toNotebook filters out projects without one.
-  const projects = await listProjects(tenantId);
-  // NB-1 — resolve each notebook's binding CONCURRENTLY (was a sequential per-project await):
-  // these are internal durable reads (not rate-limited HTTP fan-out), so the wall-clock of the
-  // list path drops from O(n) round-trips to ~1. (A store-level batch is the further win.)
+/** ADR 1103 D2 — the notebooks `subject` can read, through the ONE list-visible scan
+ *  the projects list uses (`listVisibleProjects`: access resolved once per org, not
+ *  once per notebook — the PRJC-3 class). */
+export async function listNotebooksVisibleTo(
+  tenantId: string,
+  subject: string | undefined,
+  /** The cause lane (ADR 0832): a causing member narrows an actorless run, so only
+   *  org-visible notebooks — never a private one they happen to be a member of. */
+  opts: { orgVisibleOnly?: boolean } = {},
+): Promise<Notebook[]> {
+  const visible = (await listVisibleProjects(tenantId, subject))
+    .filter(({ project }) => !opts.orgVisibleOnly || (project.visibility ?? 'org') === 'org');
+  const resolved = await Promise.all(visible.map(({ project }) => toNotebook(tenantId, project)));
+  return resolved.filter((nb): nb is Notebook => nb !== null);
+}
+
+/** ADR 1103 D2 — the system-run lane's list: notebooks whose project is org-visible,
+ *  filtered on the rows already in hand (no per-notebook re-read). */
+export async function listOrgVisibleNotebooks(tenantId: string): Promise<Notebook[]> {
+  const projects = (await listProjects(tenantId)).filter((p) => (p.visibility ?? 'org') === 'org');
   const resolved = await Promise.all(projects.map((p) => toNotebook(tenantId, p)));
   return resolved.filter((nb): nb is Notebook => nb !== null);
 }
@@ -402,7 +464,10 @@ export async function listSources(tenantId: string, id: string): Promise<Noteboo
     notebookSummaries(tenantId, id),
   ]);
   const byId = new Map(levels.map((l) => [l.sourceId, l.level]));
-  const summarized = new Set(summaries.map((s) => s.sourceId));
+  // ADR 1103 D4 — a summary of a revision that is no longer current is not a summary
+  // of this source: the projection already ignores it, so `hasSummary` must too.
+  const revisionOf = new Map(docs.map((d) => [d.documentId, d.revision ?? 1]));
+  const summarized = new Set(summaries.filter((s) => summaryIsCurrent(s, revisionOf.get(s.sourceId))).map((s) => s.sourceId));
   return docs.map((d) => ({
     ...d,
     contextLevel: byId.get(d.documentId) ?? 'full',
@@ -449,12 +514,21 @@ async function recomputeBindingProjection(tenantId: string, nb: Notebook): Promi
 
 /** The unsynchronized recompute (always called under the per-notebook chain). */
 async function recomputeBindingProjectionUnsynced(tenantId: string, nb: Notebook): Promise<void> {
-  const docs = await listDocuments(tenantId, nb.orgId, nb.collectionId, PREAUTHORIZED_CALLER); // KBC-1
+  // ADR 1103 D7 — the corpus itself can be gone (deleted at the KB door: the collection
+  // row goes before the per-document events fire). Then no source is live, and the
+  // projection must still be rewritten to drop every summary, not abandoned on the
+  // `not_found` the read throws.
+  const docs = await listDocuments(tenantId, nb.orgId, nb.collectionId, PREAUTHORIZED_CALLER) // KBC-1
+    .catch((err: unknown) => {
+      if (err instanceof OpenwopError && err.code === 'not_found') return [];
+      throw err;
+    });
   const titleById = new Map(docs.map((d) => [d.documentId, d.title]));
   const { excludeDocumentIds, extraContext } = await deriveContextProjection(
     tenantId,
     nb.id,
     (sid) => titleById.get(sid),
+    new Map(docs.map((d) => [d.documentId, d.revision ?? 1])),
   );
   const binding = await getSubjectKnowledge(tenantId, projectSubject(nb.id));
   await setSubjectKnowledge(tenantId, projectSubject(nb.id), {
@@ -487,36 +561,54 @@ export async function setSourceContextLevel(
   const doc = await getDocument(tenantId, nb.orgId, nb.collectionId, sourceId, PREAUTHORIZED_CALLER); // KBC-1
   if (!doc) throw new OpenwopError('not_found', 'Source not found.', 404, { id, sourceId });
 
-  // `summary` is selectable ONLY once a summary has been generated for the source
-  // (the route enforces this too; the service guards it so the binding projection
-  // can never drop a source's chunks without a replacement summary to inject).
-  if (level === 'summary' && (await getSourceSummary(tenantId, id, sourceId)) === null) {
+  // `summary` is selectable ONLY once a summary of the source's CURRENT revision
+  // exists (ADR 1103 D4). This is the one check (the route relies on it), so the
+  // binding projection can never drop a source's chunks without a replacement summary.
+  const hasSummary = (await currentSummaryOf(tenantId, id, sourceId, doc.revision ?? 1)) !== null;
+  if (level === 'summary' && !hasSummary) {
     throw new OpenwopError('validation_error', 'Summarize the source first.', 400, { id, sourceId });
   }
 
   await sourceLevels.put({ tenantId, notebookId: id, sourceId, level });
   await recomputeBindingProjection(tenantId, nb);
 
-  const hasSummary = (await getSourceSummary(tenantId, id, sourceId)) !== null;
   const { text: _text, ...projection } = doc;
   return { ...projection, contextLevel: level, hasSummary };
 }
 
 /** Read a source's FULL text (ADR 0084 Transformations T1) — the input the
- *  summarize node feeds the LLM. Returns the durable document text, or null for a
- *  missing source / notebook (tenant + org + collection scoped via getDocument). */
-export async function getSourceText(tenantId: string, id: string, sourceId: string): Promise<string | null> {
+ *  summarize node feeds the LLM — with the revision it was read at (ADR 1103 D4: the
+ *  summary write is refused if the source changed since). Null for a missing source /
+ *  notebook (tenant + org + collection scoped via getDocument). */
+export async function getSourceText(tenantId: string, id: string, sourceId: string): Promise<{ text: string; revision: number } | null> {
   const nb = await getNotebook(tenantId, id);
   if (!nb) return null;
   const doc = await getDocument(tenantId, nb.orgId, nb.collectionId, sourceId, PREAUTHORIZED_CALLER); // KBC-1
-  return doc ? doc.text : null;
+  return doc ? { text: doc.text, revision: doc.revision ?? 1 } : null;
 }
 
 /** Read a source's stored SUMMARY (ADR 0084 Transformations T1), or null if none
  *  has been generated. Its presence is what un-gates the `summary` context level. */
 export async function getSourceSummary(tenantId: string, id: string, sourceId: string): Promise<string | null> {
+  const nb = await getNotebook(tenantId, id);
+  const doc = nb ? await getDocument(tenantId, nb.orgId, nb.collectionId, sourceId, PREAUTHORIZED_CALLER) : null; // KBC-1
+  return currentSummaryOf(tenantId, id, sourceId, doc ? (doc.revision ?? 1) : undefined);
+}
+
+/** ADR 1103 D4 — the stored summary IF it is about the given current revision (it
+ *  un-gates the `summary` level, which must never inject text about content that has
+ *  changed, or about a source that is gone). For callers that already hold the doc. */
+async function currentSummaryOf(tenantId: string, id: string, sourceId: string, currentRevision: number | undefined): Promise<string | null> {
   const row = await sourceSummaries.get(`${tenantId}:${id}:${sourceId}`);
-  return row ? row.summary : null;
+  return row && summaryIsCurrent(row, currentRevision) ? row.summary : null;
+}
+
+/** ADR 1103 D4 — is this stored summary about the source's current revision? A row
+ *  written before ADR 1103 carries no revision and is taken as current (none exist in
+ *  prod); a source that is gone has no current revision. */
+function summaryIsCurrent(row: { revision?: number }, currentRevision: number | undefined): boolean {
+  if (currentRevision === undefined) return false;
+  return row.revision === undefined || row.revision === currentRevision;
 }
 
 /**
@@ -532,6 +624,10 @@ export async function setSourceSummary(
   id: string,
   sourceId: string,
   summary: unknown,
+  /** ADR 1103 D4 — the revision the summarized text was read at. When given and the
+   *  source has moved on, the write is refused: the summary describes text that no
+   *  longer exists. */
+  opts: { revision?: number } = {},
 ): Promise<{ stored: boolean }> {
   const nb = await mustGet(tenantId, id);
   const doc = await getDocument(tenantId, nb.orgId, nb.collectionId, sourceId, PREAUTHORIZED_CALLER); // KBC-1
@@ -540,7 +636,11 @@ export async function setSourceSummary(
   if (text.length === 0) {
     throw new OpenwopError('validation_error', 'summary must be a non-empty string.', 400, { id, sourceId });
   }
-  await sourceSummaries.put({ tenantId, notebookId: id, sourceId, summary: text, createdAt: new Date().toISOString() });
+  const current = doc.revision ?? 1;
+  if (opts.revision !== undefined && opts.revision !== current) {
+    throw new OpenwopError('conflict', 'The source changed after it was read; summarize it again.', 409, { id, sourceId, reason: 'source_changed' });
+  }
+  await sourceSummaries.put({ tenantId, notebookId: id, sourceId, summary: text, createdAt: new Date().toISOString(), revision: current });
   await recomputeBindingProjection(tenantId, nb);
   return { stored: true };
 }
@@ -654,6 +754,68 @@ export async function listTransformations(tenantId: string, id: string): Promise
   return docs
     .filter((d) => NOTEBOOK_TRANSFORMATION_KINDS.has(d.kind))
     .map((d) => ({ documentId: d.documentId, title: d.title, kind: d.kind, status: d.status, createdAt: d.createdAt }));
+}
+
+/**
+ * ADR 1103 D8 — the notebook's derived per-source state (levels + summaries) as a
+ * project dependent: `deleteProject` purges it on BOTH delete doors, before the row
+ * goes, and reports the count in `dependentsDeleted`. Before this, a deleted
+ * notebook's summaries (LLM text derived from deleted sources) outlived it with no
+ * owner and no reader.
+ */
+export async function countNotebookSourceState(tenantId: string, notebookId: string): Promise<number> {
+  const [levels, summaries] = await Promise.all([notebookLevels(tenantId, notebookId), notebookSummaries(tenantId, notebookId)]);
+  return levels.length + summaries.length;
+}
+
+export async function purgeNotebookSourceState(tenantId: string, notebookId: string): Promise<number> {
+  let n = 0;
+  for (const r of await notebookLevels(tenantId, notebookId)) if (await sourceLevels.delete(`${tenantId}:${notebookId}:${r.sourceId}`)) n += 1;
+  for (const r of await notebookSummaries(tenantId, notebookId)) if (await sourceSummaries.delete(`${tenantId}:${notebookId}:${r.sourceId}`)) n += 1;
+  return n;
+}
+
+/**
+ * ADR 1103 D7 — a source's derived state follows the source. Called from the KB
+ * lifecycle seam (`onKnowledgeDocumentChanged`, registered in feature.ts):
+ *   - deleted  → drop the source's level + summary rows;
+ *   - revised  → drop its summary (it describes text that no longer exists) and put
+ *                a `summary` level back to `full`;
+ * then recompute the binding projection so the chat stops injecting it.
+ *
+ * Found from the ROWS, not from the collection: the only thing this has to clean is a
+ * level or summary row for this document, and those rows name their notebook. So the
+ * check is two tenant-prefix reads of the notebook stores (small: one row per
+ * summarized or re-levelled source), and a KB event for a document with no such row —
+ * every ordinary KB collection — costs nothing more. No collection read (on the
+ * collection-delete lane the row is already gone), no project scan, and legacy
+ * corpora (unstamped collection, or a project that predates the stamp) are followed
+ * like any other. A row whose notebook no longer exists or whose corpus is not this
+ * collection is left alone (the notebook-delete path purges through D8; a second
+ * corpus bound to the same project is not the notebook's).
+ */
+export async function onNotebookSourceChanged(e: { tenantId: string; collectionId: string; documentId: string; deleted?: boolean }): Promise<void> {
+  const [levels, summaries] = await Promise.all([
+    sourceLevels.listByPrefix(`${e.tenantId}:`),
+    sourceSummaries.listByPrefix(`${e.tenantId}:`),
+  ]);
+  const notebookIds = new Set([...levels, ...summaries].filter((r) => r.sourceId === e.documentId).map((r) => r.notebookId));
+  for (const notebookId of notebookIds) {
+    const nb = await getNotebook(e.tenantId, notebookId);
+    if (!nb || nb.collectionId !== e.collectionId) continue;
+    const key = `${e.tenantId}:${nb.id}:${e.documentId}`;
+    let changed = await sourceSummaries.delete(key);
+    if (e.deleted) {
+      changed = (await sourceLevels.delete(key)) || changed;
+    } else {
+      const level = await sourceLevels.get(key);
+      if (level?.level === 'summary') {
+        await sourceLevels.put({ ...level, level: 'full' });
+        changed = true;
+      }
+    }
+    if (changed) await recomputeBindingProjection(e.tenantId, nb);
+  }
 }
 
 /** Resolve a notebook or throw the uniform 404 (the existence-leak guard). */

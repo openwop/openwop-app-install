@@ -18,6 +18,7 @@ import {
   ATTRIBUTION_MODELS, FeatureDisabledError, getAttributionModels, saveAttributionSettings,
   type AttributionModel, type AttributionModelReport, type ModelCreditRow,
 } from './campaignIntelClient.js';
+import { TableScroll } from '../../ui/DataTable.js';
 
 const credit = (n: number): string => formatNumber(n, { maximumFractionDigits: 2 });
 
@@ -101,7 +102,7 @@ export function MultiTouchSection({ orgId }: { orgId: string }): JSX.Element | n
         <p className="muted u-fs-13 u-mb-0">{t('modelsEmpty')}</p>
       ) : (
         <>
-          <div className="table-scroll table--stack">
+          <TableScroll className="table--stack" label={t('modelsTableCaption', { model: t(`model_${report.model}`) })}>
             <table className="u-w-full">
               <caption className="sr-only">{t('modelsTableCaption', { model: t(`model_${report.model}`) })}</caption>
               <thead><tr className="muted u-fs-13"><th scope="col" className="u-text-left u-py-2">{t('colCampaign')}</th><th scope="col" className="u-text-right u-py-2">{t('colCredited')}</th><th scope="col" className="u-text-right u-py-2">{t('colCreditedValue')}</th></tr></thead>
@@ -115,9 +116,9 @@ export function MultiTouchSection({ orgId }: { orgId: string }): JSX.Element | n
                 ))}
               </tbody>
             </table>
-          </div>
+          </TableScroll>
           <h3 className="u-fs-13 u-mb-2">{t('modelsCompareTitle')}</h3>
-          <div className="table-scroll table--stack">
+          <TableScroll className="table--stack" label={t('modelsCompareTitle')}>
             <table className="u-w-full">
               <caption className="sr-only">{t('modelsCompareTitle')}</caption>
               <thead><tr className="muted u-fs-13"><th scope="col" className="u-text-left u-py-2">{t('colCampaign')}</th>{ATTRIBUTION_MODELS.map((m) => <th key={m} scope="col" className="u-text-right u-py-2">{t(`model_${m}`)}</th>)}</tr></thead>
@@ -130,7 +131,7 @@ export function MultiTouchSection({ orgId }: { orgId: string }): JSX.Element | n
                 ))}
               </tbody>
             </table>
-          </div>
+          </TableScroll>
         </>
       )}
     </section>

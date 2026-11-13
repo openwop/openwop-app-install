@@ -76,7 +76,11 @@ export const messages = {
   noRulesTitle: "Aucune règle de merchandising",
   noRulesBody: "Les règles masquent des produits de votre boutique. Aucune n'est active : les acheteurs voient tout.",
   productsTruncated: "Affichage des {{shown}} premiers résultats sur {{total}}.",
+  // ADR 1110 P2 — the search read a bounded set
+  productsTruncatedFloor: "Affichage des {{shown}} premiers résultats sur plus de {{total}}.",
   facetsTruncated: "Les {{shown}} valeurs principales sur {{total}} par facette.",
+  // ADR 1110 round fix
+  facetsFloor: "Les nombres portent sur les 1 000 premiers résultats.",
   fieldCategoryHelp: "Les produits de cette catégorie rejoignent la collection automatiquement.",
   fieldHideCategoryHelp: "Les produits de cette catégorie cessent d'apparaître sur votre boutique tant que cette règle est active.",
   colEffect: "Effet",

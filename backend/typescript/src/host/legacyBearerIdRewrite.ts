@@ -3,12 +3,13 @@
  * legacy env-key principal ids, `bearer:<first 8 raw key chars>`, to the id the
  * same key presents today, `envKeyPrincipalId(key)`.
  *
- * Why: until this runs, a legacy id matches through the legacy rule in
- * `middleware/envKeyPrincipal.ts` (the UNIQUE configured key with that prefix),
- * so a same-prefix rotation (A → C, both `sk-live-…`) hands A's delegations, run
- * actors and scheduled jobs to C. And rows keyed on the legacy id (org members an
- * env key created) match nothing at all. Once this has run in apply mode, the
- * legacy rule is deleted (a separate change), so a legacy id matches nothing.
+ * Why: the legacy matching rule is DELETED (CHAN-F14, 2026-11-12), so a stored
+ * legacy id matches nothing: delegations an env key minted, its run actors and
+ * scheduled jobs lose operator standing (fail closed), and env-key-created org
+ * members stay orphaned, until this job rewrites them. openwop-dev ran it in
+ * apply mode on 2026-11-12. It stays for white-label installs that upgrade
+ * without having run it (0.12.0 called it optional); removing it is TODO
+ * `CHAN-F18`. It needs no legacy rule: it maps prefixes from the configured keys.
  *
  * What is rewritten, and only for a prefix exactly ONE configured key holds at
  * the time of the run (an ambiguous prefix is counted and left: nothing says
@@ -52,6 +53,7 @@ import { envKeyPrincipalId } from '../middleware/envKeyPrincipal.js';
 import { hostExtCollectionPrefixes } from './hostExtPersistence.js';
 import { rekeyMemberSubject } from './accessControlService.js';
 import { createLogger } from '../observability/logger.js';
+import { AUDIT_CHAIN_COLLECTION } from './auditChainService.js';
 
 const log = createLogger('host.legacyBearerIdRewrite');
 
@@ -64,6 +66,8 @@ const RUN_PAGE = 200;
 
 /** Collections whose rows record what happened; their ids stay as recorded. */
 export const AUDIT_COLLECTIONS: readonly string[] = [
+  // The tamper-evident hash chain (ADR 0301): rewriting an entry breaks `verifyChain`.
+  AUDIT_CHAIN_COLLECTION,
   'brand:audit',
   'email:sendlog',
   'analytics:event',
@@ -89,8 +93,9 @@ export interface LegacyBearerRewriteReport {
   rowsByCollection: Record<string, number>;
   /** Index markers with at least one value rewritten (or to be). */
   markers: number;
-  /** Values rewritten (or to be) across rows and markers. */
-  values: number;
+  /** Values rewritten (or to be) across rows and markers. Not named `values`:
+   *  the log sink masks a field of that name as PII (ADR 0733). */
+  valueCount: number;
   /** Rows in audit collections that carry a mapped id (left). */
   auditRowsLeft: number;
   /** Rows whose id or an object key contains a mapped id (left). */
@@ -177,7 +182,7 @@ export async function runLegacyBearerIdRewrite(storage: Storage, mode: LegacyBea
   const { map, configuredKeys, ambiguousPrefixes } = legacyBearerIdMap();
   const report: LegacyBearerRewriteReport = {
     mode, configuredKeys, mappedPrefixes: map.size, ambiguousPrefixes,
-    rowsByCollection: {}, markers: 0, values: 0, auditRowsLeft: 0, keyedRowsLeft: 0, unmappedValues: 0,
+    rowsByCollection: {}, markers: 0, valueCount: 0, auditRowsLeft: 0, keyedRowsLeft: 0, unmappedValues: 0,
     members: 0, runs: 0, unstampedRunsLeft: 0, conflicts: 0, failures: 0,
   };
   const apply = mode === 'apply';
@@ -216,7 +221,7 @@ export async function runLegacyBearerIdRewrite(storage: Storage, mode: LegacyBea
         if (outcome === 'conflict') { report.conflicts += 1; continue; }
         if (outcome === 'failed') { report.failures += 1; continue; }
       }
-      report.values += w.values;
+      report.valueCount += w.values;
       if (scan.marker) report.markers += 1;
       else report.rowsByCollection[collection] = (report.rowsByCollection[collection] ?? 0) + 1;
     }

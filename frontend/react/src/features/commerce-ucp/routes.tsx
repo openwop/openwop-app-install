@@ -15,7 +15,7 @@ const routes: FeatureRoute[] = [
     path: '/commerce-ucp',
     element: <CommerceUcpPage />,
     tier: 'admin', archetype: 'admin',
-    nav: { group: 'System operations', label: 'UCP commerce', labelKey: 'commerceUcpLabel', icon: PlugIcon, hint: 'Agentic-commerce endpoints & clients', hintKey: 'commerceUcpHint', order: 90, featureId: 'commerce-ucp' },
+    nav: { group: 'System operations', labelKey: 'commerceUcpLabel', icon: PlugIcon, hintKey: 'commerceUcpHint', order: 90, featureId: 'commerce-ucp' },
   },
 ];
 

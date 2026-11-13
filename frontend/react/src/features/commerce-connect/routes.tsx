@@ -12,10 +12,8 @@ const routes: FeatureRoute[] = [{
   tier: 'admin', archetype: 'admin',
   nav: {
     group: 'Billing & commerce',
-    label: 'Sell on the marketplace',
     labelKey: 'commerceConnectLabel',
     icon: PackageIcon,
-    hint: 'Stripe Connect seller onboarding',
     hintKey: 'commerceConnectHint',
     order: 82,
     featureId: 'commerce-connect',

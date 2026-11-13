@@ -126,9 +126,13 @@ export function ProjectDetailPage(): JSX.Element {
   // charter brief would be waste.
   const charterDirtyRef = useRef(false);
   const onCharterDirtyChange = useCallback((d: boolean): void => { charterDirtyRef.current = d; }, []);
+  // ADR 1103 D9 — the Sources tab's drafts (source text, YouTube URL, note) ride the
+  // same guard: switching tab unmounts them.
+  const sourcesDirtyRef = useRef(false);
+  const onSourcesDirtyChange = useCallback((d: boolean): void => { sourcesDirtyRef.current = d; }, []);
   const setTab = (next: Tab): void => {
     void (async () => {
-      if (next !== tab && charterDirtyRef.current) {
+      if (next !== tab && (charterDirtyRef.current || sourcesDirtyRef.current)) {
         const ok = await confirm({
           title: t('ui:unsavedLeaveTitle'),
           body: t('ui:unsavedLeaveBody'),
@@ -137,6 +141,7 @@ export function ProjectDetailPage(): JSX.Element {
         });
         if (!ok) return; // stay — the draft survives
         charterDirtyRef.current = false; // discarded with the unmounting editor
+        sourcesDirtyRef.current = false;
       }
       setSearchParams((p) => { const n = new URLSearchParams(p); n.set('tab', next); return n; }, { replace: true });
     })();
@@ -345,7 +350,9 @@ export function ProjectDetailPage(): JSX.Element {
       ) : tab === 'sources' ? (
         // ADR 0084 correction — the notebook surface (sources, context levels,
         // audio/YouTube ingest, transformations, grounded Ask) scoped to this project.
-        <ProjectSourcesPanel projectId={projectId} readOnly={!canWrite} />
+        // `key` — a different project is a different notebook: never carry one's drafts,
+        // give-ups or run cards into another (ADR 1103 round-5 UX re-grade).
+        <ProjectSourcesPanel key={projectId} projectId={projectId} readOnly={!canWrite} onDirtyChange={onSourcesDirtyChange} />
       ) : tab === 'podcast' ? (
         // ADR 0086 — generate a multi-speaker audio overview of THIS project.
         <ProjectPodcastPanel orgId={project.orgId} projectId={projectId} />

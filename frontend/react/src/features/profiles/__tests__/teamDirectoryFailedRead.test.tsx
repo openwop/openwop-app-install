@@ -27,6 +27,15 @@
  * flag, a retry that drops the rows, an unannounced card, an endorse chip that is
  * not disabled / not busy / never released / pressed from a non-zero count, and
  * the removed sr-only texts each turn a named case red.
+ *
+ * ADR 0888 D1 (+ PROF2UX-1/-4/-11): in a SHARED workspace the directory lists
+ * only people who shared their profile with it. An empty one says so instead of
+ * "as teammates fill them in", names WHERE and WHAT a share publishes before
+ * anything is shared, shares only on the click, and re-reads (the server decides
+ * who is listed). Once shared there is no consent disclosure, the control reads
+ * "Stop sharing here", skills are shown without an endorse control, and the
+ * home-only note is said once. Re-probed at 3bcc187f9 (/grade-tests w106,
+ * `w106g3-t*`): each of those, and every older claim above, reds a named case.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
@@ -219,6 +228,8 @@ describe('ADR 0888 D1 — a shared workspace says who it lists and offers the on
     listProfiles.mockResolvedValue([]);
     shareProfileWithWorkspace.mockResolvedValue(PROFILE);
     await mount();
+    // Consent first: nothing is shared until the person clicks.
+    expect(shareProfileWithWorkspace).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain('Nobody has shared a profile here yet');
     expect(document.body.textContent).not.toContain('Profiles appear here as teammates fill them in');
     // PROF2UX-1 — it says WHERE and WHAT before you share.
@@ -233,6 +244,8 @@ describe('ADR 0888 D1 — a shared workspace says who it lists and offers the on
     dirMeta.current = { scope: 'workspace', workspaceId: 'ws:1', sharedByMe: true };
     await mount();
     expect(document.body.textContent).toContain('Ada Lovelace');
+    // The skill IS shown (positive anchor), only not as an endorse button.
+    expect(screen.getByText('maths')).toBeTruthy();
     expect(screen.queryByRole('button', { name: /maths/ })).toBeNull();
     expect(screen.getByRole('button', { name: 'Stop sharing here' })).toBeTruthy();
     // Said once, in the card — not once per person (PROF2UX-4/-11).

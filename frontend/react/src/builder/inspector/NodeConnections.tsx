@@ -11,7 +11,8 @@
  * state resets when the selection moves to another node.
  */
 
-import { projectSourceOutput, sameSourceBinding } from '../schema/sourceOutput.js';
+import { sameSourceBinding } from '../schema/sourceOutput.js';
+import { projectSourceOutputForKind } from '../canvas/sourceOutputForKind.js';
 import { Button } from '../../ui/Button.js';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -97,7 +98,7 @@ export function NodeConnections({ node }: { node: BuilderNode }): JSX.Element {
         <ul className="u-list-none binspector-conn-list">
           {mine.map((e) => {
             const sourceKind = nodes.find(n => n.id === e.source)?.kind;
-            const port = projectSourceOutput(e, catalogEntry(sourceKind ?? '')?.outputs ?? []).label;
+            const port = projectSourceOutputForKind(e, sourceKind).label;
             const desc = e.source === node.id
               ? t('connectionOut', { port, node: nodeName(e.target), targetPort: e.targetPort })
               : t('connectionIn', { targetPort: e.targetPort, node: nodeName(e.source), port });

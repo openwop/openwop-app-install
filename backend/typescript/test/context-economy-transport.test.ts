@@ -9,9 +9,19 @@
  * that already set Content-Encoding gets identity JSON. Responses are read with
  * raw node:http (no auto-decompression), so the headers and bytes are the wire's.
  *
- * Sabotage (grade-tests w28): ignoring the flag or Accept-Encoding, dropping the
- * threshold, the q=0 or `*` handling, the already-encoded guard, the Vary header,
- * or computing Content-Length from the raw body each turn a case red.
+ * ADR 1003 D6 added: the most specific Accept-Encoding entry wins (an explicit
+ * gzip beats `*` either way round); the gzipped body goes through `res.send`, so
+ * it keeps Express's ETag and answers a fresh revalidation with 304; a route's
+ * strong ETag is weakened on the gzipped representation only; `res.json(undefined)`
+ * is an empty 200, never a thrown 500.
+ *
+ * Sabotage (grade-tests w28, re-probed w107): ignoring the flag or Accept-Encoding,
+ * dropping the threshold, the q=0 or `*` handling, letting the first entry decide,
+ * the already-encoded guard, the Vary header, ending with `res.end(gz)` instead of
+ * `res.send`, dropping `weakenEtag`, or dropping the `undefined` guard each turn a
+ * case red. Content-Length is asserted as the wire claim, but no middleware line
+ * owns it any more: `res.send` (and Node's `end`) set it, so no sabotage of this
+ * file can move it.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import express from 'express';
@@ -120,6 +130,9 @@ describe('jsonGzipMiddleware', () => {
   it('on + gzipped → carries an ETag and answers a matching revalidation with 304', async () => {
     process.env.OPENWOP_CONTEXT_ECONOMY_TRANSPORT = 'on';
     const first = await get('/big', 'gzip');
+    // The ETag must belong to the GZIPPED representation: the identity path gets
+    // one from Express too, so without this the case passes with gzip broken.
+    expect(first.headers['content-encoding']).toBe('gzip');
     const etag = first.headers['etag'];
     expect(typeof etag).toBe('string');
     const again = await get('/big', 'gzip', { 'if-none-match': String(etag) });
@@ -143,5 +156,6 @@ describe('jsonGzipMiddleware', () => {
     const r = await get('/undef', 'gzip');
     expect(r.status).toBe(200);
     expect(r.headers['content-encoding']).toBeUndefined();
+    expect(r.body.length).toBe(0);
   });
 });

@@ -4,8 +4,8 @@
  *
  * Source of truth: the FEATURES manifest in `src/chrome/features.tsx`. Each nav
  * entry carries a `labelKey`/`hintKey`; group headers carry a group→key map.
- * Consumers (Sidebar / AdminLayout / CommandPalette) resolve these via
- * `t(key, { defaultValue: englishFallback })`.
+ * This catalog is the ONLY copy of a keyed entry's English (ADR 0874 P3): the
+ * manifest holds no literal beside a key. Read through `chrome/navText.ts`.
  */
 export const messages = {
   siteNavMore: 'More',
@@ -219,4 +219,23 @@ export const messages = {
   uiPluginsHint: 'Sandboxed front-end plugin packs',
   claudeCodeLabel: 'Claude Code',
   claudeCodeHint: 'Your paired Claude Code devices',
+  // ADR 0874 P3 follow-up (NAV-1): the nine entries whose words used to live only in a feature catalog.
+  webinarsLabel: 'Webinars',
+  webinarsHint: 'Zoom webinars → CRM attendance',
+  creativeVideoLabel: 'AI Video',
+  creativeVideoHint: 'Generate avatar videos',
+  campaignStudioLabel: 'Campaign Studio',
+  campaignStudioHint: 'Briefs, campaigns, performance & intelligence in one place',
+  jobListingsLabel: 'Job listings',
+  jobListingsHint: 'Postings found across your boards, deduped by content',
+  jobAnswersLabel: 'Answer once',
+  jobAnswersHint: 'Answer the questions applications ask, once',
+  jobFunnelLabel: 'What is working',
+  jobFunnelHint: 'Response rates, follow-ups due, and drafts waiting',
+  jobExceptionsLabel: 'Questions waiting',
+  jobExceptionsHint: 'The whole interruption budget of a campaign, in one place',
+  jobApplicationsLabel: 'Applications',
+  jobApplicationsHint: 'Applications sent for you, and the verification links you have shared',
+  jobAuthorityLabel: 'Auto-apply authority',
+  jobAuthorityHint: 'Bounded, revocable consent for automatic job applications',
 } as const;

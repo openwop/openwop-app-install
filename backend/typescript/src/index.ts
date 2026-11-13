@@ -451,6 +451,10 @@ export async function createApp(config: AppConfig): Promise<Express> {
   setCompensationDefinitionResolver(
     async (child) => (await resolveTenantWorkflow(hostSuite.workflowCatalog, child.tenantId, child.workflowId))?.definition ?? null,
   );
+  // ADR 1109 D3 — a notification names the workflow by its definition's name (a
+  // chain's `label`) when no dispatcher stamped one. Late-bound for the same reason.
+  const { setNotificationWorkflowNameResolver, catalogWorkflowNameResolver } = await import('./notifications/notify.js');
+  setNotificationWorkflowNameResolver(catalogWorkflowNameResolver(hostSuite.workflowCatalog));
   // RFC 0151 §E separation of duties, at the ONE decision choke every decide
   // path funnels through. Registered at boot, not lazily on the first unwind —
   // an eligibility check that installs itself when the gate is first needed is

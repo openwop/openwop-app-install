@@ -127,6 +127,20 @@ export async function updateClient(orgId: string, patch: { mode?: ClientMode; st
 export async function listAssets(orgId: string): Promise<CampaignAsset[]> {
   return (await get<{ assets: CampaignAsset[] }>(`/clients/${enc(orgId)}/assets`)).assets;
 }
+/** CC-OPS-1 — a CMS page of the client org that can be registered, with the adapter's own field paths. */
+export interface PageCandidate {
+  pageId: string; title: string; status: string; registered: boolean;
+  fields: Array<{ path: string; preview: string }>;
+}
+export async function listPageCandidates(orgId: string): Promise<PageCandidate[]> {
+  return (await get<{ pages: PageCandidate[] }>(`/clients/${enc(orgId)}/asset-candidates`)).pages;
+}
+/** CC-OPS-1 — register a client CMS page as an asset (ADR 0922 D1). */
+export async function addPageAsset(orgId: string, input: { pageId: string; label: string; editableFields: string[] }): Promise<CampaignAsset> {
+  return (await send<{ asset: CampaignAsset }>('POST', `${base}/clients/${enc(orgId)}/assets`, {
+    destination: 'openwop.cms.page', locator: { pageId: input.pageId }, label: input.label, editableFields: input.editableFields,
+  })).asset;
+}
 export async function listRequests(orgId: string): Promise<ChangeRequest[]> {
   return (await get<{ requests: ChangeRequest[] }>(`/clients/${enc(orgId)}/requests`)).requests;
 }

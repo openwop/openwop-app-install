@@ -1005,6 +1005,7 @@ export const messages = {
   // ADR 0153 Phase 1 — slides canvas
   slidesInvalid: 'This slide deck could not be rendered (invalid deck data).',
   slidesDeckLabel: 'Slide deck',
+  slidesTableLabel: 'Table: {{columns}}',
   slidesNotesLabel: 'Notes:',
   // ADR 0153 Phase 2 — app-builder canvas
   appBuilderInvalid: 'This app design could not be rendered (invalid design data).',

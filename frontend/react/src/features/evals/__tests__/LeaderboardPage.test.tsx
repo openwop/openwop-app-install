@@ -5,11 +5,14 @@
  * empty states, and the toggle gate (no fetch when off). The client + feature access
  * are mocked → pure component test.
  *
- * Witnessed: an ascending initial sort, rendering the raw win rate as the score, a
- * dropped managed chip, a missing unattributed notice, fetching a different org, and
- * an org read that ignores the toggle each red a case. HONEST CEILING: "no fetch when
- * off" is double-guarded (the org read is gated too), so dropping `access.enabled`
- * from the load effect alone cannot red it; the case pins the outcome.
+ * Breaks it (grade-tests w106 probes): an ascending initial sort, rendering the raw win
+ * rate as the score, raters read from another count, a dropped managed chip, an
+ * unrounded or swapped arena record, a missing unattributed notice, fetching another
+ * org's board, and an org read
+ * that ignores the toggle each red a case. DOUBLE GUARD: "no fetch when off" is held
+ * by `useOrgSelection(listOrgs, access.enabled)` AND the load effect's
+ * `access.enabled && orgId` (an org id never appears while off), so dropping the load
+ * effect's half alone is an equivalent mutant; the w106 break-both probe drops both.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, within } from '@testing-library/react';
@@ -58,7 +61,12 @@ describe('LeaderboardPage', () => {
     mockBoard.mockResolvedValue(board({ arena: [{ key: 'openai/gpt', provider: 'openai', model: 'gpt', rating: 1561.4, wins: 4, losses: 1, ties: 2, matches: 7 }] }));
     render(<MemoryRouter><LeaderboardPage /></MemoryRouter>);
     expect(await screen.findByText('1,561')).toBeTruthy();
-    expect(screen.getByText('4–1–2')).toBeTruthy();
+    // In the ARENA table's row, labelled by column (stacked reflow), not anywhere on the page.
+    const [arenaRow, ...rest] = bodyRows('Arena');
+    expect(rest).toEqual([]);
+    const cells = within(arenaRow!).getAllByRole('cell').map((c) => c.textContent);
+    expect(cells).toContain('Rating1,561');
+    expect(cells).toContain('W–L–T4–1–2');
   });
 
   it('says how many ratings could not be attributed instead of reading as empty', async () => {

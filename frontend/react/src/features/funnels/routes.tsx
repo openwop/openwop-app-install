@@ -18,7 +18,7 @@ const routes: FeatureRoute[] = [
     path: '/funnels',
     element: <FunnelsPage />,
     tier: 'workspace', archetype: 'standard-index',
-    nav: { group: 'Marketing', label: 'Funnels', labelKey: 'funnelsLabel', icon: ListOrderedIcon, hint: 'Multi-step sales funnels', hintKey: 'funnelsHint', order: 63, featureId: 'funnels' },
+    nav: { group: 'Marketing', labelKey: 'funnelsLabel', icon: ListOrderedIcon, hintKey: 'funnelsHint', order: 63, featureId: 'funnels' },
   },
   // ADR 0522 — the step editor / analytics / experiments live at the funnel's
   // OWN URL (§4.5 rule 12), not stacked under the table behind `?funnel=`.

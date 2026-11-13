@@ -66,6 +66,8 @@ export interface ProvenanceSummary {
     resumes: number;
     /** The run is currently parked on an open interrupt. */
     open: boolean;
+    /** CC-UI-2 — the open interrupt's kind (a `timer` is not a human wait). */
+    openKind?: string;
   };
   inputs?: unknown;
   output?: unknown;
@@ -184,6 +186,7 @@ export function summarizeProvenance(
       kinds: [...interruptKinds],
       resumes,
       open: Boolean(openInterruptKind),
+      ...(openInterruptKind ? { openKind: openInterruptKind } : {}),
     },
     inputs,
     output,
@@ -203,7 +206,9 @@ function fmtDuration(ms?: number): string | null {
 
 /** The human-action chip — encodes "agents propose, humans dispose" for a
  *  finished run: a gate that's open, one a human resolved, or no gate at all. */
-function humanChip(human: ProvenanceSummary['human']): { cls: string; label: string } {
+export function humanChip(human: ProvenanceSummary['human']): { cls: string; label: string } {
+  // CC-UI-2 — a timer waits on the clock, not a person.
+  if (human.open && human.openKind === 'timer') return { cls: 'chip--muted', label: i18n.t('runs:provWaitingTimer') };
   if (human.open) return { cls: 'chip--warning chip--pulse', label: i18n.t('runs:provAwaitingHuman') };
   if (human.resumes > 0) return { cls: 'chip--success', label: i18n.t('runs:provHumanResolved', { count: human.resumes }) };
   if (human.interrupts > 0) return { cls: 'chip--muted', label: i18n.t('runs:provGateUnresolved', { count: human.interrupts }) };

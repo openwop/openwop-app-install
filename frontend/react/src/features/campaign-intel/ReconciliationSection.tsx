@@ -10,6 +10,7 @@ import { Notice } from '../../ui/Notice.js';
 import { AlertIcon } from '../../ui/icons/index.js';
 import { formatCurrency, formatNumber } from '../../i18n/format.js';
 import { FeatureDisabledError, getReconciliation, type ReconciliationReport, type ReconciliationRow } from './campaignIntelClient.js';
+import { TableScroll } from '../../ui/DataTable.js';
 
 const num = (n: number): string => formatNumber(n, { maximumFractionDigits: 2 });
 const roas = (n: number | null): string | null => (n === null ? null : `${formatNumber(n, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}×`);
@@ -56,7 +57,7 @@ export function ReconciliationSection({ orgId }: { orgId: string }): JSX.Element
           ))}
         </ul>
       ) : null}
-      <div className="table-scroll table--stack">
+      <TableScroll className="table--stack" label={t('reconTitle')}>
         <table className="u-w-full">
           <caption className="sr-only">{t('reconTitle')}</caption>
           <thead>
@@ -86,7 +87,7 @@ export function ReconciliationSection({ orgId }: { orgId: string }): JSX.Element
             ))}
           </tbody>
         </table>
-      </div>
+      </TableScroll>
       <p className="muted u-fs-13 u-mb-0">{t('reconCalibrationNote')}</p>
     </section>
   );

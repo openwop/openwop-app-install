@@ -31,10 +31,8 @@ export const modelsHubRoutes: FeatureRoute[] = [
     tier: 'admin', archetype: 'admin',
     nav: {
       group: 'AI & automation',
-      label: 'Models',
       labelKey: 'modelsLabel',
       icon: ScaleIcon,
-      hint: 'Choose which model answers, and see which performs',
       hintKey: 'modelsHint',
       order: 5,
       activeFor: ['/model-router'],

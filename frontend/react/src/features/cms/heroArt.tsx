@@ -78,7 +78,7 @@ function AppsFigure({ data }: { data: Record<string, unknown> }): JSX.Element | 
       aria-label={str(data.label) || t('appsFigureLabel')}
       style={{ '--n': apps.length } as CSSProperties}
     >
-      <ul className="fp-apps__stack">
+      <ul role="list" className="fp-apps__stack">
         {apps.map((a, i) => {
           const accent = pick('apps', a.accent, 'items', 'accent') ?? 'accent';
           const rows = (Array.isArray(a.rows) ? a.rows : []).slice(0, ROWS_CAP).map(obj).filter((r) => str(r.text));
@@ -94,7 +94,7 @@ function AppsFigure({ data }: { data: Record<string, unknown> }): JSX.Element | 
                 <div className="fp-apps__main">
                   {str(a.heading) ? <p className="fp-apps__heading">{str(a.heading)}</p> : null}
                   {rows.length > 0 ? (
-                    <ul className="fp-apps__rows">
+                    <ul role="list" className="fp-apps__rows">
                       {rows.map((r, j) => {
                         const state = pick('apps', r.state, 'items', 'rows', 'state');
                         return (
@@ -143,14 +143,14 @@ function VersusFigure({ data }: { data: Record<string, unknown> }): JSX.Element 
             <path className="fp-versus__wire fp-versus__wire--broken" d="M70 50 C 40 150, 260 140, 200 160" />
             <path className="fp-versus__wire" d="M200 160 C 300 120, 340 250, 300 250" />
           </svg>
-          <ul className="fp-versus__chips">
+          <ul role="list" className="fp-versus__chips">
             {before.items.map((x, i) => <li key={i} className="fp-versus__chip">{x}</li>)}
           </ul>
           {before.label ? <p className="fp-versus__label">{before.label}</p> : null}
         </div>
         {str(data.divider) ? <p className="fp-versus__vs">{str(data.divider)}</p> : <span className="fp-versus__vs" aria-hidden="true" />}
         <div className="fp-versus__pane fp-versus__pane--after">
-          <ul className="fp-versus__tiles">
+          <ul role="list" className="fp-versus__tiles">
             {after.items.map((x, i) => <li key={i} className="fp-versus__tile" style={{ '--i': i } as CSSProperties}>{x}</li>)}
           </ul>
           {after.label ? <p className="fp-versus__label fp-versus__label--after">{after.label}</p> : null}
@@ -181,7 +181,7 @@ function FanoutFigure({ data }: { data: Record<string, unknown> }): JSX.Element 
           <span className="fp-fanout__lines" aria-hidden="true"><b /><i /><i /><i /><i /><i /></span>
         </div>
         <span className="fp-fanout__wire" aria-hidden="true" />
-        <ul className="fp-fanout__outputs">
+        <ul role="list" className="fp-fanout__outputs">
           {outputs.map((o, i) => {
             const state = pick('fanout', o.state, 'outputs', 'state');
             return (
@@ -225,7 +225,7 @@ function PhoneFigure({ data }: { data: Record<string, unknown> }): JSX.Element |
         <div className="fp-phone__screen">
           {str(data.time) ? <p className="fp-phone__clock">{str(data.time)}</p> : null}
           {str(data.day) ? <p className="fp-phone__day">{str(data.day)}</p> : null}
-          <ol className="fp-phone__notes">
+          <ol role="list" className="fp-phone__notes">
             {notes.map((n, i) => (
               <li key={i} className="fp-phone__note" style={{ '--i': i } as CSSProperties}>
                 {head(n)}
@@ -264,7 +264,7 @@ function WallFigure({ data }: { data: Record<string, unknown> }): JSX.Element | 
   return (
     <figure className={`fp-wall fp-wall--loop${loop.paused ? ' is-paused' : ''}`} aria-label={str(data.label) || t('wallFigureLabel')}>
       <div className="fp-wall__stage">
-        <ul className="fp-wall__spaces">
+        <ul role="list" className="fp-wall__spaces">
           {spaces.map((s, i) => {
             const members = typeof s.members === 'number' ? Math.min(MEMBERS_MAX, Math.max(0, Math.floor(s.members))) : 0;
             const docs = (Array.isArray(s.docs) ? s.docs : []).slice(0, DOCS_CAP).map(obj).map((d) => str(d.label)).filter(Boolean);
@@ -272,7 +272,7 @@ function WallFigure({ data }: { data: Record<string, unknown> }): JSX.Element | 
               <li key={i} className="fp-wall__space">
                 <p className="fp-wall__title">{str(s.title)}</p>
                 {members > 0 ? <span className="fp-wall__who" aria-hidden="true">{Array.from({ length: members }, (_, j) => <i key={j} />)}</span> : null}
-                {docs.length > 0 ? <ul className="fp-wall__docs">{docs.map((d, j) => <li key={j} className="fp-wall__doc">{d}</li>)}</ul> : null}
+                {docs.length > 0 ? <ul role="list" className="fp-wall__docs">{docs.map((d, j) => <li key={j} className="fp-wall__doc">{d}</li>)}</ul> : null}
               </li>
             );
           })}
@@ -300,7 +300,7 @@ function TallyFigure({ data }: { data: Record<string, unknown> }): JSX.Element |
   if (cards.length === 0) return null;
   return (
     <figure className="fp-tally" aria-label={str(data.label) || t('tallyFigureLabel')}>
-      <ul className="fp-tally__cards">
+      <ul role="list" className="fp-tally__cards">
         {cards.map((c, i) => {
           const state = pick('tally', c.state, 'items', 'state');
           const fill = typeof c.fill === 'number' && Number.isFinite(c.fill) ? Math.min(1, Math.max(0, c.fill)) : 1;
@@ -332,7 +332,7 @@ function LogFigure({ data }: { data: Record<string, unknown> }): JSX.Element | n
         <span className="fp-log__dot" /><span className="fp-log__dot" /><span className="fp-log__dot" />
         {str(data.title) ? <span className="fp-log__title">{str(data.title)}</span> : null}
       </div>
-      <ol className="fp-log__lines">
+      <ol role="list" className="fp-log__lines">
         {lines.map((l, i) => {
           const state = pick('log', l.state, 'lines', 'state');
           return (

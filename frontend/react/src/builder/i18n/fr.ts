@@ -7,6 +7,7 @@ export const messages = {
   errCanonicalSourceOutput: "La liaison de sortie source enregistrée est invalide. Rechargez le workflow avant de l’enregistrer.",
   defaultSourceOutput: "Sortie par défaut",
   missingSourceOutput: "Sortie introuvable : {{name}}",
+  undeclaredSourceOutput: "{{name}} (sortie non déclarée par le nœud)",
   defaultSourceOutputHelp: "Utilise la propriété output si elle existe ; sinon, transmet la table des sorties de la source.",
   sourceOutputDescription: "Sortie source : {{name}} ({{type}})",
 

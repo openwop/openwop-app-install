@@ -14,7 +14,7 @@ const routes: FeatureRoute[] = [
     path: '/discovery',
     element: <DiscoveryPage />,
     tier: 'workspace', archetype: 'standard-index',
-    nav: { group: 'Commerce', label: 'Discovery', labelKey: 'discoveryLabel', icon: BoxesIcon, hint: 'Search, collections & merchandising', hintKey: 'discoveryHint', order: 63, featureId: 'discovery' },
+    nav: { group: 'Commerce', labelKey: 'discoveryLabel', icon: BoxesIcon, hintKey: 'discoveryHint', order: 63, featureId: 'discovery' },
   },
 ];
 

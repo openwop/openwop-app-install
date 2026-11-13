@@ -36,7 +36,7 @@
 
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveFeatureToggle, type ToolAccessScope } from '../../host/agentToolKit.js';
 import { getOrg, listOrgs, resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
 import { startWorkflowRun, type StartRunDeps } from '../../host/runStarter.js';
 import { claimIgnition, recordIgnitionRun, releaseIgnition, ignitionKey } from '../../host/ignitionGuard.js';
@@ -48,6 +48,7 @@ import { createLogger } from '../../observability/logger.js';
 import { listVendors } from './productionService.js';
 import { canSeeVendorPricing, redactVendorPricing } from './vendorRedaction.js';
 import { PRODUCTION_PLAN_WORKFLOW_ID } from './builtinWorkflows.js';
+import { forwardedPlanExemption } from '../../host/operatorPlanExemption.js';
 
 const log = createLogger('production.agent-tools');
 
@@ -67,9 +68,9 @@ function toolError(error: string, message: string, extra?: Record<string, unknow
 }
 
 /** Per-call toggle honesty (ADR 0308 D2): per-tenant, dynamic, fail-closed. */
-async function productionEnabled(tenantId: string, actingUserId: string | undefined): Promise<boolean> {
-  const assignment = await resolveOne('production', { tenantId, ...(actingUserId ? { userId: actingUserId } : {}) }).catch(() => null);
-  return Boolean(assignment?.enabled);
+async function productionEnabled(scope: ToolAccessScope): Promise<boolean> {
+  // ADR 1108 — the kit's subject: the route's shape plus the operator exemption.
+  return resolveFeatureToggle('production', scope);
 }
 
 /** Internal columns the surface strips from vendor projections (recorded in the
@@ -163,7 +164,7 @@ const strArr = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is 
  */
 async function runGetVendorsTool(input: Record<string, unknown>, scope: BundleScope): Promise<ToolResult> {
   const empty: ToolResult = { content: JSON.stringify({ vendors: [] }) };
-  if (!(await productionEnabled(scope.tenantId, scope.actingUserId))) return empty;
+  if (!(await productionEnabled(scope))) return empty;
   const resolved = await resolveOrgScope(scope, str(input.orgId), 'workspace:read');
   if ('failure' in resolved) return empty; // reads fail EMPTY, never typed
   const { orgId, actingUserId } = resolved;
@@ -182,7 +183,7 @@ async function runGetVendorsTool(input: Record<string, unknown>, scope: BundleSc
  * for direct testing.
  */
 async function runPlanTool(deps: StartRunDeps, input: Record<string, unknown>, scope: BundleScope): Promise<ToolResult> {
-  if (!(await productionEnabled(scope.tenantId, scope.actingUserId))) {
+  if (!(await productionEnabled(scope))) {
     return toolError('feature_disabled', 'Production Intelligence is not enabled for this workspace — tell the user you cannot generate a production plan here.');
   }
   const resolved = await resolveOrgScope(scope, str(input.orgId), 'workspace:write');
@@ -203,6 +204,8 @@ async function runPlanTool(deps: StartRunDeps, input: Record<string, unknown>, s
 
   const runId = await startWorkflowRun(deps, {
     tenantId: scope.tenantId,
+    // CC-CHAN-1 / ADR 1108 — keep the listed operator's exemption on the started run.
+    ...forwardedPlanExemption(scope),
     workflowId: PRODUCTION_PLAN_WORKFLOW_ID,
     inputs: {
       orgId,

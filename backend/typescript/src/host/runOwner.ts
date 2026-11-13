@@ -296,6 +296,14 @@ export function requestSubjectV2(req: Request, tenant: string): RunSubjectV2 | u
   return toV2Subject({ ...stamp.subject, tenant });
 }
 
+/** ADR 1059 — the v2 Subject this host stamps for a signed-in `userId` on its
+ *  own session lane (the `ownerStampFromRequest` session branch), without a
+ *  request. `resolvedVia.boundTo` uses it for a person the host addressed a
+ *  signed link to (RFC 0259 §A.4: "the mapping it uses for `owner.subject`"). */
+export function sessionSubjectV2(userId: string, tenant: string): RunSubjectV2 {
+  return toV2Subject({ issuer: SESSION_SUBJECT_ISSUER, subjectId: opaquePrincipal(userId), tenant, lane: 'api-key', kind: 'user' });
+}
+
 export function runOwnerV2(run: { tenantId: string; metadata?: Record<string, unknown> | null }): RunOwnerBlockV2 {
   const v1 = runOwner(run);
   const tenant = run.tenantId;

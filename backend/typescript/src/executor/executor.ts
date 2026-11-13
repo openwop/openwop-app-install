@@ -30,6 +30,7 @@
  * @see scheduler.ts for the trigger-rule + condition evaluation.
  */
 
+import { APPROVAL_DATA_LOOPBACK_FIELD, LOOPBACK_CAP_KIND, LOOPBACK_LIMIT_ERROR_CODE, LOOPBACK_LIMIT_EVENT } from './loopbackWire.js';
 import { runAiDefaultFor, runCredentialRefFor } from '../host/runAiDefault.js';
 import { multiAgentPhaseGates } from '../host/multiAgentPhases.js';
 import { NEGOTIATION_DECIDED_EVENT, type NegotiationRecorder } from '../host/negotiationDecided.js';
@@ -74,6 +75,7 @@ import type { Storage } from '../storage/storage.js';
 import type {
   EdgeDef,
   NodeContext,
+  NodeLoopbackState,
   NodeOutcome,
   WorkflowDefinition,
 } from './types.js';
@@ -137,9 +139,23 @@ import { SuspendSignal, makeSuspendFn, type DurableResolutionLookup } from './su
 import { interruptFormDefect } from '../host/interruptFormRules.js';
 import { CredentialGateError, nodeOAuthDeclarationOf, runCredentialGate } from '../host/credentialGate.js';
 import { beginNodeActivity } from '../host/effectIdentity.js';
+import { PLAN_EXEMPT_PERSONAL_TENANT_KEY, planExemptOfRunMetadata } from '../host/operatorPlanExemption.js';
+import {
+  isRefineResolution,
+  LOOPBACK_MARKER_KEY,
+  LoopbackVisits,
+  nodeResumeKey,
+  planLoopbacks,
+  qualifyResumeKey,
+  readLoopbackMarker,
+  rebuildLoopbackHistory,
+  type LoopbackMarker,
+  type LoopbackPlan,
+} from './loopback.js';
 import {
   buildGraph,
   buildNodeInputs,
+  evaluateTrigger,
   freshSnapshot,
   inspectDisposition,
   markCompleted,
@@ -477,6 +493,8 @@ function nodeRetryMaxAttempts(nodeRef: { config?: Record<string, unknown> }): nu
 /** Failure classes retrying cannot fix — semantic refusals + author errors. */
 const NON_RETRYABLE_NODE_ERRORS: ReadonlySet<string> = new Set([
   'envelope_refusal', 'validation_error', 'capability_unsupported', 'workflow_invalid', 'recursion_limit_exceeded',
+  // ADR 1058 / RFC 0258 §D — a spent loopback cap is a typed terminal, never retried.
+  LOOPBACK_LIMIT_ERROR_CODE,
   // ADR 0655 D2 — egress REFUSALS are semantic: a `config.retry` node makes exactly one
   // attempt. Timeouts / request failures / in-flight stay retryable by omission.
   'email_recipient_suppressed', 'email_recipient_erased', 'email_recipient_no_consent',
@@ -539,6 +557,13 @@ async function runOneNodeBody(input: {
   /** ADR 1001 D3.2 — serves a `durable: true` ctx.suspend from this node's own
    *  resolved interrupt row when the seeded resolution is for another key. */
   durableLookup?: DurableResolutionLookup;
+  /** ADR 1058 / RFC 0258 §C/§D — what this execution's completion does to a
+   *  declared loopback: `take` marks the `node.completed` with the re-arm;
+   *  `exhausted` turns the completion into the typed cap failure. Decided by
+   *  the drain from the resolution it seeds, never by the node. */
+  loopback?: { take: LoopbackMarker } | { exhausted: { limit: number } };
+  /** ADR 1058 PR-B — `ctx.loopback` for a loopback gate's execution. */
+  loopbackState?: NodeLoopbackState;
 }, pinHolder: { pin?: ChannelPin; served?: Map<string, ChannelPin> } = {}): Promise<
   | {
       kind: 'success';
@@ -781,6 +806,11 @@ async function runOneNodeBody(input: {
   const bundleOrgScopeSubject = typeof (run.metadata as Record<string, unknown> | undefined)?.orgScopeSubject === 'string'
     ? String((run.metadata as Record<string, unknown>).orgScopeSubject)
     : undefined;
+  // ADR 1108 — the request-stamped operator plan exemption (reserved key).
+  const bundlePlanExempt = planExemptOfRunMetadata(run.metadata as Record<string, unknown> | undefined);
+  const bundlePlanExemptPersonalTenant = typeof (run.metadata as Record<string, unknown> | undefined)?.[PLAN_EXEMPT_PERSONAL_TENANT_KEY] === 'string'
+    ? String((run.metadata as Record<string, unknown>)[PLAN_EXEMPT_PERSONAL_TENANT_KEY])
+    : undefined;
   // RFC 0207 — the W3C trace context the run was CREATED under, stamped on the
   // run row by the creating request (`routes/runs.ts`, a reserved metadata
   // key). Threaded onto the surface bundle, onto `ctx`, and into the MCP client
@@ -826,6 +856,10 @@ async function runOneNodeBody(input: {
     // ADR 0832 D3 — the member who caused an actorless run (reserved, host-stamped),
     // read ONLY by the org-membership floors; never an actor.
     ...(bundleOrgScopeSubject ? { orgScopeSubject: bundleOrgScopeSubject } : {}),
+    // ADR 1108 — so `ctx.features` honours the operator's exemption the run was
+    // launched under (re-checked against the allowlist at every call).
+    ...(bundlePlanExempt ? { planExempt: true } : {}),
+    ...(bundlePlanExempt && bundlePlanExemptPersonalTenant ? { planExemptPersonalTenant: bundlePlanExemptPersonalTenant } : {}),
   }));
 
   // Fixture-shape input resolution. When the workflow definition's
@@ -885,6 +919,7 @@ async function runOneNodeBody(input: {
     tenantId: run.tenantId,
     scopeId: run.scopeId,
     ...(runTrace ? { traceContext: runTrace } : {}),
+    ...(input.loopbackState ? { loopback: input.loopbackState } : {}),
     inputs: ctxInputs,
     // Resolve `{{inputs.NAME}}` tokens in config from the per-run variable bag
     // (reusable templates — the value arrives per run, not frozen at instantiate).
@@ -1514,6 +1549,13 @@ async function runOneNodeBody(input: {
         },
       };
     }
+    if (input.loopback && 'exhausted' in input.loopback) {
+      // ADR 1058 / RFC 0258 §D (`onExhausted: fail`) — the refine that would
+      // exceed the cap fails the gate typed, after the two cap events.
+      const error = await emitLoopbackExhausted(run.runId, nodeRef.nodeId, input.loopback.exhausted.limit);
+      closeExecution('failed');
+      return { kind: 'failure', error };
+    }
     await eventLog.append({
       runId: run.runId,
       nodeId: nodeRef.nodeId,
@@ -1522,7 +1564,12 @@ async function runOneNodeBody(input: {
       // run-event-payloads.schema.json $defs/nodeCompleted requires it
       // (additionalProperties false), consistent with nodeStarted/nodeFailed.
       // ADR 0936 — a declared data port keeps its text (Tier 1 known-secret scrub only).
-      payload: { nodeId: nodeRef.nodeId, outputs: stripSecretsKeepingData(outcome.outputs, module?.dataFields?.outputs) },
+      payload: {
+        nodeId: nodeRef.nodeId,
+        outputs: stripSecretsKeepingData(outcome.outputs, module?.dataFields?.outputs),
+        // ADR 1058 / RFC 0258 §C.1 — the marker IS the record of the re-arm.
+        ...(input.loopback && 'take' in input.loopback ? { [LOOPBACK_MARKER_KEY]: input.loopback.take } : {}),
+      },
     });
     closeExecution('completed');
     // Normalize outputs to a Record<string, unknown> for the snapshot.
@@ -1664,6 +1711,47 @@ export interface ExecuteRunOptions {
 }
 
 /**
+ * ADR 1058 / RFC 0258 — a looping run's interrupt data at `visit`: the resume
+ * key qualified past visit 0, and on a gate whose loopback is spent under
+ * `withdraw`, `refine` dropped from `actions` (a gate left with no action keeps
+ * it, and a refine then fails typed, §D) plus the round state on `loopback`.
+ */
+export function loopbackInterruptData(
+  data: unknown,
+  visit: number,
+  region: { edge: { edgeId: string; loopback: { maxIterations: number; onExhausted?: 'withdraw' | 'fail' } } } | undefined,
+  visits: { roundsTaken(edgeId: string): number },
+): unknown {
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) return data;
+  let d = data as Record<string, unknown>;
+  if (visit > 0 && typeof d.__resumeKey === 'string') d = { ...d, __resumeKey: qualifyResumeKey(d.__resumeKey, visit) };
+  if (!region) return d;
+  const round = visits.roundsTaken(region.edge.edgeId);
+  const maxIterations = region.edge.loopback.maxIterations;
+  const exhausted = round >= maxIterations;
+  d = { ...d, [APPROVAL_DATA_LOOPBACK_FIELD]: { round, maxIterations, exhausted } };
+  if (exhausted && region.edge.loopback.onExhausted !== 'fail' && Array.isArray(d.actions)) {
+    const kept = (d.actions as unknown[]).filter((a) => a !== 'refine');
+    if (kept.length > 0) d = { ...d, actions: kept };
+  }
+  return d;
+}
+
+/**
+ * ADR 1058 / RFC 0258 §D (`onExhausted: fail`) — a refine past the cap: the
+ * detail event, the cap breach, then the gate's typed, non-retryable failure.
+ * Its `run.failed` follows from the gate's failure like any node's.
+ */
+async function emitLoopbackExhausted(runId: string, nodeId: string, limit: number): Promise<{ code: string; message: string }> {
+  const eventLog = getEventLog();
+  await eventLog.append({ runId, nodeId, type: LOOPBACK_LIMIT_EVENT, payload: { nodeId, iterations: limit, limit } });
+  await eventLog.append({ runId, nodeId, type: 'cap.breached', payload: { kind: LOOPBACK_CAP_KIND, nodeId, limit, observed: limit + 1 } });
+  const error = { code: LOOPBACK_LIMIT_ERROR_CODE, message: `Gate '${nodeId}' was refined past its loopback cap of ${limit} (RFC 0258 §D).` };
+  await eventLog.append({ runId, nodeId, type: 'node.failed', payload: { nodeId, error: { ...error, retryable: false } } });
+  return error;
+}
+
+/**
  * ADR 0326 P3b — reconstruct a scheduler checkpoint from an event-log PREFIX
  * (the events a fork copied). Completed nodes restore their state + outputs
  * (node.completed payloads carry `{outputs}`); failed nodes restore state +
@@ -1711,6 +1799,14 @@ export function snapshotFromEventPrefix(events: ReadonlyArray<{ type: string; no
       state.set(nodeId, 'completed');
       outputs.set(nodeId, (p.outputs && typeof p.outputs === 'object' && !Array.isArray(p.outputs) ? p.outputs : { output: p.outputs }) as Record<string, unknown>);
       openKinds.delete(nodeId);
+      // ADR 1058 / RFC 0258 §C.6 — a completion that took a declared loopback
+      // re-arms its region: a fork or recovery cut after it resumes with the
+      // region pending (the target re-released from its upstream), never with
+      // the gate completed, which would release the gate's forward edges.
+      const marker = readLoopbackMarker(ev.payload);
+      if (marker) {
+        for (const id of marker.rearmed) { state.delete(id); outputs.delete(id); errors.delete(id); openKinds.delete(id); inFlight.delete(id); }
+      }
     } else if (ev.type === 'node.failed') {
       inFlight.delete(nodeId);
       state.set(nodeId, 'failed');
@@ -2088,7 +2184,11 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
   // Cycle detection + snapshot construction.
   let graph: SchedulerGraph;
   let snapshot: SchedulerSnapshot;
+  // ADR 1058 / RFC 0258 — the declared loopbacks (empty without the host flag
+  // or without a loopback edge, in which case nothing below changes).
+  let loopPlan: LoopbackPlan;
   try {
+    loopPlan = planLoopbacks(definition);
     graph = buildGraph(definition);
     snapshot = options.resumeSnapshot
       ? hydrateSnapshot(definition, options.resumeSnapshot)
@@ -2140,6 +2240,75 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
   let retrySignalResolve: () => void = () => {};
   let retrySignal = new Promise<void>((r) => { retrySignalResolve = r; });
   const armRetrySignal = (): void => { retrySignal = new Promise<void>((r) => { retrySignalResolve = r; }); };
+
+  // ADR 1058 / RFC 0258 — visits and rounds, folded from this run's own log
+  // (its markers), so a crash-resume or a fork continues the recorded count.
+  // Only a definition with a declared loopback pays for the read; every other
+  // run keeps `loopVisits` undefined and every visit is 0.
+  const loopVisits: LoopbackVisits | undefined = loopPlan.size > 0
+    ? LoopbackVisits.fold(await drainRunEvents(storage, run.runId))
+    : undefined;
+  /** What completing `gateId` with `resolution` does to its loopback, if any. */
+  const loopbackFor = (gateId: string, resolution: unknown): { take: LoopbackMarker } | { exhausted: { limit: number } } | undefined => {
+    const region = loopPlan.get(gateId);
+    if (!region || !loopVisits || !isRefineResolution(resolution)) return undefined;
+    const taken = loopVisits.roundsTaken(region.edge.edgeId);
+    const limit = region.edge.loopback.maxIterations;
+    if (taken >= limit) return { exhausted: { limit } };
+    return { take: { edgeId: region.edge.edgeId, targetNodeId: region.targetNodeId, round: taken + 1, rearmed: region.nodes } };
+  };
+  /** RFC 0258 §C.2–C.3 — re-arm the region instead of releasing the gate's
+   *  forward edges. Each region node goes back to pending with its outputs,
+   *  error, seeded resolution and attempt budget cleared; the target becomes
+   *  ready against its forward upstream, which keeps its recorded outcomes. */
+  const rearmRegion = (marker: LoopbackMarker): void => {
+    loopVisits?.rearm(marker);
+    for (const id of marker.rearmed) {
+      snapshot.nodeState.set(id, 'pending');
+      snapshot.nodeOutputs.delete(id);
+      snapshot.nodeErrors.delete(id);
+      reinvokeResolutions.delete(id);
+      nodeAttempts.delete(id);
+    }
+    if (evaluateTrigger(marker.targetNodeId, graph, snapshot) === 'ready') snapshot.nodeState.set(marker.targetNodeId, 'ready');
+  };
+  /** ADR 1058 PR-B — `ctx.loopback` for a gate: rounds taken, the cap, spent or not. */
+  const loopbackStateOf = (gateId: string): NodeLoopbackState | undefined => {
+    const region = loopPlan.get(gateId);
+    if (!region || !loopVisits) return undefined;
+    const round = loopVisits.roundsTaken(region.edge.edgeId);
+    const maxIterations = region.edge.loopback.maxIterations;
+    return { round, maxIterations, exhausted: round >= maxIterations };
+  };
+  /** The ONE host visit of a node: the loopback fold when the run loops, else 0. */
+  const loopVisitOf = (nodeId: string): number => loopVisits?.visitOf(nodeId) ?? 0;
+  /** A native return-and-resume gate settles on its resolution: completed with
+   *  the value on `output` (and its forward edges released), or, for a declared
+   *  loopback, completed-and-marked with the region re-armed, or failed typed
+   *  past the cap. `append` is false when the event is already in the log. */
+  const settleNativeResume = async (nodeId: string, value: unknown, dataKeys: readonly string[] | undefined, append: boolean): Promise<void> => {
+    const lb = loopbackFor(nodeId, value);
+    if (lb && 'exhausted' in lb) {
+      const error = append
+        ? await emitLoopbackExhausted(run.runId, nodeId, lb.exhausted.limit)
+        : { code: LOOPBACK_LIMIT_ERROR_CODE, message: `Gate '${nodeId}' was refined past its loopback cap of ${lb.exhausted.limit} (RFC 0258 §D).` };
+      markFailed(nodeId, error, snapshot);
+      releaseDownstream(nodeId, graph, snapshot);
+      return;
+    }
+    snapshot.nodeOutputs.set(nodeId, { output: value });
+    snapshot.nodeState.set(nodeId, 'completed');
+    if (append) {
+      await eventLog.append({
+        runId: run.runId,
+        nodeId,
+        type: 'node.completed',
+        payload: { nodeId, outputs: { output: stripSecretsKeepingData(value, dataKeys) }, ...(lb ? { [LOOPBACK_MARKER_KEY]: lb.take } : {}) },
+      });
+    }
+    if (lb) rearmRegion(lb.take);
+    else releaseDownstream(nodeId, graph, snapshot);
+  };
 
   // When resuming from the legacy linear path (`resumeFromNodeIndex`), seed
   // every prior node as completed using `resumeValue` as the seed input on
@@ -2222,16 +2391,7 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
     } else {
       // Native return-and-resume node: map the (redacted) resume value onto the
       // node's `input` port and mark it completed without re-running.
-      const outputs = { output: safeResumeValue };
-      snapshot.nodeOutputs.set(options.resumeNodeId, outputs);
-      snapshot.nodeState.set(options.resumeNodeId, 'completed');
-      await eventLog.append({
-        runId: run.runId,
-        nodeId: options.resumeNodeId,
-        type: 'node.completed',
-        payload: { nodeId: options.resumeNodeId, outputs: { output: stripSecretsKeepingData(safeResumeValue, resumeDataKeys) } },
-      });
-      releaseDownstream(options.resumeNodeId, graph, snapshot);
+      await settleNativeResume(options.resumeNodeId, safeResumeValue, resumeDataKeys, true);
     }
   }
 
@@ -2341,7 +2501,7 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
     // source's recorded `interrupt.resolved` instead of re-creating the gate live
     // and waiting for a new one (`forkReplayResolutions.ts`). Applied here exactly
     // as a live resolution: a rejection fails the node and the scheduler routes it.
-    const derived = await deriveRecordedResolutions({ storage, suspend, run, suspendedNodeIds: suspendedIds });
+    const derived = await deriveRecordedResolutions({ storage, suspend, run, suspendedNodeIds: suspendedIds, ...(loopVisits ? { visitOf: loopVisitOf } : {}) });
     for (const d of derived) {
       suspendedKinds.delete(d.nodeId);
       if (d.conflict) {
@@ -2377,13 +2537,8 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
           reinvokeResolutions.set(d.nodeId, { resumeKey: d.reinvoke.resumeKey, value: safeResumeValue });
           snapshot.nodeState.set(d.nodeId, 'ready');
         } else {
-          const outputs = { output: safeResumeValue };
-          snapshot.nodeOutputs.set(d.nodeId, outputs);
-          snapshot.nodeState.set(d.nodeId, 'completed');
-          if (!d.alreadyRecorded) {
-            await eventLog.append({ runId: run.runId, nodeId: d.nodeId, type: 'node.completed', payload: { nodeId: d.nodeId, outputs: { output: stripSecretsKeepingData(safeResumeValue, resumeDataKeys) } } });
-          }
-          releaseDownstream(d.nodeId, graph, snapshot);
+          // ADR 1058 — the same settle as a live resolution, loopback included.
+          await settleNativeResume(d.nodeId, safeResumeValue, resumeDataKeys, !d.alreadyRecorded);
         }
       }
     }
@@ -2596,8 +2751,26 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
       // handler from the top) would allocate ordinal 1 for the effect it had
       // already performed as ordinal 0, mint a fresh identity, and fire it a
       // second time.
-      beginNodeActivity(run.runId, nodeId, nodeAttempts.get(nodeId) ?? 1, ordinals?.visitOf(nodeId) ?? 0);
+      // ADR 1058 — in a looping run the loopback fold is the ONE visit, for the
+      // invocation log as for interrupt keys, so each round's model call has its
+      // own records (live and replay fold the same markers).
+      const visit = loopVisitOf(nodeId);
+      beginNodeActivity(run.runId, nodeId, nodeAttempts.get(nodeId) ?? 1, loopVisits ? visit : (ordinals?.visitOf(nodeId) ?? 0));
+      // A seeded resolution is served only to the visit it belongs to, under the
+      // node's own key (the host key carries `#v<n>` past visit 0).
+      const seeded = reinvokeResolutions.get(nodeId);
+      const seededKey = seeded && loopVisits ? nodeResumeKey(seeded.resumeKey, visit) : seeded?.resumeKey;
+      const suspendResolution = seeded && seededKey !== undefined ? { resumeKey: seededKey, value: seeded.value } : undefined;
+      const loopback = suspendResolution ? loopbackFor(nodeId, suspendResolution.value) : undefined;
       const inputsByPort = buildNodeInputs(nodeId, graph, snapshot, run.inputs);
+      // ADR 1058 / RFC 0258 §C.4 — a loopback target with `historyInput` gets
+      // every earlier round on that port, rebuilt from the log ([] on visit 0).
+      if (loopVisits) {
+        for (const region of loopPlan.values()) {
+          const port = region.edge.loopback.historyInput;
+          if (region.targetNodeId === nodeId && port) inputsByPort[port] = rebuildLoopbackHistory(await drainRunEvents(storage, run.runId), region);
+        }
+      }
       const out = await runOneNode({
         storage,
         run,
@@ -2609,10 +2782,15 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
         ...(sourceOutcomes ? { sourceOutcomes } : {}),
         ...(ordinals ? { ordinals } : {}),
         ...(options.policyResolver ? { policyResolver: options.policyResolver } : {}),
-        ...(reinvokeResolutions.has(nodeId) ? { suspendResolution: reinvokeResolutions.get(nodeId)! } : {}),
+        ...(suspendResolution ? { suspendResolution } : {}),
+        ...(loopback ? { loopback } : {}),
+        ...(loopVisits && loopPlan.has(nodeId) ? { loopbackState: loopbackStateOf(nodeId) } : {}),
         // ADR 1001 D3.2 — this run's own resolved rows only, scrubbed exactly
         // like a seeded resume (and unwrapped when a replay fork derived them).
-        durableLookup: async (resumeKey) => {
+        // ADR 1058 — keyed by THIS visit, so visit n is never served an earlier
+        // visit's answer (identical to the node's key at visit 0).
+        durableLookup: async (nodeKey) => {
+          const resumeKey = qualifyResumeKey(nodeKey, visit);
           const row = await storage.getResolvedInterruptByKey(run.runId, nodeId, resumeKey);
           // ADR 1001 D3.5 — a replay fork re-executing this node may also be
           // served an answer its PARENT recorded inside the copied prefix (the
@@ -2645,7 +2823,10 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
           // `requiresApproval` and §B stamps it at mint time.
           ...(definition.settings?.compensation ? { policy: definition.settings.compensation } : {}),
         });
-        releaseDownstream(nodeId, graph, snapshot, (skippedId, reason) =>
+        // ADR 1058 / RFC 0258 §C.2 — a completion that took a declared loopback
+        // releases nothing: the region re-arms instead.
+        if (loopback && 'take' in loopback) rearmRegion(loopback.take);
+        else releaseDownstream(nodeId, graph, snapshot, (skippedId, reason) =>
           // ADR 0208 — a routing branch that doesn't fire otherwise leaves no
           // trace; surface WHY a node was skipped (false condition vs upstream).
           log.debug('node_skipped', { runId: run.runId, nodeId: skippedId, reason, by: nodeId }),
@@ -2735,6 +2916,11 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
         // replay-safe (deterministic key, no event emitted); skipped on a replay-mode fork
         // (the original run's artifacts are canonical, mirroring the memory-write gate).
         let interruptData: unknown = out.interrupt.data;
+        // ADR 1058 / RFC 0258 — past visit 0 the host key carries the visit, so
+        // the durable store, the interrupt key and every fork derivation tell
+        // the visits apart; on an exhausted `withdraw` visit `refine` is no
+        // longer offered (the resolve validator enforces `actions`).
+        if (loopVisits) interruptData = loopbackInterruptData(interruptData, visit, loopPlan.get(nodeId), loopVisits);
         // RFC 0199 §E.3 — a `credential` ask has no gate content to preview, and its
         // `CredentialData` is closed: binding a preview artifact onto it would make
         // the wire payload invalid.
@@ -2823,6 +3009,7 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
           payload: stripSecretsFromPersisted(buildInterruptRequestedPayload({
             runId: run.runId,
             nodeId,
+            ...(visit > 0 ? { visit } : {}),
             kind: interrupt.kind,
             data: interruptData,
             ...(interrupt.resumeSchema !== undefined ? { resumeSchema: interrupt.resumeSchema } : {}),

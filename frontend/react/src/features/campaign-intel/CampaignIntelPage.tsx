@@ -30,6 +30,7 @@ import { AdMapSection } from './AdMapSection.js';
 import { ReallocationPlansPanel } from './ReallocationPlansPanel.js';
 import { SpendCapsPanel } from './SpendCapsPanel.js';
 import { StagedAlertAction, isStagedAction } from './StagedAlertAction.js';
+import { TableScroll } from '../../ui/DataTable.js';
 
 // CMPUX-15: currency is threaded from the read model (per-row for attribution +
 // pacing, report-level otherwise) — no hardcoded USD.
@@ -323,7 +324,7 @@ export function CampaignIntelPage(): JSX.Element {
                     {plan.pacing.length > 0 ? (
                       <div>
                         <h3 className="u-fs-13 u-mt-2 u-mb-1">{t('pacingWeeksTitle')}</h3>
-                        <div className="table-scroll table--stack">
+                        <TableScroll className="table--stack" label={t('pacingWeeksTitle')}>
                           <table className="u-w-full">
                             <thead><tr className="muted u-fs-13"><th scope="col" className="u-text-left u-py-2">{t('colWeek')}</th><th scope="col" className="u-text-right u-py-2">{t('colWeekBudget')}</th><th scope="col" className="u-text-right u-py-2">{t('colWeekExpected')}</th></tr></thead>
                             <tbody>
@@ -336,7 +337,7 @@ export function CampaignIntelPage(): JSX.Element {
                               ))}
                             </tbody>
                           </table>
-                        </div>
+                        </TableScroll>
                       </div>
                     ) : null}
                   </div>
@@ -364,7 +365,7 @@ export function CampaignIntelPage(): JSX.Element {
                 ) : (
                   <>
                     <Notice variant="info">{budget.noteCode ? t(`budgetNote_${budget.noteCode}`, { defaultValue: budget.note, shift: orgMoney(budget.noteParams?.shift ?? 0), from: budget.noteParams?.from ?? '', to: budget.noteParams?.to ?? '' }) : budget.note} {budget.projectedRoasGain > 0 ? t('projectedGain', { gain: orgMoney(budget.projectedRoasGain) }) : ''}</Notice>
-                    <div className="table-scroll table--stack">
+                    <TableScroll className="table--stack" label={t('budgetTitle')}>
                     <table className="u-w-full">
                       <thead><tr className="muted u-fs-13"><th scope="col" className="u-text-left u-py-2">{t('colPlatform')}</th><th scope="col" className="u-text-right u-py-2">{t('colCurrent')}</th><th scope="col" className="u-text-right u-py-2">{t('colSuggested')}</th><th scope="col" className="u-text-right u-py-2">{t('colRoas')}</th></tr></thead>
                       <tbody>
@@ -378,7 +379,7 @@ export function CampaignIntelPage(): JSX.Element {
                         ))}
                       </tbody>
                     </table>
-                    </div>
+                    </TableScroll>
                   </>
                 )}
               </section>
@@ -436,7 +437,7 @@ export function CampaignIntelPage(): JSX.Element {
                 <section className="surface-card u-mb-4">
                   <h2 className="u-mt-0 u-fs-15">{t('attributionTitle')}</h2>
                   <p className="muted u-fs-13 u-mt-0">{t('attributionHint')}</p>
-                  <div className="table-scroll table--stack">
+                  <TableScroll className="table--stack" label={t('attributionTitle')}>
                   <table className="u-w-full">
                     <thead><tr className="muted u-fs-13"><th scope="col" className="u-text-left u-py-2">{t('colCampaign')}</th><th scope="col" className="u-text-right u-py-2">{t('colSpend')}</th><th scope="col" className="u-text-right u-py-2">{t('colPlatformConv')}</th><th scope="col" className="u-text-right u-py-2">{t('colWebConv')}</th>{hasSessionLastClick ? <th scope="col" className="u-text-right u-py-2">{t('colSessionLastClick')}</th> : null}<th scope="col" className="u-text-right u-py-2">{t('colCpa')}</th></tr></thead>
                     <tbody>
@@ -452,7 +453,7 @@ export function CampaignIntelPage(): JSX.Element {
                       ))}
                     </tbody>
                   </table>
-                  </div>
+                  </TableScroll>
                   {attribution.unattributedConversions > 0 ? <p className="muted u-fs-13 u-mb-0">{t('unattributed', { count: attribution.unattributedConversions })}</p> : null}
                   {hasSessionLastClick ? <p className="muted u-fs-13 u-mb-0">{t('sessionLastClickNote', { days: attribution.lookbackDays ?? 30 })}</p> : null}
                 </section>

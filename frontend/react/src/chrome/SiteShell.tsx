@@ -40,6 +40,7 @@ import { ThemeToggle } from '../ui/ThemeToggle.js';
 import { LanguageSwitcher } from '../i18n/LanguageSwitcher.js';
 import { useResolvedNav } from './navConfig/NavConfigProvider.js';
 import { Button } from '../ui/Button.js';
+import { navLabel } from './navText.js';
 
 /**
  * The phone rail is deliberately smaller than the desktop rail. These are the
@@ -132,7 +133,7 @@ function SiteNav(): JSX.Element | null {
   }, [moreOpen]);
 
   const labelOf = (item: (typeof items)[number]): string =>
-    item.labelKey ? tn(item.labelKey, { defaultValue: item.label }) : item.label;
+    navLabel(item, tn);
   const isItemActive = (item: (typeof items)[number]): boolean => (
     item.end || item.to === '/' ? location.pathname === item.to : location.pathname.startsWith(item.to)
   );

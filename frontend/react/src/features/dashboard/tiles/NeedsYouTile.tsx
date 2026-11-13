@@ -26,7 +26,8 @@ import { StatusBadge } from '../../../ui/StatusBadge.js';
 import { CheckIcon } from '../../../ui/icons/index.js';
 import { formatRelativeTime } from '../../../i18n/format.js';
 import { useEffectiveAccessState, isAdminCaller } from '../../../client/useEffectiveAccess.js';
-import { readConnections } from '../sharedReads.js';
+import { readConnections, readWorkflowSummaries } from '../sharedReads.js';
+import { workflowName } from '../../../agents/roleTemplates.js';
 import { isFailed, isWaiting, readMyRuns, readRecentRuns } from '../runsWindow.js';
 import type { DashboardTileProps } from '../tileTypes.js';
 
@@ -57,6 +58,8 @@ export function needsYouItems(
   t: (key: string) => string,
   /** Admin tier: may open run pages and the Access page, and sees the workspace. */
   isAdmin: boolean,
+  /** A run row's title (issue 5788): the workflow's name, never its id when a name is known. */
+  nameOf: (workflowId: string) => string = workflowName,
 ): Item[] {
   const items: Item[] = [];
   for (const a of approvals) {
@@ -75,11 +78,11 @@ export function needsYouItems(
   for (const r of runs) {
     const to = isAdmin ? `/runs/${encodeURIComponent(r.runId)}` : undefined;
     if (isWaiting(r.status)) {
-      items.push({ key: `w:${r.runId}`, kind: 'waiting', title: r.workflowId, detail: t('needsWaitingDetail'), at: r.startedAt, to, action: t('needsActionOpenRun') });
+      items.push({ key: `w:${r.runId}`, kind: 'waiting', title: nameOf(r.workflowId), detail: t('needsWaitingDetail'), at: r.startedAt, to, action: t('needsActionOpenRun') });
     } else if (isFailed(r.status)) {
       const at = Date.parse(r.completedAt ?? r.startedAt ?? '');
       if (Number.isFinite(at) && now - at <= FAILED_LOOKBACK_MS) {
-        items.push({ key: `f:${r.runId}`, kind: 'failed', title: r.workflowId, detail: t('needsFailedDetail'), at: r.completedAt ?? r.startedAt, to, action: t('needsActionInspect') });
+        items.push({ key: `f:${r.runId}`, kind: 'failed', title: nameOf(r.workflowId), detail: t('needsFailedDetail'), at: r.completedAt ?? r.startedAt, to, action: t('needsActionInspect') });
       }
     }
   }
@@ -104,6 +107,23 @@ export function needsYouItems(
   return items.sort((x, y) => (Date.parse(y.at ?? '') || 0) - (Date.parse(x.at ?? '') || 0));
 }
 
+/**
+ * A run row's title (issue 5788): the tenant's own name for the workflow, else the
+ * built-in example's name, else its id. Names are read only when a waiting or
+ * failed row will show one, and a failed read keeps the last two steps.
+ */
+export async function runNameLookup(
+  runs: readonly RunListItem[],
+  read: () => Promise<readonly { workflowId: string; name: string }[]>,
+): Promise<(workflowId: string) => string> {
+  const names = new Map<string, string>();
+  if (runs.some((x) => isWaiting(x.status) || isFailed(x.status))) {
+    const s = await settle(read());
+    if (s.ok) for (const w of s.value) if (w.name) names.set(w.workflowId, w.name);
+  }
+  return (id) => names.get(id) ?? workflowName(id);
+}
+
 const KIND_STATUS: Record<Item['kind'], string> = {
   approval: 'waiting-approval',
   waiting: 'waiting-input',
@@ -125,13 +145,15 @@ export default function NeedsYouTile({ compact }: DashboardTileProps): JSX.Eleme
       settle(listApprovals('pending')),
       settle(isAdmin ? readRecentRuns() : readMyRuns()),
       settle(readConnections()),
-    ]).then(([a, r, c]) => {
+    ]).then(async ([a, r, c]) => {
+      const runs = r.ok ? r.value : [];
+      const nameOf = await runNameLookup(runs, readWorkflowSummaries);
       if (!live) return;
       const failed: Source[] = [];
       if (!a.ok) failed.push('approvals');
       if (!r.ok) failed.push('runs');
       if (!c.ok) failed.push('connections');
-      const items = needsYouItems(a.ok ? a.value : [], r.ok ? r.value : [], c.ok ? c.value : [], Date.now(), (k: string) => t(k), isAdmin);
+      const items = needsYouItems(a.ok ? a.value : [], runs, c.ok ? c.value : [], Date.now(), (k: string) => t(k), isAdmin, nameOf);
       setState({ items, failed });
     });
     return () => { live = false; };

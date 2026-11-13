@@ -113,6 +113,46 @@ describe('planBudget (P1)', () => {
   });
 });
 
+describe('planBudget weekly pacing — partial last week (CC-PERF-1)', () => {
+  // Live 2026-11-11 (build a1d1dccb7): 1500 over 30 days paced 5 × 300, so
+  // the 2-day week 5 got a full 7-day week's money. Pacing is now ∝ days in
+  // each bucket (7,7,7,7,2), integer minor units, each column summing exactly,
+  // remainders to the EARLIEST weeks (the FU-DATA-5 rule, unchanged).
+  // One platform, CPA 10 minor (spend 10 / 1 conv per day) → expected = floor(total / 10).
+  const oneCpa = Array.from({ length: 8 }, (_, i) => rec('google', `2026-06-0${i + 1}`, { spend: 0.1, conversions: 1 }));
+  const col = (p: ReturnType<typeof planBudget>, k: 'budgetMinor' | 'expectedConversions') => p.pacing.map((w) => w[k]);
+
+  it('30 days: the 2-day week gets 2/7 of a full week (live repro)', () => {
+    const p = planBudget(oneCpa, { totalBudgetMinor: 1500, targetConversions: 10, horizonDays: 30 });
+    expect(p.pacing.map((w) => w.week)).toEqual([1, 2, 3, 4, 5]);
+    expect(col(p, 'budgetMinor')).toEqual([350, 350, 350, 350, 100]);
+    // expected = floor(1500 / 10) = 150 → 35 per full week, 10 for 2 days.
+    expect(p.expectedConversions).toBe(150);
+    expect(col(p, 'expectedConversions')).toEqual([35, 35, 35, 35, 10]);
+  });
+
+  it('odd total over 30 days: sums exact, remainders to the earliest weeks', () => {
+    const p = planBudget(oneCpa, { totalBudgetMinor: 1001, targetConversions: 10, horizonDays: 30 });
+    // floors: 233.56→233 ×4, 66.73→66 = 998; residual 3 → weeks 1–3.
+    expect(col(p, 'budgetMinor')).toEqual([234, 234, 234, 233, 66]);
+    expect(col(p, 'budgetMinor').reduce((s, v) => s + v, 0)).toBe(1001);
+    // expected = 100: floors 23 ×4 + 6 = 98; residual 2 → weeks 1–2.
+    expect(p.expectedConversions).toBe(100);
+    expect(col(p, 'expectedConversions')).toEqual([24, 24, 23, 23, 6]);
+  });
+
+  it('control: 28 days stays four equal weeks', () => {
+    const p = planBudget(oneCpa, { totalBudgetMinor: 1500, targetConversions: 10, horizonDays: 28 });
+    expect(col(p, 'budgetMinor')).toEqual([375, 375, 375, 375]);
+    expect(col(p, 'expectedConversions')).toEqual([38, 38, 37, 37]);
+  });
+
+  it('control: 7 days is a single week carrying everything', () => {
+    const p = planBudget(oneCpa, { totalBudgetMinor: 1001, targetConversions: 10, horizonDays: 7 });
+    expect(p.pacing).toEqual([{ week: 1, budgetMinor: 1001, expectedConversions: 100 }]);
+  });
+});
+
 describe('detectAnomalies (P2)', () => {
   it('flags a 10x spend spike (min-N itself is unobservable — see header)', () => {
     const rows = Array.from({ length: 13 }, (_, i) => rec('google', `2026-06-${String(i + 1).padStart(2, '0')}`));

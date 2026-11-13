@@ -20,7 +20,7 @@ const routes: FeatureRoute[] = [
     path: '/billing',
     element: <BillingPage />,
     tier: 'admin', archetype: 'admin',
-    nav: { group: 'Billing & commerce', label: 'Billing', labelKey: 'billingLabel', icon: BuildingIcon, hint: 'Plan & token balance', hintKey: 'billingHint', order: 80, featureId: 'billing' },
+    nav: { group: 'Billing & commerce', labelKey: 'billingLabel', icon: BuildingIcon, hintKey: 'billingHint', order: 80, featureId: 'billing' },
   },
 ];
 

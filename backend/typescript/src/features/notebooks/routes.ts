@@ -2,8 +2,10 @@
  * Research Notebooks routes (ADR 0084) — host-extension, toggle-gated on
  * `notebooks` (backend authority — 404 when off, like every feature package).
  *
- * A notebook IS a project Subject (`facet:'notebook'`), so the RBAC + IDOR model
- * is the project model, reused verbatim: the caller's access is resolved through
+ * A notebook IS a project Subject with a bound KB corpus (ADR 0084 correction — any
+ * project, not only `facet:'notebook'`), so the RBAC + IDOR model is the project
+ * model, reused verbatim through the ONE rule `notebookAccess` (ADR 1103 D1, shared
+ * with the chat tools and the run surface): the caller's access is resolved through
  * `resolveProjectAccess` (org authority composed with the project's visibility/
  * members, ADR 0054 D5). Write needs `workspace:write` in the notebook's org;
  * read needs `workspace:read`. A foreign-tenant / non-notebook / no-access id is a
@@ -21,6 +23,7 @@
  *   POST   /:id/sources/:sid/transform    {templateId} enqueue notebooks.transform run [workspace:write]
  *   GET    /:id/transformations           list the notebook's transformation Documents [workspace:read]
  *   GET    /:id/transformations/templates the transformation catalog [workspace:read]
+ *   POST   /:id/chat          ensure the notebook's group chat  [workspace:read — ADR 1103 D9, the projects door's rule]
  *   POST   /:id/notes         {text, origin} add a note         [workspace:write]
  *                             `origin:'authored'` (a human composed it) ⇒ trusted;
  *                             anything else / absent ⇒ third-party ⇒ FENCED (ADR 0601)
@@ -44,12 +47,12 @@ import {
 } from '../../host/conversationStore.js';
 import { deleteConversationCompletely } from '../../host/conversationCascade.js';
 import {
-  createNotebook, ensureNotebookForProject, getNotebook, listNotebooks, deleteNotebook,
+  createNotebook, ensureNotebookForProject, notebookAccess, listNotebooksVisibleTo, deleteNotebook,
   addSource, listSources, setSourceContextLevel, addNote, listNotes, searchNotebook,
-  getSourceSummary, listTransformations, type NoteContentOrigin,
+  listTransformations, NOTEBOOK_RESEARCHER_AGENT_ID, type NoteContentOrigin,
 } from './notebooksService.js';
 import { getDocument } from '../kb/kbService.js';
-import { startWorkflowRun } from '../../host/runStarter.js';
+import { startWorkflowRun, type StartRunDeps } from '../../host/runStarter.js';
 import { NOTEBOOKS_SUMMARIZE_ID } from './summarizeWorkflow.js';
 import { NOTEBOOKS_TRANSFORM_ID } from './transformWorkflow.js';
 import { NOTEBOOKS_INGEST_AUDIO_ID, NOTEBOOKS_INGEST_YOUTUBE_ID } from './transcribeWorkflow.js';
@@ -77,7 +80,7 @@ const MAX_AUDIO_DECODED_BYTES = 32 * 1024 * 1024;
  *  ROSTER agents, and the researcher is a manifest pack agent the chat dispatch
  *  resolves via the agent registry). Phase-2 owner-subject auto-grounding is
  *  agent-agnostic, so swapping the agent KEEPS grounding and adds ask/search. */
-const RESEARCHER_AGENT_ID = 'vendor.openwop-app.notebooks.agents.researcher';
+const RESEARCHER_AGENT_ID = NOTEBOOK_RESEARCHER_AGENT_ID;
 
 const TOGGLE = { toggleId: 'notebooks', label: 'Research Notebooks' };
 
@@ -108,17 +111,37 @@ async function hasOrgScope(req: Request, orgId: string, scope: Scope): Promise<b
  *  read-only caller attempting a write op gets 403. Returns the resolved notebook. */
 async function requireNotebook(req: Request, scope: Scope) {
   await requireFeatureEnabled(req, TOGGLE.toggleId, TOGGLE.label);
-  const tenantId = tenantOf(req);
   const id = req.params.id;
-  const nb = await getNotebook(tenantId, id);
-  const level = nb ? await resolveProjectAccess(tenantId, id, actingUserOf(req)) : 'none';
-  if (!nb || level === 'none') {
+  const access = await notebookAccess(tenantOf(req), id, actingUserOf(req)); // ADR 1103 D1 — the one rule
+  if (!access) {
     throw new OpenwopError('not_found', 'Notebook not found.', 404, { id });
   }
-  if (scope === 'workspace:write' && level !== 'write') {
+  if (scope === 'workspace:write' && access.level !== 'write') {
     throw new OpenwopError('forbidden_scope', `Missing required scope: ${scope}`, 403, { requiredScope: scope });
   }
-  return nb;
+  return access.notebook;
+}
+
+/**
+ * ADR 1103 D3 — a run this door starts acts for the person the door just authorized.
+ * These four runs used to carry no actor, so the run surface treated them as system
+ * runs, refused every private project, and the nodes reported success with nothing
+ * written. `actingUserId` rides `run.metadata` (the chat tool's form); `personalTenant`
+ * is a reserved key and is passed as the starter's own input (it serves the run's BYOK
+ * and tenant gates).
+ */
+function startAsCaller(
+  deps: StartRunDeps,
+  req: Request,
+  input: { workflowId: string; inputs: Record<string, unknown>; metadata: Record<string, unknown> },
+): Promise<string | null> {
+  return startWorkflowRun(deps, {
+    tenantId: tenantOf(req),
+    workflowId: input.workflowId,
+    inputs: input.inputs,
+    metadata: { ...input.metadata, actingUserId: requireActor(req) },
+    ...(req.personalTenant ? { personalTenant: req.personalTenant } : {}),
+  });
 }
 
 export function registerNotebooksRoutes(deps: RouteDeps): void {
@@ -166,11 +189,9 @@ export function registerNotebooksRoutes(deps: RouteDeps): void {
       await requireFeatureEnabled(req, TOGGLE.toggleId, TOGGLE.label);
       const tenantId = tenantOf(req);
       const caller = actingUserOf(req);
-      // NB-1 — resolve the per-notebook access CONCURRENTLY (was a sequential await-in-loop)
-      // before the access-scoped filter — bounds the list path at ~1 round-trip of latency.
-      const all = await listNotebooks(tenantId);
-      const levels = await Promise.all(all.map((nb) => resolveProjectAccess(tenantId, nb.id, caller)));
-      res.json({ notebooks: all.filter((_, i) => levels[i] !== 'none') });
+      // ADR 1103 D2 — the same list-visible scan the run surface and the projects list
+      // use (access resolved once per org, not once per notebook).
+      res.json({ notebooks: await listNotebooksVisibleTo(tenantId, caller) });
     } catch (err) { next(err); }
   });
 
@@ -304,15 +325,11 @@ export function registerNotebooksRoutes(deps: RouteDeps): void {
       const sourceType = contentType.startsWith('video/') ? 'video' : 'audio';
       const title = optionalString(body.title) ?? `Transcribed ${sourceType}`;
       const language = optionalString(body.language);
-      const runId = await startWorkflowRun(
-        { storage: deps.storage, hostSuite: deps.hostSuite },
-        {
-          tenantId,
-          workflowId: NOTEBOOKS_INGEST_AUDIO_ID,
-          inputs: { notebookId: nb.id, title, sourceType, audioBase64: contentBase64, mimeType: contentType, language: language ?? '' },
-          metadata: { notebookIngest: { notebookId: nb.id, sourceType } },
-        },
-      );
+      const runId = await startAsCaller({ storage: deps.storage, hostSuite: deps.hostSuite }, req, {
+        workflowId: NOTEBOOKS_INGEST_AUDIO_ID,
+        inputs: { notebookId: nb.id, title, sourceType, audioBase64: contentBase64, mimeType: contentType, language: language ?? '' },
+        metadata: { notebookIngest: { notebookId: nb.id, sourceType } },
+      });
       if (!runId) {
         throw new OpenwopError('internal_error', 'Audio ingest workflow is unavailable.', 500, { workflowId: NOTEBOOKS_INGEST_AUDIO_ID });
       }
@@ -338,15 +355,11 @@ export function registerNotebooksRoutes(deps: RouteDeps): void {
         throw new OpenwopError('validation_error', 'url must be a YouTube watch/share URL.', 400, { field: 'url' });
       }
       const title = optionalString(body.title) ?? 'YouTube source';
-      const runId = await startWorkflowRun(
-        { storage: deps.storage, hostSuite: deps.hostSuite },
-        {
-          tenantId,
-          workflowId: NOTEBOOKS_INGEST_YOUTUBE_ID,
-          inputs: { notebookId: nb.id, title, sourceType: 'youtube', url },
-          metadata: { notebookIngest: { notebookId: nb.id, sourceType: 'youtube' } },
-        },
-      );
+      const runId = await startAsCaller({ storage: deps.storage, hostSuite: deps.hostSuite }, req, {
+        workflowId: NOTEBOOKS_INGEST_YOUTUBE_ID,
+        inputs: { notebookId: nb.id, title, sourceType: 'youtube', url },
+        metadata: { notebookIngest: { notebookId: nb.id, sourceType: 'youtube' } },
+      });
       if (!runId) {
         throw new OpenwopError('internal_error', 'YouTube ingest workflow is unavailable.', 500, { workflowId: NOTEBOOKS_INGEST_YOUTUBE_ID });
       }
@@ -376,9 +389,7 @@ export function registerNotebooksRoutes(deps: RouteDeps): void {
       if (level !== 'full' && level !== 'excluded' && level !== 'summary') {
         throw new OpenwopError('validation_error', 'level must be "full", "summary", or "excluded".', 400, { level });
       }
-      if (level === 'summary' && (await getSourceSummary(tenantOf(req), req.params.id, req.params.sid)) === null) {
-        throw new OpenwopError('validation_error', 'Summarize the source first.', 400, { level, sourceId: req.params.sid });
-      }
+      // `summary` without a CURRENT summary is refused by the service (ADR 1103 D4), one read.
       const source = await setSourceContextLevel(tenantOf(req), req.params.id, req.params.sid, level);
       res.json(source);
     } catch (err) { next(err); }
@@ -398,15 +409,11 @@ export function registerNotebooksRoutes(deps: RouteDeps): void {
       const sid = req.params.sid;
       const doc = await getDocument(tenantId, nb.orgId, nb.collectionId, sid, PREAUTHORIZED_CALLER); // KBC-1 — `requireNotebook` above is this lane's door
       if (!doc) throw new OpenwopError('not_found', 'Source not found.', 404, { id: nb.id, sourceId: sid });
-      const runId = await startWorkflowRun(
-        { storage: deps.storage, hostSuite: deps.hostSuite },
-        {
-          tenantId,
-          workflowId: NOTEBOOKS_SUMMARIZE_ID,
-          inputs: { notebookId: nb.id, sourceId: sid },
-          metadata: { notebookSummarize: { notebookId: nb.id, sourceId: sid } },
-        },
-      );
+      const runId = await startAsCaller({ storage: deps.storage, hostSuite: deps.hostSuite }, req, {
+        workflowId: NOTEBOOKS_SUMMARIZE_ID,
+        inputs: { notebookId: nb.id, sourceId: sid },
+        metadata: { notebookSummarize: { notebookId: nb.id, sourceId: sid } },
+      });
       if (!runId) {
         // The built-in workflow didn't resolve in the catalog — a deploy/config
         // issue, not a caller error.
@@ -467,23 +474,19 @@ export function registerNotebooksRoutes(deps: RouteDeps): void {
       // node fetches it IN-RUN (keeps the run record small for large sources +
       // consistent with notebooks.summarize). The route passes the small systemPrompt
       // + ids; read-source prepends the system message before the chatCompletion node.
-      const runId = await startWorkflowRun(
-        { storage: deps.storage, hostSuite: deps.hostSuite },
-        {
-          tenantId,
-          workflowId: NOTEBOOKS_TRANSFORM_ID,
-          inputs: {
-            notebookId: nb.id,
-            sourceId: sid,
-            systemPrompt: tpl.systemPrompt,
-            kind: tpl.docKind,
-            title: `${tpl.label}: ${doc.title}`,
-            ownerSubject: projectSubject(nb.id),
-            orgId: nb.orgId,
-          },
-          metadata: { notebookTransform: { notebookId: nb.id, sourceId: sid, templateId } },
+      const runId = await startAsCaller({ storage: deps.storage, hostSuite: deps.hostSuite }, req, {
+        workflowId: NOTEBOOKS_TRANSFORM_ID,
+        inputs: {
+          notebookId: nb.id,
+          sourceId: sid,
+          systemPrompt: tpl.systemPrompt,
+          kind: tpl.docKind,
+          title: `${tpl.label}: ${doc.title}`,
+          ownerSubject: projectSubject(nb.id),
+          orgId: nb.orgId,
         },
-      );
+        metadata: { notebookTransform: { notebookId: nb.id, sourceId: sid, templateId } },
+      });
       if (!runId) {
         throw new OpenwopError('internal_error', 'Transform workflow is unavailable.', 500, { workflowId: NOTEBOOKS_TRANSFORM_ID });
       }
@@ -533,24 +536,30 @@ export function registerNotebooksRoutes(deps: RouteDeps): void {
   //
   // The `ownerSubject` is SERVER-SET to `projectSubject(id)` (never client-supplied),
   // which is what `conversationExchange` reads to ground each turn in the notebook's
-  // bound KB sources (authorized via `resolveSubjectAccess`). Write-gated: opening
-  // reconciles the lineup (a write), mirroring the projects handler.
+  // bound KB sources (authorized via `resolveSubjectAccess`).
+  //
+  // ADR 1103 D9 — READ-gated, the projects door's rule for the SAME conversation id
+  // (`projects/routes.ts` `/:id/chat`). It used to be write-gated "because opening
+  // reconciles the lineup", which the projects door does on read too — so a viewer
+  // could reach this room through one door and not the other, and the notebook panel
+  // offered them a button that always 403'd. The two doors also title the room the
+  // same way now (`· project`): one room, one title, no flip-flop on each open.
   app.post(`${BASE}/:id/chat`, async (req, res, next) => {
     try {
-      const nb = await requireNotebook(req, 'workspace:write');
+      const nb = await requireNotebook(req, 'workspace:read');
       const tenantId = tenantOf(req);
       const subject = projectSubject(nb.id);
       const conversationId = subjectConversationId(tenantId, subject);
       const researcherRef = agentRef(RESEARCHER_AGENT_ID);
       const ts = new Date().toISOString();
       try {
-        await deps.storage.createChatSession({ sessionId: conversationId, tenantId, title: `${nb.name} · notebook`, createdAt: ts, updatedAt: ts, messageCount: 0, titleSource: 'given' });
+        await deps.storage.createChatSession({ sessionId: conversationId, tenantId, title: `${nb.name} · project`, createdAt: ts, updatedAt: ts, messageCount: 0, titleSource: 'given' });
       } catch (err) {
         const code = (err as { code?: string }).code;
         if (code !== 'SQLITE_CONSTRAINT_PRIMARYKEY' && code !== '23505') throw err; // already exists ⇒ reuse
         // ADR 1019 D1 — follow a notebook rename, and repair a room the ADR 0151
         // autotitler renamed (the shared helper boards and projects use).
-        await refreshEntityChatTitle(deps.storage, tenantId, conversationId, `${nb.name} · notebook`);
+        await refreshEntityChatTitle(deps.storage, tenantId, conversationId, `${nb.name} · project`);
       }
       await ensureConversationMeta(tenantId, conversationId, {
         type: 'group',

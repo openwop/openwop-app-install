@@ -18,13 +18,13 @@ export interface Org { orgId: string; name: string }
 export { SYSTEM_SITE_ORG } from './siteOrg.js';
 export type PageStatus = 'draft' | 'in_review' | 'published' | 'archived';
 export const PAGE_STATUSES: readonly PageStatus[] = ['draft', 'in_review', 'published', 'archived'];
-export type SectionType = 'hero' | 'richText' | 'image' | 'cta' | 'columns' | 'productGrid' | 'form' | 'pricing' | 'entityList' | 'entityDetail' | 'comparison' | 'faq' | 'quotes' | 'fields' | 'video' | 'statusTable' | 'dateCalc' | 'conversation' | 'featureIndex' | 'decisionTree' | 'scheduleSim' | 'films'; // ADR 1080
+export type SectionType = 'hero' | 'richText' | 'image' | 'cta' | 'columns' | 'productGrid' | 'form' | 'pricing' | 'entityList' | 'entityDetail' | 'comparison' | 'faq' | 'quotes' | 'fields' | 'video' | 'statusTable' | 'dateCalc' | 'conversation' | 'featureIndex' | 'decisionTree' | 'scheduleSim' | 'films' | 'marginCalc' | 'allowanceGap' | 'partyViews' | 'stageChart'; // ADR 1080, ADR 1105
 // The `comparison` matrix (ADR 0485) is HOST-AUTHORED (seeded via code), not built
 // through the visual editor — so it is a member of the type union (the renderer
 // handles it) but deliberately absent from the editor's add-section picker below.
 // `fields` (ADR 0748) is the same: created through the RFC 0103 content API,
 // editable here once it exists, not offered as a blank block.
-export const SECTION_TYPES: readonly SectionType[] = ['hero', 'richText', 'image', 'cta', 'columns', 'productGrid', 'form', 'pricing', 'entityList', 'entityDetail', 'faq', 'quotes', 'video', 'statusTable', 'dateCalc', 'conversation', 'featureIndex', 'decisionTree', 'scheduleSim', 'films'];
+export const SECTION_TYPES: readonly SectionType[] = ['hero', 'richText', 'image', 'cta', 'columns', 'productGrid', 'form', 'pricing', 'entityList', 'entityDetail', 'faq', 'quotes', 'video', 'statusTable', 'dateCalc', 'conversation', 'featureIndex', 'decisionTree', 'scheduleSim', 'films', 'marginCalc', 'allowanceGap', 'partyViews', 'stageChart'];
 export interface Section {
   sectionId: string;
   type: SectionType;
@@ -114,13 +114,16 @@ export interface PageVersion {
    *  Restore adopts it into the draft. */
   origin?: 'publish' | 'submit' | 'seed';
 }
+/** UXG-1112-14 — a history entry without its sections (`?summary=1`). Compare reads
+ *  the whole capture with `getVersion`. */
+export type PageVersionSummary = Omit<PageVersion, 'snapshot'> & { snapshot: { title: string; slug: string } };
 /** Per-locale counts of AI-drafted overlays a submit produced (ADR 0064
  *  amendment — autoTranslateOnPublish). Absent when nothing was drafted. */
 export type AutoTranslated = Record<string, number>;
 /** ADR 0592 §9 (CMSL-5) — how the submit-time sweep DEGRADED, when it did:
  *  call cap hit / provider failed mid-sweep / N unusable translations. Absent
  *  = the sweep completed (or never ran). */
-export interface AutoTranslateDegraded { capped?: boolean; errored?: boolean; invalid?: number; conflict?: boolean }
+export interface AutoTranslateDegraded { capped?: boolean; errored?: boolean; timedOut?: boolean; invalid?: number; conflict?: boolean }
 /** ADR 1100 D2 — `altText`/`altTextSource` (media's ADR 0363 fields) let a
  *  placed picture take the library's description. */
 export interface MediaAssetRef { assetId: string; name: string; serveUrl: string; serveToken?: string; altText?: string; altTextSource?: 'human' | 'ai' | 'decorative' }
@@ -148,6 +151,9 @@ export class CmsApiError extends Error {
     this.name = 'CmsApiError';
   }
 }
+
+/** Bytes from an error's details, in whole kB as the server's own message rounds them. */
+const kB = (v: unknown): number | string => (typeof v === 'number' && Number.isFinite(v) ? Math.ceil(v / 1000) : '?');
 
 /**
  * ADR 0592 §6 (CMSLU-7) — map a KNOWN backend error CODE to a cms-namespace
@@ -178,14 +184,33 @@ export function cmsErrorInfo(e: unknown): { key: string; options?: Record<string
     case 'forbidden':
       // ADR 0859 D4 — the submitter's own Approve, refused while another manager can.
       return e.details?.reason === 'separation-of-duties' ? { key: 'errSelfApproval' } : null;
-    case 'validation_error':
-      // ADR 0836 D9 — the server half of the publish checklist.
-      return e.details?.reason === 'publish_blocked' ? { key: 'errPublishBlocked' } : null;
+    case 'validation_error': {
+      // ADR 0836 D9 — the server half of the publish checklist; ADR 1112 D5 — the byte
+      // limits, keyed off `details.reason` so the editor speaks its own language (UXG-1112-12).
+      const sizes = { kb: kB(e.details?.bytes), limit: kB(e.details?.limit) };
+      switch (e.details?.reason) {
+        case 'publish_blocked': {
+          const big = Array.isArray(e.details?.blockers) ? (e.details.blockers as Array<{ rule?: unknown; bytes?: unknown; limit?: unknown }>).find((b) => b?.rule === 'too_large') : undefined;
+          if (!big) return { key: 'errPublishBlocked' };
+          const options = { kb: kB(big.bytes), limit: kB(big.limit) };
+          // ADR 1112 Phase E — a shared-section edit refused for a published page that uses it.
+          return typeof e.details?.pageTitle === 'string'
+            ? { key: 'errSharedGrowsPage', options: { ...options, title: e.details.pageTitle } }
+            : { key: 'errPublishTooLarge', options };
+        }
+        case 'section_too_large': return { key: 'errSectionTooLarge', options: sizes };
+        case 'page_too_large': return { key: 'errPageTooLarge', options: sizes };
+        case 'too_large': return { key: 'errAiTooLarge' }; // the rewrite lane's refusal
+        default: return null;
+      }
+    }
     case 'host_capability_missing':
       return { key: 'translateUnavailable' };
     case 'translation_invalid':
       // ADR 0592 §7 — unusable model output after the bounded repair.
-      return { key: 'translateInvalid' };
+      return e.details?.reason === 'too_large' ? { key: 'errAiTooLarge' } : e.details?.reason === 'timeout' ? { key: 'errAiTimeout' } : { key: 'translateInvalid' };
+    case 'rewrite_invalid':
+      return e.details?.reason === 'timeout' ? { key: 'errAiTimeout' } : null;
     default:
       return null;
   }
@@ -307,9 +332,13 @@ export async function getPageReview(orgId: string, pageId: string): Promise<Page
   }
 }
 
-export async function listVersions(orgId: string, pageId: string): Promise<PageVersion[]> {
-  const res = await fetch(`${base(orgId)}/pages/${encodeURIComponent(pageId)}/versions`, fetchOpts({ headers: authedHeaders() }));
-  return (await asJson<{ versions: PageVersion[] }>(res, 'listVersions')).versions;
+export async function listVersions(orgId: string, pageId: string): Promise<PageVersionSummary[]> {
+  const res = await fetch(`${base(orgId)}/pages/${encodeURIComponent(pageId)}/versions?summary=1`, fetchOpts({ headers: authedHeaders() }));
+  return (await asJson<{ versions: PageVersionSummary[] }>(res, 'listVersions')).versions;
+}
+export async function getVersion(orgId: string, pageId: string, versionId: string): Promise<PageVersion> {
+  const res = await fetch(`${base(orgId)}/pages/${encodeURIComponent(pageId)}/versions/${encodeURIComponent(versionId)}`, fetchOpts({ headers: authedHeaders() }));
+  return asJson<PageVersion>(res, 'getVersion');
 }
 export async function restoreVersion(orgId: string, pageId: string, versionId: string, expectedVersion?: number): Promise<Page> {
   // ADR 0836 D8 — pinned to the version the editor is looking at (409 otherwise).

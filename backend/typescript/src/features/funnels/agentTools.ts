@@ -28,7 +28,6 @@
  *    unpublish / archive / experiment tool is EVER registered here.
  */
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { listFunnels, getFunnel, createFunnel, updateFunnel, FUNNEL_STEP_KINDS } from './funnelsService.js';
@@ -40,7 +39,7 @@ import { surfaceDispatchedRun } from '../../host/turnRunDispatch.js';
 
 import { getFunnelStats, projectStepTotals } from './funnelStats.js';
 import { findCompactionMarkerPath, COMPACTION_MARKER_IN_INPUT } from '../../host/toolResultTransform.js';
-import { untrustedToolError } from '../../host/agentToolKit.js';
+import { untrustedToolError, resolveFeatureToggle, type ToolAccessScope } from '../../host/agentToolKit.js';
 
 export const FUNNELS_LIST_TOOL_ID = 'openwop:funnels.list';
 export const FUNNELS_GET_TOOL_ID = 'openwop:funnels.get';
@@ -62,9 +61,9 @@ const ok = (payload: unknown): ToolResult => ({ content: JSON.stringify(payload)
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
 
 /** Per-call toggle honesty (ADR 0308 D2): per-tenant, dynamic, fail-closed. */
-async function funnelsEnabled(tenantId: string, actingUserId: string | undefined): Promise<boolean> {
-  const assignment = await resolveOne('funnels', { tenantId, ...(actingUserId ? { userId: actingUserId } : {}) }).catch(() => null);
-  return Boolean(assignment?.enabled);
+async function funnelsEnabled(scope: ToolAccessScope): Promise<boolean> {
+  // ADR 1108 — the kit's subject: the route's shape plus the operator exemption.
+  return resolveFeatureToggle('funnels', scope);
 }
 
 /**
@@ -117,7 +116,7 @@ export function registerFunnelsAgentTools(deps: StartRunDeps): void {
     async run(input, scope) {
       // Read tool: no acting user OR the feature disabled → EMPTY, not typed (the
       // model just sees no funnels; the loop is not derailed). Writes stay typed.
-      if (!scope.actingUserId || !(await funnelsEnabled(scope.tenantId, scope.actingUserId))) return ok({ funnels: [] });
+      if (!scope.actingUserId || !(await funnelsEnabled(scope))) return ok({ funnels: [] });
       const access = await assertFunnelsOrgAccess(scope, scope.actingUserId, str(input.orgId), 'workspace:read');
       if ('content' in access) return access;
       const funnels = (await listFunnels(scope.tenantId, access.orgId)).map((f) => ({
@@ -153,7 +152,7 @@ export function registerFunnelsAgentTools(deps: StartRunDeps): void {
     },
     async run(input, scope) {
       // Read tool: no acting user OR the feature disabled → EMPTY, not typed.
-      if (!scope.actingUserId || !(await funnelsEnabled(scope.tenantId, scope.actingUserId))) return ok({ funnel: null });
+      if (!scope.actingUserId || !(await funnelsEnabled(scope))) return ok({ funnel: null });
       const funnelId = str(input.funnelId);
       if (!funnelId) return toolError('validation_error', 'Field `funnelId` is required.');
       const access = await assertFunnelsOrgAccess(scope, scope.actingUserId, str(input.orgId), 'workspace:read');
@@ -196,7 +195,7 @@ export function registerFunnelsAgentTools(deps: StartRunDeps): void {
     },
     async run(input, scope) {
       // Read tool: no acting user OR the feature disabled → EMPTY, not typed.
-      if (!scope.actingUserId || !(await funnelsEnabled(scope.tenantId, scope.actingUserId))) return ok({ steps: {}, days: 0 });
+      if (!scope.actingUserId || !(await funnelsEnabled(scope))) return ok({ steps: {}, days: 0 });
       const funnelId = str(input.funnelId);
       if (!funnelId) return toolError('validation_error', 'Field `funnelId` is required.');
       const access = await assertFunnelsOrgAccess(scope, scope.actingUserId, str(input.orgId), 'workspace:read');
@@ -253,7 +252,7 @@ export function registerFunnelsAgentTools(deps: StartRunDeps): void {
       if (!actingUserId) {
         return toolError('acting_user_required', 'Funnels can only be drafted from a human-initiated turn.');
       }
-      if (!(await funnelsEnabled(scope.tenantId, scope.actingUserId))) {
+      if (!(await funnelsEnabled(scope))) {
         return toolError('feature_disabled', 'The Funnels feature is not enabled for this workspace.');
       }
       const access = await assertFunnelsOrgAccess(scope, actingUserId, str(input.orgId), 'workspace:write');
@@ -323,7 +322,7 @@ export function registerFunnelsAgentTools(deps: StartRunDeps): void {
       },
     },
     async run(input, scope) {
-      if (!scope.actingUserId || !(await funnelsEnabled(scope.tenantId, scope.actingUserId))) return ok({ blueprints: [] });
+      if (!scope.actingUserId || !(await funnelsEnabled(scope))) return ok({ blueprints: [] });
       const access = await assertFunnelsOrgAccess(scope, scope.actingUserId, str(input.orgId), 'workspace:read');
       if ('content' in access) return access;
       const blueprints = runnableBlueprints();
@@ -361,7 +360,7 @@ export function registerFunnelsAgentTools(deps: StartRunDeps): void {
     async run(input, scope) {
       const actingUserId = scope.actingUserId;
       if (!actingUserId) return toolError('acting_user_required', 'A funnel can only be generated from a human-initiated turn.');
-      if (!(await funnelsEnabled(scope.tenantId, actingUserId))) return toolError('feature_disabled', 'The Funnels feature is not enabled for this workspace.');
+      if (!(await funnelsEnabled(scope))) return toolError('feature_disabled', 'The Funnels feature is not enabled for this workspace.');
       const access = await assertFunnelsOrgAccess(scope, actingUserId, str(input.orgId), 'workspace:write');
       if ('content' in access) return access;
       const blueprintId = str(input.blueprintId);

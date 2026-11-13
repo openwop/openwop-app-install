@@ -22,7 +22,7 @@ import type { User } from '../../users/usersService.js';
 import { getOrg } from '../../../host/accessControlService.js';
 import { resolveToggle } from '../../../host/featureToggles/service.js';
 import { ownerPublicRuntimeLapsed } from '../../../host/publicLapse.js';
-import { listProducts, getProduct, isPubliclyListed, getCart, setCartItem, clearCart, checkoutCart, getOrder, markAsPaid, cancelOrder, liveStripeKeyFor } from '../commerceService.js';
+import { listProductsPage, getProduct, isPubliclyListed, getCart, setCartItem, clearCart, checkoutCart, getOrder, markAsPaid, cancelOrder, liveStripeKeyFor } from '../commerceService.js';
 import type { Order } from '../commerceService.js';
 import type { Product } from '../commerceService.js';
 import { resolveAp2Payment } from './ap2.js';
@@ -142,8 +142,18 @@ export function registerCommerceUcpRoutes(deps: RouteDeps): void {
   app.get(`${UCP_BASE}/catalog`, async (req, res, next) => {
     try {
       const m = await resolveMerchant(req.params.orgId);
-      const items = (await listProducts(m.tenantId, m.orgId)).filter(isPubliclyListed).map(toUcpCatalogItem); // ADR 1098
-      res.json({ vertical: 'shopping', items });
+      // ADR 1110 P2 — one page, in UCP's cursor-pagination shape (`limit` + `cursor` in;
+      // `pagination: {cursor, has_next_page, total_count}` out, the Search capability's
+      // contract). Listed products only (ADR 1098).
+      const raw = Number(typeof req.query.limit === 'string' ? req.query.limit : NaN);
+      const limit = Number.isInteger(raw) && raw > 0 ? Math.min(raw, 200) : 50;
+      const cursor = typeof req.query.cursor === 'string' && req.query.cursor ? req.query.cursor : undefined;
+      const page = await listProductsPage(m.tenantId, m.orgId, { listedOnly: true, limit, ...(cursor ? { cursor } : {}) });
+      res.json({
+        vertical: 'shopping',
+        items: page.products.filter(isPubliclyListed).map(toUcpCatalogItem),
+        pagination: { has_next_page: page.nextCursor !== undefined, ...(page.nextCursor ? { cursor: page.nextCursor } : {}) },
+      });
     } catch (err) { next(err); }
   });
   app.get(`${UCP_BASE}/catalog/:productId`, async (req, res, next) => {

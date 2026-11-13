@@ -22,6 +22,7 @@ import { recordRecentAdminDestination } from './adminRecents.js';
 import { useMediaQuery } from '../ui/useMediaQuery.js';
 import { AdminRouteProvider, type AdminParentRoute } from './AdminRouteContext.js';
 import { NavRailItemContent, NavRailSection } from './NavRailPrimitives.js';
+import { navHint, navLabel } from './navText.js';
 
 const COLLAPSE_KEY = 'openwop.admin.railCollapsed';
 
@@ -100,7 +101,7 @@ export function AdminLayout(): JSX.Element {
   const currentItemLabel = (): string | undefined => {
     for (const g of navGroups) {
       const hit = g.items.find((item) => navItemIsActive(item, location.pathname));
-      if (hit) return hit.labelKey ? tn(hit.labelKey, { defaultValue: hit.label }) : hit.label;
+      if (hit) return navLabel(hit, tn);
     }
     return undefined;
   };
@@ -112,7 +113,7 @@ export function AdminLayout(): JSX.Element {
     if (!current?.parentPath) return null;
     const parent = FEATURES.find((feature) => feature.path === current.parentPath);
     if (!parent?.nav || parent.tier !== 'admin') return null;
-    return { path: parent.path, label: parent.nav.label, ...(parent.nav.labelKey ? { labelKey: parent.nav.labelKey } : {}) };
+    return { path: parent.path, ...(parent.nav.label !== undefined ? { label: parent.nav.label } : {}), ...(parent.nav.labelKey ? { labelKey: parent.nav.labelKey } : {}) };
   })();
   // ADR 0203 — admin-tier PAGE enforcement (ADM-8). Presentation-only (every
   // backend route 403s on its own); the ONE layout wrapping all admin routes,
@@ -195,10 +196,10 @@ export function AdminLayout(): JSX.Element {
                   const active = navItemIsActive(item, location.pathname);
                   const badge = badgeFor(item.featureId);
                   const locked = lockedFor(item.featureId);
-                  const label = item.labelKey ? tn(item.labelKey, { defaultValue: item.label }) : item.label;
+                  const label = navLabel(item, tn);
                   const tooltip = locked ? locked.label : collapsed
                     ? label
-                    : (item.hintKey ? tn(item.hintKey, { defaultValue: item.hint }) : item.hint);
+                    : (navHint(item, tn));
                   return (
                     <li key={item.to}>
                       <Tooltip text={tooltip} disabled={!collapsed}>

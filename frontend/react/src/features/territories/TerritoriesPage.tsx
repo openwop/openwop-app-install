@@ -10,6 +10,7 @@ import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
+import { TableScroll } from '../../ui/DataTable.js';
 import type { TFunction } from 'i18next';
 import { PageHeader } from '../../ui/PageHeader.js';
 import { Panel, Toolbar } from '../../ui/layout.js';
@@ -436,7 +437,7 @@ function ModelDetail({ orgId, model, isActive, busy, onActivate, onArchive, onDe
         ) : attainment.data.length === 0 ? (
           <p className="u-text-muted">{t('noAttainment')}</p>
         ) : (
-          <div className="u-overflow-x-auto">
+          <TableScroll label={t('tableCaption')}>
             <table className="data-table">
               <caption className="sr-only">{t('tableCaption')}</caption>
               <thead>
@@ -454,7 +455,7 @@ function ModelDetail({ orgId, model, isActive, busy, onActivate, onArchive, onDe
                 {attainment.data.map((a) => <AttainmentRow key={a.territoryId} row={a} editable={editable} onSaveQuota={saveQuota} />)}
               </tbody>
             </table>
-          </div>
+          </TableScroll>
         )}
       </Panel>
     </>

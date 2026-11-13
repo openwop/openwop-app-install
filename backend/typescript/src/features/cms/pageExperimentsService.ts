@@ -37,7 +37,7 @@ import { featureAccessRefusal, type LaunchSubject } from '../../host/workflowFea
 import { listEventsForExperiment } from '../analytics/analyticsService.js';
 import { registerExperimentStampResolver } from '../analytics/experimentStampResolver.js';
 import { isApprovalGateOn, liveEditGateActive, queueContentApproval } from './contentApproval.js';
-import { advancePagePromotion, preparePagePromotion, assertNoPublishBlockers, recordPageUnpublishedByRestore, getPage, getVersion, restoreVersion, transitionPage, type Page } from './cmsService.js';
+import { advancePagePromotion, preparePagePromotion, assertNoPublishBlockers, assertResolvedPageFits, recordPageUnpublishedByRestore, getPage, getVersion, restoreVersion, transitionPage, type Page } from './cmsService.js';
 
 const log = createLogger('feature.cms.experiments');
 
@@ -551,6 +551,7 @@ export async function startExperiment(tenantId: string, orgId: string, pageId: s
       // ADR 0836 D9 — START serves the variant to visitors, so it meets the
       // publish blockers (a seed offer is a version row too, and may carry one).
       assertNoPublishBlockers({ pageId, sections: version.snapshot.sections });
+      await assertVariantFits(tenantId, orgId, pageId, version.snapshot.sections);
     }
     const next: PageExperiment = { ...exp, status: 'running', startedAt: nowIso(), updatedAt: nowIso() };
     delete next.stoppedAt;
@@ -684,6 +685,14 @@ export async function restorePageBaseline(tenantId: string, orgId: string, pageI
 /** ADR 0950 G8 — may this arm's content go live now? The live page (a null
  *  version) always may; a version must still exist, carry the review stamp
  *  where the gate requires one, and pass the publish blockers. Read-only. */
+/** ADR 1112 Phase E — a running variant is served with its shared sections resolved
+ *  (`publishingService` serves `{...page, sections: snapshot.sections}`), so it meets the
+ *  same resolved page limit as a publish. */
+async function assertVariantFits(tenantId: string, orgId: string, pageId: string, sections: Page['sections']): Promise<void> {
+  const page = await getPage(tenantId, orgId, pageId);
+  if (page) await assertResolvedPageFits({ ...page, sections });
+}
+
 export async function checkArmPromotable(tenantId: string, orgId: string, pageId: string, versionId: string | null, armKey: string): Promise<{ ok: boolean; reason?: string }> {
   if (versionId === null) return { ok: true };
   const version = await getVersion(tenantId, orgId, pageId, versionId);
@@ -691,6 +700,7 @@ export async function checkArmPromotable(tenantId: string, orgId: string, pageId
   try {
     await assertVariantSnapshotReviewed(tenantId, orgId, armKey, version);
     assertNoPublishBlockers({ pageId, sections: version.snapshot.sections });
+    await assertVariantFits(tenantId, orgId, pageId, version.snapshot.sections);
     return { ok: true };
   } catch (err) {
     const details = (err as { details?: { reason?: string } }).details;

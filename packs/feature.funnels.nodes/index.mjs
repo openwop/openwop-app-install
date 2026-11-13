@@ -236,6 +236,13 @@ export async function offerContext(ctx) {
   const i = merged(ctx);
   const rawBrief = i.brief && typeof i.brief === 'object' ? (i.brief.brief && typeof i.brief.brief === 'object' ? i.brief.brief : i.brief) : null;
   if (!rawBrief || !text(rawBrief.name, 200)) return invalid('brief_not_found', 'offer-context needs the campaign `brief`.');
+  // CC-KERNEL-1 / ADR 1020 D8 — a STALE kernel (the brief changed after it was
+  // approved) is not usable content: the channel generators refuse it, and a
+  // funnel step wrote and submitted a page from one (live, build 373d4863a).
+  // Same refusal, same words. A brief with no kernel is still fine here.
+  if (rawBrief.kernelStale === true) {
+    return invalid('kernel_stale', 'The brief changed after its messaging kernel was approved. Regenerate and approve the kernel before generating funnel pages.');
+  }
   const context = { brief: briefProjection(rawBrief) };
   const productId = text(i.productId, 120);
   const bumpId = text(i.bumpProductId, 120);

@@ -11,7 +11,7 @@ import type { RunListItem } from '../../../client/runsClient.js';
 import type { PendingApproval } from '../../../agents/approvalsClient.js';
 import type { Connection } from '../../connections/connectionsClient.js';
 import { computeRunHealth, formatDuration, RUN_WINDOW } from '../runsWindow.js';
-import { needsYouItems } from '../tiles/NeedsYouTile.js';
+import { needsYouItems, runNameLookup } from '../tiles/NeedsYouTile.js';
 import { filterRuns } from '../tiles/RunActivityTile.js';
 
 const NOW = Date.parse('2026-10-06T12:00:00Z');
@@ -106,6 +106,24 @@ describe('needsYouItems', () => {
     expect(items[0]!.to).toBeUndefined();
     // CONTROL: the same row for an admin carries the run link.
     expect(needsYouItems([], [run('f', 'failed', H, 1000)], [], NOW, t, true)[0]!.to).toBe('/runs/f');
+  });
+
+  it('titles a run row with its workflow name, and with the id only when no name is known (#5788)', () => {
+    const names = new Map([['wf-w', 'Decision reminders']]);
+    const items = needsYouItems([], [run('w', 'paused', 2 * H), run('f', 'failed', 3 * H, 1000)], [], NOW, t, true,
+      (id) => names.get(id) ?? id);
+    expect(items.map((i) => i.title)).toEqual(['Decision reminders', 'wf-f']);
+  });
+
+  it('reads names only when a run row needs one, and a failed read falls back to the id', async () => {
+    let reads = 0;
+    const read = async () => { reads++; return [{ workflowId: 'wf-w', name: 'Decision reminders' }]; };
+    expect((await runNameLookup([run('ok', 'completed', H, 1000)], read))('wf-ok')).toBe('wf-ok');
+    expect(reads).toBe(0);
+    expect((await runNameLookup([run('w', 'paused', H)], read))('wf-w')).toBe('Decision reminders');
+    expect(reads).toBe(1);
+    const down = async (): Promise<never> => { throw new Error('read failed'); };
+    expect((await runNameLookup([run('w', 'paused', H)], down))('wf-w')).toBe('wf-w');
   });
 });
 

@@ -347,7 +347,7 @@ function BaseNodeImpl({ id, data, selected }: NodeProps) {
         </div>
         <div className="builder-node-ports-col builder-node-ports-col-right">
           {virtualOutputs.map(p => (
-            <div key={p.handleId} className="builder-node-port builder-node-port-right" title={p.missing ? p.label : t('defaultSourceOutputHelp')}>
+            <div key={p.handleId} className="builder-node-port builder-node-port-right" title={p.missing || p.named ? p.label : t('defaultSourceOutputHelp')}>
               {handlesInRows && <Handle id={p.handleId} type="source" position={Position.Right} isConnectable={false} style={{ background: entry.accent }} />}
               <span className="builder-node-port-label">{p.label}</span>
             </div>

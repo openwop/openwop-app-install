@@ -18,7 +18,7 @@ import { seedDemoPeople } from '../src/host/demoPeopleSeed.js';
 import { seedDemoMedia } from '../src/host/demoMediaSeed.js';
 import { seedDemoCrm } from '../src/host/demoCrmSeed.js';
 import { seedDemoCommerceDepth, clearDemoCommerceDepth, countDemoCommerceDepth } from '../src/host/demoCommerceDepthSeed.js';
-import { listProducts, listOrders, listCoupons, listStockMovements } from '../src/features/commerce/commerceService.js';
+import { collectCatalog, listOrders, listCoupons, listStockMovements } from '../src/features/commerce/commerceService.js';
 import { listAffiliates } from '../src/features/commerce/affiliate.js';
 import { listProductSubscriptions } from '../src/features/commerce/subscriptions.js';
 import { listQuotes } from '../src/features/commerce/quotes.js';
@@ -46,7 +46,7 @@ describe('demo-commerce-depth seeder', () => {
     const first = await seedDemoCommerceDepth(tenantId);
     expect(first.created).toBeGreaterThan(50);
 
-    const products = (await listProducts(tenantId, orgId)).filter((p) => p.createdBy === ACTOR);
+    const products = (await collectCatalog(tenantId, orgId, () => true)).filter((p) => p.createdBy === ACTOR);
     expect(products).toHaveLength(SOLSTICE_CATALOG.length); // 24
     // Images wired from Phase 2, variants + facet fields present.
     expect(products.filter((p) => (p.imageAssetTokens?.length ?? 0) > 0).length).toBeGreaterThan(20);

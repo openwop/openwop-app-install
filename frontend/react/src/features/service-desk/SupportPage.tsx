@@ -325,7 +325,7 @@ export function SupportPage(): JSX.Element {
           ? <StateCard icon={<LifeBuoyIcon size={20} />} title={t('emptyTitle')} body={t('emptyBody')} />
           : <StateCard icon={<LifeBuoyIcon size={20} />} title={t('emptyViewTitle')} body={t(`emptyView_${view}`)} />
       ) : (
-        <DataTable columns={columns} rows={rows} rowKey={(r) => r.ticketId} />
+        <DataTable caption={t('title')} columns={columns} rows={rows} rowKey={(r) => r.ticketId} />
       )}
       </OrgSelectionState>
 

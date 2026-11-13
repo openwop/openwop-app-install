@@ -525,7 +525,7 @@ export function MetricsPage(): JSX.Element {
         <StateCard icon={<BarChartIcon size={20} />} title={t('emptyTitle')} body={t(canManage ? 'emptyBody' : 'emptyBodyReader')} />
       ) : (
         <>
-          <DataTable columns={columns} rows={rows} rowKey={(m) => m.metricId} />
+          <DataTable caption={t('title')} columns={columns} rows={rows} rowKey={(m) => m.metricId} />
           {rows.map((m) => {
             const detail = renderRun(m.metricId);
             return detail ? <div key={m.metricId} className="surface-card u-mt-2"><h4 className="u-mt-0 u-fs-13">{m.title}</h4>{detail}</div> : null;

@@ -17,9 +17,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Sales',
-      label: 'Commissions', labelKey: 'commissionsLabel',
+      labelKey: 'commissionsLabel',
       icon: ScaleIcon,
-      hint: 'Rep incentive plans & commission statements', hintKey: 'commissionsHint',
+      hintKey: 'commissionsHint',
       order: 48,
       featureId: 'sales-commissions',
     },

@@ -105,7 +105,24 @@ export const listOrgs = async (): Promise<Org[]> => (await get<{ orgs: Org[] }>(
 export interface ProductSourceView { assetId: string; role: 'hero' | 'angle' | 'detail' | 'packaging' | 'label' | 'lifestyle'; sha256: string; serveUrl: string }
 export const getProductMedia = async (orgId: string, productId: string): Promise<ProductSourceView[]> =>
   (await get<{ sources: ProductSourceView[] }>(`${orgBase(orgId)}/products/${encodeURIComponent(productId)}/media`, 'getProductMedia')).sources;
-export const listProducts = async (orgId: string): Promise<Product[]> => (await get<{ products: Product[] }>(`${orgBase(orgId)}/products`, 'listProducts')).products;
+/** ADR 1110 P2 — one page of the catalog. `nextCursor` reads the next page; `total` is
+ *  the catalog size, sent only for an unfiltered read. The catalog can hold far more
+ *  than one screen, so nothing reads it whole. */
+export interface ProductPageQuery {
+  q?: string; category?: string; tag?: string; type?: string; state?: 'active' | 'archived';
+  limit?: number; cursor?: string;
+}
+export interface ProductPage { products: Product[]; nextCursor?: string; total?: number }
+export const listProductsPage = async (orgId: string, query: ProductPageQuery = {}, signal?: AbortSignal): Promise<ProductPage> => {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(query)) if (v !== undefined && v !== '') qs.set(k, String(v));
+  const search = qs.toString();
+  const url = `${orgBase(orgId)}/products${search ? `?${search}` : ''}`;
+  return asJson<ProductPage>(await fetch(url, fetchOpts({ headers: authedHeaders(), ...(signal ? { signal } : {}) })), 'listProducts');
+};
+/** Products by id (up to 200), e.g. what a picker already has chosen. */
+export const getProductsByIds = async (orgId: string, ids: readonly string[]): Promise<Product[]> =>
+  ids.length === 0 ? [] : (await get<{ products: Product[] }>(`${orgBase(orgId)}/products?ids=${encodeURIComponent(ids.slice(0, 200).join(','))}`, 'getProducts')).products;
 export const createProduct = (orgId: string, body: Record<string, unknown>): Promise<Product> => post(`${orgBase(orgId)}/products`, body, 'createProduct');
 export const updateProduct = (orgId: string, productId: string, body: Record<string, unknown>): Promise<Product> => patch(`${orgBase(orgId)}/products/${encodeURIComponent(productId)}`, body, 'updateProduct');
 export const deleteProduct = (orgId: string, productId: string): Promise<void> => del(`${orgBase(orgId)}/products/${encodeURIComponent(productId)}`, 'deleteProduct');
@@ -114,7 +131,14 @@ export const listProductFields = async (orgId: string): Promise<ProductFieldDef[
 export const createProductField = (orgId: string, body: Record<string, unknown>): Promise<ProductFieldDef> => post(`${orgBase(orgId)}/product-fields`, body, 'createProductField');
 export const deleteProductField = (orgId: string, defId: string): Promise<void> => del(`${orgBase(orgId)}/product-fields/${encodeURIComponent(defId)}`, 'deleteProductField');
 
-export const listOrders = async (orgId: string): Promise<Order[]> => (await get<{ orders: Order[] }>(`${orgBase(orgId)}/orders`, 'listOrders')).orders;
+/** ADR 1110 P5 — one page of orders, newest first; `total` only on an unfiltered read. */
+export interface OrderPage { orders: Order[]; nextCursor?: string; total?: number }
+export const listOrdersPage = async (orgId: string, query: { status?: string; cursor?: string; limit?: number } = {}): Promise<OrderPage> => {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(query)) if (v !== undefined && v !== '') qs.set(k, String(v));
+  const search = qs.toString();
+  return get<OrderPage>(`${orgBase(orgId)}/orders${search ? `?${search}` : ''}`, 'listOrders');
+};
 export const getOrder = (orgId: string, orderId: string): Promise<Order> => get<Order>(`${orgBase(orgId)}/orders/${encodeURIComponent(orderId)}`, 'getOrder');
 export const payOrder = (orgId: string, orderId: string, paymentIntentId: string): Promise<Order> => post(`${orgBase(orgId)}/orders/${encodeURIComponent(orderId)}/pay`, { paymentIntentId }, 'payOrder');
 export const refundOrder = (orgId: string, orderId: string): Promise<Order> => post(`${orgBase(orgId)}/orders/${encodeURIComponent(orderId)}/refund`, {}, 'refundOrder');

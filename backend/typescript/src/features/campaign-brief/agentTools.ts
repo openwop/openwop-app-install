@@ -30,7 +30,6 @@ import { strictCurrencyExponent } from '../../host/currencyUnits.js';
 import type { BriefBudget } from './types.js';
 import { isTerminalRunStatus } from '@openwop/openwop';
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
 import { startWorkflowRun, type StartRunDeps } from '../../host/runStarter.js';
 import { claimIgnition, recordIgnitionRun, releaseIgnition, ignitionKey, reclaimAfterFinishedRun } from '../../host/ignitionGuard.js';
 import { surfaceDispatchedRun, type TurnRunDispatchSink } from '../../host/turnRunDispatch.js';
@@ -39,7 +38,8 @@ import { orgScopeGranted } from './routes.js';
 import { getBrief, validateBrief } from './briefService.js';
 import { isTargetingPlatform, TARGETING_PLATFORMS } from './targetingService.js';
 import { MARKET_INTEL_WORKFLOW_ID, KERNEL_WORKFLOW_ID } from './intelWorkflows.js';
-import { untrustedToolError, launchRefusalResult } from '../../host/agentToolKit.js';
+import { untrustedToolError, launchRefusalResult, resolveFeatureAccess, featureUnavailable } from '../../host/agentToolKit.js';
+import { forwardedPlanExemption } from '../../host/operatorPlanExemption.js';
 
 const log = createLogger('campaign-brief.agent-tools');
 
@@ -56,6 +56,9 @@ export interface ToolScope {
   tenantId: string;
   actingUserId?: string | undefined;
   agentProfileId?: string | undefined;
+  /** ADR 1108 — read only through the kit / `operatorPlanExemption.ts`. */
+  personalTenant?: string | undefined;
+  planExempt?: boolean | undefined;
   conversationId?: string | undefined;
   runId?: string | undefined;
   /** Present on the conversation transport — see `host/turnRunDispatch.ts`. */
@@ -68,15 +71,15 @@ function toolError(error: string, message: string, extra?: Record<string, unknow
   return { content: JSON.stringify({ ...extra, error, message }), isError: true, hostMessage: true };
 }
 
-/** Per-call toggle honesty (ADR 0308 D2) — fail-closed FIRST, SAME subject shape
- *  as the route gate so a user-bucketed rollout can't disagree between route and
- *  tool. */
-async function featureEnabled(scope: ToolScope): Promise<boolean> {
-  const assignment = await resolveOne(TOGGLE_ID, {
-    tenantId: scope.tenantId,
-    ...(scope.actingUserId ? { userId: scope.actingUserId } : {}),
-  }).catch(() => null);
-  return Boolean(assignment?.enabled);
+/** Per-call access honesty (ADR 0308 D2) — fail-closed FIRST, through the kit's
+ *  subject (ADR 1108): the route's `{ tenantId, userId? }` plus the listed
+ *  operator's plan exemption, which the route gets from `toggleSubjectOf(req)`
+ *  and this comment used to claim it shared when it did not. `null` = allowed;
+ *  else the typed refusal — `not_entitled` for a plan refusal, so the model is
+ *  not told to flip a toggle that is already on. */
+async function featureRefusal(scope: ToolScope): Promise<ToolResult | null> {
+  const assignment = await resolveFeatureAccess(TOGGLE_ID, scope);
+  return assignment?.enabled ? null : featureUnavailable(assignment, 'Personas & Campaign Brief');
 }
 
 /**
@@ -131,9 +134,8 @@ function presentBudget(budget: BriefBudget | undefined) {
 
 // ── READ: get-brief ──────────────────────────────────────────────────────────
 export async function runGetBriefTool(input: Record<string, unknown>, scope: ToolScope): Promise<ToolResult> {
-  if (!(await featureEnabled(scope))) {
-    return toolError('feature_disabled', 'The Personas & Campaign Brief feature is not enabled for this workspace.');
-  }
+  const refused = await featureRefusal(scope);
+  if (refused) return refused;
   const actingUserId = scope.actingUserId;
   if (!actingUserId) {
     return { content: JSON.stringify({ brief: null, note: 'No acting user on this turn — brief access is resolved per signed-in user.' }) };
@@ -178,9 +180,8 @@ export async function runGetBriefTool(input: Record<string, unknown>, scope: Too
 
 // ── READ: validate ─────────────────────────────────────────────────────────
 export async function runValidateTool(input: Record<string, unknown>, scope: ToolScope): Promise<ToolResult> {
-  if (!(await featureEnabled(scope))) {
-    return toolError('feature_disabled', 'The Personas & Campaign Brief feature is not enabled for this workspace.');
-  }
+  const refused = await featureRefusal(scope);
+  if (refused) return refused;
   const actingUserId = scope.actingUserId;
   if (!actingUserId) {
     return { content: JSON.stringify({ valid: false, issues: [], enabledChannels: [], note: 'No acting user on this turn — brief access is resolved per signed-in user.' }) };
@@ -197,9 +198,8 @@ async function guardBriefAction(
   input: Record<string, unknown>,
   scope: ToolScope,
 ): Promise<{ ok: true; briefId: string; orgId: string } | { ok: false; result: ToolResult }> {
-  if (!(await featureEnabled(scope))) {
-    return { ok: false, result: toolError('feature_disabled', 'The Personas & Campaign Brief feature is not enabled for this workspace.') };
-  }
+  const refused = await featureRefusal(scope);
+  if (refused) return { ok: false, result: refused };
   if (!scope.actingUserId) {
     return { ok: false, result: toolError('acting_user_required', 'This action can only run from a human-initiated turn.') };
   }
@@ -247,6 +247,8 @@ export async function runResearchRunTool(deps: StartRunDeps, input: Record<strin
   const runId = await startWorkflowRun(deps, {
     tenantId: scope.tenantId,
     workflowId: MARKET_INTEL_WORKFLOW_ID,
+    // ADR 1108 — the started run keeps the operator exemption this turn holds.
+    ...forwardedPlanExemption(scope),
     inputs: { briefId: guard.briefId, platform },
     metadata: {
       actingUserId: scope.actingUserId,
@@ -299,6 +301,8 @@ export async function runGenerateKernelTool(deps: StartRunDeps, input: Record<st
   const runId = await startWorkflowRun(deps, {
     tenantId: scope.tenantId,
     workflowId: KERNEL_WORKFLOW_ID,
+    // ADR 1108 — the started run keeps the operator exemption this turn holds.
+    ...forwardedPlanExemption(scope),
     inputs: { briefId: guard.briefId },
     metadata: {
       actingUserId: scope.actingUserId,

@@ -23,6 +23,15 @@
  * read in `decideContentPublish` and the `expectedVersion` precondition in
  * `transitionPage`, whose refusal re-opens the row); disabling either alone leaves
  * "refuses to publish a page that changed…" green by design.
+ *
+ * MyndHyve B2 (ADR 0027 correction): a superadmin decides system-site reviews.
+ * Sabotage-witnessed (re-graded w106): not threading `decidedBySuperadmin` at the
+ * route or in the content-publish dispatch, or never honouring `isSuperadmin`,
+ * reds approve and reject; dropping the reserved tenant AND org clauses together
+ * reds the real-org handler case (either clause alone is held by the other: a
+ * real org fails both); honouring an unset flag reds the not-a-superadmin
+ * handler case; dropping `requireCmsScope`'s superadmin check reds the
+ * non-superadmin 404.
  */
 
 import http from 'node:http';
@@ -48,7 +57,7 @@ beforeAll(async () => {
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   const t = getToggleDefault('users');
   if (t) await saveConfig({ ...t, status: 'on' }, 'test');
-});
+}, 120_000);
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 const setGate = async (status: 'on' | 'off'): Promise<void> => {
@@ -373,9 +382,13 @@ describe('MyndHyve B2 — a superadmin decides system-site reviews', () => {
   it('approve publishes the page', async () => {
     await asSuperadmin(async (c) => {
       const pageId = await submittedSystemPage(c, `B2 approve ${n++}`);
+      const open = await findPendingContentApprovalForPage(SYSTEM_SITE_TENANT, pageId);
+      expect(open, 'submit must open a review row').toBeTruthy();
       const approve = await c.post(u(SYSTEM_SITE_ORG, `/pages/${pageId}/approve`));
       expect(approve.status, JSON.stringify(approve.body)).toBe(200);
       expect(approve.body.status).toBe('published');
+      // The review was DECIDED, not bypassed: the row the submit opened is approved.
+      expect((await getApproval(open!.approvalId))?.status).toBe('approved');
     });
   });
 
@@ -391,7 +404,11 @@ describe('MyndHyve B2 — a superadmin decides system-site reviews', () => {
   it('a non-superadmin still cannot see the system site, so cannot decide there', async () => {
     const pageId = await asSuperadmin((c) => submittedSystemPage(c, `B2 hidden ${n++}`));
     const { c } = await owner();
-    expect((await c.post(u(SYSTEM_SITE_ORG, `/pages/${pageId}/approve`))).status).toBe(404);
+    const refused = await c.post(u(SYSTEM_SITE_ORG, `/pages/${pageId}/approve`));
+    expect(refused.status, JSON.stringify(refused.body)).toBe(404);
+    expect(assertFlatErrorEnvelope(refused.body, 'system-site decide refusal').error).toBe('not_found');
+    // …and nothing was decided: the review is still open.
+    expect(await findPendingContentApprovalForPage(SYSTEM_SITE_TENANT, pageId)).toBeTruthy();
   });
 
   it('the superadmin allowance is the system site only: in a real org the handler still demands the org scope', async () => {

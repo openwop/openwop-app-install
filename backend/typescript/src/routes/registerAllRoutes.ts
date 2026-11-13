@@ -39,6 +39,7 @@ import { registerEventLogSeedSeam } from './eventLogSeedSeam.js';
 import { registerWebhookReceiveSeam } from './webhookReceiveSeam.js';
 import { registerFireEffectSeam } from './effectSeamFireSeam.js';
 import { registerHostEventEmitSeam } from './hostEventEmitSeam.js';
+import { registerInterruptTokenSeam } from './interruptTokenSeam.js';
 import { registerDurabilitySeam } from './durabilitySeam.js';
 import { registerEffectTransportRetrySeam } from './effectTransportRetrySeam.js';
 import { registerPackRoutes } from './packs.js';
@@ -102,6 +103,7 @@ import { registerAccessControlRoutes } from './accessControl.js';
 import { registerWorkspaceTenancyRoutes } from './workspaces.js';
 import { registerOperatorAccessRoutes } from './operatorAccess.js';
 import { registerKanbanRoutes } from './kanban.js';
+import { registerExternalCollaboratorRoutes } from './externalCollaborators.js';
 import { registerAgentOpsRoutes } from './agentOps.js';
 import { registerApprovalRoutes } from './approvals.js';
 import { registerWorkflowProposalPolicyRoutes } from './workflowProposalPolicies.js';
@@ -183,6 +185,7 @@ const ROUTE_MODULES: RouteModule[] = [
   { name: 'fireEffectSeam', register: ({ app, storage, hostSuite }) => registerFireEffectSeam(app, { storage, hostSuite }) },
   // RFC 0236 §G (ADR 0825) — produce one advertised host event through the production fan-out.
   { name: 'hostEventEmitSeam', register: ({ app, storage }) => registerHostEventEmitSeam(app, { storage }) },
+  { name: 'interruptTokenSeam', register: ({ app, storage }) => registerInterruptTokenSeam(app, { storage }) },
   // RFC 0158 (ADR 0739) — the kill/bound durability seam. Answers 404 unless the
   // seam gate is on AND `main()` was the entry point: it SIGKILLs this process.
   { name: 'durabilitySeam', register: ({ app, storage, hostSuite }) => registerDurabilitySeam(app, { storage, hostSuite }) },
@@ -391,6 +394,8 @@ const ROUTE_MODULES: RouteModule[] = [
   // Kanban boards — sample host-extension (non-normative). The card→run
   // trigger is the RFCS/0086 "named workflow agents" demo surface.
   { name: 'kanban', register: ({ app, storage, hostSuite }) => registerKanbanRoutes(app, { storage, hostSuite }) },
+  // ADR 1099 D2 — the collaborator's side of ADR 0958 (shared, grant view, invite accept).
+  { name: 'external-collaborators', register: ({ app }) => registerExternalCollaboratorRoutes(app) },
   // Agent-experience ops (PRD §14): idempotent demo seed + the agent heartbeat
   // "Check now" task-claim. After roster + kanban since it composes both.
   { name: 'agentOps', register: ({ app, storage, hostSuite }) => registerAgentOpsRoutes(app, { storage, hostSuite }) },

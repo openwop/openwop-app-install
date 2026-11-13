@@ -32,10 +32,11 @@ const ProductShotsPanel = lazy(() => import('./ProductShotsPanel.js'));
 import { ChatPocket } from '../../chat/ChatPocket.js';
 import { useFormat } from '../../i18n/useFormat.js';
 import { copyToClipboard } from '../../ui/copyToClipboard.js';
+import { ProductPicker } from './ProductPicker.js';
 import {
-  listOrgs, listProducts, createProduct, updateProduct, deleteProduct,
+  listOrgs, listProductsPage, getProductsByIds, createProduct, updateProduct, deleteProduct,
   listProductFields, createProductField, deleteProductField,
-  listOrders,
+  listOrdersPage, getOrder,
   listQuotes, createQuote, sendQuote, declineQuote, acceptQuote, createQuoteShareLink,
   listPriceLists, createPriceList, deletePriceList, resolvePrice,
   listCoupons, createCoupon, commerceSummary, storefrontPath,
@@ -259,25 +260,74 @@ function ProductsTab({ orgId, focusId }: { orgId: string; focusId?: string | und
   const [editing, setEditing] = useState<Product | null>(null); // ADR 0257 — the row being edited in place
   const [managingFields, setManagingFields] = useState(false);
   const [loadError, setLoadError] = useState(false);
-  // CM-R2-2 — the reload-after-action path must keep the honesty the initial
-  // load has (the quotes section three screens down is the in-file precedent).
-  // CM-R2-2-WINDOW — a RETRY after a failed load clears the `[]` that load wrote,
-  // so the skeleton shows instead of a confident "No products" over a failed read
-  // (the MKT-UX-12 shape). A refetch after a successful action keeps the list.
-  const reload = useCallback(() => { if (loadError) setProducts(null); setLoadError(false); void listProducts(orgId).then(setProducts).catch(() => { setLoadError(true); setProducts((p) => p ?? []); }); }, [orgId, loadError]);
-  // grade-code H2/H3: active-flag guard (last org wins, not last response) + a
-  // distinct error state (not "no products").
-  useEffect(() => { let active = true; setProducts(null); setLoadError(false); void listProducts(orgId).then((r) => { if (active) setProducts(r); }).catch(() => { if (active) { setLoadError(true); setProducts([]); } }); return () => { active = false; }; }, [orgId]);
+  // ADR 1110 P2 — the catalog is read a page at a time (it can hold far more than one
+  // screen), and search and the type/state filters run on the server, so a match is
+  // never missed because it sat on a page not yet loaded.
+  const [nextCursor, setNextCursor] = useState<string | undefined>(undefined);
+  const [total, setTotal] = useState<number | undefined>(undefined);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [loadMoreFailed, setLoadMoreFailed] = useState(false);
+  const [query, setQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
+  const [typeFilter, setTypeFilter] = useState<'' | Product['type']>('');
+  const [stateFilter, setStateFilter] = useState<'' | 'active' | 'archived'>('');
+  useEffect(() => { const timer = setTimeout(() => setDebouncedQuery(query.trim()), 250); return () => clearTimeout(timer); }, [query]);
+  const filtered = debouncedQuery !== '' || typeFilter !== '' || stateFilter !== '';
+  const pageQuery = useMemo(() => ({
+    ...(debouncedQuery ? { q: debouncedQuery } : {}), ...(typeFilter ? { type: typeFilter } : {}), ...(stateFilter ? { state: stateFilter } : {}), limit: 50,
+  }), [debouncedQuery, typeFilter, stateFilter]);
+  // The last request wins, whatever order the answers arrive in (grade-code H2/H3: the
+  // active-flag guard, now a sequence so a filter change also retires an older read).
+  const seq = useRef(0);
+  // CM-R2-2 / CM-R2-2-WINDOW — a failed read is an error state, never "No products"; a
+  // RETRY after a failure shows the skeleton again; a refetch after an action keeps the list.
+  const load = useCallback((opts: { keepList: boolean }) => {
+    const mine = ++seq.current;
+    if (!opts.keepList) setProducts(null);
+    setLoadError(false);
+    setRefreshing(true);
+    void listProductsPage(orgId, pageQuery).then((page) => {
+      if (mine !== seq.current) return;
+      setProducts(page.products); setNextCursor(page.nextCursor); if (page.total !== undefined) setTotal(page.total);
+    }).catch(() => { if (mine === seq.current) { setLoadError(true); setProducts((cur) => cur ?? []); } })
+      .finally(() => { if (mine === seq.current) setRefreshing(false); });
+  }, [orgId, pageQuery]);
+  // A filter change refreshes IN PLACE (the list and the filter bar stay mounted, so the
+  // search box keeps focus mid-word); only a different org starts from the skeleton.
+  const loadedOrg = useRef<string | null>(null);
+  useEffect(() => { load({ keepList: loadedOrg.current === orgId }); loadedOrg.current = orgId; }, [load, orgId]);
+  const reload = useCallback(() => load({ keepList: !loadError }), [load, loadError]);
+  const loadMore = useCallback(() => {
+    if (!nextCursor) return;
+    const mine = seq.current;
+    setLoadingMore(true);
+    setLoadMoreFailed(false);
+    void listProductsPage(orgId, { ...pageQuery, cursor: nextCursor }).then((page) => {
+      if (mine !== seq.current) return;
+      setProducts((cur) => {
+        const have = new Set((cur ?? []).map((p) => p.productId));
+        return [...(cur ?? []), ...page.products.filter((p) => !have.has(p.productId))];
+      });
+      setNextCursor(page.nextCursor);
+    }).catch(() => { if (mine === seq.current) setLoadMoreFailed(true); }).finally(() => setLoadingMore(false));
+  }, [orgId, pageQuery, nextCursor]);
 
   // Deep-link spine (Phase 2): `?tab=products&product=<id>` opens that product's
-  // inline editor once its row loads (e.g. from a Reports low-stock link).
+  // inline editor once its row loads (e.g. from a Reports low-stock link). ADR 1110: a
+  // product past the first page is read by id and shown first.
   const focusConsumed = useRef(false);
   useEffect(() => {
     if (focusConsumed.current || products === null || !focusId) return;
-    const match = products.find((p) => p.productId === focusId);
-    if (match) { setEditing(match); setCreating(false); }
     focusConsumed.current = true;
-  }, [products, focusId]);
+    const match = products.find((p) => p.productId === focusId);
+    if (match) { setEditing(match); setCreating(false); return; }
+    void getProductsByIds(orgId, [focusId]).then(([found]) => {
+      if (!found) return;
+      setProducts((cur) => [found, ...(cur ?? []).filter((p) => p.productId !== found.productId)]);
+      setEditing(found); setCreating(false);
+    }).catch(() => { /* the list still shows; the deep link just does not open */ });
+  }, [products, focusId, orgId]);
 
   const remove = useCallback(async (p: Product) => {
     if (!(await confirm({ title: t('deleteProductTitle', { name: p.name }), body: t('deleteProductBody'), danger: true, confirmLabel: t('delete') }))) return;
@@ -288,18 +338,9 @@ function ProductsTab({ orgId, focusId }: { orgId: string; focusId?: string | und
     try { await updateProduct(orgId, p.productId, { active: !p.active }); reload(); } catch (e) { actionError(e, t); }
   }, [orgId, reload, t]);
 
-  // Collection kit (§4.5 rule 13): gated search + type/state facets → separate memo.
-  const [query, setQuery] = useState('');
-  const [typeFilter, setTypeFilter] = useState<'' | Product['type']>('');
-  const [stateFilter, setStateFilter] = useState<'' | 'active' | 'archived'>('');
-  const visibleProducts = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return (products ?? []).filter((p) =>
-      (!q || p.name.toLowerCase().includes(q) || (p.tags ?? []).some((tag) => tag.toLowerCase().includes(q)))
-      && (!typeFilter || p.type === typeFilter)
-      && (!stateFilter || (stateFilter === 'active') === p.active));
-  }, [products, query, typeFilter, stateFilter]);
-  const clearFilters = useCallback(() => { setQuery(''); setTypeFilter(''); setStateFilter(''); }, []);
+  // Collection kit (§4.5 rule 13): gated search + type/state facets, applied by the server.
+  const visibleProducts = products ?? [];
+  const clearFilters = useCallback(() => { setQuery(''); setDebouncedQuery(''); setTypeFilter(''); setStateFilter(''); }, []);
 
   return (
     <div className="surface-card u-p-4 u-grid u-gap-3">
@@ -312,7 +353,7 @@ function ProductsTab({ orgId, focusId }: { orgId: string; focusId?: string | und
       </div>
       {managingFields ? <ProductFieldsManager orgId={orgId} /> : null}
       {creating ? <ProductForm orgId={orgId} onDone={() => { setCreating(false); reload(); }} onCancel={() => setCreating(false)} /> : null}
-      {products !== null && products.length > 3 ? (
+      {(products !== null || filtered) && (filtered || (total ?? products?.length ?? 0) > 3) ? (
         <div className="filterbar" role="group" aria-label={t('filterGroup')}>
           <input
             type="search"
@@ -335,12 +376,12 @@ function ProductsTab({ orgId, focusId }: { orgId: string; focusId?: string | und
       ) : null}
       {products === null ? <Skeleton /> : loadError ? (
         <StateCard announce title={t('loadErrorTitle')} body={t('loadErrorBody')} action={<Button variant="primary" onClick={reload}>{t('retry')}</Button>} />
-      ) : products.length === 0 ? (
+      ) : products.length === 0 && !filtered ? (
         <StateCard icon={<PackageIcon />} title={t('noProducts')} body={t('noProductsBody')} action={<Button variant="primary" onClick={() => setCreating(true)}>{t('newProduct')}</Button>} />
       ) : visibleProducts.length === 0 ? (
         <StateCard icon={<PackageIcon />} title={t('noMatchTitle')} body={t('noMatchBody')} action={<Button variant="secondary" onClick={clearFilters}>{t('clearFilters')}</Button>} />
       ) : (
-        <ul className="u-grid u-gap-2 u-list-none u-p-0 u-m-0">
+        <ul className="u-grid u-gap-2 u-list-none u-p-0 u-m-0" aria-busy={refreshing}>
           {visibleProducts.map((p) => (
             <li key={p.productId} className="u-grid u-gap-2">
               <div className="action-bar u-justify-between u-items-center u-gap-2">
@@ -367,6 +408,15 @@ function ProductsTab({ orgId, focusId }: { orgId: string; focusId?: string | und
           ))}
         </ul>
       )}
+      {products !== null && !loadError && products.length > 0 ? (
+        <div className="action-bar u-justify-between u-items-center u-gap-2">
+          <p className="u-m-0 u-text-sm muted" role="status" aria-live="polite">
+            {total !== undefined && !filtered ? t('productsShowing', { shown: fmt.number(products.length), total: fmt.number(total) }) : t('productsShownCount', { count: products.length })}
+          </p>
+          {loadMoreFailed ? <span className="u-text-sm" role="alert">{t('loadMoreFailed')}</span> : null}
+          {nextCursor ? <Button variant="secondary" disabled={loadingMore} onClick={loadMore}>{loadingMore ? t('loadingMore') : loadMoreFailed ? t('retry') : t('loadMore')}</Button> : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -621,32 +671,74 @@ function OrdersTab({ orgId }: { orgId: string }): JSX.Element {
   const fmt = useFormat();
   const [orders, setOrders] = useState<Order[] | null>(null);
   const [loadError, setLoadError] = useState(false);
-  // CM-R2-2 — same reload-honesty fix as products (the quotes precedent).
-  // CM-R2-2-WINDOW — same retry window as products.
-  const reload = useCallback(() => { if (loadError) setOrders(null); setLoadError(false); void listOrders(orgId).then(setOrders).catch(() => { setLoadError(true); setOrders((o) => o ?? []); }); }, [orgId, loadError]);
-  useEffect(() => { let active = true; setOrders(null); setLoadError(false); void listOrders(orgId).then((r) => { if (active) setOrders(r); }).catch(() => { if (active) { setLoadError(true); setOrders([]); } }); return () => { active = false; }; }, [orgId]);
-
-  // Collection kit (§4.5 rule 13): gated search + status facet → separate memo.
+  // ADR 1110 P5 — orders are read a page at a time, newest first; the status filter runs
+  // on the server so a match is never missed on a page not yet loaded.
+  const [nextCursor, setNextCursor] = useState<string | undefined>(undefined);
+  const [total, setTotal] = useState<number | undefined>(undefined);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [loadMoreFailed, setLoadMoreFailed] = useState(false);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'' | (typeof ORDER_STATUSES)[number]>('');
+  const seq = useRef(0);
+  // CM-R2-2 / CM-R2-2-WINDOW — same reload honesty as products.
+  const load = useCallback((opts: { keepList: boolean }) => {
+    const mine = ++seq.current;
+    if (!opts.keepList) setOrders(null);
+    setLoadError(false);
+    setRefreshing(true);
+    void listOrdersPage(orgId, { ...(statusFilter ? { status: statusFilter } : {}), limit: 50 }).then((page) => {
+      if (mine !== seq.current) return;
+      setOrders(page.orders); setNextCursor(page.nextCursor); if (page.total !== undefined) setTotal(page.total);
+    }).catch(() => { if (mine === seq.current) { setLoadError(true); setOrders((cur) => cur ?? []); } })
+      .finally(() => { if (mine === seq.current) setRefreshing(false); });
+  }, [orgId, statusFilter]);
+  // A filter change refreshes IN PLACE (the list and the filter bar stay mounted, so the
+  // search box keeps focus mid-word); only a different org starts from the skeleton.
+  const loadedOrg = useRef<string | null>(null);
+  useEffect(() => { load({ keepList: loadedOrg.current === orgId }); loadedOrg.current = orgId; }, [load, orgId]);
+  const reload = useCallback(() => load({ keepList: !loadError }), [load, loadError]);
+  const loadMore = useCallback(() => {
+    if (!nextCursor) return;
+    const mine = seq.current;
+    setLoadingMore(true);
+    setLoadMoreFailed(false);
+    void listOrdersPage(orgId, { ...(statusFilter ? { status: statusFilter } : {}), limit: 50, cursor: nextCursor }).then((page) => {
+      if (mine !== seq.current) return;
+      setOrders((cur) => [...(cur ?? []), ...page.orders.filter((o) => !(cur ?? []).some((c) => c.orderId === o.orderId))]);
+      setNextCursor(page.nextCursor);
+    }).catch(() => { if (mine === seq.current) setLoadMoreFailed(true); }).finally(() => setLoadingMore(false));
+  }, [orgId, statusFilter, nextCursor]);
+
+  // A full order id is looked up directly, so it is found even past the loaded pages;
+  // any other text filters the orders loaded so far (and the hint below says so).
+  const [lookedUp, setLookedUp] = useState<Order | null>(null);
+  useEffect(() => {
+    const q = query.trim();
+    setLookedUp(null);
+    if (!/^ord:[0-9a-f-]{36}$/i.test(q) || (orders ?? []).some((o) => o.orderId === q)) return undefined;
+    let live = true;
+    void getOrder(orgId, q).then((o) => { if (live && (!statusFilter || o.status === statusFilter)) setLookedUp(o); }).catch(() => { /* not found: the empty state says so */ });
+    return () => { live = false; };
+  }, [query, orders, orgId, statusFilter]);
   const visibleOrders = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return (orders ?? []).filter((o) =>
-      (!q || o.orderId.toLowerCase().includes(q) || (o.couponCode ?? '').toLowerCase().includes(q))
-      && (!statusFilter || o.status === statusFilter));
-  }, [orders, query, statusFilter]);
+    const loaded = (orders ?? []).filter((o) => !q || o.orderId.toLowerCase().includes(q) || (o.couponCode ?? '').toLowerCase().includes(q));
+    return lookedUp && !loaded.some((o) => o.orderId === lookedUp.orderId) ? [lookedUp, ...loaded] : loaded;
+  }, [orders, query, lookedUp]);
 
   return (
     <div className="surface-card u-p-4 u-grid u-gap-3">
       <div><strong>{t('ordersTitle')}</strong><p className="u-m-0 u-text-sm muted">{t('ordersHint')}</p></div>
       <Notice variant="info">{t('approvalHint')}</Notice>
-      {orders !== null && orders.length > 3 ? (
+      {(orders !== null || statusFilter !== '') && (statusFilter !== '' || query !== '' || (total ?? orders?.length ?? 0) > 3) ? (
         <div className="filterbar" role="group" aria-label={t('filterGroup')}>
           <input
             type="search"
             className="ui-input filterbar-search"
             placeholder={t('filterOrdersPlaceholder')}
             aria-label={t('filterOrdersAria')}
+            {...(nextCursor ? { 'aria-describedby': 'orders-search-scope' } : {})}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
@@ -656,10 +748,11 @@ function OrdersTab({ orgId }: { orgId: string }): JSX.Element {
           </select>
         </div>
       ) : null}
-      {orders === null ? <Skeleton /> : loadError ? <StateCard announce title={t('loadErrorTitle')} body={t('loadErrorBody')} action={<Button variant="primary" onClick={reload}>{t('retry')}</Button>} /> : orders.length === 0 ? <StateCard title={t('noOrders')} body={t('noOrdersBody')} /> : visibleOrders.length === 0 ? (
+      {nextCursor ? <p id="orders-search-scope" className="u-m-0 u-text-sm muted">{t('ordersSearchLoadedHint')}</p> : null}
+      {orders === null ? <Skeleton /> : loadError ? <StateCard announce title={t('loadErrorTitle')} body={t('loadErrorBody')} action={<Button variant="primary" onClick={reload}>{t('retry')}</Button>} /> : orders.length === 0 && !statusFilter && !lookedUp ? <StateCard title={t('noOrders')} body={t('noOrdersBody')} /> : visibleOrders.length === 0 ? (
         <StateCard title={t('noMatchTitle')} body={t('noMatchBody')} action={<Button variant="secondary" onClick={() => { setQuery(''); setStatusFilter(''); }}>{t('clearFilters')}</Button>} />
       ) : (
-        <ul className="u-grid u-gap-2 u-list-none u-p-0 u-m-0">
+        <ul className="u-grid u-gap-2 u-list-none u-p-0 u-m-0" aria-busy={refreshing}>
           {visibleOrders.map((o) => (
             <li key={o.orderId} className="action-bar u-justify-between u-items-center u-gap-2">
               <div className="u-flex-1">
@@ -677,6 +770,16 @@ function OrdersTab({ orgId }: { orgId: string }): JSX.Element {
           ))}
         </ul>
       )}
+      {orders !== null && !loadError && orders.length > 0 ? (
+        <div className="action-bar u-justify-between u-items-center u-gap-2">
+          <p className="u-m-0 u-text-sm muted" role="status" aria-live="polite">
+            {query.trim() ? t('ordersShownCount', { count: visibleOrders.length })
+              : total !== undefined && !statusFilter ? t('ordersShowing', { shown: fmt.number(orders.length), total: fmt.number(total) }) : t('ordersShownCount', { count: orders.length })}
+          </p>
+          {loadMoreFailed ? <span className="u-text-sm" role="alert">{t('loadMoreFailed')}</span> : null}
+          {nextCursor ? <Button variant="secondary" disabled={loadingMore} onClick={loadMore}>{loadingMore ? t('loadingMore') : loadMoreFailed ? t('retry') : t('loadMore')}</Button> : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -690,12 +793,11 @@ function QuotesTab({ orgId, focusId }: { orgId: string; focusId?: string | undef
   // Scroll to + focus the deep-linked quote row so keyboard/SR users land on it
   // (grade-ux DL-UX-2); the row is tabIndex=-1 below.
   useEffect(() => { if (focusId && focusRef.current) { focusRef.current.scrollIntoView({ block: 'center', behavior: scrollBehavior() }); focusRef.current.focus({ preventScroll: true }); } }, [focusId, quotes]);
-  const [products, setProducts] = useState<Product[]>([]);
   const [creating, setCreating] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const reload = useCallback(() => { setLoadError(false); void listQuotes(orgId).then(setQuotes).catch(() => setLoadError(true)); }, [orgId]);
   // grade-ux I4: a failed fetch is an ERROR state, not the empty "No quotes yet".
-  useEffect(() => { let active = true; setQuotes(null); setLoadError(false); void listQuotes(orgId).then((r) => { if (active) setQuotes(r); }).catch(() => { if (active) { setLoadError(true); setQuotes([]); } }); void listProducts(orgId).then((r) => { if (active) setProducts(r); }).catch(() => { if (active) setProducts([]); }); return () => { active = false; }; }, [orgId]);
+  useEffect(() => { let active = true; setQuotes(null); setLoadError(false); void listQuotes(orgId).then((r) => { if (active) setQuotes(r); }).catch(() => { if (active) { setLoadError(true); setQuotes([]); } }); return () => { active = false; }; }, [orgId]);
 
   const act = useCallback(async (fn: () => Promise<unknown>) => { try { await fn(); reload(); } catch (e) { actionError(e, t); } }, [reload, t]);
   const share = useCallback(async (q: Quote) => {
@@ -726,7 +828,7 @@ function QuotesTab({ orgId, focusId }: { orgId: string; focusId?: string | undef
         <div><strong>{t('quotesTitle')}</strong><p className="u-m-0 u-text-sm muted">{t('quotesHint')}</p></div>
         <Button variant="primary" onClick={() => setCreating((v) => !v)}>{creating ? t('cancel') : t('newQuote')}</Button>
       </div>
-      {creating ? <QuoteForm orgId={orgId} products={products} onDone={() => { setCreating(false); reload(); }} /> : null}
+      {creating ? <QuoteForm orgId={orgId} onDone={() => { setCreating(false); reload(); }} /> : null}
       {quotes !== null && quotes.length > 3 ? (
         <div className="filterbar" role="group" aria-label={t('filterGroup')}>
           <input
@@ -773,9 +875,10 @@ function QuotesTab({ orgId, focusId }: { orgId: string; focusId?: string | undef
   );
 }
 
-function QuoteForm({ orgId, products, onDone }: { orgId: string; products: Product[]; onDone: () => void }): JSX.Element {
+function QuoteForm({ orgId, onDone }: { orgId: string; onDone: () => void }): JSX.Element {
   const { t } = useTranslation('commerce');
-  const [productId, setProductId] = useState('');
+  const [product, setProduct] = useState<Product | null>(null);
+  const productId = product?.productId ?? '';
   const [quantity, setQuantity] = useState('1');
   const [unitPrice, setUnitPrice] = useState('');
   const [note, setNote] = useState('');
@@ -801,12 +904,7 @@ function QuoteForm({ orgId, products, onDone }: { orgId: string; products: Produ
   return (
     <div className="surface-card u-p-3 u-grid u-gap-3">
       <div className="action-bar u-gap-2">
-        <Field label={t('fieldProduct')} required>{(w) => (
-          <select {...w} value={productId} onChange={(e) => setProductId(e.target.value)} autoFocus>
-            <option value="">{t('pickProduct')}</option>
-            {products.map((p) => <option key={p.productId} value={p.productId}>{p.name}</option>)}
-          </select>
-        )}</Field>
+        <ProductPicker orgId={orgId} label={t('fieldProduct')} required value={product} onChange={setProduct} autoFocus />
         <Field label={t('fieldQuantity')}>{(w) => <input {...w} inputMode="numeric" value={quantity} onChange={(e) => setQuantity(e.target.value)} />}</Field>
         <Field label={t('fieldNegotiatedPrice')} help={t('fieldNegotiatedPriceHint')}>{(w) => <input {...w} inputMode="decimal" value={unitPrice} onChange={(e) => setUnitPrice(e.target.value)} />}</Field>
       </div>
@@ -820,7 +918,8 @@ function PricingTab({ orgId }: { orgId: string }): JSX.Element {
   const { t } = useTranslation('commerce');
   const fmt = useFormat();
   const [lists, setLists] = useState<PriceList[] | null>(null);
-  const [products, setProducts] = useState<Product[]>([]);
+  // ADR 1110 P2 — the forms default to the catalog's currency, read from one product.
+  const [catalogCurrency, setCatalogCurrency] = useState<string | undefined>(undefined);
   const [coupons, setCoupons] = useState<Coupon[] | null>(null);
   // A failed coupon read must not render as "No coupons yet" — that is a
   // claim about the store we cannot make when the request never returned.
@@ -833,7 +932,7 @@ function PricingTab({ orgId }: { orgId: string }): JSX.Element {
     void listCoupons(orgId).then(setCoupons).catch(() => { setCouponsFailed(true); setCoupons([]); });
   }, [orgId]);
   // grade-ux I4/N2: distinct error state for price lists; coupons load with a skeleton.
-  useEffect(() => { let active = true; setLists(null); setCoupons(null); setCouponsFailed(false); setLoadError(false); void listPriceLists(orgId).then((r) => { if (active) setLists(r); }).catch(() => { if (active) { setLoadError(true); setLists([]); } }); void listCoupons(orgId).then((r) => { if (active) setCoupons(r); }).catch(() => { if (active) { setCouponsFailed(true); setCoupons([]); } }); void listProducts(orgId).then((r) => { if (active) setProducts(r); }).catch(() => { if (active) setProducts([]); }); return () => { active = false; }; }, [orgId]);
+  useEffect(() => { let active = true; setLists(null); setCoupons(null); setCouponsFailed(false); setLoadError(false); void listPriceLists(orgId).then((r) => { if (active) setLists(r); }).catch(() => { if (active) { setLoadError(true); setLists([]); } }); void listCoupons(orgId).then((r) => { if (active) setCoupons(r); }).catch(() => { if (active) { setCouponsFailed(true); setCoupons([]); } }); void listProductsPage(orgId, { limit: 1 }).then((r) => { if (active) setCatalogCurrency(r.products[0]?.currency); }).catch(() => { /* keep the USD default */ }); return () => { active = false; }; }, [orgId]);
 
   const remove = useCallback(async (pl: PriceList) => {
     if (!(await confirm({ title: t('deletePriceListTitle', { name: pl.name }), body: t('deletePriceListBody'), danger: true, confirmLabel: t('delete') }))) return;
@@ -851,7 +950,7 @@ function PricingTab({ orgId }: { orgId: string }): JSX.Element {
     <div className="u-grid u-gap-3">
       <div className="surface-card u-p-4 u-grid u-gap-3">
         <div><strong>{t('priceListsTitle')}</strong><p className="u-m-0 u-text-sm muted">{t('priceListsHint')}</p></div>
-        <PriceListForm orgId={orgId} products={products} onDone={reload} />
+        <PriceListForm orgId={orgId} catalogCurrency={catalogCurrency} onDone={reload} />
         {lists !== null && lists.length > 3 ? (
           <div className="filterbar" role="group" aria-label={t('filterGroup')}>
             <input
@@ -879,11 +978,11 @@ function PricingTab({ orgId }: { orgId: string }): JSX.Element {
             ))}
           </ul>
         )}
-        <PricePreview orgId={orgId} products={products} />
+        <PricePreview orgId={orgId} />
       </div>
       <div className="surface-card u-p-4 u-grid u-gap-3">
         <div><strong>{t('couponsTitle')}</strong><p className="u-m-0 u-text-sm muted">{t('couponsHint')}</p></div>
-        <CouponForm orgId={orgId} products={products} onDone={reload} />
+        <CouponForm orgId={orgId} catalogCurrency={catalogCurrency} onDone={reload} />
         {coupons === null ? <InlineState kind="loading" /> : couponsFailed ? <InlineState kind="failed" message={t('couponsFailed')} /> : coupons.length === 0 ? <InlineState kind="empty" message={t('noCoupons')} /> : (
           <div className="action-bar u-gap-1 u-flex-wrap">
             {/* R2 CM-P2-M2 — a fixed coupon used to render `fmt.currency(cp.value, 'USD')`
@@ -905,25 +1004,25 @@ function PricingTab({ orgId }: { orgId: string }): JSX.Element {
   );
 }
 
-function PriceListForm({ orgId, products, onDone }: { orgId: string; products: Product[]; onDone: () => void }): JSX.Element {
+function PriceListForm({ orgId, catalogCurrency, onDone }: { orgId: string; catalogCurrency: string | undefined; onDone: () => void }): JSX.Element {
   const { t } = useTranslation('commerce');
   const [name, setName] = useState('');
   // R2 CM-P2-M4 — this was hardcoded 'USD' while the resolver matches the product's
   // currency by EXACT string, so on a non-USD catalog the list never won a single
   // resolution and the key account it was built for was quietly billed list price.
   // Default to the catalog's own currency; warn when they disagree. The default has to
-  // SYNC (review M-8): `products` is [] on first paint and fills asynchronously, so a
+  // SYNC (review M-8): `catalogCurrency` arrives asynchronously, so a
   // `useState` initialiser — which runs once — was always 'USD', i.e. the very bug the
   // comment claimed to fix. `touched` keeps a deliberate operator choice.
   const [currency, setCurrency] = useState<string>('USD');
   const [currencyTouched, setCurrencyTouched] = useState(false);
-  useEffect(() => { if (!currencyTouched && products[0]) setCurrency(products[0].currency); }, [products, currencyTouched]);
+  useEffect(() => { if (!currencyTouched && catalogCurrency) setCurrency(catalogCurrency); }, [catalogCurrency, currencyTouched]);
   const [priority, setPriority] = useState('1');
   const [contactIds, setContactIds] = useState('');
-  const [productId, setProductId] = useState('');
+  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+  const productId = selectedProduct?.productId ?? '';
   const [price, setPrice] = useState('');
   const [busy, setBusy] = useState(false);
-  const selectedProduct = products.find((p) => p.productId === productId);
 
   const submit = useCallback(async () => {
     if (!name.trim() || !productId || price.trim() === '') { toast.error(t('priceListFieldsRequired')); return; }
@@ -945,12 +1044,7 @@ function PriceListForm({ orgId, products, onDone }: { orgId: string; products: P
       <Field label={t('fieldName')}>{(w) => <input {...w} value={name} onChange={(e) => setName(e.target.value)} maxLength={200} />}</Field>
       <Field label={t('fieldPriority')}>{(w) => <input {...w} inputMode="numeric" value={priority} onChange={(e) => setPriority(e.target.value)} className="u-w-auto" />}</Field>
       <Field label={t('fieldContactIds')} help={t('fieldContactIdsHint')}>{(w) => <input {...w} value={contactIds} onChange={(e) => setContactIds(e.target.value)} />}</Field>
-      <Field label={t('fieldProduct')}>{(w) => (
-        <select {...w} value={productId} onChange={(e) => setProductId(e.target.value)}>
-          <option value="">{t('pickProduct')}</option>
-          {products.map((p) => <option key={p.productId} value={p.productId}>{p.name}</option>)}
-        </select>
-      )}</Field>
+      <ProductPicker orgId={orgId} label={t('fieldProduct')} value={selectedProduct} onChange={setSelectedProduct} />
       <Field label={t('fieldContractPrice')}>{(w) => <input {...w} inputMode="decimal" value={price} onChange={(e) => setPrice(e.target.value)} className="u-w-auto" />}</Field>
       <Field label={t('fieldCurrency')}>{(w) => (
         <select {...w} value={currency} onChange={(e) => { setCurrencyTouched(true); setCurrency(e.target.value); }}>
@@ -966,10 +1060,11 @@ function PriceListForm({ orgId, products, onDone }: { orgId: string; products: P
 }
 
 /** "View as buyer" — the C4 explainability answer, verbatim from the resolver. */
-function PricePreview({ orgId, products }: { orgId: string; products: Product[] }): JSX.Element {
+function PricePreview({ orgId }: { orgId: string }): JSX.Element {
   const { t } = useTranslation('commerce');
   const fmt = useFormat();
-  const [productId, setProductId] = useState('');
+  const [product, setProduct] = useState<Product | null>(null);
+  const productId = product?.productId ?? '';
   const [contactId, setContactId] = useState('');
   const [answer, setAnswer] = useState<string | null>(null);
 
@@ -987,12 +1082,7 @@ function PricePreview({ orgId, products }: { orgId: string; products: Product[] 
     <div className="u-grid u-gap-2">
       <div className="u-text-sm"><strong>{t('previewTitle')}</strong> <span className="muted">{t('previewHint')}</span></div>
       <div className="surface-form">
-        <Field label={t('fieldProduct')}>{(w) => (
-          <select {...w} value={productId} onChange={(e) => setProductId(e.target.value)}>
-            <option value="">{t('pickProduct')}</option>
-            {products.map((p) => <option key={p.productId} value={p.productId}>{p.name}</option>)}
-          </select>
-        )}</Field>
+        <ProductPicker orgId={orgId} label={t('fieldProduct')} value={product} onChange={setProduct} />
         <Field label={t('fieldContactId')}>{(w) => <input {...w} value={contactId} onChange={(e) => setContactId(e.target.value)} />}</Field>
         <Button variant="secondary" onClick={() => void run()}>{t('previewRun')}</Button>
       </div>
@@ -1001,7 +1091,7 @@ function PricePreview({ orgId, products }: { orgId: string; products: Product[] 
   );
 }
 
-function CouponForm({ orgId, products, onDone }: { orgId: string; products: Product[]; onDone: () => void }): JSX.Element {
+function CouponForm({ orgId, catalogCurrency, onDone }: { orgId: string; catalogCurrency: string | undefined; onDone: () => void }): JSX.Element {
   const { t } = useTranslation('commerce');
   const [code, setCode] = useState('');
   const [type, setType] = useState<'percentage' | 'fixed' | 'free_shipping'>('percentage');
@@ -1014,8 +1104,7 @@ function CouponForm({ orgId, products, onDone }: { orgId: string; products: Prod
   const [currencyTouched, setCurrencyTouched] = useState(false);
   // Same async-catalog sync as the price-list form (review M-8) — and a fixed coupon
   // stamped USD on a EUR store is INERT, so this default mattered more here.
-  useEffect(() => { if (!currencyTouched && products[0]) setCurrency(products[0].currency); }, [products, currencyTouched]);
-  const catalogCurrency = products[0]?.currency;
+  useEffect(() => { if (!currencyTouched && catalogCurrency) setCurrency(catalogCurrency); }, [catalogCurrency, currencyTouched]);
   const [busy, setBusy] = useState(false);
   const submit = useCallback(async () => {
     if (!code.trim()) { toast.error(t('codeRequired')); return; }

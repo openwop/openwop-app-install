@@ -379,6 +379,10 @@ Evidence: `docs/steward/monetization-2026-10/core-audit.md`. Decisions, extendin
 
 5. **Keep core and relabel** `goals`, `proposals` and `task-deck`. Split `assistant`, `cms`, `media` and
    `entities` into sub-toggles in phase 2, which depends on gen-distribution accepting sub-toggle ids.
+
+   > **CORRECTED 2026-11-12 (ADR 1106 Q5, user decision):** `goals` and `task-deck` no longer stay in core.
+   > They move to ADR 1106 group B (optional, on by default, dependents degrade first). `proposals` stays in
+   > core as decided here.
 6. **Hygiene:**
    - fix the stale `scheduled-chats` nav `featureId`;
    - add an alias test: a toggled core feature's toggle id = its package id, or a listed alias (`settings` →

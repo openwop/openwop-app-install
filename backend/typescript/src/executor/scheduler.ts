@@ -41,6 +41,7 @@ import type {
   EdgeDef,
   WorkflowDefinition,
 } from './types.js';
+import { isLoopbackEdge } from './loopback.js';
 
 export type NodeState =
   | 'pending'
@@ -89,9 +90,14 @@ export interface SchedulerGraph {
 export function buildGraph(definition: WorkflowDefinition): SchedulerGraph {
   // First pass: build the raw forward graph including any back-edges.
   // We need this to run DFS over the candidate edge set.
+  // ADR 1058 / RFC 0258 — a declared loopback edge is not a forward edge for
+  // any rule (trigger rules, terminals, toposort): the executor takes it on a
+  // refine settle (`executor/loopback.ts`). Only under the host flag; with the
+  // flag off it stays in the graph and the cycle is refused as before.
+  const forwardEdges = (definition.edges ?? []).filter((e) => !isLoopbackEdge(e));
   const rawOutgoing = new Map<string, EdgeDef[]>();
   for (const n of definition.nodes) rawOutgoing.set(n.nodeId, []);
-  for (const e of definition.edges ?? []) rawOutgoing.get(e.sourceNodeId)?.push(e);
+  for (const e of forwardEdges) rawOutgoing.get(e.sourceNodeId)?.push(e);
 
   // Detect back-edges via DFS coloring (WHITE→GRAY→BLACK). An edge to
   // a node currently on the recursion stack is a back-edge — same
@@ -117,7 +123,7 @@ export function buildGraph(definition: WorkflowDefinition): SchedulerGraph {
     outgoing.set(n.nodeId, []);
     incoming.set(n.nodeId, []);
   }
-  for (const e of definition.edges ?? []) {
+  for (const e of forwardEdges) {
     if (backEdges.has(`${e.sourceNodeId}\x00${e.targetNodeId}`)) continue;
     outgoing.get(e.sourceNodeId)?.push(e);
     incoming.get(e.targetNodeId)?.push(e);

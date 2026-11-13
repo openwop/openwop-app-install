@@ -22,9 +22,9 @@ const routes: FeatureRoute[] = [
     tier: 'admin', archetype: 'admin',
     nav: {
       group: 'Access & data',
-      label: 'Users', labelKey: 'usersLabel',
+      labelKey: 'usersLabel',
       icon: UserIcon,
-      hint: 'Accounts + identity', hintKey: 'usersHint',
+      hintKey: 'usersHint',
     },
     // ADR 0144 §correction — Users/People is account & identity management, a
     // standalone admin surface, NOT a credential tab in the Access Hub. It keeps

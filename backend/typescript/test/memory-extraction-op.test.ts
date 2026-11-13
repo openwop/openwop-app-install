@@ -1,34 +1,44 @@
 /**
  * ADR 0120 Phase 2 / ADR 0982 D5–D6 — the consent-gated extraction op, deps injected.
  *
- * Guards: no grant ⇒ no extractor call and no write (FAIL-CLOSED); every path returns a typed
- * outcome (a provider failure is never "no facts"); a fact already in memory, typed or learned, is
- * a duplicate; a fact the person deleted is suppressed; the lane's own budget (50 learned notes,
+ * Guards: no grant ⇒ no extractor call and no write (FAIL-CLOSED), and consent is re-read after
+ * the model call (MAE2CD-2); every path returns a typed outcome (a provider failure is never "no
+ * facts"); a fact already in memory, typed or learned, is a duplicate, and so is a repeat within
+ * one batch; a fact the person deleted is suppressed; the lane's own budget (50 learned notes, and
  * 10 slots of headroom under NOTE_CAP) is never exceeded; a per-fact write failure is counted and
  * never aborts the rest; the deadline stops further writes.
  *
- * Witnessed (row 57 sabotage, see the PR): removing the grant gate, the dedupe, the forgotten
- * check, either budget term, the per-fact catch or the signal check each reds its case.
+ * The budget numbers are pinned as LITERALS (49 learned notes, NOTE_CAP − 11 typed ones), not as
+ * the product's own `AUTO_EXTRACT_CAP` / `HUMAN_HEADROOM`: a fixture built from the constant moves
+ * with a sabotage of the constant.
+ *
+ * Sabotages each red their case (wave 106 probes w106g2-op-*): dropping either consent check, the
+ * empty-text skip, the typed passthrough, the rejected/no-facts split, the existing-note dedupe,
+ * the in-batch dedupe, the forgotten check, either budget term or its number, the per-fact catch,
+ * the failed-write count, the concurrent-duplicate branch, or the signal check.
  */
-import { describe, it, expect, vi } from 'vitest';
-import { runMemoryExtraction, AUTO_EXTRACT_CAP, HUMAN_HEADROOM, type ExtractionDeps } from '../src/features/memory-auto-extract/extractionOp.js';
+import { describe, it, expect, vi, type Mock } from 'vitest';
+import { runMemoryExtraction, type ExtractionDeps } from '../src/features/memory-auto-extract/extractionOp.js';
 import { NOTE_CAP } from '../src/host/subjectMemory.js';
 import type { ExtractorResult } from '../src/features/memory-auto-extract/memoryExtractor.js';
 
 const ok = (...facts: string[]): ExtractorResult => ({ status: 'ok', facts: facts.map((fact) => ({ fact, category: 'other' as const })), rejected: 0 });
 
-function deps(over: Partial<ExtractionDeps> & { result?: ExtractorResult; existingNotes?: Array<{ content: string; source: string }> } = {}): ExtractionDeps & { written: string[]; extract: ReturnType<typeof vi.fn> } {
+type Fixture = ExtractionDeps & { written: string[]; extract: Mock<() => Promise<ExtractorResult>> };
+type Over = Partial<ExtractionDeps> & { result?: ExtractorResult; existingNotes?: Array<{ content: string; source: string }> };
+
+function deps(over: Over = {}): Fixture {
+  const { result, existingNotes, ...rest } = over;
   const written: string[] = [];
-  const extract = vi.fn(async () => over.result ?? ok());
-  return {
+  const extract = vi.fn<() => Promise<ExtractorResult>>(async () => result ?? ok());
+  const base: ExtractionDeps = {
     isGranted: async () => true,
-    existing: async () => over.existingNotes ?? [],
-    forgotten: async () => () => false,
-    write: async (f) => { written.push(f); return 'written'; },
-    ...over,
     extract,
-    written,
-  } as ExtractionDeps & { written: string[]; extract: ReturnType<typeof vi.fn> };
+    existing: async () => existingNotes ?? [],
+    forgotten: async () => () => false,
+    write: async (f: string) => { written.push(f); return 'written'; },
+  };
+  return { ...base, ...rest, extract, written };
 }
 
 describe('runMemoryExtraction', () => {
@@ -44,6 +54,7 @@ describe('runMemoryExtraction', () => {
     const d = deps({ isGranted: async () => granted, result: ok('Keeps bees') });
     d.extract.mockImplementation(async () => { granted = false; return ok('Keeps bees'); });
     expect(await runMemoryExtraction(true, d)).toEqual({ status: 'skipped', reason: 'no-consent' });
+    expect(d.extract).toHaveBeenCalledTimes(1); // the model WAS asked: the second check is what refused
     expect(d.written).toEqual([]);
   });
 
@@ -51,16 +62,18 @@ describe('runMemoryExtraction', () => {
     const d = deps({ result: ok('Keeps bees') });
     expect(await runMemoryExtraction(false, d)).toEqual({ status: 'skipped', reason: 'empty' });
     expect(d.extract).not.toHaveBeenCalled();
+    expect(d.written).toEqual([]);
   });
 
   it('extractor failures pass through as typed outcomes, never as "no facts"', async () => {
-    for (const result of [
+    const failures: ExtractorResult[] = [
       { status: 'failed', reason: 'provider-error' },
       { status: 'failed', reason: 'invalid-output' },
       { status: 'abandoned' },
-    ] as ExtractorResult[]) {
+    ];
+    for (const result of failures) {
       const d = deps({ result });
-      expect(await runMemoryExtraction(true, d)).toEqual(result);
+      expect(await runMemoryExtraction(true, d), JSON.stringify(result)).toEqual(result);
       expect(d.written).toEqual([]);
     }
   });
@@ -71,39 +84,50 @@ describe('runMemoryExtraction', () => {
   });
 
   it('dedupes against existing notes of ANY source, and within the batch', async () => {
-    const d = deps({ result: ok('Keeps bees.', 'Lives in Lisbon', 'lives in  lisbon'), existingNotes: [{ content: 'keeps bees', source: 'user' }] });
+    const d = deps({
+      result: { status: 'ok', facts: ['Keeps bees.', 'Lives in Lisbon', 'lives in  lisbon'].map((fact) => ({ fact, category: 'other' as const })), rejected: 1 },
+      existingNotes: [{ content: 'keeps bees', source: 'user' }],
+    });
     const r = await runMemoryExtraction(true, d);
     expect(d.written).toEqual(['Lives in Lisbon']);
-    expect(r).toMatchObject({ status: 'written', written: 1, duplicates: 2 });
+    // The extractor's `rejected` count is carried onto the written outcome.
+    expect(r).toEqual({ status: 'written', written: 1, duplicates: 2, rejected: 1, suppressed: 0, failedWrites: 0, budgetFull: false });
   });
 
   it('never re-learns a fact the person deleted', async () => {
     const d = deps({ result: ok('Keeps bees', 'Lives in Lisbon'), forgotten: async () => (t) => t === 'Keeps bees' });
-    expect(await runMemoryExtraction(true, d)).toMatchObject({ status: 'written', written: 1, suppressed: 1 });
+    expect(await runMemoryExtraction(true, d)).toEqual({ status: 'written', written: 1, duplicates: 0, rejected: 0, suppressed: 1, failedWrites: 0, budgetFull: false });
     expect(d.written).toEqual(['Lives in Lisbon']);
   });
 
   it('stops at the learned-note cap', async () => {
-    const learned = Array.from({ length: AUTO_EXTRACT_CAP - 1 }, (_, i) => ({ content: `learned ${i}`, source: 'auto-extract' }));
+    // 49 learned notes: exactly one more fits under the 50-note cap (ADR 0982 D6).
+    const learned = Array.from({ length: 49 }, (_, i) => ({ content: `learned ${i}`, source: 'auto-extract' }));
     const d = deps({ result: ok('Fact one', 'Fact two'), existingNotes: learned });
-    expect(await runMemoryExtraction(true, d)).toMatchObject({ status: 'written', written: 1, budgetFull: true });
+    expect(await runMemoryExtraction(true, d)).toEqual({ status: 'written', written: 1, duplicates: 0, rejected: 0, suppressed: 0, failedWrites: 0, budgetFull: true });
+    expect(d.written).toEqual(['Fact one']);
     // …and a close that is ALL over budget, duplicate or forgotten is `nothing-new`, not a write.
-    const full = deps({ result: ok('Fact one'), existingNotes: Array.from({ length: AUTO_EXTRACT_CAP }, (_, i) => ({ content: `l ${i}`, source: 'auto-extract' })) });
+    const full = deps({ result: ok('Fact one'), existingNotes: Array.from({ length: 50 }, (_, i) => ({ content: `l ${i}`, source: 'auto-extract' })) });
     expect(await runMemoryExtraction(true, full)).toEqual({ status: 'nothing-new', duplicates: 0, suppressed: 0, budgetFull: true });
+    expect(full.written).toEqual([]);
   });
 
   it('always leaves the person HUMAN_HEADROOM slots under NOTE_CAP', async () => {
-    const typed = Array.from({ length: NOTE_CAP - HUMAN_HEADROOM - 1 }, (_, i) => ({ content: `typed ${i}`, source: 'user' }));
+    // NOTE_CAP − 11 typed notes: exactly one slot remains above the 10-slot headroom.
+    const typed = Array.from({ length: NOTE_CAP - 11 }, (_, i) => ({ content: `typed ${i}`, source: 'user' }));
     const d = deps({ result: ok('Fact one', 'Fact two'), existingNotes: typed });
-    expect(await runMemoryExtraction(true, d)).toMatchObject({ status: 'written', written: 1, budgetFull: true });
+    expect(await runMemoryExtraction(true, d)).toEqual({ status: 'written', written: 1, duplicates: 0, rejected: 0, suppressed: 0, failedWrites: 0, budgetFull: true });
+    expect(d.written).toEqual(['Fact one']);
   });
 
   it('a per-fact write failure is counted and never aborts the rest; a concurrent duplicate is a duplicate', async () => {
+    const attempted: string[] = [];
     const d = deps({
       result: ok('Fact one', 'Fact two', 'Fact three'),
-      write: async (f) => { if (f === 'Fact one') throw new Error('store'); if (f === 'Fact two') return 'duplicate'; return 'written'; },
+      write: async (f) => { attempted.push(f); if (f === 'Fact one') throw new Error('store'); if (f === 'Fact two') return 'duplicate'; return 'written'; },
     });
-    expect(await runMemoryExtraction(true, d)).toMatchObject({ status: 'written', written: 1, duplicates: 1, failedWrites: 1 });
+    expect(await runMemoryExtraction(true, d)).toEqual({ status: 'written', written: 1, duplicates: 1, rejected: 0, suppressed: 0, failedWrites: 1, budgetFull: false });
+    expect(attempted).toEqual(['Fact one', 'Fact two', 'Fact three']);
     const all = deps({ result: ok('Fact one'), write: async () => { throw new Error('store'); } });
     expect(await runMemoryExtraction(true, all)).toEqual({ status: 'failed', reason: 'write-error' });
   });

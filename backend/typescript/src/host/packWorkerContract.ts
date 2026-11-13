@@ -224,6 +224,8 @@ export interface DispatchEnvelope {
   readonly nodeAgent?: Record<string, unknown>;
   readonly configurable: Record<string, unknown>;
   readonly triggerData?: unknown;
+  /** ADR 1058 — `NodeContext.loopback`, carried as plain data. */
+  readonly loopback?: { readonly round: number; readonly maxIterations: number; readonly exhausted: boolean };
   readonly attempt: number;
   /**
    * ALWAYS `'untrusted'` under isolation, regardless of the run's own

@@ -73,6 +73,7 @@ import {
   listSharedSectionPages,
   listSharedSections,
   listVersions,
+  getVersion,
   restoreVersion,
   savePage,
   schedulePublish,
@@ -93,6 +94,7 @@ import {
   type Page,
   type PageStatus,
   type PageVersion,
+  type PageVersionSummary,
   type Section,
   type SharedSection,
   type WorkflowAction,
@@ -272,9 +274,11 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
   const [a11yIssues, setA11yIssues] = useState<A11yIssue[] | null>(null); // ADR 0363 P2
   const [a11yIncomplete, setA11yIncomplete] = useState(false); // ADR 1100 D3 — recorded with the result
   // Version history (ADR 0206 B1) — lazily loaded per open of the panel.
-  const [versions, setVersions] = useState<PageVersion[] | null>(null);
+  const [versions, setVersions] = useState<PageVersionSummary[] | null>(null);
   const [versionsFailed, setVersionsFailed] = useState(false);
   const [diffVersion, setDiffVersion] = useState<PageVersion | null>(null);
+  /** UXG-1112-14 — the history list carries no sections, so Compare reads the capture first. */
+  const [comparingId, setComparingId] = useState<string | null>(null);
   // Tag draft input for the selected page.
   const [newTag, setNewTag] = useState('');
   // ADR 0592 §1 (CMSLU-3) — a stale save 409'd: the page changed under this
@@ -554,6 +558,33 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
       .catch(() => { setVersions([]); setVersionsFailed(true); });
   }, [orgId]);
 
+  // A slow read must not open one page's capture over another page the author moved to.
+  const comparePageRef = useRef<string | null>(null);
+  comparePageRef.current = selected?.pageId ?? null;
+  // The busy button is disabled, which drops keyboard focus, so the dialog's own
+  // restore lands on <body>. Closing the diff puts focus back on this button.
+  const compareOpenerRef = useRef<HTMLElement | null>(null);
+  const closeDiff = useCallback(() => {
+    setDiffVersion(null);
+    const opener = compareOpenerRef.current;
+    requestAnimationFrame(() => { if (opener?.isConnected) opener.focus(); });
+  }, []);
+  const compareVersion = useCallback(async (versionId: string, opener: HTMLElement) => {
+    const pageId = comparePageRef.current;
+    if (!pageId) return;
+    compareOpenerRef.current = opener;
+    setComparingId(versionId);
+    try {
+      const full = await getVersion(orgId, pageId, versionId);
+      if (comparePageRef.current === pageId) setDiffVersion(full);
+    } catch {
+      // The catalog line, not the server's English: a failed read has no reason worth showing.
+      toast.error(t('historyDiffFailed'));
+    } finally {
+      setComparingId(null);
+    }
+  }, [orgId, t]);
+
   const restore = useCallback(async (versionId: string, versionNo: number) => {
     if (!selected) return;
     // ADR 0836 D8 — restoring a LIVE page takes it offline (it lands in draft);
@@ -746,6 +777,7 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
         const parts: string[] = [];
         if (d.capped) parts.push(t('autoTranslateCapped'));
         if (d.errored) parts.push(t('autoTranslateErrored'));
+        if (d.timedOut) parts.push(t('autoTranslateTimedOut'));
         if (d.invalid) parts.push(t('autoTranslateInvalid', { count: d.invalid }));
         if (d.conflict) parts.push(t('autoTranslateConflict'));
         if (parts.length > 0) toast.error(t('autoTranslateDegradedToast', { reasons: parts.join(' · ') }));
@@ -2044,7 +2076,7 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
                                                 : <span className="chip chip--muted">v{v.version}</span>}
                                               <span className="u-label-sm">{formatDateTime(v.publishedAt)} · {v.publishedBy}</span>
                                               <span className="u-flex-1" />
-                                              <Button variant="quiet" className="u-w-auto" onClick={() => setDiffVersion(v)}>{t('historyDiff')}</Button>
+                                              <Button variant="quiet" className="u-w-auto" loading={comparingId === v.versionId} disabled={comparingId !== null} onClick={(e) => void compareVersion(v.versionId, e.currentTarget)}>{t('historyDiff')}</Button>
                                               {knownNotAdmin ? null : (
                                                 <Button variant="quiet" className="u-w-auto" onClick={() => void restore(v.versionId, v.version)}>
                                                   <RotateCwIcon size={13} /> {t('historyRestore')}
@@ -2170,7 +2202,7 @@ export function CmsPage({ translatorSurface = false }: { translatorSurface?: boo
 
       {/* Field-level version diff (ADR 0206 B1) — snapshot vs the CURRENT editor content. */}
       {diffVersion && selected ? (
-        <Modal onClose={() => setDiffVersion(null)} label={t('diffTitle', { version: diffVersion.version })} className="hire-modal cms-diff" showClose>
+        <Modal onClose={closeDiff} label={t('diffTitle', { version: diffVersion.version })} className="hire-modal cms-diff" showClose>
           <VersionDiff
             from={diffVersion}
             to={selected}

@@ -56,6 +56,7 @@ import {
 } from '../host/authorityContext.js';
 import { resolveRunDefinition } from '../host/resolveRunDefinition.js';
 import { resolveLaunchWorkflow } from '../host/resolveLaunchDefinition.js';
+import { boundParamConflicts } from '../host/chainParamBinding.js';
 import { createAgentEvalRun, callerFromRequest } from '../host/evals/createEvalRun.js';
 import { requireAgentEvalsEnabled } from '../host/evals/access.js';
 import { isAgentEvalRun } from '../host/evals/agentEvalRun.js';
@@ -93,6 +94,7 @@ import { storedRunId } from '../host/evals/runIds.js';
 import { resolveRunArtifact } from '../host/runArtifactRead.js';
 import { artifact10 } from '../host/a2aCodec10.js';
 import { callerSubject as actingSubjectOf, personalTenantOf } from '../host/requestSubject.js';
+import { PLAN_EXEMPT_METADATA_KEY, planExemptStampOf } from '../host/operatorPlanExemption.js';
 import {
   canonicalRequestDigest,
   idempotencyLeaseMs,
@@ -566,6 +568,21 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
           );
         }
       }
+      // CC-CHAIN-5 — a copy instantiated from a chain froze its params into node
+      // inputs, and declared inputs win over run inputs (ADR 0237). A run input
+      // naming a DIFFERENT value would be recorded on the run while the nodes acted
+      // on the bound record (live: a kernel written onto another brief). Refuse it.
+      if (wf) {
+        const conflict = boundParamConflicts(wf.definition, body.inputs ?? {})[0];
+        if (conflict) {
+          throw new OpenwopError(
+            'validation_error',
+            `This workflow was created for ${conflict.param} "${String(conflict.bound)}", but the run asked for "${String(conflict.given)}". Run a copy made for that ${conflict.param}, or leave ${conflict.param} out of the run inputs.`,
+            400,
+            { reason: 'bound_param_conflict', param: conflict.param, bound: conflict.bound, given: conflict.given },
+          );
+        }
+      }
       // Capability-gated typeId refusal per `capabilities.md §"Unsupported
       // capability — refusal contract"`. When the workflow references a
       // gated typeId AND the host doesn't advertise the gating capability,
@@ -782,6 +799,10 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
         },
         actingUserId,
         ...(personalTenant ? { personalTenant } : {}),
+        // ADR 1108 — the listed operator's plan exemption, decided HERE (the one
+        // place that sees whether an API key narrowed itself, ADR 0795 D1) and
+        // read by the chat tool lane and in-run `ctx.features`.
+        ...(planExemptStampOf(req) ? { planExempt: true as const } : {}),
         // RFC 0165 §B (ADR 0625) — the owner + Subject, minted from the same
         // principal `actingUserId` comes from; read back by the snapshot, the
         // `run.started` echo, and copied verbatim onto forks.
@@ -2101,6 +2122,9 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
           // would let user B's fork hold A's implicit-owner authority in A's sandbox.
           const forkingPersonalTenant = personalTenantOf(req);
           if (forkingPersonalTenant) m.personalTenant = forkingPersonalTenant; else delete m.personalTenant;
+          // ADR 1108 — the plan exemption is the FORKING caller's too: a fork by a
+          // customer of the operator's run must not keep the operator's stamp.
+          if (planExemptStampOf(req)) m[PLAN_EXEMPT_METADATA_KEY] = true; else delete m[PLAN_EXEMPT_METADATA_KEY];
           // ADR 0556 P3 / RFC 0154 — the same confused-deputy reasoning as
           // `actingUserId` above, one layer down. `...sourceRun` copies the
           // recorded AUTHORITY verbatim, which is right for the delegation depth

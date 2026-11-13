@@ -25,5 +25,12 @@ export const CAMPAIGN_STUDIO_WALKTHROUGH_ID = 'walkthrough.campaign-studio.first
  *  never double-shows next to the seeded walkthrough. */
 export const LEGACY_CAMPAIGN_STUDIO_ID = 'tour.campaign-studio.first-brief';
 
+/** CC-CHAIN-4 — retired chain ids → their replacement. The chain-pack catalog
+ *  (`GET /workflow-chains`) omits these and `from-chain` refuses to mint them;
+ *  they stay registered so old runs still replay/fork. */
+export const RETIRED_CHAIN_ALIASES: ReadonlyMap<string, string> = new Map([
+  [LEGACY_CAMPAIGN_STUDIO_ID, CAMPAIGN_STUDIO_WALKTHROUGH_ID],
+]);
+
 /** The chat first-message walkthrough (ADR 0378 P4; seeded since 0429). */
 export const CHAT_WALKTHROUGH_ID = 'walkthrough.chat.first-message';

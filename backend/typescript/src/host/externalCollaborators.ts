@@ -11,8 +11,9 @@
  * Owned beside accessControl (ADR 0006's single owner of identity and authority)
  * because sharing, approvals and campaign ops all consume it. Host layer: it
  * imports no feature. Features register the resource kinds they own
- * (`registerGrantResourceKind`) and the client-account gate
- * (`registerCollaborationOrgGate`).
+ * (`registerGrantResourceKind`), and campaign-ops registers the DEFAULT
+ * collaboration surface (`registerDefaultCollaborationSurface`, ADR 1099 D1:
+ * its toggles and the client-account gate); a kind may bring its own surface.
  *
  * THE ONE CHECK. `checkGrantUse` runs on every use and decides from storage, live,
  * with no sweeper. Tenant and org come FROM THE GRANT, never from the request.
@@ -141,6 +142,10 @@ export interface GrantResourceKind {
    *  the Collaborators panel's picker: id and a title only. Omitted ⇒ the kind
    *  is not offered there (it can still be granted by id through the route). */
   list?(tenantId: string, orgId: string): Promise<Array<{ id: string; title: string }>>;
+  /** ADR 1099 D1 — the collaboration surface this kind runs under. Absent ⇒ the
+   *  DEFAULT surface (campaign-ops: its toggles and an active client account), so
+   *  every pre-1099 kind behaves exactly as before. */
+  surface?: CollaborationSurface;
 }
 const kinds = new Map<string, GrantResourceKind>();
 
@@ -150,13 +155,56 @@ export function registerGrantResourceKind(kind: string, def: GrantResourceKind):
   kinds.set(kind, def);
 }
 
-/** Is the client account behind `orgId` usable (not paused or archived)? Host
- *  cannot read the account, so campaign-ops registers this. ABSENT ⇒ every use is
- *  refused (fail closed). */
-export type CollaborationOrgGate = (tenantId: string, orgId: string) => Promise<boolean>;
-let orgGate: CollaborationOrgGate | null = null;
-export function registerCollaborationOrgGate(fn: CollaborationOrgGate): void {
-  orgGate = fn;
+/**
+ * ADR 1099 D1 — a collaboration SURFACE: who may run external collaboration in
+ * a tenant (`enabledFor`, the surface's toggles) and in which orgs (`orgOpen`).
+ * Before 1099 there was one, hard-wired: campaign-ops' toggles plus an active
+ * client account. It is now the DEFAULT surface campaign-ops registers, and a
+ * grant kind may bring its own (a `project` grant, ADR 1099 D3). No default and
+ * no kind surface ⇒ every use is refused (fail closed), as before.
+ *
+ * Where each check runs: granting, every use, the grant view and expiry notices
+ * use the grant's KIND surface. Creating a collaborator and accepting an invite
+ * have no kind yet, so they pass when ANY surface admits the org; a grant still
+ * needs its own kind's surface, so this never widens what a grant reaches.
+ */
+export interface CollaborationSurface {
+  /** The surface's switch(es), on the tenant that OWNS the invite or grant. */
+  enabledFor(tenantId: string): Promise<boolean>;
+  /** Is this org open to external collaboration right now? */
+  orgOpen(tenantId: string, orgId: string): Promise<boolean>;
+}
+let defaultSurface: CollaborationSurface | null = null;
+/** ADR 1099 D1 — campaign-ops registers the default surface at boot. */
+export function registerDefaultCollaborationSurface(surface: CollaborationSurface): void {
+  defaultSurface = surface;
+}
+function surfaceOf(kind: GrantResourceKind): CollaborationSurface | null {
+  return kind.surface ?? defaultSurface;
+}
+/** Every registered surface: the default, then each distinct kind surface. */
+function allSurfaces(): CollaborationSurface[] {
+  const out: CollaborationSurface[] = defaultSurface ? [defaultSurface] : [];
+  for (const k of kinds.values()) if (k.surface && !out.includes(k.surface)) out.push(k.surface);
+  return out;
+}
+async function safely(check: () => Promise<boolean>): Promise<boolean> {
+  try { return await check(); } catch { return false; }
+}
+/** ADR 1099 D1 — is the collaboration surface of grant kind `kindName` on for `tenantId`? Unknown kind ⇒ false. */
+export async function kindCollaborationOn(kindName: string, tenantId: string): Promise<boolean> {
+  const kind = kinds.get(kindName);
+  const surface = kind ? surfaceOf(kind) : null;
+  return surface ? safely(() => surface.enabledFor(tenantId)) : false;
+}
+/** ADR 1099 D1 — does ANY surface take collaboration in this tenant and org (both
+ *  its switch and its org rule)? For the steps that have no grant kind yet: an
+ *  invite's acceptance. */
+export async function anySurfaceAdmits(tenantId: string, orgId: string): Promise<boolean> {
+  for (const s of allSurfaces()) {
+    if (await safely(() => s.enabledFor(tenantId)) && await safely(() => s.orgOpen(tenantId, orgId))) return true;
+  }
+  return false;
 }
 
 async function ownerOn(kind: GrantResourceKind, tenantId: string): Promise<boolean> {
@@ -164,9 +212,15 @@ async function ownerOn(kind: GrantResourceKind, tenantId: string): Promise<boole
   try { return Boolean((await resolveOne(kind.featureId, { tenantId }))?.enabled); } catch { return false; }
 }
 
-async function orgOpen(tenantId: string, orgId: string): Promise<boolean> {
-  if (!orgGate) return false;
-  try { return await orgGate(tenantId, orgId); } catch { return false; }
+/** ADR 1099 D1 — the org rule of THIS kind's surface. */
+async function kindOrgOpen(kind: GrantResourceKind, tenantId: string, orgId: string): Promise<boolean> {
+  const surface = surfaceOf(kind);
+  return surface ? safely(() => surface.orgOpen(tenantId, orgId)) : false;
+}
+/** ADR 1099 D1 — the org rule of ANY surface (collaborator creation has no kind). */
+async function anyOrgOpen(tenantId: string, orgId: string): Promise<boolean> {
+  for (const s of allSurfaces()) if (await safely(() => s.orgOpen(tenantId, orgId))) return true;
+  return false;
 }
 
 function audit(tenantId: string, payload: Record<string, unknown>): Promise<void> {
@@ -201,7 +255,7 @@ export async function listCollaborators(tenantId: string, orgId: string): Promis
 export async function createCollaborator(input: {
   tenantId: string; orgId: string; kind: unknown; email: unknown; displayName: unknown; company?: unknown; createdBy: string;
 }): Promise<ExternalCollaborator> {
-  if (!(await orgOpen(input.tenantId, input.orgId))) throw notFound();
+  if (!(await anyOrgOpen(input.tenantId, input.orgId))) throw notFound();
   if (typeof input.kind !== 'string' || !(COLLABORATOR_KINDS as readonly string[]).includes(input.kind)) {
     throw new OpenwopError('validation_error', `\`kind\` must be one of: ${COLLABORATOR_KINDS.join(', ')}.`, 400, { field: 'kind' });
   }
@@ -237,7 +291,7 @@ export async function createLinkOnlyCollaborator(input: {
   tenantId: string; orgId: string; kind: CollaboratorKind; email: unknown; displayName: unknown; createdBy: string;
   collaboratorId?: string; status?: 'active' | 'revoked'; createdAt?: string;
 }): Promise<ExternalCollaborator> {
-  if (!(await orgOpen(input.tenantId, input.orgId)) && input.collaboratorId === undefined) throw notFound();
+  if (!(await anyOrgOpen(input.tenantId, input.orgId)) && input.collaboratorId === undefined) throw notFound();
   const email = normalizeEmail(input.email);
   const displayName = cleanString(input.displayName, 120, '').trim();
   if (!displayName) throw new OpenwopError('validation_error', '`displayName` is required.', 400, { field: 'displayName' });
@@ -392,7 +446,9 @@ export async function grantAccess(input: {
   tenantId: string; orgId: string; collaboratorId: string;
   resource: unknown; actions: unknown; expiresInDays?: unknown; createdBy: string;
 }): Promise<CollaboratorGrant> {
-  if (!(await orgOpen(input.tenantId, input.orgId))) throw notFound();
+  // Checked first, before any validation, so a closed org answers 404 to every
+  // request (unchanged); the kind's own surface is re-checked once it is known.
+  if (!(await anyOrgOpen(input.tenantId, input.orgId))) throw notFound();
   const collaborator = await getCollaborator(input.tenantId, input.orgId, input.collaboratorId);
   if (!collaborator) throw notFound();
   if (collaborator.status === 'revoked') throw new OpenwopError('conflict', 'This collaborator was revoked.', 409, { reason: 'collaborator_revoked' });
@@ -417,7 +473,7 @@ export async function grantAccess(input: {
     }
     days = input.expiresInDays;
   }
-  if (!(await ownerOn(kind, input.tenantId)) || !(await kind.exists(input.tenantId, input.orgId, id))) throw notFound();
+  if (!(await ownerOn(kind, input.tenantId)) || !(await kindOrgOpen(kind, input.tenantId, input.orgId)) || !(await kind.exists(input.tenantId, input.orgId, id))) throw notFound();
   const now = new Date();
   const row: CollaboratorGrant = {
     grantId: `cgr_${randomUUID()}`,
@@ -622,7 +678,7 @@ async function checkGrantUseOnce(input: GrantUseInput): Promise<GrantUse> {
   const kind = kinds.get(grant.resource.kind);
   if (!kind) throw notFound();
   if (!(await ownerOn(kind, grant.tenantId))) throw notFound();
-  if (!(await orgOpen(grant.tenantId, grant.orgId))) throw notFound();
+  if (!(await kindOrgOpen(kind, grant.tenantId, grant.orgId))) throw notFound();
   if (!(await peopleStillAllowed(grant, collaborator))) throw notFound();
   if (!(await kind.exists(grant.tenantId, grant.orgId, grant.resource.id))) throw notFound();
   const target = input.target;
@@ -707,9 +763,10 @@ const EXPIRY_NOTICE_TYPE = 'collab.grant-expiring';
  */
 export async function notifyExpiringGrants(
   now: Date = new Date(),
-  /** The owning feature's own switch for collaboration in a tenant (campaign-ops
-   *  passes its parent + sub-toggle check). Fails closed: absent, nothing is sent. */
-  collaborationOn?: (tenantId: string) => Promise<boolean>,
+  /** The switch for collaboration in a tenant, given the grant's kind (ADR 1099
+   *  D1: the host tick passes each kind's surface switch). Fails closed: absent,
+   *  nothing is sent. */
+  collaborationOn?: (tenantId: string, kind: string) => Promise<boolean>,
 ): Promise<{ notified: number; failed: number }> {
   if (!collaborationOn) return { notified: 0, failed: 0 };
   const nowMs = now.getTime();
@@ -721,11 +778,11 @@ export async function notifyExpiringGrants(
     if (g.status !== 'active' || g.expiryNoticeAt || !(ends > nowMs && ends <= horizon)) continue;
     if (!g.createdBy || g.createdBy.startsWith('system:') || g.createdBy === ERASED_ACTOR) continue;
     try {
-      if (!(await collaborationOn(g.tenantId))) continue;
+      if (!(await collaborationOn(g.tenantId, g.resource.kind))) continue;
       const collaborator = await collaborators.get(g.collaboratorId);
       if (!collaborator || collaborator.tenantId !== g.tenantId || collaborator.orgId !== g.orgId || collaborator.status !== 'active') continue;
       const kind = kinds.get(g.resource.kind);
-      if (!kind || !(await ownerOn(kind, g.tenantId)) || !(await orgOpen(g.tenantId, g.orgId))) continue;
+      if (!kind || !(await ownerOn(kind, g.tenantId)) || !(await kindOrgOpen(kind, g.tenantId, g.orgId))) continue;
       if (!(await peopleStillAllowed(g, collaborator))) continue;
       if (!(await grants.compareAndSwap(g, { ...g, expiryNoticeAt: now.toISOString() }))) continue;
       const days = Math.max(1, Math.ceil((ends - nowMs) / DAY_MS));

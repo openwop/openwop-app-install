@@ -31,6 +31,18 @@ describe('public sections', () => {
     expect(screen.getByRole('table')).toBeTruthy();
     expect(screen.getByText('CFA overdue').className).toContain('fp-status--bad');
   });
+  it('status table puts a split head and its points beside the table, and is unchanged without them (#5765)', () => {
+    const data = { columns: ['Tag'], rows: [{ cells: ['UP-07'] }] };
+    const { container } = show({ sectionId: 't', type: 'statusTable', data: { ...data, heading: 'Lock readiness', head: 'split', points: ['Every order', 'Every date'] } });
+    const intro = container.querySelector('.fp-stable__intro');
+    expect(intro?.querySelector('h2')?.textContent).toContain('Lock readiness');
+    expect([...(intro?.querySelectorAll('.fp-stable__points li') ?? [])].map((li) => li.textContent)).toEqual(['Every order', 'Every date']);
+    expect(container.querySelector('section')?.className).toContain('fp-split');
+    cleanup();
+    const plain = show({ sectionId: 't', type: 'statusTable', data });
+    expect(plain.container.querySelector('.fp-stable__intro, .fp-stable__points')).toBeNull();
+  });
+
   it('conversation swaps the answer', () => {
     show({ sectionId: 'q', type: 'conversation', data: { exchanges: [{ q: 'One?', a: 'First.' }, { q: 'Two?', a: 'Second.' }] } });
     fireEvent.click(screen.getByRole('button', { name: 'Two?' }));

@@ -292,6 +292,10 @@
   /* DSA-023 — the coarse-pointer EFFECTIVE hit-area floor (WCAG 2.5.8 mobile
    * benchmark). Consumed by the (pointer: coarse) block near the end. */
   --hit-target: 44px;
+  /* #5779 B5 — how far below the viewport top in-page sticky content sits so the
+   * public site's sticky header (.public-shell-header) does not cover it. A site
+   * with a taller header overrides it. */
+  --public-header-offset: 4.75rem;
 
   /* App-shell sidebar (§5 .app-sidebar). The rail is a fixed-width column;
    * collapsed mode narrows it to an icon-only strip. */

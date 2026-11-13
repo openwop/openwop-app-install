@@ -15,7 +15,7 @@
  * spend, experiments, leads, journeys and bi-metric as they land).
  */
 import { OpenwopError } from '../../../types.js';
-import { featureAccessRefusal } from '../../../host/workflowFeatureGate.js';
+import { featureAccessRefusal, type LaunchSubject } from '../../../host/workflowFeatureGate.js';
 import type { ReportLineage, ReportMetric, ReportSection, ReportSectionKind, ReportSnapshot, ReportSourceId } from './types.js';
 
 export const WINDOW_NOTE = 'all-data-to-computedAt';
@@ -25,6 +25,11 @@ export interface SectionContext {
   orgId: string;
   campaignIds: string[] | 'all';
   computedAt: string;
+  /** CC-AUTH-3 / ADR 1108 — who is computing, beyond the tenant: the route's
+   *  `launchSubjectOf(req)` or the run lane's scope subject. Carries the listed
+   *  operator's `planExempt`; absent for a caller with no person (a schedule
+   *  fire is stamped by its launcher instead). */
+  subject?: LaunchSubject;
 }
 
 type SectionSource = (section: ReportSection, ctx: SectionContext, into: ReportSnapshot) => Promise<void>;
@@ -38,7 +43,7 @@ const metric = (value: number | null | undefined, unit: ReportMetric['unit'], li
 });
 
 const kpi: SectionSource = async (section, ctx, into) => {
-  await requireReportSource('campaign-connectors', ctx.tenantId);
+  await requireReportSource('campaign-connectors', ctx.tenantId, ctx.subject);
   const campaignId = section.params.campaignId;
   const { kpiSummary } = await import('../../campaign-connectors/performanceService.js');
   const s = await kpiSummary(ctx.tenantId, ctx.orgId, campaignId || undefined);
@@ -73,7 +78,7 @@ const kpi: SectionSource = async (section, ctx, into) => {
 };
 
 const attribution: SectionSource = async (section, ctx, into) => {
-  await requireReportSource('campaign-intel', ctx.tenantId);
+  await requireReportSource('campaign-intel', ctx.tenantId, ctx.subject);
   const { buildAttribution } = await import('../../campaign-intel/attribution.js');
   const a = await buildAttribution(ctx.tenantId, ctx.orgId);
   const keep = ctx.campaignIds === 'all' ? null : new Set(ctx.campaignIds);
@@ -97,7 +102,7 @@ const attribution: SectionSource = async (section, ctx, into) => {
 };
 
 const email: SectionSource = async (section, ctx, into) => {
-  await requireReportSource('email', ctx.tenantId);
+  await requireReportSource('email', ctx.tenantId, ctx.subject);
   const emailCampaignId = section.params.emailCampaignId ?? '';
   const svc = await import('../../email/emailService.js');
   // engagementStats is tenant-scoped only: prove the email campaign is this
@@ -121,8 +126,20 @@ const email: SectionSource = async (section, ctx, into) => {
   });
 };
 
-export async function requireReportSource(featureId: string, tenantId: string): Promise<void> {
-  if (await featureAccessRefusal(featureId, tenantId)) {
+/**
+ * A section source's feature must be usable by THIS caller. CC-AUTH-3: the
+ * subject rides along so the listed operator's plan exemption (ADR 1108) is
+ * honoured here as on every route; without it a free-plan workspace refused the
+ * operator what the rest of the page served. A plan refusal says so (403
+ * `not_entitled`, the paywall's shape); a source switched off or unresolvable
+ * stays the 409 `report_source_unavailable`.
+ */
+export async function requireReportSource(featureId: string, tenantId: string, subject: LaunchSubject = {}): Promise<void> {
+  const refusal = await featureAccessRefusal(featureId, tenantId, subject);
+  if (refusal === 'plan') {
+    throw new OpenwopError('forbidden', `This report uses ${featureId}, which is not included in this workspace's plan.`, 403, { reason: 'not_entitled', featureId, feature: featureId });
+  }
+  if (refusal) {
     throw new OpenwopError('conflict', 'A reporting source is unavailable for this workspace.', 409, { reason: 'report_source_unavailable', featureId });
   }
 }

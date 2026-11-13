@@ -84,13 +84,13 @@ function client(): Client {
 }
 
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
-async function ownerWithOrg(who: string): Promise<{ c: Client; orgId: string; tenantId: string }> {
+async function ownerWithOrg(who: string): Promise<{ c: Client; orgId: string; tenantId: string; userId: string }> {
   const c = client();
   const tenantId = `t-${who}-${Date.now()}-${n++}`;
   const login = await c.post('/host/openwop-app/test/login', { email: uniqEmail(who), tenantId });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
   const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
-  return { c, orgId: body<{ orgId: string }>(org).orgId, tenantId };
+  return { c, orgId: body<{ orgId: string }>(org).orgId, tenantId, userId: body<{ user: { userId: string } }>(login).user.userId };
 }
 /** A co-tenant added to `orgId` as a read-only `viewer` (workspace:read, no :write) — the NB-2 pattern. */
 async function viewerIn(owner: Client, tenantId: string, orgId: string): Promise<Client> {
@@ -159,7 +159,7 @@ describe('agentKnowledgeComposition — generic extraContext is appended + fence
 
 describe('notebooks — summarize route + Summary context level (T1)', () => {
   it('enqueues a run (write-gated, sid-validated, cross-tenant 404)', async () => {
-    const { c, orgId, tenantId } = await ownerWithOrg('nb-sum');
+    const { c, orgId, tenantId, userId } = await ownerWithOrg('nb-sum');
     const id = notebookId(await c.post(NB, { orgId, name: 'Pets research' }));
     const cat = documentId(await c.post(`${NB}/${id}/sources`, { title: 'Cat facts', text: FELINE }));
 
@@ -171,6 +171,9 @@ describe('notebooks — summarize route + Summary context level (T1)', () => {
     expect(summarizeStarts()).toEqual([
       expect.objectContaining({ tenantId, workflowId: 'notebooks.summarize', inputs: { notebookId: id, sourceId: cat } }),
     ]);
+    // ADR 1103 D3 — the run acts for the person the door authorized (it used to carry
+    // no actor, so the run surface refused every private project).
+    expect(summarizeStarts()[0]?.metadata).toMatchObject({ actingUserId: userId });
     const run = await c.get(`/runs/${encodeURIComponent(`${tenantId}/${runId}`)}`); // major-2 run id is tenant-bound
     expect(run.status, JSON.stringify(run.body)).toBe(200);
     expect(body<{ workflowId: string }>(run).workflowId).toBe('notebooks.summarize');

@@ -26,7 +26,14 @@ function mockFetch(checkout: { status: number; body: unknown }): ReturnType<type
   let checkedOut = false;
   const fn = vi.fn(async (url: string) => {
     if (String(url).includes('/checkout')) { checkedOut = true; return new Response(JSON.stringify(checkout.body), { status: checkout.status, headers: { 'content-type': 'application/json' } }); }
-    // After the refusal the product is no longer listed (it was delisted mid-cart).
+    // After the refusal the product is no longer listed (it was delisted mid-cart). ADR 1110
+    // P2: the page asks about each cart line by id, so the detail read is what says so.
+    const detail = /\/products\/([^/?]+)$/.exec(String(url));
+    if (detail) {
+      const id = decodeURIComponent(detail[1] ?? '');
+      const gone = checkedOut && id === PRODUCT.productId;
+      return new Response(JSON.stringify(gone ? { error: 'not_found' } : { product: id === KEPT.productId ? KEPT : PRODUCT }), { status: gone ? 404 : 200, headers: { 'content-type': 'application/json' } });
+    }
     return new Response(JSON.stringify({ products: checkedOut ? [KEPT] : [PRODUCT, KEPT], store: { name: 'Shop' } }), { status: 200, headers: { 'content-type': 'application/json' } });
   });
   vi.stubGlobal('fetch', fn);

@@ -183,6 +183,12 @@ function pickHostFetch(ctx) {
  * Substitute `{{name}}` placeholders. Missing keys throw INVALID_URL.
  */
 function substituteUrl(template, variables) {
+  // CC-CHAIN-2 — a chain whose `url: "{{params.X}}"` was never filled (no param,
+  // no run input) reaches here with undefined; that used to crash as a raw
+  // TypeError. Same typed code as the other URL failures.
+  if (typeof template !== 'string' || template.trim() === '') {
+    throw makeError('INVALID_URL', 'config.url is required (a non-empty http:// or https:// URL); this node received none — set the workflow parameter or run input that fills it.');
+  }
   const vars = variables ?? {};
   const out = template.replace(TEMPLATE_RE, (_full, name) => {
     if (!(name in vars)) {

@@ -90,9 +90,9 @@
     <link rel="apple-touch-icon" href="{{BRAND_FAVICON}}" />
 
     <!-- Fonts — the app's brand type triple: Bricolage Grotesque + Geist +
-         Geist Mono (DESIGN.md §2). Override per-deploy with VITE_BRAND_FONTS_HREF. -->
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+         Geist Mono (DESIGN.md §2). Override per-deploy with VITE_BRAND_FONTS_HREF; the
+         Google preconnect hints are stamped only when that href is Google Fonts. -->
+    {{BRAND_FONTS_PRECONNECT}}
     <link rel="stylesheet" href="{{BRAND_FONTS_HREF}}" />
 
     <link rel="stylesheet" href="/src/styles/index.css" />

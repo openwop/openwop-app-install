@@ -174,3 +174,28 @@ describe('runCoreSubmit — precedence', () => {
     expect(c.send).toHaveBeenCalledWith('hi', c.config, expect.objectContaining({ webSearch: true, tools }));
   });
 });
+
+// CC-CHAT-4 — a turn routed to the already-selected (e.g. deep-link-scoped) agent
+// reports it, so the surface can persist the agent as a conversation member and a
+// reopened conversation lists it again (as a member; it is not auto-selected).
+// Red when `onAgentRouted` is not
+// called for a plain turn to the selected agent, or is called for a fresh @-mention
+// (that path already reports through onAgentActivated) or the default Assistant.
+describe('runCoreSubmit — CC-CHAT-4 onAgentRouted', () => {
+  it('a plain turn to the selected agent reports it', async () => {
+    const onAgentRouted = vi.fn();
+    const c = ctx({ activeAgents: { activateAgent: vi.fn(() => 'x'), currentAgentId: 'scoped-agent' }, onAgentRouted });
+    await runCoreSubmit('hello', undefined, c);
+    expect(sendOpts(c)).toMatchObject({ activeAgentId: 'scoped-agent' });
+    expect(onAgentRouted).toHaveBeenCalledWith('scoped-agent');
+  });
+
+  it('not for an @-mention (onAgentActivated covers it) nor for the default Assistant', async () => {
+    const onAgentRouted = vi.fn();
+    detectAgentMention.mockReturnValue({ entry: agentEntry('rev', 'rev'), trailing: 'hi' });
+    await runCoreSubmit('@rev hi', undefined, ctx({ activeAgents: { activateAgent: vi.fn(() => 'rev'), currentAgentId: DEFAULT }, onAgentRouted }));
+    detectAgentMention.mockReturnValue(null);
+    await runCoreSubmit('hello', undefined, ctx({ onAgentRouted }));
+    expect(onAgentRouted).not.toHaveBeenCalled();
+  });
+});

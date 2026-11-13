@@ -1,13 +1,13 @@
 /**
  * Discovery service (ADR 0275 / MERCH-C) — faceted product search, collections
  * (manual + dynamic), and pin/boost/bury merchandising rules, COMPOSING commerce
- * `listProducts` (never a second product store) + the priority-matrix-free lexical
+ * `listProductsPage` (never a second product store) + the priority-matrix-free lexical
  * rank it already computes + the shared bucketing primitive (holdout). No parallel
  * catalog/ranker/bucketer (ADR 0271 rulings 1/3/4).
  *
  * - Collections: a `Collection` stores only a curated `productIds[]` (manual) OR a
  *   facet-predicate `rule` (dynamic); dynamic membership resolves LIVE from
- *   `listProducts` (ADR 0211 — never materialized).
+ *   `getProducts` / `listProductsPage` (ADR 0211 — never materialized).
  * - Merch-rules: pin(id,pos) / boost(pred,factor) / bury(pred) / hide(pred) applied
  *   OVER the ranked candidate set (a post-ranking transform), with preview + holdout.
  *
@@ -28,15 +28,17 @@ import { ensureProductEmbeddingsFresh, queryProductEmbeddings } from './productE
  *  RRF combines RANKS (not scores) so the two rankers never double-count; the stable
  *  `productId` tiebreak keeps the fused order deterministic (so the merch-rule/holdout
  *  layer downstream stays deterministic). Products only in the lexical set are kept. */
-function rrfFuse(lexical: Product[], semanticIds: string[]): Product[] {
+function rrfFuse(lexical: Product[], semanticIds: string[], semanticOnly: Product[] = []): Product[] {
   const K = 60;
   const semRank = new Map(semanticIds.map((id, i) => [id, i] as const));
-  return lexical
-    .map((p, i) => ({ p, score: 1 / (K + i) + (semRank.has(p.productId) ? 1 / (K + semRank.get(p.productId)!) : 0) }))
+  const semTerm = (p: Product): number => { const r = semRank.get(p.productId); return r === undefined ? 0 : 1 / (K + r); };
+  // ADR 1110 P2 — a product only semantic recall found (its description matched, which the
+  // lexical leg no longer reads) scores on its semantic rank alone.
+  return [...lexical.map((p, i) => ({ p, score: 1 / (K + i) + semTerm(p) })), ...semanticOnly.map((p) => ({ p, score: semTerm(p) }))]
     .sort((a, b) => b.score - a.score || a.p.productId.localeCompare(b.p.productId))
     .map((s) => s.p);
 }
-import { listProducts, isPubliclyListed, type Product } from '../commerce/commerceService.js';
+import { getProducts, listProductsPage, isPubliclyListed, type Product, type ProductPageQuery } from '../commerce/commerceService.js';
 import { listProductFieldDefs } from '../commerce/productFields.js';
 import { createLogger } from '../../observability/logger.js';
 
@@ -217,15 +219,64 @@ export async function resolveCollection(
   tenantId: string, orgId: string, collectionId: string,
   opts: { activeProducts: boolean; activeCollection: boolean } = { activeProducts: true, activeCollection: true },
 ): Promise<Product[]> {
+  return (await resolveCollectionBounded(tenantId, orgId, collectionId, opts)).products;
+}
+
+/** ADR 1110 P2 — the most products one resolve or search reads from the catalog. */
+export const DISCOVERY_CANDIDATE_LIMIT = 1000;
+/** ADR 1110 (round fix) — the most PAGES one resolve or search reads, whatever matched:
+ *  a sparse filter must not walk the catalog to fill the candidate set. Each page reads
+ *  at most 200 × 4 index markers, so the walk is bounded by markers read, not matches. */
+const DISCOVERY_PAGE_BUDGET = 10;
+
+/** `resolveCollection`, saying whether the bound cut it short. A manual collection is
+ *  point reads of its ids (already capped at write time). A rule collection reads the
+ *  narrowest slice its predicate allows (its categories, else its tags, else the whole
+ *  catalog in name order) and keeps what the predicate accepts, up to the bound. */
+export async function resolveCollectionBounded(
+  tenantId: string, orgId: string, collectionId: string,
+  opts: { activeProducts: boolean; activeCollection: boolean } = { activeProducts: true, activeCollection: true },
+): Promise<{ products: Product[]; truncated: boolean }> {
   const c = await getCollection(tenantId, orgId, collectionId);
-  if (!c || (opts.activeCollection && !c.active)) return [];
+  if (!c || (opts.activeCollection && !c.active)) return { products: [], truncated: false };
   // ADR 1098 — `activeProducts` is the search lanes' scope, so it also drops unlisted (quote-only) products.
-  const all = (await listProducts(tenantId, orgId)).filter((p) => !opts.activeProducts || isPubliclyListed(p));
-  if (c.type === 'manual') {
-    const ids = new Set(c.productIds ?? []);
-    return all.filter((p) => ids.has(p.productId));
+  const visible = (p: Product): boolean => !opts.activeProducts || isPubliclyListed(p);
+  if (c.type === 'manual') return { products: (await getProducts(tenantId, orgId, c.productIds ?? [])).filter(visible), truncated: false };
+  const rule = c.rule;
+  if (!rule) return { products: [], truncated: false };
+  const slices: ProductPageQuery[] = rule.categories?.length
+    ? rule.categories.map((category) => ({ category }))
+    : rule.tags?.length ? rule.tags.map((tag) => ({ tag })) : [{}];
+  const out = new Map<string, Product>();
+  let truncated = false;
+  let pages = 0;
+  for (const slice of slices) {
+    let cursor: string | undefined;
+    do {
+      const page = await listProductsPage(tenantId, orgId, { ...slice, ...(opts.activeProducts ? { listedOnly: true } : {}), limit: 200, ...(cursor ? { cursor } : {}) });
+      pages += 1;
+      for (const p of page.products) if (visible(p) && matchesPredicate(p, rule)) out.set(p.productId, p);
+      cursor = page.nextCursor;
+    } while (cursor && out.size < DISCOVERY_CANDIDATE_LIMIT && pages < DISCOVERY_PAGE_BUDGET);
+    if (cursor) truncated = true;
+    if (out.size >= DISCOVERY_CANDIDATE_LIMIT || pages >= DISCOVERY_PAGE_BUDGET) { truncated = truncated || slices.length > 1; break; }
   }
-  return c.rule ? all.filter((p) => matchesPredicate(p, c.rule!)) : [];
+  return { products: [...out.values()].slice(0, DISCOVERY_CANDIDATE_LIMIT), truncated };
+}
+
+/** Up to `DISCOVERY_CANDIDATE_LIMIT` listed products for a query, in the paged read's
+ *  order (ranked when `q` is set), and whether more existed. */
+async function searchCandidates(tenantId: string, orgId: string, q: string | undefined): Promise<{ products: Product[]; truncated: boolean }> {
+  const out: Product[] = [];
+  let cursor: string | undefined;
+  let pages = 0;
+  do {
+    const page = await listProductsPage(tenantId, orgId, { q, listedOnly: true, limit: 200, ...(cursor ? { cursor } : {}) });
+    pages += 1;
+    out.push(...page.products);
+    cursor = page.nextCursor;
+  } while (cursor && out.length < DISCOVERY_CANDIDATE_LIMIT && pages < DISCOVERY_PAGE_BUDGET);
+  return { products: out.slice(0, DISCOVERY_CANDIDATE_LIMIT), truncated: cursor !== undefined || out.length > DISCOVERY_CANDIDATE_LIMIT };
 }
 
 // ── Merchandising rules ─────────────────────────────────────────────────────
@@ -419,9 +470,12 @@ export interface SearchResult {
    *  match count can say why instead of leaving "where did it go?" unanswerable on the
    *  one screen that exists to answer it. */
   hiddenByRules: number;
+  /** ADR 1110 P2 — the search read at most `DISCOVERY_CANDIDATE_LIMIT` products and more
+   *  existed, so `total` and the facet counts are floors ("1,000+"), not the catalog's. */
+  candidatesTruncated: boolean;
 }
 
-/** Faceted search over the ACTIVE catalog: lexical rank (commerce `listProducts`) →
+/** Faceted search over the ACTIVE catalog: lexical rank (commerce `listProductsPage`) →
  *  optional collection scope + facet filters → merch-rules. Facet COUNTS are computed
  *  over the active, pre-merch-rule set (categories/tags + typed productFields). */
 export async function searchProducts(input: {
@@ -429,15 +483,20 @@ export async function searchProducts(input: {
   collectionId?: string; filters?: Record<string, string>; sessionKey?: string; limit?: number;
 }): Promise<SearchResult> {
   const { tenantId, orgId } = input;
-  // Collection scope resolves the base set (active-only); else the full active catalog.
-  let base = input.collectionId
-    ? await resolveCollection(tenantId, orgId, input.collectionId)
-    : (await listProducts(tenantId, orgId, input.q, {})).filter(isPubliclyListed); // ADR 1098
+  // Collection scope resolves the base set (active-only); else the listed catalog. ADR 1110
+  // P2: both are bounded candidate sets (`DISCOVERY_CANDIDATE_LIMIT`), and the result says
+  // when the bound cut one short, so a count is never read as the whole catalog's.
+  const scoped = input.collectionId
+    ? await resolveCollectionBounded(tenantId, orgId, input.collectionId)
+    : await searchCandidates(tenantId, orgId, input.q);
+  let base = scoped.products;
+  let candidatesTruncated = scoped.truncated;
   if (input.collectionId && input.q) {
-    // apply the lexical query within the collection via listProducts ranking order
-    const ranked = (await listProducts(tenantId, orgId, input.q, {})).filter(isPubliclyListed); // ADR 1098
+    // apply the lexical query within the collection, in the search's ranking order
+    const ranked = await searchCandidates(tenantId, orgId, input.q);
     const inColl = new Set(base.map((p) => p.productId));
-    base = ranked.filter((p) => inColl.has(p.productId));
+    base = ranked.products.filter((p) => inColl.has(p.productId));
+    candidatesTruncated = candidatesTruncated || ranked.truncated;
   }
 
   // MERCH-C (ADR 0275, PR 2 Part B) — SEMANTIC recall fused with the lexical order via RRF.
@@ -456,7 +515,15 @@ export async function searchProducts(input: {
     log.warn('product embedding refresh failed — searching lexical-only', { tenantId, orgId, error: err instanceof Error ? err.message : String(err) });
   }
     const semanticIds = await queryProductEmbeddings(tenantId, orgId, input.q, 96);
-    if (semanticIds.length > 0) base = rrfFuse(base, semanticIds);
+    if (semanticIds.length > 0) {
+      // ADR 1110 P2 — over the whole listed catalog (no collection scope), a product only
+      // semantic recall found joins the set: lexical search reads names, tags, categories
+      // and variant names, and recall is what still finds a product by its description.
+      // Inside a collection the set stays the collection's (fusion never widens a scope).
+      const have = new Set(base.map((p) => p.productId));
+      const extra = input.collectionId ? [] : (await getProducts(tenantId, orgId, semanticIds.filter((id) => !have.has(id)))).filter(isPubliclyListed);
+      base = rrfFuse(base, semanticIds, extra);
+    }
   }
 
   const fieldDefs = await listProductFieldDefs(tenantId, orgId);
@@ -486,6 +553,7 @@ export async function searchProducts(input: {
     total,
     truncated: total > limit,
     hiddenByRules: Math.max(0, filtered.length - total),
+    candidatesTruncated,
   };
 }
 

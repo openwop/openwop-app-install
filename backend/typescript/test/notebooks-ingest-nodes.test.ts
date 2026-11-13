@@ -4,16 +4,16 @@
  * (ctx.http.safeFetch caption track), and `ingest-source` (the surface write).
  *
  * Pure node-fn unit test against a MOCK ctx — asserts the pack's own contract
- * (audio part shape, caption parsing + no_transcript, no-op short-circuits, surface
- * write) without the host surface (covered elsewhere). `safeFetch` returns REAL
+ * (audio part shape, caption parsing + no_transcript, the typed refusals that replaced
+ * the no-op short-circuits (ADR 1103 D4), surface write) without the host surface (covered elsewhere). `safeFetch` returns REAL
  * `Response` objects, so `readBodyCapped` runs the same `body.getReader()` stream
  * branch (the MEDIA-4 byte cap) it runs against undici in production.
  *
  * What reds it (sabotage-witnessed, /grade-tests wave 20): the audio part's
- * `dataBase64` key; the empty-audio short-circuit; the 32 MiB cap; entity decoding;
+ * `dataBase64` key; the empty-audio refusal; the 32 MiB cap; entity decoding;
  * the no-captions branch; the lowest-bitrate stream pick; the nested
  * `playerCaptionsTracklistRenderer` fallback; the `ctx.callAI`-absent guard; the
- * sourceType title weave; the empty-text no-op.
+ * sourceType title weave; the empty-text refusal.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -46,11 +46,10 @@ describe('feature.notebooks.nodes — transcribe-source (ADR 0085)', () => {
     expect(seen?.provider).toBe('google');
   });
 
-  it('short-circuits empty audio to a no-op (no model call)', async () => {
+  it('refuses empty audio, typed, before any model call (ADR 1103 D4 — was a success no-op)', async () => {
     let called = false;
     const ctx = { inputs: { audioBase64: '   ' }, config: {}, callAI: async () => { called = true; return { content: 'x' }; } };
-    const out = await pack.transcribeSource(ctx);
-    expect(out.outputs.empty).toBe(true);
+    await expect(pack.transcribeSource(ctx)).rejects.toMatchObject({ code: 'validation_error' });
     expect(called).toBe(false);
   });
 });
@@ -133,14 +132,13 @@ describe('feature.notebooks.nodes — ingest-source (ADR 0084 deferred / 0085)',
     expect(seen).toEqual({ notebookId: 'nb1', title: 'My recording (audio)', text: 'transcribed words' }); // sourceType woven into the title
   });
 
-  it('is a no-op for empty text', async () => {
+  it('fails transcript_empty for empty text, without writing (ADR 1103 D4 — was a success no-op)', async () => {
     let called = false;
     const ctx = {
       inputs: { notebookId: 'nb1', title: 'x', text: '   ' },
       features: { notebooks: { ingestSource: async () => { called = true; return { ingested: true }; } } },
     };
-    const out = await pack.ingestSource(ctx);
-    expect(out.outputs.ingested).toBe(false);
+    await expect(pack.ingestSource(ctx)).rejects.toMatchObject({ code: 'transcript_empty' });
     expect(called).toBe(false);
   });
 });

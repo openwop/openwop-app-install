@@ -12,6 +12,7 @@ import { useTranslation } from 'react-i18next';
 import { formatNumber } from '../../i18n/format.js';
 import { useFormat } from '../../i18n/useFormat.js';
 import { InlineState } from '../../ui/InlineState.js';
+import { TableScroll } from '../../ui/DataTable.js';
 import { PageHeader } from '../../ui/PageHeader.js';
 import { Notice } from '../../ui/Notice.js';
 import { StateCard } from '../../ui/StateCard.js';
@@ -576,21 +577,23 @@ function NavTelemetrySection(): JSX.Element | null {
       ) : report.rows.length === 0 ? (
         <InlineState kind="empty" message={t('navReportEmpty')} />
       ) : (
-        <table className="u-w-full">
-          <caption className="sr-only">{t('navReportHeading')}</caption>
-          <thead>
-            <tr><th className="u-text-left">{t('navColRoute')}</th><th className="u-text-left">{t('navColSource')}</th><th className="u-text-right">{t('navColCount')}</th></tr>
-          </thead>
-          <tbody>
-            {report.rows.slice(0, 40).map((r) => (
-              <tr key={`${r.route}-${r.source}`}>
-                <td className="u-mono u-fs-12">{r.route}</td>
-                <td className="u-fs-12">{r.source}</td>
-                <td className="u-text-right u-tabular">{formatNumber(r.count)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <TableScroll label={t('navReportHeading')}>
+          <table className="u-w-full">
+            <caption className="sr-only">{t('navReportHeading')}</caption>
+            <thead>
+              <tr><th className="u-text-left">{t('navColRoute')}</th><th className="u-text-left">{t('navColSource')}</th><th className="u-text-right">{t('navColCount')}</th></tr>
+            </thead>
+            <tbody>
+              {report.rows.slice(0, 40).map((r) => (
+                <tr key={`${r.route}-${r.source}`}>
+                  <td className="u-mono u-fs-12">{r.route}</td>
+                  <td className="u-fs-12">{r.source}</td>
+                  <td className="u-text-right u-tabular">{formatNumber(r.count)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </TableScroll>
       )}
       {report && report.rows.length > 40 ? (
         <p className="muted u-fs-12 u-m-0">{t('navReportTruncated', { shown: 40, total: formatNumber(report.rows.length) })}</p>

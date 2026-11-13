@@ -275,7 +275,11 @@ export function buildCampaignOpsSurface(scope: BundleScope): FeatureSurface {
       const period = stamp?.definitionId !== undefined
         ? await readClientReportPeriod(tenantId, scope.runId, { orgId, definitionId: def.definitionId, definitionVersion: def.version })
         : resolvePeriod(def.period.kind, { start: optStr(config.periodStart), end: optStr(config.periodEnd) });
-      const report = await createReport(def, period, person, scope.runId ? { runId: scope.runId } : {});
+      // CC-AUTH-3 / ADR 1108 — the sources resolve as THIS run's person, with the
+      // operator exemption the run was launched under (re-checked here).
+      const { scopeToggleSubject } = await import('../../host/operatorPlanExemption.js');
+      const { tenantId: _t, ...subject } = scopeToggleSubject(scope);
+      const report = await createReport(def, period, person, { ...(scope.runId ? { runId: scope.runId } : {}), subject });
       return { orgId, reportId: report.reportId, snapshot: report.snapshot, snapshotHash: report.snapshotHash };
     },
     /** ADR 0957 D3 `report-snapshot-read`: a stored report's frozen numbers. */

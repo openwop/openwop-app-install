@@ -26,10 +26,9 @@ import { listJobsForSubject, registerJob, MAX_FUTURE_HORIZON_MS, MAX_FUTURE_HORI
 import { parseCron, computeNextFire, isValidTimeZone } from '../../host/cronSchedule.js';
 import { SCHEDULED_CHAT_TURN_WORKFLOW_ID, SCHEDULED_CHAT_CREDENTIAL_REF } from './scheduledChatTurnWorkflow.js';
 import { SCHEDULED_AGENT_CHATS_TOGGLE, cadenceRefusal } from './scheduledChatService.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
 import { hasWorkflowScope } from '../../host/workflowWriteAuthority.js';
 import { isAnonTenantId } from '../../host/requestSubject.js';
-import { untrustedToolError } from '../../host/agentToolKit.js';
+import { untrustedToolError, resolveFeatureAccess, type ToolAccessScope } from '../../host/agentToolKit.js';
 
 /**
  * ADR 0985 D6 — who may arm standing autonomous work from chat. A scheduled job is
@@ -52,10 +51,10 @@ async function schedulingRefusal(scope: { tenantId: string; actingUserId?: strin
 const SCHEDULED_CHATS_PAGE = 'the Scheduled chats page';
 
 /** ADR 0820 §8.2 — the feature's ACCESS gate for both tools (toggle + plan, via
- *  `resolveOne`), the same answer its HTTP routes give. Fail-closed: an
+ *  `resolveOne` via the kit, ADR 1108 operator exemption included), the same answer its HTTP routes give. Fail-closed: an
  *  unresolvable read refuses. */
-async function featureRefused(scope: { tenantId: string; actingUserId?: string | undefined }): Promise<boolean> {
-  const a = await resolveOne(SCHEDULED_AGENT_CHATS_TOGGLE, { tenantId: scope.tenantId, ...(scope.actingUserId ? { userId: scope.actingUserId } : {}) }).catch(() => null);
+async function featureRefused(scope: ToolAccessScope): Promise<boolean> {
+  const a = await resolveFeatureAccess(SCHEDULED_AGENT_CHATS_TOGGLE, scope);
   return a?.enabled !== true;
 }
 const FEATURE_REFUSED_MESSAGE = 'Scheduled agent chats are not enabled for this workspace — tell the user, and do the work in this turn instead if it can be done now.';

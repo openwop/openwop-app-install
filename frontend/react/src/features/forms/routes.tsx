@@ -16,10 +16,10 @@ const routes: FeatureRoute[] = [
       // authoring cluster (Workflows/Documents/Comments) in the Workspace section,
       // not under CRM.
       group: 'Workspace',
-      label: 'Forms', labelKey: 'formsLabel',
+      labelKey: 'formsLabel',
       icon: ClipboardIcon,
       order: 20,
-      hint: 'Form builder + submissions', hintKey: 'formsHint',
+      hintKey: 'formsHint',
       featureId: 'forms',
     },
   },

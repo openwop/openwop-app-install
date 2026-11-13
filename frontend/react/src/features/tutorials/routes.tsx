@@ -18,7 +18,7 @@ const routes: FeatureRoute[] = [
     path: '/tutorials',
     element: <TutorialsPage />,
     tier: 'admin', archetype: 'admin',
-    nav: { group: 'Learning & support', label: 'Tutorials', labelKey: 'tutorialsLabel', icon: BookOpenIcon, hint: 'Hands-on product walkthroughs', hintKey: 'tutorialsHint', order: 88 },
+    nav: { group: 'Learning & support', labelKey: 'tutorialsLabel', icon: BookOpenIcon, hintKey: 'tutorialsHint', order: 88 },
   },
   {
     path: '/tutorials/:tutorialId',

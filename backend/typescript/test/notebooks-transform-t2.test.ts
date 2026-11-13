@@ -73,13 +73,13 @@ function client(): Client {
 }
 
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
-async function ownerWithOrg(who: string): Promise<{ c: Client; orgId: string; tenantId: string }> {
+async function ownerWithOrg(who: string): Promise<{ c: Client; orgId: string; tenantId: string; userId: string }> {
   const c = client();
   const tenantId = `t-${who}-${Date.now()}-${n++}`;
   const login = await c.post('/host/openwop-app/test/login', { email: uniqEmail(who), tenantId });
   expect(login.status, JSON.stringify(login.body)).toBe(201);
   const org = await c.post('/host/openwop-app/orgs', { name: 'Acme' });
-  return { c, orgId: body<{ orgId: string }>(org).orgId, tenantId };
+  return { c, orgId: body<{ orgId: string }>(org).orgId, tenantId, userId: body<{ user: { userId: string } }>(login).user.userId };
 }
 /** A co-tenant added to `orgId` as a read-only `viewer` (workspace:read, no :write) — the NB-2 pattern. */
 async function viewerIn(owner: Client, tenantId: string, orgId: string): Promise<Client> {
@@ -144,6 +144,29 @@ describe('notebooks — apply-transformation route + catalog (T2)', () => {
     const stranger = await ownerWithOrg('nb-tx-stranger');
     expect((await stranger.c.post(`${NB}/${id}/sources/${cat}/transform`, { templateId: 'summary' })).status).toBe(404);
     expect(transformStarts()).toHaveLength(1); // no refused call enqueued anything
+  });
+
+  it('ADR 1103 D3 — EVERY route door starts its run as the caller it authorized', async () => {
+    // One witness per door: reverting any one of the four to a bare, actorless start
+    // reds its row (the surface would then treat it as a system run and refuse every
+    // private project — NBK92-2).
+    const { c, orgId, userId } = await ownerWithOrg('nb-actor');
+    const id = notebookId(await c.post(NB, { orgId, name: 'Doors' }));
+    const cat = body<{ documentId: string }>(await c.post(`${NB}/${id}/sources`, { title: 'Cat facts', text: FELINE })).documentId;
+    vi.mocked(startWorkflowRun).mockClear();
+    expect((await c.post(`${NB}/${id}/sources/${cat}/summarize`)).status).toBe(202);
+    expect((await c.post(`${NB}/${id}/sources/${cat}/transform`, { templateId: 'summary' })).status).toBe(202);
+    expect((await c.post(`${NB}/${id}/sources/audio`, { title: 'a', contentBase64: 'QUJD', contentType: 'audio/mpeg' })).status).toBe(202);
+    expect((await c.post(`${NB}/${id}/sources/youtube`, { url: 'https://youtu.be/abc' })).status).toBe(202);
+    const actors = Object.fromEntries(vi.mocked(startWorkflowRun).mock.calls.map((call) => call[1])
+      .filter((i) => i.workflowId.startsWith('notebooks.'))
+      .map((i) => [i.workflowId, i.metadata?.['actingUserId']]));
+    expect(actors).toEqual({
+      'notebooks.summarize': userId,
+      'notebooks.transform': userId,
+      'notebooks.ingest-audio': userId,
+      'notebooks.ingest-youtube': userId,
+    });
   });
 
   it('listTransformations returns the owned transformation Documents', async () => {

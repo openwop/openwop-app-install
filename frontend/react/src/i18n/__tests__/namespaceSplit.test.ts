@@ -32,9 +32,20 @@
  * below; case 1 is left exactly as it was. The fix PR for NSSPLIT-BORROW-1 flips the
  * `it.fails` to `it`.
  *
+ * CORRECTED 2026-11-11 (grade-tests w106): ONE pair is left. SectionRenderer was fixed in
+ * e23a6663d (2026-11-02) by binding `useTranslation(SITE_NS)` with
+ * `SITE_NS = ['cms', 'site']`, a same-file constant `hookLoadedIn` could not read, so the
+ * fixed file stayed in the offender list and the `it.fails` kept failing on it. The
+ * scanner now resolves that form; MEASURED at 3bcc187f9 the only offender is
+ * `features/profiles/ProfilePage.tsx:twin` (its `twin:` keys render in the toggle-failed
+ * and loading branches, where `ProfileTwinGrantsTab`, which would load `twin`, is not
+ * mounted). Fix-probe: add `'twin'` to ProfilePage's hook and the `it.fails` reds.
+ *
  * Sabotage (wave 51 probes): a cross-feature `useTranslation`, a shell file using a lazy
  * feature namespace, a second `featureToggles` user, a suspending `assistantAction`
- * hook, or a drift in any of the three shell-namespace lists each red one case.
+ * hook, or a drift in any of the three shell-namespace lists each red one case. Wave 106
+ * adds, for the `workforces`/`settings` case: a reader outside the area (literal or
+ * constant hook), a static import of the area, and either list dropping `settings`.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -65,17 +76,24 @@ const namespacesIn = (file: string): string[] =>
   [...readFileSync(file, 'utf8').matchAll(/useTranslation\('([a-z0-9-]+)'\)/g)].map((m) => m[1]!);
 
 /**
- * Every namespace a file borrows, in ANY form: `useTranslation('a')`,
- * `useTranslation(['a', 'b'])`, `t('a:key')` / `i18n.t('a:key')`, and `{ ns: 'a' }`.
- * (NSSPLIT-BORROW-1 — `namespacesIn` sees only the first.)
+ * Namespaces a file LOADS through its own `useTranslation(...)` hook: the string form,
+ * the array form, and a hook given a same-file constant (`const SITE_NS = ['cms', 'site']
+ * as const; useTranslation(SITE_NS)`). The constant form is how `features/cms/
+ * SectionRenderer.tsx` fixed its `site` borrow (e23a6663d, 2026-11-02); a scanner blind
+ * to it kept that FIXED file in the NSSPLIT-BORROW-1 offender list, so fixing the one
+ * real offender left could never have flipped the `it.fails` below.
  */
-/** Namespaces a file LOADS through its own `useTranslation(...)` hook (string or array form). */
 function hookLoadedIn(src: string): Set<string> {
   const out = new Set<string>();
-  for (const m of src.matchAll(/useTranslation\(\s*\[([^\]]*)\]/g)) {
-    for (const n of (m[1] ?? '').matchAll(/['"]([a-z0-9-]+)['"]/g)) out.add(n[1]!);
-  }
+  const addQuoted = (list: string): void => {
+    for (const n of list.matchAll(/['"]([a-z0-9-]+)['"]/g)) out.add(n[1]!);
+  };
+  for (const m of src.matchAll(/useTranslation\(\s*\[([^\]]*)\]/g)) addQuoted(m[1] ?? '');
   for (const m of src.matchAll(/useTranslation\(\s*['"]([a-z0-9-]+)['"]/g)) out.add(m[1]!);
+  for (const m of src.matchAll(/useTranslation\(\s*([A-Za-z_$][\w$]*)\s*[,)]/g)) {
+    const decl = src.match(new RegExp(`\\bconst\\s+${m[1]!.replace(/\$/g, '\\$')}\\s*(?::[^=]+)?=\\s*(\\[[^\\]]*\\]|['"][a-z0-9-]+['"])`));
+    if (decl) addQuoted(decl[1]!);
+  }
   return out;
 }
 
@@ -123,9 +141,9 @@ describe('ADR 0490 — the eager/lazy namespace split stays safe', () => {
   });
 
   // NSSPLIT-BORROW-1 — the raw-key half of case 1's claim, with a scanner that sees the
-  // BARE borrow forms case 1 is blind to. RED today on the two `file:ns` pairs in the
-  // header (cms/SectionRenderer:site, profiles/ProfilePage:twin), so it is pinned as
-  // `it.fails`; the fix flips it to `it`. An array hook that LOADS the other namespace
+  // BARE borrow forms case 1 is blind to. RED today on one `file:ns` pair
+  // (profiles/ProfilePage:twin; cms/SectionRenderer:site was fixed, see the header), so
+  // it is pinned as `it.fails`; the fix flips it to `it`. An array hook that LOADS the other namespace
   // is the sanctioned fix (BILLUX-1 chose it for BundleShopPage) and is not counted.
   it.fails('no feature reads another feature namespace it does not load (NSSPLIT-BORROW-1)', () => {
     const feats = new Set(featureDirs());
@@ -235,7 +253,9 @@ describe('ADR 0490 — the eager/lazy namespace split stays safe', () => {
           const rel = p.slice(SRC.length + 1).split(sep).join('/');
           if (rel.startsWith(`${area}/`)) continue;
           const src = readFileSync(p, 'utf8');
-          if (new RegExp(`useTranslation\\((\\[[^\\]]*)?['"]${area}['"]|['"\`]${area}:[a-zA-Z]|ns:\\s*\\[?\\s*['"]${area}['"]`).test(src)) readers.push(rel);
+          // `hookLoadedIn` adds the same-file-constant hook form the literal regex cannot see.
+          if (new RegExp(`useTranslation\\((\\[[^\\]]*)?['"]${area}['"]|['"\`]${area}:[a-zA-Z]|ns:\\s*\\[?\\s*['"]${area}['"]`).test(src)
+            || hookLoadedIn(src).has(area)) readers.push(rel);
           for (const line of src.split('\n')) {
             for (const m of line.matchAll(/['"](\.\.?\/[^'"]+)['"]/g)) {
               if (resolve(dirname(p), m[1]!).startsWith(join(SRC, area) + sep)) importers.push(`${rel}: ${line.trim()}`);

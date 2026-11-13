@@ -34,9 +34,9 @@ const routes: FeatureRoute[] = [
     tier: 'admin', archetype: 'admin',
     nav: {
       group: 'Billing & commerce',
-      label: 'Marketplace', labelKey: 'marketplaceLabel',
+      labelKey: 'marketplaceLabel',
       icon: BoxesIcon,
-      hint: 'Feature store, packs & distributions', hintKey: 'marketplaceHint',
+      hintKey: 'marketplaceHint',
       order: 81,
       featureId: 'marketplace',
       activeFor: ['/marketplace'],

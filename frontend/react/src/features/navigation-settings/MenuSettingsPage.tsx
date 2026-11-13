@@ -34,6 +34,7 @@ import { isAdminCaller, useEffectiveAccess } from '../../client/useEffectiveAcce
 import { useUnsavedRouteGuard } from '../../ui/useUnsavedChangesWarning.js';
 import type { NavGroup } from '../../chrome/features.js';
 import { resolveMenuPreview } from './menuPreview.js';
+import { navLabel } from '../../chrome/navText.js';
 
 type Scope = 'user' | 'tenant';
 const EDIT_TIERS: FeatureTier[] = ['workspace', 'admin'];
@@ -106,7 +107,7 @@ export function MenuSettingsPage(): JSX.Element {
       if (f.nav.featureId && !isVisible(f.nav.featureId)) continue;
       out.push({
         path: f.path,
-        label: f.nav.labelKey ? tn(f.nav.labelKey, { defaultValue: f.nav.label }) : f.nav.label,
+        label: navLabel(f.nav, tn),
         declaredTier: f.tier,
         declaredGroup: f.nav.group,
         alwaysOn: !f.nav.featureId,
@@ -353,7 +354,7 @@ function MenuPreview({ workspace, admin }: { workspace: NavGroup[]; admin: NavGr
       <div key={group.id} className="u-flex u-flex-col u-gap-1">
         <strong className="u-fs-12">{group.custom ? group.label : tn(GROUP_LABEL_KEYS[group.id] ?? '', { defaultValue: group.label })}</strong>
         <ul className="menu-preview-list">
-          {group.items.map((item) => <li key={item.to}>{item.labelKey ? tn(item.labelKey, { defaultValue: item.label }) : item.label}</li>)}
+          {group.items.map((item) => <li key={item.to}>{navLabel(item, tn)}</li>)}
         </ul>
       </div>
     ));

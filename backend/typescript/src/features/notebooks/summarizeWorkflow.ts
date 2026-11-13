@@ -77,6 +77,9 @@ const summarizeWorkflowDefinition: WorkflowDefinition = {
     { edgeId: 'e_read_generate', sourceNodeId: 'read', sourceOutput: 'messages', targetNodeId: 'generate', targetInput: 'messages', triggerRule: 'all_success' },
     // generate.content → store.summary (the LLM text becomes the stored summary)
     { edgeId: 'e_generate_store', sourceNodeId: 'generate', sourceOutput: 'content', targetNodeId: 'store', targetInput: 'summary', triggerRule: 'all_success' },
+    // ADR 1103 D4 — the revision read-source saw, so store-summary refuses a summary of
+    // text that changed while the model was writing it.
+    { edgeId: 'e_read_store_revision', sourceNodeId: 'read', sourceOutput: 'revision', targetNodeId: 'store', targetInput: 'revision', triggerRule: 'all_success' },
   ],
   variables: [
     { name: 'notebookId', type: 'string', description: 'The notebook whose source is summarized.', required: true },

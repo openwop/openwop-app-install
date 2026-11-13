@@ -90,4 +90,12 @@ export const messages = {
   'error_account-erased': 'Esta cuenta ya no existe.',
   'error_session-revoked': 'Se cerró tu sesión en todos los dispositivos. Inicia sesión de nuevo para continuar.',
   cannotBeUndone: 'Esto no se puede deshacer.',
+  // ADR 1110 P2 — the shared Combobox (ui/Combobox.tsx).
+  comboboxLoading: 'Buscando…',
+  comboboxFailed: "No se pudo cargar la lista. Pulsa Abajo para reintentar.",
+  comboboxNoResults: 'Sin coincidencias',
+  comboboxResults_one: '{{count}} coincidencia',
+  comboboxResults_other: '{{count}} coincidencias',
+  comboboxResultsMore_one: "Más de {{count}} coincidencia; escribe para acotar",
+  comboboxResultsMore_other: "Más de {{count}} coincidencias; escribe para acotar",
 } as const;

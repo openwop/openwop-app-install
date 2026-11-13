@@ -299,6 +299,16 @@ export interface BundleScope {
    *  that grants (credentials, twin recall, toggles, the chat-tool gates, the
    *  KB subject filter) ever does. `actingUserId` wins when both are set. */
   orgScopeSubject?: string;
+  /** ADR 1108 — the reserved `run.metadata.planExempt` stamp: the run was
+   *  created by this host's listed operator acting in person
+   *  (`isListedSuperadmin(req)`). Honoured only through
+   *  `operatorPlanExemption.ts` `operatorPlanExempt`, which re-checks the
+   *  allowlist and requires `actingUserId`; it grants nothing else. */
+  planExempt?: boolean;
+  /** ADR 1108 D7 — a sub-workflow child's NON-granting record of its operator's
+   *  personal tenant (`run.metadata.planExemptPersonalTenant`). Read only by
+   *  `operatorPlanExempt`; never by a tenant/org gate. */
+  planExemptPersonalTenant?: string;
   /** ADR 0617 D1a — the executing run's WORKFLOW id (`run.workflowId`), so a
    *  feature surface that emits a host event from inside a run can stamp
    *  `origin.workflowId` and the dispatcher can refuse to start a second run of

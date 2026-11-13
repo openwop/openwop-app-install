@@ -3,6 +3,7 @@ import { describe, it, expect } from 'vitest';
 import { chromeFor, isAdminPath, featureFor, navItemIsActive, navGroups, WORKSPACE_NAV, ADMIN_NAV_GROUPS, NAV, GROUP_ORDER, FEATURES, HOST_GROUP_ORDER, withFeatureNavGroups, type NavItem } from '../features.js';
 import { featureNavGroups } from '../../features/registry.js';
 import type { FeatureRoute } from '../featureTypes.js';
+import { navLabel } from '../navText.js';
 
 /**
  * The feature manifest is the single source of truth for routes, the
@@ -95,7 +96,7 @@ describe('navItemIsActive', () => {
 
 describe('nav registry — category + position ordering', () => {
   const labels = (groupLabel: string): string[] =>
-    WORKSPACE_NAV.find((g) => g.label === groupLabel)?.items.map((i) => i.label) ?? [];
+    WORKSPACE_NAV.find((g) => g.label === groupLabel)?.items.map((i) => navLabel(i)) ?? [];
 
   it('groups are ordered by GROUP_ORDER (Pinned before Workspace before CRM)', () => {
     // The manifest happens to DECLARE these groups in rank order, so the live
@@ -115,7 +116,7 @@ describe('nav registry — category + position ordering', () => {
     // signed-in home ('/') and leads the pinned cluster; Chat lives at /chat.
     const pinned = WORKSPACE_NAV.find((g) => g.label === 'Pinned');
     expect(pinned?.headerless).toBe(true);
-    expect(pinned?.items.map((i) => i.label)).toEqual(['Dashboard', 'Chat', 'Inbox', 'Agents']);
+    expect(pinned?.items.map((i) => navLabel(i))).toEqual(['Dashboard', 'Chat', 'Inbox', 'Agents']);
     // and they left the labelled Workspace section
     expect(labels('Workspace')).not.toContain('Chat');
   });
@@ -152,33 +153,33 @@ describe('nav registry — category + position ordering', () => {
     // was carved out of the overloaded generic 'Workspace' group into 'CRM'
     // (customer core), 'Sales' (field/rep sales), and 'Commerce' (store +
     // merchandising) sections.
-    const ws = NAV.find((g) => g.label === 'Workspace')?.items.map((i) => i.label) ?? [];
+    const ws = NAV.find((g) => g.label === 'Workspace')?.items.map((i) => navLabel(i)) ?? [];
     expect(ws).not.toContain('CRM');
     expect(ws).not.toContain('Funnels');
     // The 'Workspace' label now fronts the authoring section (formerly "Create"):
     // Workflows · Forms · Documents · Comments. Chat/Inbox/Agents moved to 'Pinned'.
     expect(ws).toEqual(expect.arrayContaining(['Workflows', 'Forms', 'Documents', 'Comments']));
     expect(ws).not.toContain('Chat');
-    const crm = NAV.find((g) => g.label === 'CRM')?.items.map((i) => i.label) ?? [];
+    const crm = NAV.find((g) => g.label === 'CRM')?.items.map((i) => navLabel(i)) ?? [];
     expect(crm).toContain('CRM');
     expect(crm).not.toContain('Commerce'); // commerce graduated to the Commerce section
     // The field-sales cluster moved to the new 'Sales' group.
-    const sales = NAV.find((g) => g.label === 'Sales')?.items.map((i) => i.label) ?? [];
+    const sales = NAV.find((g) => g.label === 'Sales')?.items.map((i) => navLabel(i)) ?? [];
     expect(sales).toContain('Territories');
     // The store + merchandising cluster moved to the new 'Commerce' group.
-    const commerce = NAV.find((g) => g.label === 'Commerce')?.items.map((i) => i.label) ?? [];
+    const commerce = NAV.find((g) => g.label === 'Commerce')?.items.map((i) => navLabel(i)) ?? [];
     expect(commerce).toContain('Commerce');
     // Funnels joined the Marketing section (was mis-filed under Workspace).
-    const marketing = NAV.find((g) => g.label === 'Marketing')?.items.map((i) => i.label) ?? [];
+    const marketing = NAV.find((g) => g.label === 'Marketing')?.items.map((i) => navLabel(i)) ?? [];
     expect(marketing).toContain('Funnels');
     // Documents sits with the authoring surfaces in the Workspace section (it was
     // re-homed Studio -> the authoring group 2026-07-06), not the media cluster.
     expect(ws).toContain('Documents');
-    const studio = NAV.find((g) => g.label === 'Studio')?.items.map((i) => i.label) ?? [];
+    const studio = NAV.find((g) => g.label === 'Studio')?.items.map((i) => navLabel(i)) ?? [];
     expect(studio).not.toContain('Documents');
     // CMS moved to the 'Content' group in the 2026-06-04 IA rename (alongside
     // Media / Publishing / Sharing), so it lands there rather than in Workspace.
-    const content = NAV.find((g) => g.label === 'Content')?.items.map((i) => i.label) ?? [];
+    const content = NAV.find((g) => g.label === 'Content')?.items.map((i) => navLabel(i)) ?? [];
     expect(content).toContain('CMS');
   });
 

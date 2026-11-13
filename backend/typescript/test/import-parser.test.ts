@@ -1,17 +1,35 @@
 /**
- * ADR 0119 Phase 4a — conversation import parsers (`features/chat-export/importParser.ts`).
+ * ADR 0119 Phase 4a / ADR 0992 D2, D7 — conversation import parsers
+ * (`features/chat-export/importParser.ts`).
  *
- * What turns each case red (wave-24 probes): dropping the `version` check or the `!o`
- * guard (rejects — the openwop leg carries `messages: []` so ONLY the version check can
- * refuse it, and the messages are pinned so a TypeError cannot stand in for the typed
- * refusal); not skipping non-string content / echoing an unknown role (skips malformed);
- * not reversing the parent walk (ADR 0992: typed OpenwopError refusals, archive
- * reason, unknown roles carried as written, create_time read) (chronological); dropping the mapping guard (rejects a
- * non-ChatGPT payload); weakening the cycle guard (cyclic tree — note that REMOVING it
- * outright hangs the synchronous walk on a self-cycle rather than failing).
+ * Guards: a malformed input is a typed `OpenwopError` 400 (`validation_error`, with
+ * `details.reason`), never a plain Error the middleware maps to a 500; an ARRAY (a
+ * ChatGPT data-export archive) is refused as `reason: 'archive'` by BOTH parsers; a
+ * message whose content is not a string is skipped; an unknown role is carried as
+ * written (ADR 0992 D2: defaulting it to 'user' made a workflow card re-import as
+ * speech); `createdAt` is carried through; the ChatGPT mapping tree is walked from
+ * `current_node` and reversed into chronological order; a cyclic tree terminates;
+ * `create_time` (epoch seconds) is read and a value no Date can hold is dropped.
+ *
+ * Every refusal is asserted by its reason and message, so a TypeError (null guard
+ * removed) or a neighbouring refusal cannot stand in for the one a case names. The
+ * openwop version leg carries `messages: []`, so ONLY the version check can refuse it.
+ *
+ * Sabotages each red their case (wave 106 probes w106g2-ip-*): the archive checks, the
+ * version check, the null guard, the content skip, the unknown-role spelling, the
+ * createdAt carry, the reverse, the mapping guard, the cycle guard (weakened, since
+ * REMOVING it outright hangs the synchronous walk on a self-cycle), the seconds→ms
+ * scale and the finite-date check.
  */
 import { describe, it, expect } from 'vitest';
+import { OpenwopError } from '../src/types.js';
 import { parseOpenwopExport, parseChatGptExport } from '../src/features/chat-export/importParser.js';
+
+/** What `fn` threw; fails the case if it did not throw. */
+function thrown(fn: () => unknown): unknown {
+  try { fn(); } catch (e) { return e; }
+  throw new Error('expected a throw');
+}
 
 describe('parseOpenwopExport', () => {
   it('round-trips the openwop-v1 shape', () => {
@@ -20,31 +38,32 @@ describe('parseOpenwopExport', () => {
       conversation: { sessionId: 'c1', title: 'Plan', createdAt: 'x' },
       messages: [{ role: 'user', content: 'q', createdAt: 't1' }, { role: 'assistant', content: 'a', createdAt: 't2' }],
     });
-    expect(out.title).toBe('Plan');
-    expect(out.turns).toHaveLength(2);
-    expect(out.turns[0]).toMatchObject({ role: 'user', content: 'q', createdAt: 't1' });
+    expect(out).toEqual({ title: 'Plan', turns: [{ role: 'user', content: 'q', createdAt: 't1' }, { role: 'assistant', content: 'a', createdAt: 't2' }] });
   });
   it('rejects a non-openwop payload', () => {
     // `messages: []` is present, so the VERSION check alone must refuse it.
-    expect(() => parseOpenwopExport({ version: 'other', messages: [] })).toThrow(/Not an OpenWOP conversation export/);
+    const versionErr = thrown(() => parseOpenwopExport({ version: 'other', messages: [] }));
+    expect(versionErr).toBeInstanceOf(OpenwopError);
+    expect(versionErr).toMatchObject({ code: 'validation_error', httpStatus: 400, message: 'Not an OpenWOP conversation export (openwop-v1).', details: { field: 'data', reason: 'not_openwop' } });
     // null must be refused by the guard, not by a TypeError on `null.version`.
-    expect(() => parseOpenwopExport(null)).toThrow(/Not an OpenWOP conversation export/);
-    let code: unknown;
-    try { parseOpenwopExport({ version: 'other', messages: [] }); } catch (e) { code = (e as { code?: unknown }).code; }
-    expect(code).toBe('validation_error');
+    const nullErr = thrown(() => parseOpenwopExport(null));
+    expect(nullErr).toBeInstanceOf(OpenwopError);
+    expect(nullErr).toMatchObject({ code: 'validation_error', details: { reason: 'not_openwop' } });
   });
   it('ADR 0992 D7 — refuses a multi-conversation archive with a typed 400 naming it', () => {
-    let err: { httpStatus?: unknown; details?: { reason?: unknown } } = {};
-    try { parseOpenwopExport([{ version: 'openwop-v1', messages: [] }]); } catch (e) { err = e as typeof err; }
-    expect(err.httpStatus).toBe(400);
-    expect(err.details?.reason).toBe('archive');
-    expect(() => parseChatGptExport([{ mapping: {} }])).toThrow(/archive/);
+    for (const err of [
+      thrown(() => parseOpenwopExport([{ version: 'openwop-v1', messages: [] }])),
+      thrown(() => parseChatGptExport([{ mapping: {} }])),
+    ]) {
+      expect(err).toBeInstanceOf(OpenwopError);
+      expect(err).toMatchObject({ code: 'validation_error', httpStatus: 400, message: expect.stringMatching(/archive of several conversations/), details: { reason: 'archive' } });
+    }
   });
   // ADR 0992 D2 — an unknown role is carried as written (the importer skips and
   // counts it); defaulting it to 'user' made a workflow card re-import as speech.
   it('skips malformed messages + carries an unknown role as written', () => {
     const out = parseOpenwopExport({ version: 'openwop-v1', messages: [{ role: 'weird', content: 'x' }, { content: 123 }, { content: 'y' }] });
-    expect(out.turns.map((t) => t.role)).toEqual(['weird', 'unknown']);
+    expect(out.turns).toEqual([{ role: 'weird', content: 'x' }, { role: 'unknown', content: 'y' }]);
   });
 });
 
@@ -59,12 +78,12 @@ describe('parseChatGptExport', () => {
         n2: { message: { author: { role: 'assistant' }, content: { parts: ['hi there'] } }, parent: 'n1' },
       },
     });
-    expect(out.title).toBe('GPT chat');
-    expect(out.turns.map((t) => t.content)).toEqual(['hello', 'hi there']); // chronological
-    expect(out.turns[0]!.role).toBe('user');
+    expect(out).toEqual({ title: 'GPT chat', turns: [{ role: 'user', content: 'hello' }, { role: 'assistant', content: 'hi there' }] });
   });
   it('rejects a non-ChatGPT payload', () => {
-    expect(() => parseChatGptExport({})).toThrow(/Not a ChatGPT conversation export/);
+    const err = thrown(() => parseChatGptExport({}));
+    expect(err).toBeInstanceOf(OpenwopError);
+    expect(err).toMatchObject({ code: 'validation_error', httpStatus: 400, message: 'Not a ChatGPT conversation export.', details: { reason: 'not_chatgpt' } });
   });
   it('tolerates a cyclic/partial tree without throwing', () => {
     const out = parseChatGptExport({ current_node: 'a', mapping: { a: { message: { author: { role: 'user' }, content: { parts: ['x'] } }, parent: 'a' } } });
@@ -75,7 +94,7 @@ describe('parseChatGptExport', () => {
       a: { message: { author: { role: 'user' }, content: { parts: ['x'] }, create_time: 1700000000.5 }, parent: null },
       b: { message: { author: { role: 'assistant' }, content: { parts: ['y'] }, create_time: 1e300 }, parent: 'a' },
     } });
-    expect(out.turns[0]!.createdAt).toBe(new Date(1700000000500).toISOString());
-    expect(out.turns[1]!.createdAt).toBeUndefined();
+    // 1700000000.5 s, converted by hand: 2023-11-14T22:13:20.500Z.
+    expect(out.turns).toEqual([{ role: 'user', content: 'x', createdAt: '2023-11-14T22:13:20.500Z' }, { role: 'assistant', content: 'y' }]);
   });
 });

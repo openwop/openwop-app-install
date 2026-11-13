@@ -1,6 +1,6 @@
 {
   "name": "feature.funnels.nodes",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "kind": "node",
   "description": "Funnels feature node pack (Funnel A chat-drivability) — nodes over the ctx.features.funnels surface. Reads (role:action): `list` / `get` / `step-stats` (per-step visitor-cohort views/completions, unattributed completions, paid orders and revenue per currency); `get` and `step-stats` fail typed `not_found` for an unknown funnel (ADR 1023). Writes (role:side-effect, ADR 0948 P1 — a replay fork is served the recorded output, never re-executed): `create` and `set-steps` author DRAFT state only; `set-steps` refuses a published funnel (editing a live funnel is publishing its new steps). `request-publish` (ADR 0948 P1b) queues a `funnel-publish` review and returns; a human's approve publishes. Blueprint plumbing (ADR 0948 P2, pure, role:action): `compose-step-page` builds a step page's sections from schema-validated copy (closed-world; the opt-in form must be one of the org's own forms), `step-result` returns a step sub-chain's step through the run variable bag, `collect-steps` orders the steps a blueprint's sub-chains returned. No node and no ctx.funnels method publishes ('agent proposes, human disposes'). ADR 1023: `check-offers` refuses (offer_not_found) any offer product that is not an active product of the org, as a blueprint's first node; `offer-context` gives a step's copy model its ONE input — closed projections of the brief and the offered product(s), never raw rows.",
   "author": "OpenWOP App",

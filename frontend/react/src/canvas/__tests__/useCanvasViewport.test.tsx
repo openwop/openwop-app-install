@@ -10,6 +10,16 @@
  * attributes are real DOM here; the native isContentEditable fallback requires
  * a browser. GraphSurface additionally exercises native mouse events with
  * pointer type names to retain button data through React's bubbling path.
+ *
+ * ADR 0333 Phase 1 — the chrome gate resolves the OWNING control of a pointer
+ * target (an SVG icon path, a nested label) through its ancestors: native
+ * controls via `closest`, ARIA widget roles and explicit `contenteditable` by an
+ * ancestor walk, with the nearest `contenteditable="false"` an island.
+ * Sabotage that turns it red (/grade-tests w107): `closest` narrowed to the
+ * target itself; the role walk stopped at the target; `group` treated as a
+ * widget; the false island skipped; `plaintext-only` dropped; the Element guard
+ * dropped; the fit's per-fit clamp ignored; the unmeasured guard dropped; the
+ * opt-in, Space or touch conjunct of the pan gate dropped.
  */
 import { describe, it, expect } from 'vitest';
 import { renderHook, act } from '@testing-library/react';

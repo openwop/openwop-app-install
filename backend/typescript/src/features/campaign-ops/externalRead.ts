@@ -27,6 +27,7 @@ import type { MarketingCampaign } from '../campaign-orchestration/types.js';
 import { listRecords } from '../campaign-connectors/performanceService.js';
 import { runClientStamp } from '../../host/runClientOrg.js';
 import { featureAccessRefusal } from '../../host/workflowFeatureGate.js';
+import { tenantToggleSubject } from '../../host/operatorPlanExemption.js';
 import { getClient } from './clientService.js';
 import { createRequest } from './requestService.js';
 import { CAMPAIGN_OPS_RUN_STAMP, bindRunToClient } from './surface.js';
@@ -66,7 +67,12 @@ export function bindExternalRead(scope: BundleScope, clientId: string): Promise<
  */
 export async function bindExternal(scope: BundleScope, clientId: string, need: 'read' | 'request'): Promise<string> {
   if (!clientId) throw new OpenwopError('validation_error', '`clientId` is required.', 400, { field: 'clientId' });
-  if (!(await resolveOne('campaign-ops', { tenantId: scope.tenantId }).catch(() => null))?.enabled) throw notFound();
+  // CC-MCP-1 (ADR 1108): both feature checks resolve with the RUN's tenant-only
+  // toggle subject, so the listed operator's plan exemption reaches them while its
+  // stamp holds. With `{ tenantId }` alone, every read in a free-plan workspace was
+  // the not-found below, whatever the client's `externalAgents` said.
+  const subject = tenantToggleSubject(scope);
+  if (!(await resolveOne('campaign-ops', subject).catch(() => null))?.enabled) throw notFound();
   let person: string;
   try {
     person = await bindRunToClient(scope, clientId, need === 'request' ? 'workspace:write' : 'workspace:read');
@@ -81,7 +87,7 @@ export async function bindExternal(scope: BundleScope, clientId: string, need: '
   if (scope.runId && !run) throw notFound();
   const binding = runClientStamp(run?.metadata as Record<string, unknown> | undefined);
   if (binding && (!('orgId' in binding) || binding.orgId !== clientId)) throw notFound();
-  if (await featureAccessRefusal('campaign-orchestration', scope.tenantId)) throw notFound();
+  if (await featureAccessRefusal('campaign-orchestration', scope.tenantId, subject)) throw notFound();
   const client = await getClient(scope.tenantId, clientId);
   if (!client) throw notFound();
   const allowed = externalAgentsOf(client.externalAgents);

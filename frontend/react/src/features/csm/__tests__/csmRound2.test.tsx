@@ -1,23 +1,35 @@
 /**
- * UX_UPGRADE-csm ROUND 2 — XCS-0..3.
+ * UX_UPGRADE-csm ROUND 2 (XCS-0..3) plus the ADR 0882 owner / plays / grade-ux
+ * fixes. The name is a grading-pass leftover; every case below carries its own
+ * claim (one gap id each), so the file is kept whole rather than split.
  *
  *  - CS-SP-1: a FAILED company-name read is never cached as empty forever —
- *    the picker shows a named error + retry, and a retry that succeeds
- *    populates it (the old `[]`-cache made that structurally impossible).
- *  - CS-SP-3: `owner` finally renders (it was captured, searchable, and
- *    PATCHable with no surface).
- *  - CS-SP-5: the GRID view carries the renewal urgency chip too.
- *  - CSM-G3: the "renewing soon / past due" facet; undated rows SINK in the
- *    renewal sort.
- *  - CS-SP-2 / CSM-R2-3: ARR renders with its unit; the portfolio band groups
- *    by currency — never a blind cross-unit total.
- *  - CS-SP-7: an emptied health-score field errors instead of recording 0.
+ *    the cell says "name unavailable", and a Retry that succeeds recovers.
+ *  - CS-SP-3 / ADR 0882 D3: the owner renders. A legacy typed owner is marked
+ *    as a typed name; a member owner shows their name, "You" for the viewer and
+ *    "Former member" for one who left; "Mine" and "Unassigned" filter; the add
+ *    form sends a member id, never typed text.
+ *  - ADR 0882 D7 + CSM2UX-3: the plays card only deep-links into the builder
+ *    and says how each play starts (the rescue play needs its event bound).
+ *  - CSM2UX-1 (focus), -2 (an owner is not "former" while the people list is
+ *    loading), -4 (a Viewer gets no write control), -10 (a DSAR-erased owner).
+ *  - CS-SP-5 / CSM-G3: the GRID carries the renewal urgency chip; the renewal
+ *    facet; undated rows SINK in the renewal sort. The clock is pinned (local
+ *    noon) so "in 5 d" cannot straddle a midnight or a shifted year.
+ *  - CS-SP-2 / CSM-R2-3 / F8: ARR renders with its unit; the portfolio band
+ *    groups by currency — never a blind cross-unit total; an invalid code
+ *    degrades to the number plus the raw code.
+ *  - CS-SP-7 / ADR 0582 §4: an emptied score creates the account UNSCORED; an
+ *    out-of-range score is natively invalid.
  *
- * Sabotage-witnessed (w7 grade-tests): making `retryCompanies` not bump its
- * tick reds CS-SP-1 (the editor-open refetch also fails here, so ONLY the
- * Retry can recover); dropping the grid's `days <= 30` chip reds CS-SP-5;
- * rendering ARR without its currency reds CS-SP-2; sending `arrCurrency`
- * without an amount reds the create leg.
+ * Sabotage-probed at 3bcc187f9 (/grade-tests w106, `w106g3-r*`): a retry that
+ * does not bump its tick, a failed read shown as the raw id, the typed-name
+ * mark, member name, "You", the Mine/Unassigned predicates or the member-id
+ * create field broken, the builder / event-binding links changed, autoFocus
+ * moved, "Former member" while loading, any one Viewer gate opened, the erased
+ * marker shown raw, the grid's 30-day chip, either renewal facet, currency
+ * formatting or grouping, currency-without-amount, an empty score sent as 0,
+ * the native max, and an undated sort key each turn a named case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react';
@@ -64,6 +76,14 @@ const acct = (id: string, name: string, over: Partial<Account> = {}): Account =>
   accountId: id, tenantId: 't1', name, healthScore: 80,
   createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z', ...over,
 });
+
+/** Renewal cases pin `Date` (only) to a fixed LOCAL noon: `day()` here and the
+ *  page's `daysToRenewal` then read the same instant, whatever the wall clock or
+ *  the clock-shift lane says. */
+const pinClock = (): void => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date(2026, 5, 15, 12, 0, 0));
+};
 
 const day = (offset: number): string => {
   const d = new Date();
@@ -123,7 +143,7 @@ describe('CS-SP-3 — owner is rendered', () => {
 });
 
 describe('ADR 0882 D3 — the owner is a member', () => {
-  it('shows the member\'s name, "You" for me, and "Mine" filters to my accounts', async () => {
+  it('names the member owner, "You" for me, "Former member" for one who left; Mine and Unassigned filter', async () => {
     listAccounts.mockResolvedValue([
       acct('a1', 'MineCo', { ownerUserId: 'user:me' }),
       acct('a2', 'DanaCo', { ownerUserId: 'user:dana' }),
@@ -142,6 +162,9 @@ describe('ADR 0882 D3 — the owner is a member', () => {
     fireEvent.change(screen.getByLabelText(/filter by owner/i), { target: { value: 'unassigned' } });
     expect(screen.getByText('NobodyCo')).toBeTruthy();
     expect(screen.queryByText('MineCo')).toBeNull();
+    // A former member is still an owner: "Unassigned" does not sweep them in.
+    expect(screen.queryByText('GoneCo')).toBeNull();
+    expect(screen.queryByText('DanaCo')).toBeNull();
   });
 
   it('the create form sends a member id, never typed text', async () => {
@@ -196,9 +219,10 @@ describe('ADR 0882 — grade-ux fixes', () => {
     api.listAssignees.mockImplementationOnce(() => new Promise(() => {}));
     listAccounts.mockResolvedValue([acct('a1', 'PendingCo', { ownerUserId: 'user:dana' })]);
     renderPage();
-    await screen.findByText('PendingCo');
+    const row = (await screen.findByText('PendingCo')).closest('tr')!;
     expect(screen.queryByText('Former member')).toBeNull();
-    expect(screen.getAllByText('Loading…').length).toBeGreaterThan(0);
+    // The owner cell says what is true right now: the name is still loading.
+    expect(within(row).getByText('Loading…')).toBeTruthy();
   });
 
   it('CSM2UX-4: a Viewer is not offered the add form, row actions or play set-up', async () => {
@@ -208,8 +232,11 @@ describe('ADR 0882 — grade-ux fixes', () => {
     await screen.findByText('ReadOnlyCo');
     expect(screen.queryByRole('button', { name: /add account/i })).toBeNull();
     expect(screen.queryByRole('button', { name: /edit readonlyco/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /delete readonlyco/i })).toBeNull();
     expect(screen.queryByRole('link', { name: /^set up .* in the builder$/i })).toBeNull();
     expect(screen.getByText(/needs edit access/i)).toBeTruthy();
+    // Read access is untouched: the plays are still explained, only not offered.
+    expect(screen.getByText('Red-account rescue')).toBeTruthy();
   });
 
   it('CSM2UX-10: a DSAR-erased owner reads as "Erased", not the raw marker', async () => {
@@ -222,6 +249,9 @@ describe('ADR 0882 — grade-ux fixes', () => {
 });
 
 describe('CS-SP-5 + CSM-G3 — grid chip parity, facet, undated sink', () => {
+  beforeEach(pinClock);
+  afterEach(() => { vi.useRealTimers(); });
+
   it('the GRID view shows the urgency chip (round 1 fixed only the table)', async () => {
     listAccounts.mockResolvedValue([
       acct('a1', 'SoonCo', { renewalDate: day(5) }),
@@ -340,6 +370,9 @@ describe('CS-SP-7 / ADR 0582 §4 — an emptied score field is UNSCORED, never a
 });
 
 describe('CSM-G3 — renewal sort sinks undated rows (ascending)', () => {
+  beforeEach(pinClock);
+  afterEach(() => { vi.useRealTimers(); });
+
   it('soonest first; undated rows come LAST', async () => {
     listAccounts.mockResolvedValue([
       acct('a1', 'NoDateCo', {}),
@@ -372,7 +405,8 @@ describe('F8 coverage — formatArr edge branches (band-level)', () => {
     await screen.findByText('UnitlessCo');
     const band = screen.getByRole('group', { name: /portfolio/i });
     expect(band.textContent).toMatch(/700/);
-    expect(band.textContent).toMatch(/300/);
+    // Degrades to the number plus the raw code — not dropped, not a crash.
+    expect(band.textContent).toMatch(/300\s?XX!/);
     expect(band.textContent).not.toMatch(/1[,.]?000/); // never a blind cross-group total
   });
 });

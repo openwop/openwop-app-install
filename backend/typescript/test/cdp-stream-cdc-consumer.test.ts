@@ -231,7 +231,7 @@ describe('HTTP end-to-end — admin-gated config + unauthenticated signed public
   });
 
   it('a different caller cannot (re)configure the owner\'s inbound — 403, config unchanged', async () => {
-    // A second, distinct bearer principal (`bearer:cdc-intr`): configured for this case only.
+    // A second, distinct bearer principal (`envKeyPrincipalId('cdc-intruder-key')`): configured for this case only.
     const prior = process.env.OPENWOP_API_KEYS;
     process.env.OPENWOP_API_KEYS = 'dev-token:*,cdc-intruder-key:*';
     let denied: { status: number; body: { error?: string; message?: string } };

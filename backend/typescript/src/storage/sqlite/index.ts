@@ -2778,6 +2778,21 @@ export function openSqliteStorage(dbPath: string): Storage {
       return row ? rowToNotificationSqlite(row) : null;
     },
 
+    async resolveRequestNotifications({ tenantId, runId, interruptId, resolution }) {
+      // ADR 1114 (#5868) — mirrors postgres; SET expressions read the old row.
+      const res = db.prepare(
+        `UPDATE notifications
+            SET metadata = json_set(COALESCE(metadata, '{}'), '$.resolution', json(?)),
+                read_at = CASE WHEN status = 'unread' THEN COALESCE(read_at, ?) ELSE read_at END,
+                status = CASE WHEN status = 'unread' THEN 'read' ELSE status END
+          WHERE tenant_id = ? AND run_id = ? AND interrupt_id IS NOT NULL
+            AND (? IS NULL OR interrupt_id = ?)
+            AND status <> 'archived'
+            AND json_extract(COALESCE(metadata, '{}'), '$.resolution') IS NULL`,
+      ).run(JSON.stringify(resolution), resolution.at, tenantId, runId, interruptId ?? null, interruptId ?? null);
+      return res.changes;
+    },
+
     async markAllNotificationsRead(tenantId, now, recipientUserId, recipientRoles) {
       // ADR 0050 — when scoped to a recipient, clear only the rows that user can
       // see (their addressed rows + true broadcasts + role rows they hold, Phase 3),

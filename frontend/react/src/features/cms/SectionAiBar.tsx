@@ -64,6 +64,8 @@ export function SectionAiBar({ orgId, section, onApply, errorMessage }: {
           {busy === 'custom' ? t('aiWorking') : t('aiAsk')}
         </Button>
       </form>
+      {/* ADR 1112 P6 — a large schedule is rewritten in parts and can take up to a minute. */}
+      {busy !== null && section.type === 'scheduleSim' ? <p className="u-label-sm muted u-m-0">{t('translatingLongHint')}</p> : null}
       {error ? <p className="u-label-sm u-m-0" role="alert">{error}</p> : null}
       {proposal ? (
         <div className="cms-ai-proposal" role="region" aria-label={t('aiProposalLabel')}>

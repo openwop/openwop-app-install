@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next';
 import { Notice } from '../../ui/Notice.js';
 import { formatNumber } from '../../i18n/format.js';
 import { FeatureDisabledError, getAdMap, type AdMapReport, type AdMapRow } from './campaignIntelClient.js';
+import { TableScroll } from '../../ui/DataTable.js';
 
 function Landing({ row }: { row: AdMapRow }): JSX.Element {
   const { t } = useTranslation('campaign-intel');
@@ -46,7 +47,7 @@ export function AdMapSection({ orgId }: { orgId: string }): JSX.Element | null {
       <h2 id="admap-title" className="u-mt-0 u-fs-15">{t('admapTitle')}</h2>
       <p className="muted u-fs-13 u-mt-0">{t('admapHint', { model: t(`model_${report.model}`) })}</p>
       {report.ledgerCapped ? <Notice variant="warning">{t('admapLedgerCapped')}</Notice> : null}
-      <div className="table-scroll table--stack">
+      <TableScroll className="table--stack" label={t('admapTitle')}>
         <table className="u-w-full">
           <caption className="sr-only">{t('admapTitle')}</caption>
           <thead>
@@ -72,7 +73,7 @@ export function AdMapSection({ orgId }: { orgId: string }): JSX.Element | null {
             ))}
           </tbody>
         </table>
-      </div>
+      </TableScroll>
       <p className="muted u-fs-13 u-mb-0">
         {t('admapTrackingNote')}{' '}
         {t('admapGrainNote')}{report.unplacedLegacyRows > 0 ? ` ${t('admapLegacyRows', { count: report.unplacedLegacyRows })}` : ''}

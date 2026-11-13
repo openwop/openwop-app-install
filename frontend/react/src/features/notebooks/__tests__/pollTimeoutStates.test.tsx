@@ -48,6 +48,10 @@ const listTransformations = vi.fn<typeof Client.listTransformations>();
 const addYoutubeSource = vi.fn<typeof Client.addYoutubeSource>();
 const applyTransformation = vi.fn<typeof Client.applyTransformation>();
 const summarizeSource = vi.fn<typeof Client.summarizeSource>();
+/** ADR 1103 D9 — the poller asks the run whether waiting is still honest. Default:
+ *  still running, so the NBU-6 give-up cases below keep exercising the give-up. */
+const getRun = vi.fn();
+vi.mock('../../../client/runsClient.js', () => ({ getRun: (...a: unknown[]) => getRun(...a) }));
 const toastError = vi.fn();
 const toastSuccess = vi.fn();
 const toastInfo = vi.fn();
@@ -110,7 +114,8 @@ beforeEach(() => {
   announceSpy.mockClear();
   // `mockReset`, not just `clearAllMocks`: an unconsumed `mockResolvedValueOnce` must not leak
   // into the next case (clearAllMocks keeps implementations, Once queue included).
-  for (const m of [listSources, listNotes, listTransformations, addYoutubeSource, applyTransformation, summarizeSource, toastError, toastSuccess, toastInfo]) m.mockReset();
+  for (const m of [listSources, listNotes, listTransformations, addYoutubeSource, applyTransformation, summarizeSource, toastError, toastSuccess, toastInfo, getRun]) m.mockReset();
+  getRun.mockResolvedValue({ runId: 'r', workflowId: 'w', status: 'running' });
   vi.useFakeTimers({ shouldAdvanceTime: true });
   listSources.mockResolvedValue([]);
   listNotes.mockResolvedValue([]);
@@ -227,6 +232,9 @@ describe('NBU-6 — the transform poll gives up the same way', () => {
     // The per-source Transform menu appears once the template catalog resolves.
     const select = await screen.findByRole('combobox');
     fireEvent.change(select, { target: { value: 'tpl-1' } });
+    // NBK92-15 — choosing starts nothing; Apply does.
+    expect(applyTransformation).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: /apply the chosen transformation/i }));
     await runOutThePoll();
 
     expect(screen.getByText('Still waiting for that transformation')).toBeTruthy();
@@ -246,14 +254,14 @@ describe('NBU-6 — the summarize poll gives up the same way', () => {
   it('states the give-up rather than silently dropping the pending spinner', async () => {
     listSources.mockResolvedValue([source('d1')]);
     await renderWorkspace();
-    fireEvent.click(await screen.findByRole('button', { name: 'Summarize' }));
+    fireEvent.click(await screen.findByRole('button', { name: /^summarize\b/i }));
     await runOutThePoll();
 
     expect(screen.getByText('Still waiting for that summary')).toBeTruthy();
     expect(screen.getByText(/may still be generating/i)).toBeTruthy();
     // The row's pending flag still clears — the give-up states itself INSTEAD of
     // leaving a spinner that never resolves, not in addition to one.
-    expect(screen.queryByRole('button', { name: 'Summarizing…' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^summarizing/i })).toBeNull();
   });
 });
 
@@ -335,7 +343,7 @@ describe('ADR 0602 correction round — the give-up card', () => {
     // unconditionally; `panelStalled()` is what makes it true per panel.
     listSources.mockResolvedValue([source('d1')]);
     const r = await renderWorkspace();
-    fireEvent.click(await screen.findByRole('button', { name: 'Summarize' }));
+    fireEvent.click(await screen.findByRole('button', { name: /^summarize\b/i }));
     // The source list goes empty underneath (the server lost it / a peer removed
     // it) while the summarize give-up stands.
     listSources.mockResolvedValue([]);
@@ -419,12 +427,140 @@ describe('ADR 0602 correction round — L7, the liveRef that never reset', () =>
     listSources.mockResolvedValue([source('d1')]);
     render(<StrictMode><MemoryRouter><ProjectSourcesPanel projectId="nb1" /></MemoryRouter></StrictMode>);
     await screen.findByLabelText('New note');
-    fireEvent.click(await screen.findByRole('button', { name: 'Summarize' }));
+    fireEvent.click(await screen.findByRole('button', { name: /^summarize\b/i }));
     await runOutThePoll();
 
     // The give-up is REACHED, which is only possible if the poll ran at all.
     expect(screen.getByText('Still waiting for that summary')).toBeTruthy();
     // And the row's pending flag cleared, rather than spinning forever.
-    expect(screen.queryByRole('button', { name: 'Summarizing…' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^summarizing/i })).toBeNull();
+  });
+});
+
+describe('ADR 1103 D9 — a run that ENDED without the item is a failure, not a stall', () => {
+  it('a failed summarize run says it failed, names why, links the run, and offers no "Check again"', async () => {
+    listSources.mockResolvedValue([source('d1')]);
+    getRun.mockResolvedValue({ runId: 'run-sum-1', workflowId: 'notebooks.summarize', status: 'failed', error: { code: 'notebook_write_forbidden', message: 'x' } });
+    await renderWorkspace();
+    fireEvent.click(await screen.findByRole('button', { name: /^summarize\b/i }));
+    await runOutThePoll();
+    expect(screen.getByText('The summary of “Source d1” was not saved')).toBeTruthy();
+    expect(screen.getByText('The run was not allowed to change this notebook.')).toBeTruthy();
+    // The reason is SPOKEN too (StateCard announces only the title).
+    await act(async () => { await vi.advanceTimersByTimeAsync(10); });
+    // …and LAST, so it is what the live region holds (the card's own title came first).
+    expect(announceSpy.mock.lastCall?.[0]).toBe('The summary of “Source d1” was not saved. The run was not allowed to change this notebook.');
+    expect(screen.queryByText('Still waiting for that summary')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Check again' })).toBeNull();
+    expect(screen.getByRole('link', { name: 'View the run' }).getAttribute('href')).toBe('/runs/run-sum-1');
+    // A failure can be put away.
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    expect(screen.queryByText('The summary of “Source d1” was not saved')).toBeNull();
+    // The pending flag clears either way.
+    expect(screen.queryByRole('button', { name: /^summarizing/i })).toBeNull();
+  });
+
+  it('a run that COMPLETED but wrote nothing is a failure too (the success-with-nothing shape)', async () => {
+    listSources.mockResolvedValue([source('d1')]);
+    getRun.mockResolvedValue({ runId: 'run-sum-1', workflowId: 'notebooks.summarize', status: 'completed' });
+    await renderWorkspace();
+    fireEvent.click(await screen.findByRole('button', { name: /^summarize\b/i }));
+    await runOutThePoll();
+    // It DID finish — the copy must not say otherwise (UX re-grade #1).
+    expect(screen.getByText('The summary of “Source d1” was not saved')).toBeTruthy();
+    expect(screen.getByText('The run finished, but nothing was saved. View the run for details.')).toBeTruthy();
+  });
+
+  it('a RE-summarize is judged by its run, not by the summary the source already had (UX re-grade #2)', async () => {
+    listSources.mockResolvedValue([source('d1', { hasSummary: true })]);
+    getRun.mockResolvedValue({ runId: 'run-sum-1', workflowId: 'notebooks.summarize', status: 'failed', error: { code: 'source_changed', message: 'x' } });
+    await renderWorkspace();
+    fireEvent.click(await screen.findByRole('button', { name: /^re-summarize\b/i }));
+    await runOutThePoll();
+    expect(screen.getByText('The summary of “Source d1” was not saved')).toBeTruthy();
+    expect(screen.getByText('The source changed while it was being summarized. Summarize it again.')).toBeTruthy();
+  });
+
+  it('CONTROL: a run still running gives up as before (the stall card, with "Check again")', async () => {
+    listSources.mockResolvedValue([source('d1')]);
+    await renderWorkspace();
+    fireEvent.click(await screen.findByRole('button', { name: /^summarize\b/i }));
+    await runOutThePoll();
+    expect(screen.getByText('Still waiting for that summary')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Check again' })).toBeTruthy();
+    expect(screen.queryByText('The summary of “Source d1” was not saved')).toBeNull();
+  });
+});
+
+describe('ADR 1103 D9 — round-2 UX folds', () => {
+  it('two FAILED list reads after a completed run are not "nothing was saved" (the M1 rule)', async () => {
+    listSources.mockResolvedValue([source('d1')]);
+    getRun.mockResolvedValue({ runId: 'run-sum-1', workflowId: 'notebooks.summarize', status: 'completed' });
+    await renderWorkspace();
+    fireEvent.click(await screen.findByRole('button', { name: /^summarize\b/i }));
+    listSources.mockRejectedValue(new Error('read down'));
+    await runOutThePoll();
+    expect(screen.queryByText('The run finished, but nothing was saved. View the run for details.')).toBeNull();
+    // It gives up honestly instead.
+    expect(screen.getByText('Still waiting for that summary')).toBeTruthy();
+  });
+
+  it('"Check again" asks the run, and a run that has since failed becomes the failure', async () => {
+    listSources.mockResolvedValue([source('d1')]);
+    await renderWorkspace();
+    fireEvent.click(await screen.findByRole('button', { name: /^summarize\b/i }));
+    await runOutThePoll();
+    expect(screen.getByText('Still waiting for that summary')).toBeTruthy();
+    getRun.mockResolvedValue({ runId: 'run-sum-1', workflowId: 'notebooks.summarize', status: 'failed', error: { code: 'source_empty', message: 'x' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(screen.getByText('The summary of “Source d1” was not saved')).toBeTruthy();
+    expect(screen.getByText('The source was empty or is no longer in this notebook.')).toBeTruthy();
+  });
+
+  it('an unrelated arrival does not clear a FAILED card', async () => {
+    listSources.mockResolvedValue([source('d1')]);
+    getRun.mockResolvedValue({ runId: 'run-sum-1', workflowId: 'notebooks.summarize', status: 'failed', error: { code: 'notebook_unavailable', message: 'x' } });
+    await renderWorkspace();
+    fireEvent.click(await screen.findByRole('button', { name: /^summarize\b/i }));
+    await runOutThePoll();
+    expect(screen.getByText('The summary of “Source d1” was not saved')).toBeTruthy();
+    // A list refresh now shows what would have SATISFIED a stall (a summary present):
+    // remount re-reads the list and re-runs the M3a clear.
+    listSources.mockResolvedValue([source('d1', { hasSummary: true }), source('d2')]);
+    cleanup();
+    await renderWorkspace();
+    await screen.findByText('Source d2');
+    expect(screen.getByText('The summary of “Source d1” was not saved')).toBeTruthy();
+    // Only the user puts it away.
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    expect(screen.queryByText('The summary of “Source d1” was not saved')).toBeNull();
+  });
+});
+
+describe('ADR 1103 D9 — round-3 UX folds', () => {
+  it('"Check again" on a run that COMPLETED with nothing saved turns into that failure', async () => {
+    listSources.mockResolvedValue([source('d1')]);
+    await renderWorkspace();
+    fireEvent.click(await screen.findByRole('button', { name: /^summarize\b/i }));
+    await runOutThePoll();
+    expect(screen.getByText('Still waiting for that summary')).toBeTruthy();
+    getRun.mockResolvedValue({ runId: 'run-sum-1', workflowId: 'notebooks.summarize', status: 'completed' });
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(screen.getByText('The summary of “Source d1” was not saved')).toBeTruthy();
+    expect(screen.getByText('The run finished, but nothing was saved. View the run for details.')).toBeTruthy();
+  });
+
+  it('a settled transform disarms its choice (no second paid run from one pick)', async () => {
+    listSources.mockResolvedValue([source('d1')]);
+    await renderWorkspace();
+    const select = await screen.findByRole<HTMLSelectElement>('combobox');
+    fireEvent.change(select, { target: { value: 'tpl-1' } });
+    fireEvent.click(screen.getByRole('button', { name: /apply the chosen transformation/i }));
+    await runOutThePoll();
+    expect(applyTransformation).toHaveBeenCalledTimes(1);
+    expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('');
+    expect((screen.getByRole('button', { name: /apply the chosen transformation/i }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

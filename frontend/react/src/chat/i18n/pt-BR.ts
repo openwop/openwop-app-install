@@ -990,6 +990,7 @@ export const messages = {
   // ADR 0153 Fase 1 — canvas de slides
   slidesInvalid: 'Não foi possível renderizar esta apresentação (dados de slides inválidos).',
   slidesDeckLabel: 'Apresentação',
+  slidesTableLabel: 'Tabela: {{columns}}',
   slidesNotesLabel: 'Notas:',
   // ADR 0153 Fase 2 — canvas do construtor de apps
   appBuilderInvalid: 'Não foi possível renderizar este design de app (dados inválidos).',

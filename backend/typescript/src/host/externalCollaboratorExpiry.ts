@@ -1,16 +1,16 @@
 /**
- * ADR 0958 D7 / P5 — the expiry-notice tick: a feature-owned, unref'd interval
- * started from the collaboration routes (the cms `publishSweep` and commerce
+ * ADR 0958 D7 / P5 — the expiry-notice tick: a host-owned (ADR 1099 D2), unref'd interval
+ * started from the collaborator routes (the cms `publishSweep` and commerce
  * reservation-sweep shape; no new scheduler primitive). Each tick runs
  * `notifyExpiringGrants`, which claims every grant by CAS before it announces
  * it, so running on several instances, or more often than daily, sends each
  * notice once.
  */
-import { createLogger } from '../../../observability/logger.js';
-import { runUnderWorkerContract } from '../../../storage/eventEraAdapter.js';
-import { notifyExpiringGrants } from '../../../host/externalCollaborators.js';
+import { createLogger } from '../observability/logger.js';
+import { runUnderWorkerContract } from '../storage/eventEraAdapter.js';
+import { kindCollaborationOn, notifyExpiringGrants } from './externalCollaborators.js';
 
-const log = createLogger('campaign-ops.collab.expiryNotices');
+const log = createLogger('host.externalCollaboratorExpiry');
 const POLL_MS = (() => {
   const raw = Number(process.env.OPENWOP_COLLAB_EXPIRY_NOTICE_MS);
   return Number.isFinite(raw) && raw >= 60_000 ? raw : 60 * 60_000;
@@ -18,9 +18,10 @@ const POLL_MS = (() => {
 
 let started = false;
 
-/** `collaborationOn` is the routes' `collabEnabledFor` (passed in, so this
- *  module does not import the routes that start it). */
-export function startCollaboratorExpiryNotices(collaborationOn: (tenantId: string) => Promise<boolean>): { stop: () => void } | null {
+/** ADR 1099 D2 — host-level: each grant is announced under its KIND's surface
+ *  switch (ADR 1099 D1), so a kind whose surface is not campaign-ops' still gets
+ *  its notices. Moved from `features/campaign-ops/collaboration/expiryNotices.ts`. */
+export function startCollaboratorExpiryNotices(): { stop: () => void } | null {
   if (started) return null;
   started = true;
   let running = false;
@@ -28,7 +29,7 @@ export function startCollaboratorExpiryNotices(collaborationOn: (tenantId: strin
     if (running) return;
     running = true;
     try {
-      const r = await notifyExpiringGrants(new Date(), collaborationOn);
+      const r = await notifyExpiringGrants(new Date(), (tenantId, kind) => kindCollaborationOn(kind, tenantId));
       if (r.notified > 0 || r.failed > 0) log.info('collab_expiry_notices', r);
     } catch (err) {
       log.warn('collab_expiry_notice_tick_failed', { error: err instanceof Error ? err.message : String(err) });

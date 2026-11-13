@@ -212,7 +212,7 @@ export function JobApplicationsPage(): JSX.Element {
           ) : apps.length === 0 ? (
             <StateCard icon={<ShieldIcon size={20} />} title={t('appsEmptyTitle')} body={t('appsEmptyBody')} />
           ) : (
-            <DataTable filterable={{ placeholder: t('filterApplications') }}
+            <DataTable caption={t('appsTitle')} filterable={{ placeholder: t('filterApplications') }}
               rows={apps} columns={columns} rowKey={(a) => a.dealId} />
           )}
         </Panel>

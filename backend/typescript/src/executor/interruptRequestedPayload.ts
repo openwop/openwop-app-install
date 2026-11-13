@@ -16,6 +16,7 @@
  */
 import type { InterruptRecord } from '../types.js';
 import { normalizeApprovalAction } from './interruptActions.js';
+import { APPROVAL_DATA_LOOPBACK_FIELD } from './loopbackWire.js';
 
 type HostKind = InterruptRecord['kind'];
 type Data = Record<string, unknown>;
@@ -39,11 +40,13 @@ export const GATE_PREVIEW_ARTIFACT_TYPE = 'openwop-app.gate-preview';
  * the node's VISIT index. A ctx.suspend / ctx.interrupt node supplies its own
  * deterministic per-invocation key (`__resumeKey`), which already
  * distinguishes two suspensions of one execution. A native return-and-resume
- * node runs once per visit, and today's scheduler visits each node once (it
- * refuses cycles), so its visit index is 0.
+ * node runs once per visit. Without a declared loopback the scheduler refuses
+ * cycles and visits each node once, so its visit index is 0.
  *
- * Loop row 3 replaces `visit` with the executor's visit ordinal
- * when bounded loopback lands. THIS is the one function that changes.
+ * ADR 1058 (RFC 0258) — bounded loopback landed: `visit` is the loopback
+ * fold's visit, and a ctx.suspend node's `__resumeKey` arrives already
+ * qualified with `#v<visit>` past visit 0 (`qualifyResumeKey`). At visit 0
+ * both forms are unchanged, so every stored run re-derives its key.
  */
 export function interruptRequestKey(runId: string, nodeId: string, data: unknown, visit = 0): string {
   const rk = (data as { __resumeKey?: unknown } | null | undefined)?.__resumeKey;
@@ -52,6 +55,16 @@ export function interruptRequestKey(runId: string, nodeId: string, data: unknown
 
 const APPROVAL_ACTIONS: ReadonlySet<string> = new Set(['accept', 'reject', 'refine', 'edit-accept', 'ask']);
 const REJECTION_POLICIES: ReadonlySet<string> = new Set(['single-veto', 'majority']);
+
+/** RFC 0258 §D — the closed `{round, maxIterations, exhausted}` triple, in that key order, or undefined. */
+function loopbackTriple(v: unknown): Data | undefined {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined;
+  const { round, maxIterations, exhausted } = v as Data;
+  if (typeof round !== 'number' || !Number.isInteger(round) || round < 0) return undefined;
+  if (typeof maxIterations !== 'number' || !Number.isInteger(maxIterations) || maxIterations < 1) return undefined;
+  if (typeof exhausted !== 'boolean') return undefined;
+  return { round, maxIterations, exhausted };
+}
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.length > 0 ? v : undefined);
 const strArr = (v: unknown): string[] | undefined =>
@@ -94,6 +107,10 @@ const PROJECTORS: { readonly [K in HostKind]: Projector } = {
       const v = strArr(d[k]);
       if (v !== undefined) out[k] = v;
     }
+    // ADR 1058 / RFC 0258 §D — `ApprovalData.loopback`, closed, on every visit
+    // of a loopback gate (the executor writes it there, and only there).
+    const lb = loopbackTriple(d[APPROVAL_DATA_LOOPBACK_FIELD]);
+    if (lb) out[APPROVAL_DATA_LOOPBACK_FIELD] = lb;
     return { kind: 'approval', data: out };
   },
   clarification: (d, { nodeId }) => {
@@ -144,13 +161,15 @@ export function buildInterruptRequestedPayload(input: {
   data: unknown;
   resumeSchema?: Record<string, unknown>;
   preview?: GatePreview;
+  /** ADR 1058 — the node's loopback visit (absent = 0, today's key). */
+  visit?: number;
 }): InterruptPayload {
   const d = hostData(input.data);
   const { kind, data } = PROJECTORS[input.kind](d, { nodeId: input.nodeId, ...(input.preview ? { preview: input.preview } : {}) });
   const timeoutMs = (input.data as { timeoutMs?: unknown } | null | undefined)?.timeoutMs;
   return {
     kind,
-    key: interruptRequestKey(input.runId, input.nodeId, input.data),
+    key: interruptRequestKey(input.runId, input.nodeId, input.data, input.visit ?? 0),
     data,
     ...(input.resumeSchema !== undefined ? { resumeSchema: input.resumeSchema } : {}),
     ...(typeof timeoutMs === 'number' && Number.isInteger(timeoutMs) && timeoutMs >= 0 ? { timeoutMs } : {}),

@@ -5,7 +5,7 @@
  * `commerce`); registered by appending to FRONTEND_FEATURES (ADR 0001).
  */
 import { lazy } from 'react';
-import { PackageIcon } from '../../ui/icons/index.js';
+import { CreditCardIcon } from '../../ui/icons/index.js';
 import type { FeatureRoute } from '../../chrome/featureTypes.js';
 import type { FrontendFeature } from '../registry.js';
 
@@ -17,7 +17,7 @@ const routes: FeatureRoute[] = [
     path: '/commerce/purchases',
     element: <PurchasesPage />,
     tier: 'workspace', archetype: 'standard-index',
-    nav: { group: 'Commerce', label: 'Agent purchases', labelKey: 'ucpPurchasesLabel', icon: PackageIcon, hint: 'Purchases agents placed over UCP', hintKey: 'ucpPurchasesHint', order: 61, featureId: 'commerce-ucp-buyer' },
+    nav: { group: 'Commerce', labelKey: 'ucpPurchasesLabel', icon: CreditCardIcon, hintKey: 'ucpPurchasesHint', order: 61, featureId: 'commerce-ucp-buyer' },
   },
   // Deep-linkable detail (no nav; gated internally). The landing target for the
   // commerce.ucp-buyer.* notifications.

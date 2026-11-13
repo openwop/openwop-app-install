@@ -26,7 +26,7 @@ import { join } from 'node:path';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { openStorage } from '../src/storage/index.js';
-import { createProduct, listProducts, __resetCommerce, type Product } from '../src/features/commerce/commerceService.js';
+import { createProduct, listProductsPage, __resetCommerce, type Product } from '../src/features/commerce/commerceService.js';
 import { searchProducts, __resetDiscovery } from '../src/features/discovery/discoveryService.js';
 import { rebuildProductEmbeddings, queryProductEmbeddings, invalidateProductEmbeddings } from '../src/features/discovery/productEmbeddingIndex.js';
 
@@ -61,19 +61,29 @@ describe('MERCH-C semantic recall', () => {
   });
 
   it('searchProducts fuses lexical+semantic (lazy rebuild) and is deterministic', async () => {
+    // ADR 1110 P2 — the lexical leg reads names and tags, not descriptions, so the shared
+    // word is a tag; the semantic leg still reads the descriptions, and the two disagree.
     const plain = (name: string, description: string) =>
-      createProduct({ tenantId: T, orgId: 'orgC', createdBy: 'u', type: 'digital', name, description, price: 50, currency: 'USD', categories: [], tags: [] });
+      createProduct({ tenantId: T, orgId: 'orgC', createdBy: 'u', type: 'digital', name, description, price: 50, currency: 'USD', categories: [], tags: ['jacket'] });
     const names = new Map<string, string>();
     for (const [n, d] of [['Alpha', 'jacket'], ['Bravo', 'jacket boats gardens sailing harbour'], ['Charlie', 'jacket jacket']] as const) names.set((await plain(n, d)).productId, n);
     const named = (ids: string[]) => ids.map((id) => names.get(id));
     // the two legs, each on its own, disagree:
-    expect((await listProducts(T, 'orgC', 'jacket')).map((p) => p.name)).toEqual(['Alpha', 'Bravo', 'Charlie']);
+    expect((await listProductsPage(T, 'orgC', { q: 'jacket' })).products.map((p) => p.name)).toEqual(['Alpha', 'Bravo', 'Charlie']);
     await rebuildProductEmbeddings(T, 'orgC');
     expect(named(await queryProductEmbeddings(T, 'orgC', 'jacket', 10))).toEqual(['Charlie', 'Alpha', 'Bravo']);
     const r1 = await searchProducts({ tenantId: T, orgId: 'orgC', q: 'jacket' });
     const r2 = await searchProducts({ tenantId: T, orgId: 'orgC', q: 'jacket' });
     expect(r1.products.map((p) => p.name)).toEqual(['Alpha', 'Charlie', 'Bravo']); // RRF, by hand (header)
     expect(r1.products.map((p) => p.productId)).toEqual(r2.products.map((p) => p.productId)); // deterministic
+  });
+
+  it('ADR 1110 P2 — a product found only by its description comes back through semantic recall', async () => {
+    const coat = await createProduct({ tenantId: T, orgId: 'orgE', createdBy: 'u', type: 'digital', name: 'Alpine', description: 'an insulated warm jacket for hiking', price: 50, currency: 'USD', categories: [], tags: [] });
+    await createProduct({ tenantId: T, orgId: 'orgE', createdBy: 'u', type: 'digital', name: 'Sun hat', description: 'a light summer cap', price: 5, currency: 'USD', categories: [], tags: [] });
+    await rebuildProductEmbeddings(T, 'orgE');
+    const r = await searchProducts({ tenantId: T, orgId: 'orgE', q: 'jacket' });
+    expect(r.products.map((p) => p.productId)).toContain(coat.productId);
   });
 
   it('empty query returns no semantic ids (lexical/facet path unchanged)', async () => {

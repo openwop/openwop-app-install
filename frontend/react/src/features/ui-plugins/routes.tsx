@@ -14,9 +14,9 @@ const routes: FeatureRoute[] = [
     tier: 'admin', archetype: 'admin',
     nav: {
       group: 'Developer',
-      label: 'UI Plugins', labelKey: 'uiPluginsLabel',
+      labelKey: 'uiPluginsLabel',
       icon: PlugIcon,
-      hint: 'Sandboxed front-end plugin packs', hintKey: 'uiPluginsHint',
+      hintKey: 'uiPluginsHint',
       featureId: 'ui-plugins',
     },
   },

@@ -113,7 +113,7 @@ export function ConfiguredProviderCard({ config, onChange, onRemoved, compact, s
             compact card is the one production renders (chat header + tab deck). */}
         {canManage ? (
           <Button
-            variant="secondary" className="u-pad-0x6 u-fs-10 u-minh-0"
+            variant="secondary" className="u-pad-0x6 u-fs-10 configprov-change"
             onClick={onChange}
             aria-label={t('changeProviderModel')}
           >{t('changeAction')}</Button>

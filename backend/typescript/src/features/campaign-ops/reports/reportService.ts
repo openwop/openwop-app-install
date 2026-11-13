@@ -19,6 +19,7 @@ import { canonicalize } from '../../../host/auditChainService.js';
 import { cleanString } from '../../../host/boundedStrings.js';
 import { createLogger } from '../../../observability/logger.js';
 import { REPORT_SECTION_SOURCES, requireReportSource, type SectionContext } from './sectionSources.js';
+import type { LaunchSubject } from '../../../host/workflowFeatureGate.js';
 import {
   CLIENT_REPORT_CHAIN_ID, REPORT_SECTION_KINDS, type ClientReport, type ReportBrand, type ReportDefinition, type ReportPeriodKind, type ReportSection, type ReportSnapshot,
 } from './types.js';
@@ -45,8 +46,8 @@ function validTimezone(tz: string): boolean {
   try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return true; } catch { return false; }
 }
 
-async function orgCampaignIds(tenantId: string, orgId: string, ids: string[]): Promise<void> {
-  await requireReportSource('campaign-orchestration', tenantId);
+async function orgCampaignIds(tenantId: string, orgId: string, ids: string[], subject: LaunchSubject = {}): Promise<void> {
+  await requireReportSource('campaign-orchestration', tenantId, subject);
   const { getCampaign } = await import('../../campaign-orchestration/campaignService.js');
   for (const id of ids) {
     const c = await getCampaign(tenantId, id);
@@ -65,7 +66,7 @@ export interface DefinitionInput {
 }
 
 /** Closed-world parse of a definition body for `orgId`. */
-export async function parseDefinition(tenantId: string, orgId: string, body: unknown): Promise<DefinitionInput> {
+export async function parseDefinition(tenantId: string, orgId: string, body: unknown, subject: LaunchSubject = {}): Promise<DefinitionInput> {
   if (!isObj(body)) throw invalid('Body must be an object.');
   for (const k of Object.keys(body)) {
     if (!['title', 'campaignIds', 'sections', 'period', 'brand', 'narrative', 'audience', 'expectedVersion', 'schedule'].includes(k)) throw invalid(`Unknown field "${k}".`, k);
@@ -79,7 +80,7 @@ export async function parseDefinition(tenantId: string, orgId: string, body: unk
   if (body.campaignIds === undefined || body.campaignIds === 'all') campaignIds = 'all';
   else if (Array.isArray(body.campaignIds) && body.campaignIds.length > 0 && body.campaignIds.length <= MAX_CAMPAIGNS && body.campaignIds.every((x) => typeof x === 'string' && x.length > 0 && x.length <= 128)) {
     campaignIds = [...new Set(body.campaignIds as string[])];
-    await orgCampaignIds(tenantId, orgId, campaignIds);
+    await orgCampaignIds(tenantId, orgId, campaignIds, subject);
   } else throw invalid(`campaignIds must be "all" or 1–${MAX_CAMPAIGNS} campaign ids.`, 'campaignIds');
 
   if (!Array.isArray(body.sections) || body.sections.length === 0 || body.sections.length > MAX_SECTIONS) throw invalid(`sections must hold 1–${MAX_SECTIONS} sections.`, 'sections');
@@ -107,7 +108,7 @@ export async function parseDefinition(tenantId: string, orgId: string, body: unk
     if (kind === 'kpi') {
       if (params.campaignId) {
         if (campaignIds !== 'all' && !campaignIds.includes(params.campaignId)) throw invalid(`${where}.params.campaignId must be one of the report's campaigns.`, `${where}.params.campaignId`);
-        await orgCampaignIds(tenantId, orgId, [params.campaignId]);
+        await orgCampaignIds(tenantId, orgId, [params.campaignId], subject);
       } else if (campaignIds !== 'all') {
         // An org-wide KPI total would include campaigns the report excludes.
         throw invalid(`${where}.params.campaignId is required when the report names campaigns.`, `${where}.params.campaignId`);
@@ -224,15 +225,15 @@ export function snapshotHashOf(snapshot: ReportSnapshot): string {
 }
 
 /** Run every section source for the definition's client and freeze the result. */
-export async function computeSnapshot(def: ReportDefinition, computedAt = new Date().toISOString()): Promise<ReportSnapshot> {
+export async function computeSnapshot(def: ReportDefinition, computedAt = new Date().toISOString(), subject?: LaunchSubject): Promise<ReportSnapshot> {
   const snapshot: ReportSnapshot = { metrics: {}, tables: {} };
-  const ctx: SectionContext = { tenantId: def.tenantId, orgId: def.orgId, campaignIds: def.campaignIds, computedAt };
+  const ctx: SectionContext = { tenantId: def.tenantId, orgId: def.orgId, campaignIds: def.campaignIds, computedAt, ...(subject ? { subject } : {}) };
   for (const section of def.sections) await REPORT_SECTION_SOURCES[section.kind].run(section, ctx, snapshot);
   return snapshot;
 }
 
 /** Compute and store a new draft report for `def` over the given period. */
-export async function createReport(def: ReportDefinition, period: { periodStart: string; periodEnd: string }, actor: string, opts: { runId?: string } = {}): Promise<ClientReport> {
+export async function createReport(def: ReportDefinition, period: { periodStart: string; periodEnd: string }, actor: string, opts: { runId?: string; subject?: LaunchSubject } = {}): Promise<ClientReport> {
   const reportId = opts.runId
     ? `rpt_${createHash('sha256').update(canonicalize([def.tenantId, def.orgId, def.definitionId, opts.runId, period])).digest('hex')}`
     : `rpt_${randomUUID()}`;
@@ -247,7 +248,7 @@ export async function createReport(def: ReportDefinition, period: { periodStart:
     }
   }
   const generatedAt = new Date().toISOString();
-  const snapshot = await computeSnapshot(def, generatedAt);
+  const snapshot = await computeSnapshot(def, generatedAt, opts.subject);
   const report: ClientReport = {
     tenantId: def.tenantId, orgId: def.orgId, reportId, definitionId: def.definitionId, definitionVersion: def.version,
     // A report computed by the client-report chain goes straight to review (the

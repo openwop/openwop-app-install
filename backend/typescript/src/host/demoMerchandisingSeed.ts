@@ -15,7 +15,7 @@ import { createLogger } from '../observability/logger.js';
 import { DurableCollection } from './hostExtPersistence.js';
 import { resolveOne } from './featureToggles/service.js';
 import { listOrgs } from './accessControlService.js';
-import { listProducts } from '../features/commerce/commerceService.js';
+import { collectCatalog } from '../features/commerce/commerceService.js';
 import {
   createPromotion, listPromotions, deletePromotion,
 } from '../features/promotions/promotionsService.js';
@@ -45,7 +45,7 @@ async function gate(id: string, tenantId: string): Promise<boolean> {
 
 /** slug → productId for the Phase-4 catalog (products store name, not slug). */
 async function productMap(tenantId: string, orgId: string): Promise<Map<string, string>> {
-  const byName = new Map((await listProducts(tenantId, orgId)).filter((p) => p.createdBy === DEMO_COMMERCE_ACTOR).map((p) => [p.name, p.productId]));
+  const byName = new Map((await collectCatalog(tenantId, orgId, (p) => p.createdBy === DEMO_COMMERCE_ACTOR)).filter((p) => p.createdBy === DEMO_COMMERCE_ACTOR).map((p) => [p.name, p.productId]));
   const bySlug = new Map<string, string>();
   for (const c of SOLSTICE_CATALOG) { const id = byName.get(c.name); if (id) bySlug.set(c.slug, id); }
   return bySlug;
@@ -169,7 +169,7 @@ export async function clearDemoMerchandising(tenantId: string): Promise<{ cleare
   // demo-commerce-depth and is NOT removed here. We explicitly delete the
   // reco:affinity rows keyed on demo products, and TTL-invalidate the embeddings
   // index (a rebuild recomputes it from whatever catalog remains).
-  const demoProductIds = new Set((await listProducts(tenantId, orgId)).filter((p) => p.createdBy === DEMO_COMMERCE_ACTOR).map((p) => p.productId));
+  const demoProductIds = new Set((await collectCatalog(tenantId, orgId, (p) => p.createdBy === DEMO_COMMERCE_ACTOR)).filter((p) => p.createdBy === DEMO_COMMERCE_ACTOR).map((p) => p.productId));
   for (const a of (await affinityStore.listForTenantIndexed(tenantId)).filter((x) => x.productId && demoProductIds.has(x.productId))) {
     await affinityStore.delete(a.key);
   }

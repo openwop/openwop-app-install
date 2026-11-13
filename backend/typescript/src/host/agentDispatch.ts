@@ -1235,6 +1235,31 @@ export function repeatedCallNote(toolName: string): string {
     + 'Do not call it again. Use that result: call a different tool, or give your answer.';
 }
 
+/** CC-CHAN-1 — refusals the arguments cannot change: the plan or a toggle. */
+const TOOL_WIDE_REFUSALS = new Set(['not_entitled', 'feature_disabled', 'feature_unavailable', 'acting_user_required']);
+
+/** CC-CHAN-1 — the refusal a failed tool result carries, if it is one: the
+ *  derived code, or the `reason` a `forbidden` result names (`launchRefusalResult`
+ *  puts the plan reason there). `toolWide` when no argument could change it.
+ *  Pure over the turn's own result, so a replay takes the same branch. */
+export function refusalOf(code: string, content: string): { code: string; toolWide: boolean } | null {
+  let reason: string | undefined;
+  try {
+    const body = JSON.parse(content) as { reason?: unknown };
+    if (typeof body?.reason === 'string') reason = body.reason;
+  } catch { /* non-JSON content carries no reason */ }
+  const named = reason && TOOL_WIDE_REFUSALS.has(reason) ? reason : code;
+  if (TOOL_WIDE_REFUSALS.has(named)) return { code: named, toolWide: true };
+  if (code === 'forbidden') return { code, toolWide: false };
+  return null;
+}
+
+/** CC-CHAN-1 — the note a model gets instead of a re-run of a refused tool. */
+export function repeatedRefusalNote(toolName: string, code: string): string {
+  return `${toolName} was already refused this turn (${code}), and calling it again will be refused the same way, so it was not run. `
+    + 'Do not call it again. Tell the user what was refused and why, and what would let it go ahead.';
+}
+
 /** ADR 0975 D6 — a turn that used every round and produced no text. */
 export const TOOL_ROUNDS_EXHAUSTED = 'tool_rounds_exhausted';
 /** ADR 1011 — the registered v2 codes for a round that ended early. */
@@ -1307,6 +1332,12 @@ export async function runChatToolLoop(
   // `openwop:kicktodo.candidates` five times with identical arguments, spent
   // every round, and the turn ended with no reply at all.
   let lastRanCall: string | undefined;
+  // CC-CHAN-1 — refusals this turn. A plan/feature refusal does not depend on the
+  // arguments, so a later call to that TOOL is answered from it; any other
+  // `forbidden` answers only an identical repeat. MEASURED live on 373d4863a: the
+  // Channel Generator called a plan-refused tool five times and spent the turn.
+  const refusedTools = new Map<string, string>();
+  const refusedCalls = new Map<string, string>();
   // Did the model end the turn with an answer (vs. running out of rounds)?
   let answered = false;
   // Native web-search/grounding sources accumulated across rounds, deduped by
@@ -1401,7 +1432,7 @@ export async function runChatToolLoop(
       // ADR 1001 D7 — the turn already ended on an earlier call this round: the
       // rest are recorded as not performed, never run behind the person's back.
       if (endTurnText !== undefined) {
-        await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden' });
+        await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden', error: { code: 'turn_ended', message: 'The turn ended on a question before this call ran.' } });
         // A run continues after the answer, so the model must not assume it ran.
         messages.push({ role: 'user', content: `Tool "${call.name}" was not run: your turn ended on your question. Call it again if you still need it.` });
         continue;
@@ -1416,7 +1447,7 @@ export async function runChatToolLoop(
         const c = opts.clarification;
         const askRound = c.roundsUsed + 1;
         if (c.roundsUsed >= c.cap) {
-          await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden' });
+          await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden', error: { code: 'clarification_cap', message: `Clarification cap (${c.cap}) reached.` } });
           await emit({ type: 'agent.reasoned', agentId, reasoning: `${persona} asked a clarification beyond the cap of ${c.cap} for this step.` });
           return {
             finalText: lastText, finalData: lastData, events, rounds,
@@ -1455,9 +1486,18 @@ export async function runChatToolLoop(
       const compiled = tools.find((t) => t.def.name === call.name);
       // §A14 — a call to a tool not on the allowlist is refused, never executed.
       if (!compiled) {
-        await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden' });
+        await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden', error: { code: 'not_on_allowlist', message: 'This tool is not on the agent\'s allowlist.' } });
         messages.push({ role: 'user', content: `Tool "${call.name}" is not permitted for this agent.` });
         continue;
+      }
+      {
+        const refusedCode = refusedTools.get(call.name) ?? refusedCalls.get(`${call.name}\u0000${computeArgsHash(call.input)}`);
+        if (refusedCode !== undefined) {
+          await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden', error: { code: 'repeated_refusal', message: `Already refused this turn (${refusedCode}).` } });
+          log.info('tool_refusal_repeat_suppressed', { agentId, toolName: call.name, code: refusedCode, round });
+          messages.push({ role: 'user', content: repeatedRefusalNote(call.name, refusedCode) });
+          continue;
+        }
       }
       // ADR 0132 — per-conversation capability scope (the fourth AND-term). A call
       // to a tool NOT in this conversation's effective `enabled` set is refused
@@ -1468,7 +1508,7 @@ export async function runChatToolLoop(
       // at resolution time, so it can never grant beyond the agent's permissions.
       // The forbidden verdict is recorded (RFC 0064) so replay reuses it verbatim.
       if (scopeEnabled && !scopeEnabled.has(call.name)) {
-        await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden' });
+        await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden', error: { code: 'not_in_conversation_scope', message: 'This tool is not enabled for this conversation.' } });
         messages.push({ role: 'user', content: `Tool "${call.name}" is not enabled for this conversation.` });
         continue;
       }
@@ -1514,7 +1554,7 @@ export async function runChatToolLoop(
           // it must not satisfy a later workspace/platform ask on the same tool.
           pendingApprovals.push({ toolName: call.name, callId: call.id, input: call.input, origin: 'baseline' });
         }
-        await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden' });
+        await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden', error: { code: 'approval_required', message: 'This tool needs a person\'s approval in this conversation.' } });
         messages.push({ role: 'user', content: `Tool "${call.name}" requires human approval for this conversation. The action was requested for review, not performed. Do not retry it; explain that it is awaiting approval.` });
         continue;
       }
@@ -1532,7 +1572,7 @@ export async function runChatToolLoop(
           const enforcing = agentToolPermissionsEnabled();
           log.info('agent_tool_permission_denied', { agentId, toolName: call.name, reason: perm.reason, enforced: enforcing });
           if (enforcing) {
-            await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden' });
+            await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden', error: { code: 'agent_guardrail_denied', message: scrubSecretShaped(`Blocked by the agent's guardrails (${perm.reason}).`) } });
             messages.push({ role: 'user', content: `Tool "${call.name}" is blocked by ${persona}'s guardrails (${perm.reason}).` });
             continue;
           }
@@ -1552,7 +1592,7 @@ export async function runChatToolLoop(
           log.info('capability_firewall_blocked', { agentId, toolName: call.name, decision: 'deny', reason: fw.reason });
           // ADR 0397 Phase 1 — decision observability (best-effort, host records it).
           try { opts.onFirewallDecision?.({ toolName: call.name, decision: 'deny', ...(fw.reason ? { reason: fw.reason } : {}), ...(fw.ruleId ? { ruleId: fw.ruleId } : {}) }); } catch { /* observability never breaks the turn */ }
-          await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden' });
+          await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden', error: { code: 'capability_firewall_denied', message: scrubSecretShaped(fw.reason ?? 'risky combination') } });
           messages.push({ role: 'user', content: `Tool "${call.name}" is blocked by the capability firewall: ${fw.reason ?? 'risky combination'}.` });
           continue;
         }
@@ -1562,7 +1602,7 @@ export async function runChatToolLoop(
           const held = pendingApprovals.find((p) => p.toolName === call.name);
           if (!held) pendingApprovals.push({ toolName: call.name, callId: call.id, input: call.input, ...(fw.origin ? { origin: fw.origin } : {}) });
           else if (fw.origin === 'policy') held.origin = 'policy';
-          await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden' });
+          await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden', error: { code: 'capability_firewall_approval_required', message: scrubSecretShaped(fw.reason ?? 'risky combination') } });
           messages.push({ role: 'user', content: `Tool "${call.name}" requires approval (capability firewall: ${fw.reason ?? 'risky combination'}). Requested for review, not performed; do not retry — explain it is awaiting approval.` });
           continue;
         }
@@ -1613,6 +1653,9 @@ export async function runChatToolLoop(
         // `forbidden`/`rate_limited`). `message` is SR-1-redacted.
         const code = deriveToolErrorCode(execOut);
         const toolRan = !CAPABILITY_PRECONDITION_CODES.has(code);
+        const refusal = refusalOf(code, execOut.content);
+        if (refusal?.toolWide) refusedTools.set(call.name, refusal.code);
+        else if (refusal) refusedCalls.set(callKey, refusal.code);
         await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'error', error: { code, message: scrubSecretShaped(execOut.content) }, ...(toolRan ? { durationMs: Date.now() - startedAt } : {}) });
       } else {
         await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'ok', durationMs: Date.now() - startedAt });
@@ -1674,14 +1717,24 @@ export async function runChatToolLoop(
       grounded: citationsByUrl.size > 0,
     });
   }
-  // ADR 0975 D6 — out of rounds with nothing to say is a typed failure, never an
-  // empty success (CLAUDE.md: "invalid model output is a typed failure"). A turn
-  // that deferred a tool for approval or produced structured data still answered.
-  if (!answered && !lastText.trim() && lastData === undefined && pendingApprovals.length === 0) {
-    log.warn('tool_rounds_exhausted', { agentId, provider, model, rounds });
+  // ADR 0975 D6 — out of rounds without an answer is a typed failure, never a
+  // success (CLAUDE.md: "invalid model output is a typed failure"). A turn that
+  // deferred a tool for approval or produced structured data still answered.
+  // CC-CHAT-1 (2026-11-12): `answered` is the test, not "said something" — the
+  // text a model writes BESIDE its tool calls ("I'll start generation once they
+  // return.") is a preamble, never the turn's answer. MEASURED live on 373d4863a:
+  // that preamble was rendered as a successful reply with nothing done. The text
+  // is kept for context; the error is what the turn reports.
+  if (!answered && lastData === undefined && pendingApprovals.length === 0) {
+    log.warn('tool_rounds_exhausted', { agentId, provider, model, rounds, hadText: lastText.trim().length > 0 });
     return {
-      finalText: '', finalData: lastData, events, rounds,
-      error: { code: TOOL_ROUNDS_EXHAUSTED, message: `${persona} used all ${rounds} tool rounds without giving an answer.` },
+      finalText: lastText, finalData: lastData, events, rounds,
+      error: {
+        code: TOOL_ROUNDS_EXHAUSTED,
+        message: lastText.trim()
+          ? `${persona} used all ${rounds} tool rounds before finishing; the last step it described was not completed.`
+          : `${persona} used all ${rounds} tool rounds without giving an answer.`,
+      },
     };
   }
   return {

@@ -1,6 +1,6 @@
 # ADR 1080 — Design-led site sections and the decision simulator
 
-Status: Accepted (2026-11-09). D1–D16 are implemented in the PR that records them.
+Status: Accepted (2026-11-09). D1–D16 are implemented in the PR that records them; D17 (2026-11-11, #5765) and D18–D19 (2026-11-11, #5779 B5/B7) in their own.
 
 Follows [ADR 1072](1072-site-p3c1-steps-gallery.md), [ADR 1074](1074-site-p3c3-richtext-image.md)
 and [ADR 1062](1062-public-site-chrome-featured-card-cta-split.md). Host CMS rendering only,
@@ -45,8 +45,18 @@ Every decision is additive. A page that sets none of the new fields renders exac
 | D14 | Photo hero keeps its picture on phones | Below 720 px the picture stacks under the copy instead of hiding |
 | D15 | `decisionTree` section | `trees` (≤16) of `title`, `question`, `evidence` and `nodes` (≤16) of `id`, `text` and `options` (≤6) of `label` with `next` or `outcome`. An option whose `next` names no node in its tree is a 400. The runner keeps the path, and has Back and Start over |
 | D16 | `scheduleSim` section | `milestones` (≤24) of `id`, `label`, `startWeek`, `weeks`, `floatDays`, `rework` and `items`. `decisions` (≤80) of `title`, `milestone`, `kind` (`selection`, `approval`, `payment`, `response`), `owner`, `note`, `options` (≤4) of `label` and `delayDays`, and optionally `id`, `element`, `decider`, `choices` (≤5), `leadDays` or `leadUnknown`, `lockWeek`, `dependsOn` (≤6 decision ids), `risk` and `source`. `presets` (≤6) of `label`, `description` and `rules` (≤6) of `delayDays` with optional `kind`, `decider` and `minLeadDays`. Optional `startDate`, `finishLabel` and `note`. A decision naming no milestone, or depending on a decision id the section lacks, is a 400 |
+| D17 | `statusTable` beside its copy (#5765, 2026-11-11) | Optional `points` (≤6 plain-text items of ≤160 chars; blanks dropped before the cap) render as a ruled list under the head. With `head: 'split'` the head and its points take the first column and the table the second from 900px, like the split FAQ; below that they stack. Both are additive: a section that sets neither stores and renders exactly as before. Crawlers get the points as a `<ul>` (HTML) or `- ` lines (Markdown) between the head and the table, in the order shown |
+| D18 | `scheduleSim` start mode and sticky summary (#5779 B5, 2026-11-11) | Optional `startMode: 'whatIf'` opens the section on the scenario controls instead of the live clock. Optional `stickySummary: true` keeps the summary in view while answers change, below the public site's sticky header (the `--public-header-offset` token, 4.75rem), from 900px only: on a phone the summary is one column of five rows and would cover half the screen. Only those two closed forms are stored, and only on the base; any other value, and either field in a locale overlay, is dropped. A section that sets neither stores and renders exactly as before. Crawlers are unchanged: they already get every milestone and decision |
+| D19 | Hero queue over a photo (#5779 B7, 2026-11-11) | A `visual: 'queue'` hero that sets `imageToken` draws the photo with the queue card in one stage, the photo first. From 900px the card overlaps the photo's lower edge; below that it stacks under the photo. No new field: the validator already kept `imageToken`/`alt` on every hero visual. `alt` stays optional, as on every hero photo; without it the photo renders as decorative (`alt=""`) and the queue card carries the content. A queue hero with no photo keeps its exact markup. Crawlers get the queue as before; the hero photo is not emitted for any visual |
 
 D10 was folded into D4 during review.
+
+> **CORRECTED 2026-11-12 (ADR 1112 P1, #5816):** D16's live mode and D18's `startMode` are gone.
+> The live clock could not be played (decisions fell due faster than anyone could read them) and
+> never ended (an unanswered decision pushed the finish out a day per day). The section is now one
+> view: set how late each decision comes in, then replay the result, which stops at the finish.
+> `startMode` and the decisions' `choices` are no longer stored; a page that has them renders the
+> same one view. `stickySummary` stays. Decisions gain `back` (below).
 
 ### D16 arithmetic
 
@@ -55,6 +65,13 @@ All arithmetic is in whole days from the project start, fixed and deterministic.
 - **Decide-by:** a decision's lock day (`lockWeek` × 7, else its milestone's start), plus the slip
   so far, less its lead time and five approval days. A decision with `leadUnknown` gets no date
   and is never counted late.
+
+  > **CORRECTED 2026-11-12 (ADR 1112 D1):** the lead time and approval days are subtracted
+  > only when the decision sets `back: true`, meaning its lock is the day the item is needed on
+  > site. Otherwise the lock is the decide-by date. Subtracting from every lock moved 173 of
+  > 1,145 CasaVoga decisions onto day 0. A `leadUnknown` decision is dated to its lock,
+  > labelled "lead time not known" and can be late. Exempting it silently dropped a quarter of
+  > a catalog.
 - **Made:** the decide-by plus the decision's own delay, or a later prerequisite's made day. A
   decision held up by a prerequisite names it as "waiting on".
 - **Milestones:** each takes the latest lateness among its decisions. Its float absorbs what it

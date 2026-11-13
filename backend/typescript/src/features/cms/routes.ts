@@ -49,6 +49,8 @@ import {
   listSharedSections,
   localizePage,
   listVersions,
+  listVersionSummaries,
+  getVersion,
   putLocaleGrant,
   restoreVersion,
   setLocalePublishState,
@@ -154,7 +156,22 @@ export function registerCmsRoutes(deps: RouteDeps): void {
   app.get(`${BASE}/pages/:pageId/versions`, async (req, res, next) => {
     try {
       const { orgId, tenantId } = await requireCmsScope(req,'workspace:read');
-      res.json({ versions: await listVersions(tenantId, orgId, req.params.pageId) });
+      // UXG-1112-14 — `?summary=1` leaves the sections out (a snapshot is up to
+      // ~975 kB). Full stays the default so an SPA from before this deploy still works.
+      res.json({ versions: req.query.summary === '1'
+        ? await listVersionSummaries(tenantId, orgId, req.params.pageId)
+        : await listVersions(tenantId, orgId, req.params.pageId) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.get(`${BASE}/pages/:pageId/versions/:versionId`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId } = await requireCmsScope(req,'workspace:read');
+      const v = await getVersion(tenantId, orgId, req.params.pageId, req.params.versionId);
+      if (!v || v.promotionBaseline) throw new OpenwopError('not_found', 'Version not found.', 404, { versionId: req.params.versionId });
+      res.json(v);
     } catch (err) {
       next(err);
     }
@@ -440,7 +457,7 @@ export function registerCmsRoutes(deps: RouteDeps): void {
       // only when the tenant's `cms-localization` toggle is ON — the flag can
       // outlive the toggle; toggle OFF stays byte-identical.
       let autoTranslated: Record<string, number> | undefined;
-      let autoTranslateDegraded: { capped?: boolean; errored?: boolean; invalid?: number; conflict?: boolean } | undefined;
+      let autoTranslateDegraded: { capped?: boolean; errored?: boolean; timedOut?: boolean; invalid?: number; conflict?: boolean } | undefined;
       if (await localizationOn(tenantId)) {
         const settings = await getContentLanguageSettings(tenantId, orgId);
         if (settings.autoTranslateOnPublish && settings.supportedLocales.length > 0) {
@@ -453,10 +470,11 @@ export function registerCmsRoutes(deps: RouteDeps): void {
           // overlays that actually persisted.
           try {
             const sweep = await autoTranslateMissingOverlays(tenantId, updated.sections, settings.supportedLocales);
-            if (sweep.capped || sweep.errored || sweep.invalid > 0) {
+            if (sweep.capped || sweep.errored || sweep.timedOut || sweep.invalid > 0) {
               autoTranslateDegraded = {
                 ...(sweep.capped ? { capped: true } : {}),
                 ...(sweep.errored ? { errored: true } : {}),
+                ...(sweep.timedOut ? { timedOut: true } : {}),
                 ...(sweep.invalid > 0 ? { invalid: sweep.invalid } : {}),
               };
             }
@@ -570,6 +588,7 @@ export function registerCmsRoutes(deps: RouteDeps): void {
       const degradeParts: string[] = [];
       if (autoTranslateDegraded?.capped) degradeParts.push('call cap hit — some sections were skipped');
       if (autoTranslateDegraded?.errored) degradeParts.push('provider failed mid-sweep');
+      if (autoTranslateDegraded?.timedOut) degradeParts.push('the time limit was reached — some sections were skipped');
       if (autoTranslateDegraded?.invalid) degradeParts.push(`${autoTranslateDegraded.invalid} translation(s) returned unusable output`);
       if (autoTranslateDegraded?.conflict) degradeParts.push('concurrent edits — the AI drafts were discarded');
       const degradeNote = degradeParts.length > 0 ? ` — auto-translate incomplete: ${degradeParts.join('; ')}` : '';

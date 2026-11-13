@@ -18,7 +18,7 @@ import {
   type NeverCacheRule,
   type OfflineFeature,
 } from './scripts/gen-service-worker.mjs';
-import { BRAND_DEFAULTS, resolveBrandFromEnv, unknownBrandEnvVars } from './src/brand/defaults';
+import { BRAND_DEFAULTS, fontPreconnectLinks, resolveBrandFromEnv, unknownBrandEnvVars } from './src/brand/defaults';
 import { DEV_FALLBACK_BASE_URL } from './src/client/baseUrlDefault';
 import { missingSignInFirebaseEnv, signInFirebaseEnvError } from './src/auth/firebaseEnvGuard';
 import { chunkFileName } from './scripts/chunkNames.mjs';
@@ -274,6 +274,7 @@ export default defineConfig(({ mode }) => {
               .replaceAll('{{BRAND_DESCRIPTION}}', brand.description
                 .replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;'))
               .replaceAll('{{BRAND_FAVICON}}', brand.faviconSrc)
+              .replaceAll('{{BRAND_FONTS_PRECONNECT}}', fontPreconnectLinks(brand.fontsHref))
               .replaceAll('{{BRAND_FONTS_HREF}}', brand.fontsHref)
               .replaceAll('{{BRAND_THEME_COLOR}}', brand.themeColor)
               .replaceAll('{{BRAND_DEFAULT_THEME}}', brand.defaultTheme);

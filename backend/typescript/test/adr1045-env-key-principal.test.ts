@@ -16,8 +16,8 @@
  *  - MCP audit rows name each key distinctly;
  *  - the issuer check: a new-form id matches only its own key, and not after
  *    that key is removed even though a sibling shares its prefix; a legacy
- *    8-char id matches when exactly one configured key has the prefix (tenant
- *    binding respected) and fails closed when two do;
+ *    8-char id matches nothing, even when exactly one configured key has the
+ *    prefix (CHAN-F14 deleted that rule);
  *  - the delegation readers in `accessControlService.ts` are tenant-bound: a
  *    key re-scoped away from the tenant its delegation lives in stops vouching.
  *
@@ -28,10 +28,10 @@
  * `printf %s sk-live-alpha-0001 | shasum -a 256 | cut -c1-16` (and the same for
  * the bravo and xray keys).
  *
- * The LEGACY unique-prefix case pins the compatibility rule ADR 1045 accepts.
- * Its known residual (review C1: after a same-prefix rotation the unique holder
- * vouches for the rotated-out key's legacy records) is TODO `CHAN-F14`, a user
- * decision; when that cure deletes the legacy rule, this case changes with it.
+ * The LEGACY case pins the CHAN-F14 cure (2026-11-12): the unique-prefix rule
+ * ADR 1045 accepted is deleted, because after a same-prefix rotation the unique
+ * holder vouched for the rotated-out key's legacy records (review C1). Stored
+ * legacy ids were rewritten first (`legacy-bearer-id-rewrite`).
  *
  * Sabotage-witnessed 2026-11-05 (each applied alone, the named legs went red,
  * then restored and `git diff` checked exact): see ADR 1045 § "Env-key principal
@@ -222,28 +222,18 @@ describe('TST-FUD-GC-1 — the operator-issuer check vouches only for the key th
     expect(r).toEqual({ any: false, t1: false, survivor: true });
   });
 
-  it('a LEGACY 8-char issuer still matches when exactly one configured key has that prefix, tenant-bound', async () => {
+  it('a LEGACY 8-char issuer matches nothing, even when exactly one configured key has that prefix (CHAN-F14)', async () => {
+    // The case the deleted rule admitted: one configured key holds the prefix.
     const unique = await withKeys(`${KEY_A}:${T1},other-prefix-key:${T2}`, () => ({
       any: isConfiguredEnvKeyIssuer(LEGACY),
       t1: isConfiguredOperatorIssuerFor(LEGACY, T1),
-      // The one key with that prefix is not configured for T2.
-      t2: isConfiguredOperatorIssuerFor(LEGACY, T2),
+      // The same key's NEW id still matches, so the refusal is the legacy form's.
+      current: isConfiguredOperatorIssuerFor(ID_A, T1),
     }));
-    expect(unique).toEqual({ any: true, t1: true, t2: false });
-    // A short key's legacy id is the whole key, matched exactly as before.
-    const short = await withKeys(`short:${T1}`, () => ({
-      whole: isConfiguredOperatorIssuerFor('bearer:short', T1),
-      partial: isConfiguredEnvKeyIssuer('bearer:shor'),
-    }));
-    expect(short).toEqual({ whole: true, partial: false });
-  });
-
-  it('an AMBIGUOUS legacy prefix fails closed: two configured keys share it', async () => {
-    const r = await withKeys(`${KEY_A}:${T1},${KEY_B}:${T1}`, () => ({
-      any: isConfiguredEnvKeyIssuer(LEGACY),
-      t1: isConfiguredOperatorIssuerFor(LEGACY, T1),
-    }));
-    expect(r).toEqual({ any: false, t1: false });
+    expect(unique).toEqual({ any: false, t1: false, current: true });
+    // A short key's legacy id was the whole key; it matches nothing either.
+    const short = await withKeys(`short:${T1}`, () => isConfiguredOperatorIssuerFor('bearer:short', T1));
+    expect(short).toBe(false);
   });
 });
 

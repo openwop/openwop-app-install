@@ -29,6 +29,8 @@ vi.mock('../dashboardClient.js', () => ({ listOwnRuns: (...a: unknown[]) => list
 vi.mock('../../connections/connectionsClient.js', () => ({ listConnections: () => listConnections() }));
 vi.mock('../../../agents/approvalsClient.js', () => ({ listApprovals: async () => [] }));
 vi.mock('../../../client/chatSessionsClient.js', () => ({ listChatSessions: async () => [] }));
+// Needs you names a waiting or failed run's workflow from this read (#5788 §4).
+vi.mock('../../../workflows/workflowsClient.js', () => ({ listWorkflowSummaries: async () => [] }));
 const storedRefs = vi.hoisted(() => ({ refs: [] as string[] }));
 vi.mock('../../../byok/lib/byokClient.js', () => ({ listStoredRefs: async () => storedRefs.refs }));
 vi.mock('../../../auth/useAuth.js', () => ({ useAuth: () => ({ user: { uid: 'u1' }, loading: false }) }));

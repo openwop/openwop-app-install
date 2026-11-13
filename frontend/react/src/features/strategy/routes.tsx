@@ -18,9 +18,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Planning',
-      label: 'Strategy', labelKey: 'strategyLabel',
+      labelKey: 'strategyLabel',
       icon: FlagIcon,
-      hint: 'Define & align company strategy', hintKey: 'strategyHint',
+      hintKey: 'strategyHint',
       order: 36,
       featureId: 'strategy',
     },

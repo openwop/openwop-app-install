@@ -26,6 +26,7 @@ import { Button } from '../../ui/Button.js';
 import { useEffect, useMemo, useRef, useState, type JSX, type PointerEvent as ReactPointerEvent, type MouseEvent as ReactMouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { StateCard } from '../../ui/StateCard.js';
+import { TableScroll } from '../../ui/DataTable.js';
 import { ZoomInIcon, ZoomOutIcon, RotateCwIcon } from '../../ui/icons/index.js';
 import { formatNumber } from '../../i18n/format.js';
 import { project, geometryToPath, type GeoGeometry } from './projection.js';
@@ -308,42 +309,46 @@ export function MapView({ regions, points = [], valueLabel, formatValue = (n) =>
         </Button>
       </div>
       {showTable ? (
-        <div className="u-overflow-x-auto">
-          <table className="data-table">
-            <caption className="u-text-sm u-text-muted u-text-left">{caption}</caption>
-            <thead>
-              <tr><th scope="col">{t('colRegion')}</th><th scope="col" className="u-text-right">{valueLabel}</th></tr>
-            </thead>
-            <tbody>
-              {tableRegions.map((r) => (
-                <tr key={r.id} aria-current={activeId === r.id ? 'true' : undefined} style={activeId === r.id ? { background: 'var(--paper-2)' } : undefined}>
-                  <td>{r.name}</td><td className="u-text-right tabular-nums">{r.value !== undefined ? formatValue(r.value) : '—'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {points.length > 0 ? (
-            <table className="data-table u-mt-2">
-              <caption className="u-text-sm u-text-muted u-text-left">{t('plottedCaption')}</caption>
-              <thead><tr><th scope="col">{t('colLocation')}</th><th scope="col">{t('colType')}</th><th scope="col" className="u-text-right">{t('colLatLng')}</th></tr></thead>
+        <>
+          <TableScroll label={caption}>
+            <table className="data-table">
+              <caption className="u-text-sm u-text-muted u-text-left">{caption}</caption>
+              <thead>
+                <tr><th scope="col">{t('colRegion')}</th><th scope="col" className="u-text-right">{valueLabel}</th></tr>
+              </thead>
               <tbody>
-                {points.map((p) => (
-                  <tr key={p.id} aria-current={activePointId === p.id ? 'true' : undefined} style={activePointId === p.id ? { background: 'var(--paper-2)' } : undefined}>
-                    {/* R2 SM2-F11 — the pin's real payload is its click handler (the
-                        page deep-links to the outlet). The SVG circles carry no tabIndex
-                        and no key handler, and this table was read-only — so that
-                        destination was unreachable without a mouse, on a feature whose
-                        own ADR calls a11y the gate. The handler already exists; give the
-                        keyboard a way to invoke it. */}
-                    <td>
-                      <Button variant="link" onClick={() => selectPoint(p.id)}>{p.label}</Button>
-                    </td><td>{p.kind ? t(p.kind === 'outlet' ? 'legendOutlet' : 'legendDealer') : t('pointKindPoint')}</td><td className="u-text-right tabular-nums">{coord(p.lat)}, {coord(p.lng)}</td>
+                {tableRegions.map((r) => (
+                  <tr key={r.id} aria-current={activeId === r.id ? 'true' : undefined} style={activeId === r.id ? { background: 'var(--paper-2)' } : undefined}>
+                    <td>{r.name}</td><td className="u-text-right tabular-nums">{r.value !== undefined ? formatValue(r.value) : '—'}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
+          </TableScroll>
+          {points.length > 0 ? (
+            <TableScroll className="u-mt-2" label={t('plottedCaption')}>
+              <table className="data-table">
+                <caption className="u-text-sm u-text-muted u-text-left">{t('plottedCaption')}</caption>
+                <thead><tr><th scope="col">{t('colLocation')}</th><th scope="col">{t('colType')}</th><th scope="col" className="u-text-right">{t('colLatLng')}</th></tr></thead>
+                <tbody>
+                  {points.map((p) => (
+                    <tr key={p.id} aria-current={activePointId === p.id ? 'true' : undefined} style={activePointId === p.id ? { background: 'var(--paper-2)' } : undefined}>
+                      {/* R2 SM2-F11 — the pin's real payload is its click handler (the
+                          page deep-links to the outlet). The SVG circles carry no tabIndex
+                          and no key handler, and this table was read-only — so that
+                          destination was unreachable without a mouse, on a feature whose
+                          own ADR calls a11y the gate. The handler already exists; give the
+                          keyboard a way to invoke it. */}
+                      <td>
+                        <Button variant="link" onClick={() => selectPoint(p.id)}>{p.label}</Button>
+                      </td><td>{p.kind ? t(p.kind === 'outlet' ? 'legendOutlet' : 'legendDealer') : t('pointKindPoint')}</td><td className="u-text-right tabular-nums">{coord(p.lat)}, {coord(p.lng)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </TableScroll>
           ) : null}
-        </div>
+        </>
       ) : null}
     </div>
   );

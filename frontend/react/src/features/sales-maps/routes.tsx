@@ -4,7 +4,7 @@
  * The MapView is a lazy chunk (only this manifest is entry-resident, ADR §10).
  */
 import { lazy } from 'react';
-import { GlobeIcon } from '../../ui/icons/index.js';
+import { MapPinIcon } from '../../ui/icons/index.js';
 import type { FeatureRoute } from '../../chrome/featureTypes.js';
 import type { FrontendFeature } from '../registry.js';
 
@@ -17,9 +17,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Sales',
-      label: 'Sales Map', labelKey: 'salesMapLabel',
-      icon: GlobeIcon,
-      hint: 'Territory attainment & dealer locations on a map', hintKey: 'salesMapHint',
+      labelKey: 'salesMapLabel',
+      icon: MapPinIcon,
+      hintKey: 'salesMapHint',
       order: 50,
       featureId: 'sales-maps',
     },

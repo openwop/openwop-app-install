@@ -40,6 +40,7 @@ import { WorkflowFeatureRefusedError } from '../host/workflowFeatureGate.js';
 import type { Storage } from '../storage/storage.js';
 import type { HostAdapterSuite } from '../host/index.js';
 import type { RunRecord } from '../types.js';
+import { childPlanExemptionStamp } from '../host/operatorPlanExemption.js';
 import {
   seedRunVariables,
   snapshotRunVariables,
@@ -255,9 +256,12 @@ export async function dispatchSubWorkflow(
   // published-when-present, else the parent's edit lane leaks into production.
   // ADR 0820 §7 / G6 — a child owned by a feature the tenant may not use is a
   // typed dispatch failure (never a silent not-found).
+  // ADR 1108 — a child of a run whose operator plan exemption still holds is
+  // launched (and stamped, below) under it; every other parent gets `{}` as before.
+  const childExemption = childPlanExemptionStamp(opts.parentTenantId, parentMetadata);
   let wf: Awaited<ReturnType<typeof resolveLaunchWorkflow>>;
   try {
-    wf = await resolveLaunchWorkflow(hostSuite.workflowCatalog, opts.parentTenantId, opts.childWorkflowId);
+    wf = await resolveLaunchWorkflow(hostSuite.workflowCatalog, opts.parentTenantId, opts.childWorkflowId, childExemption.planExempt ? { subject: { planExempt: true } } : {});
   } catch (err) {
     if (err instanceof WorkflowFeatureRefusedError) {
       throw new DispatchCreationError(`subWorkflow: ${err.message}`, 'subworkflow_feature_refused');
@@ -318,7 +322,7 @@ export async function dispatchSubWorkflow(
     inputs: childInputs,
     // ADR 0941 D2b — registered host stamps (the campaign run tag + frozen goal)
     // are projected from the PARENT ROW, after the handoff strip.
-    metadata: { ...stripReservedRunMetadata(opts.childMetadata), ...inheritedRunMetadata(parentMetadata), ...(parentPerson ? { orgScopeSubject: parentPerson } : {}) },
+    metadata: { ...stripReservedRunMetadata(opts.childMetadata), ...inheritedRunMetadata(parentMetadata), ...(parentPerson ? { orgScopeSubject: parentPerson } : {}), ...childExemption },
     configurable: {
       ...(opts.parentCredentialRefs && opts.parentCredentialRefs.length > 0 ? { credentialRefs: [...opts.parentCredentialRefs] } : {}),
       ...(opts.parentAi ? { ai: { ...opts.parentAi } } : {}),

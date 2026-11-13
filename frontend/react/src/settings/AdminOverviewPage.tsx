@@ -13,6 +13,7 @@ import { setNavSource } from '../chrome/navSource.js';
 import { useReviewList, useReviewStatusStore } from '../chat/reviews/reviewStatusStore.js';
 import { getHealthSummary, OperationsRequestError } from '../client/operationsClient.js';
 import { ActivityIcon, AlertIcon, CheckIcon, ClockIcon, InboxIcon, LockIcon, SearchIcon } from '../ui/icons/index.js';
+import { navHint, navLabel } from '../chrome/navText.js';
 
 
 type HealthState = 'idle' | 'loading' | 'ready' | 'degraded' | 'restricted' | 'unavailable';
@@ -59,12 +60,8 @@ export function AdminOverviewPage(): JSX.Element {
   const translatedGroup = (group: NavGroup): string => group.custom
     ? group.label
     : tn(GROUP_LABEL_KEYS[group.id] ?? '', { defaultValue: group.label });
-  const translatedLabel = (item: NavItem): string => item.labelKey
-    ? tn(item.labelKey, { defaultValue: item.label })
-    : item.label;
-  const translatedHint = (item: NavItem): string => item.hintKey
-    ? tn(item.hintKey, { defaultValue: item.hint })
-    : item.hint;
+  const translatedLabel = (item: NavItem): string => navLabel(item, tn);
+  const translatedHint = (item: NavItem): string => navHint(item, tn);
 
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const filteredGroups = groups.map((group) => ({

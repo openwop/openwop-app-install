@@ -12,16 +12,29 @@
  * idempotency case runs its own first import, so the file passes under
  * `--sequence.shuffle`.
  *
- * DOUBLE GUARD (named, not a gap): re-importing a schedule is skipped by TWO
- * independent checks — the find-existing `getJob` and the `claimImport`
- * insert-if-absent claim. Removing either alone stays green by design (round-1
- * probe `po-sched-existing-skip` was vacuous for exactly this reason); the probe
- * aims at the deterministic jobId both of them key on.
+ * DOUBLE GUARDS (named, not gaps): re-importing a schedule, a roster member or a
+ * prompt is skipped by TWO independent checks — a find-existing read and the
+ * `claimImport` insert-if-absent claim. Each answers with its OWN message
+ * ("already imported" / "already present" vs "claimed by a concurrent import" /
+ * "was already imported"), so the re-import cases pin the find-existing message:
+ * dropping that check alone is then red, and a break-both probe covers the pair.
+ * (Wave 8f w1 asserted the status only, so `po-sched-existing-skip` was vacuous.)
  *
- * Sabotages each case is red against (probed, /grade-tests 8f w1): the import
- * credential scan, the export self-check, the cycle check, the item cap (both
- * sides of 500), the `packs:publish` gate, validate-before-scope, topo order,
- * schedules imported enabled, the tenant-qualified jobId, the deterministic jobId.
+ * ADR 0993 D7 — a prompt lands only in an org the importer may WRITE in the
+ * target tenant (the round trip's `o1` is the source tenant's org, so it is
+ * skipped with that reason), and the export answers what the exporting subject
+ * may read (the export cases pass the org owner `test` as the caller). The
+ * prompt's own import and re-import are exercised in the per-item case, whose
+ * tenant owns its org.
+ *
+ * Sabotages each case is red against (wave 106 probes w106g2-po-*): the import
+ * credential scan, the export self-check, the redacted connection ref, the cycle
+ * check, the item cap (both sides of 500), the `packs:publish` gate, applying
+ * before the scope check, a dry run that applies, validate-before-scope, topo
+ * order, roster/schedules imported enabled, the tenant-qualified jobId, the
+ * deterministic jobId, each find-existing check and each double guard, the
+ * prompt write-access check, the record-only connection, the org-chart member
+ * filter, the export caller, and the per-item catch.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -34,7 +47,7 @@ import { createRosterEntry, listRoster } from '../src/host/rosterService.js';
 import { upsertAgentProfile } from '../src/host/agentProfileService.js';
 import { createEntry, listEntriesUnfiltered } from '../src/features/prompts/promptLibraryService.js';
 import { getJob, listJobs, registerJob } from '../src/host/schedulingService.js';
-import { putChart } from '../src/host/orgChartService.js';
+import { getChart, putChart } from '../src/host/orgChartService.js';
 import { createSecretConnection } from '../src/features/connections/connectionsService.js';
 import {
   applyImport, buildExportBundle, CredentialMaterialError, findLiteralCredential, MalformedBundleError, planImport,
@@ -46,6 +59,7 @@ let BASE: string;
 const TOKEN = 'dev-token';
 const TA = 'porta-src';
 let rosterId = '';
+const savedEnv = { dsn: process.env.OPENWOP_STORAGE_DSN, enabled: process.env.OPENWOP_PORTABILITY_ENABLED };
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -73,26 +87,51 @@ beforeAll(async () => {
   await createEntry(TA, 'o1', 'test', { name: 'weekly-brief', description: 'Weekly brief prompt', promptRef: 'tpl-porta-brief', visibility: 'org' });
   const job = await registerJob({ jobId: 'sched-porta-1', tenantId: TA, cronExpr: '0 9 * * 1', enabled: true });
   if (!job.ok) throw new Error(`seed schedule failed: ${job.error.message}`);
-  const chartOut = await putChart({ tenantId: TA, departments: [{ departmentId: 'd1', name: 'Ops', parentDepartmentId: null, roles: [] }], members: [] });
+  // One member, so the cross-tenant import has a member whose rosterId cannot resolve.
+  const chartOut = await putChart({
+    tenantId: TA,
+    departments: [{ departmentId: 'd1', name: 'Ops', parentDepartmentId: null, roles: [{ roleId: 'r1', name: 'Lead' }] }],
+    members: [{ rosterId: entry.rosterId, departmentId: 'd1', roleId: 'r1', reportsTo: null }],
+  });
   if (!('chart' in chartOut)) throw new Error(`seed chart failed: ${JSON.stringify(chartOut)}`);
   await createSecretConnection({ tenantId: TA, provider: 'sendgrid', kind: 'api_key', secret: 'SG.super-secret', scope: 'workspace' });
-});
+}, 120_000);
 
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
+  if (savedEnv.dsn === undefined) delete process.env.OPENWOP_STORAGE_DSN; else process.env.OPENWOP_STORAGE_DSN = savedEnv.dsn;
+  if (savedEnv.enabled === undefined) delete process.env.OPENWOP_PORTABILITY_ENABLED; else process.env.OPENWOP_PORTABILITY_ENABLED = savedEnv.enabled;
 });
 
-interface ErrBody { error: string; message: string; details?: Record<string, unknown> }
+/** Response bodies are read as `unknown` and narrowed here, never cast. */
+function isItem(v: unknown): v is ExportBundle['items'][number] {
+  return typeof v === 'object' && v !== null && 'kind' in v && typeof v.kind === 'string' && 'ref' in v && typeof v.ref === 'string'
+    && 'payload' in v && typeof v.payload === 'object' && v.payload !== null;
+}
+function assertBundle(v: unknown): asserts v is ExportBundle {
+  const ok = typeof v === 'object' && v !== null && 'bundleVersion' in v && v.bundleVersion === '1'
+    && 'source' in v && typeof v.source === 'object' && v.source !== null && 'origin' in v.source && typeof v.source.origin === 'string'
+    && 'items' in v && Array.isArray(v.items) && v.items.every(isItem);
+  if (!ok) throw new Error(`not an export bundle: ${JSON.stringify(v).slice(0, 300)}`);
+}
 
-async function api<T>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
+async function api(path: string, init: RequestInit = {}): Promise<{ status: number; body: unknown }> {
   const res = await fetch(`${BASE}${path}`, {
     ...init,
     headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}`, ...(init.headers ?? {}) },
   });
   const text = await res.text();
-  return { status: res.status, body: (text.length ? JSON.parse(text) : null) as T };
+  const body: unknown = text.length ? JSON.parse(text) : null;
+  return { status: res.status, body };
 }
-const post = <T>(path: string, bundle: unknown) => api<T>(path, { method: 'POST', body: JSON.stringify({ bundle }) });
+const post = (path: string, bundle: unknown) => api(path, { method: 'POST', body: JSON.stringify({ bundle }) });
+
+/** The tenant the route requests act in, read off the export's origin rather than assumed. */
+async function routeTenant(): Promise<string> {
+  const { body } = await api('/host/openwop-app/export');
+  assertBundle(body);
+  return body.source.origin.replace('host:openwop-app:', '');
+}
 
 const leaky = {
   bundleVersion: '1',
@@ -117,15 +156,16 @@ const clean = {
 
 describe('portability — export/import seam (RFC 0098)', () => {
   it('export is refs-only: no literal credential values', async () => {
-    const { status, body } = await api<ExportBundle>('/host/openwop-app/export');
+    const { status, body } = await api('/host/openwop-app/export');
     expect(status).toBe(200);
-    expect(body.bundleVersion).toBe('1');
+    assertBundle(body);
     const tenant = body.source.origin.replace('host:openwop-app:', '');
     // Seed a REAL secret connection in the exporting tenant, then export again:
     // the bundle must carry a [REDACTED:<id>] ref and never the material.
     await createSecretConnection({ tenantId: tenant, provider: 'sendgrid', kind: 'api_key', secret: 'SG.route-export-secret', scope: 'workspace' });
-    const again = await api<ExportBundle>('/host/openwop-app/export');
+    const again = await api('/host/openwop-app/export');
     expect(again.status).toBe(200);
+    assertBundle(again.body);
     const conns = again.body.items.filter((i) => i.kind === 'connection-ref');
     expect(conns.length).toBe(1);
     expect(String(conns[0]!.payload.credentialRef)).toMatch(/^\[REDACTED:[^\]]+\]$/);
@@ -142,18 +182,19 @@ describe('portability — export/import seam (RFC 0098)', () => {
   });
 
   it('import of a bundle with a literal credential value is rejected 422 (even on dryRun)', async () => {
-    const res = await post<ErrBody>('/host/openwop-app/import?dryRun=true', leaky);
+    const res = await post('/host/openwop-app/import?dryRun=true', leaky);
     expect(res.status).toBe(422);
-    expect(res.body).toMatchObject({ error: 'validation_error', details: { keyPath: 'connection-ref:c1.payload.apiKey' } });
-    expect(res.body.message).toMatch(LEAKY_MESSAGE);
+    expect(res.body).toMatchObject({ error: 'validation_error', message: expect.stringMatching(LEAKY_MESSAGE), details: { keyPath: 'connection-ref:c1.payload.apiKey' } });
   });
 
   it('clean dryRun returns a plan and makes zero writes', async () => {
-    const before = await listJobs('default');
-    const res = await post<ImportPlan>('/host/openwop-app/import?dryRun=true', clean);
+    const tenant = await routeTenant();
+    const before = await listJobs(tenant);
+    const res = await post('/host/openwop-app/import?dryRun=true', clean);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ dryRun: true, itemCount: 2, byKind: { 'connection-ref': 1, schedule: 1 }, order: ['s1', 'c1'] }); // dependency order
-    expect(await listJobs('default')).toEqual(before); // the schedule an apply WOULD register was not
+    const plan: ImportPlan = { dryRun: true, itemCount: 2, byKind: { 'connection-ref': 1, schedule: 1 }, order: ['s1', 'c1'] }; // dependency order
+    expect(res.body).toEqual(plan);
+    expect(await listJobs(tenant)).toEqual(before); // the schedule an apply WOULD register was not
   });
 
   it('a dependsOn cycle is rejected 422', async () => {
@@ -165,24 +206,24 @@ describe('portability — export/import seam (RFC 0098)', () => {
         { kind: 'pack', ref: 'b', dependsOn: ['a'], payload: {} },
       ],
     };
-    const res = await post<ErrBody>('/host/openwop-app/import?dryRun=true', cyclic);
+    const res = await post('/host/openwop-app/import?dryRun=true', cyclic);
     expect(res.status).toBe(422);
     expect(res.body).toMatchObject({ error: 'validation_error', message: 'Import bundle has a dependsOn cycle: a → b → a.', details: { cycle: ['a', 'b', 'a'] } });
   });
 
   it('apply (non-dryRun) without scope is denied 403', async () => {
-    const before = await listJobs('default');
-    const res = await post<ErrBody>('/host/openwop-app/import', clean);
+    const tenant = await routeTenant();
+    const before = await listJobs(tenant);
+    const res = await post('/host/openwop-app/import', clean);
     expect(res.status).toBe(403);
     expect(res.body).toMatchObject({ error: 'forbidden_scope', message: 'Applying an import bundle requires the `packs:publish` scope.', details: { requiredScope: 'packs:publish' } });
-    expect(await listJobs('default')).toEqual(before); // and nothing was written
+    expect(await listJobs(tenant)).toEqual(before); // and nothing was written
   });
 
   it('apply of a leaky bundle is 422 before the scope check', async () => {
-    const res = await post<ErrBody>('/host/openwop-app/import', leaky);
+    const res = await post('/host/openwop-app/import', leaky);
     expect(res.status).toBe(422); // the scope check would have answered 403
-    expect(res.body).toMatchObject({ error: 'validation_error', details: { keyPath: 'connection-ref:c1.payload.apiKey' } });
-    expect(res.body.message).toMatch(LEAKY_MESSAGE);
+    expect(res.body).toMatchObject({ error: 'validation_error', message: expect.stringMatching(LEAKY_MESSAGE), details: { keyPath: 'connection-ref:c1.payload.apiKey' } });
   });
 });
 
@@ -248,8 +289,15 @@ describe('real import — materializes via the owning services, inert + idempote
     expect(byKind('connection-ref')[0]!.status).toBe('skipped');
     expect(byKind('connection-ref')[0]!.message).toMatch(/re-auth/);
 
-    // Org chart: structure imports; TA's member rosterIds don't resolve in TB.
-    expect(byKind('org-chart')[0]!.status).toBe('imported');
+    // Org chart: the member's roster entry landed first (topo order), so it resolves
+    // in TB and is kept…
+    expect(byKind('org-chart')[0]).toMatchObject({ status: 'imported', message: 'org chart imported' });
+    expect((await getChart(TB))?.members.map((m) => m.rosterId)).toEqual([rosterId]);
+    // …while a chart exported WITHOUT its roster lands with the foreign member dropped.
+    const TC = 'porta-dst-chart-only';
+    const chartOnly = await applyImport(TC, 'test', await buildExportBundle(TA, ['org-chart'], 'test'));
+    expect(chartOnly.items).toEqual([{ ref: `orgchart:${TA}`, kind: 'org-chart', status: 'imported', message: 'org chart imported (1 member(s) dropped — no matching roster entry on this host)' }]);
+    expect((await getChart(TC))?.members).toEqual([]);
   });
 
   it('re-importing the same bundle is idempotent — skips, never duplicates', async () => {
@@ -257,23 +305,24 @@ describe('real import — materializes via the owning services, inert + idempote
     const bundle = await buildExportBundle(TA, undefined, 'test');
     const first = await applyImport(TB, 'test', bundle);
     expect(first.items.find((i) => i.kind === 'schedule')!.status).toBe('imported');
-    const rosterBefore = (await listRoster(TB)).length;
-    const promptsBefore = (await listEntriesUnfiltered(TB, 'o1')).length;
+    const rosterBefore = (await listRoster(TB)).map((r) => r.rosterId);
+    expect(rosterBefore).toHaveLength(1);
     const jobsBefore = (await listJobs(TB)).map((j) => j.jobId);
     expect(jobsBefore).toEqual([importedJobId(TB)]);
 
     const again = await applyImport(TB, 'test', bundle);
-    expect((await listRoster(TB)).length).toBe(rosterBefore); // no duplicate roster rows
+    expect((await listRoster(TB)).map((r) => r.rosterId)).toEqual(rosterBefore); // no duplicate roster rows
     expect((await listJobs(TB)).map((j) => j.jobId)).toEqual(jobsBefore); // COUNT the jobs: still one
-    expect(again.items.find((i) => i.kind === 'roster')!.status).toBe('skipped');
-    expect(again.items.find((i) => i.kind === 'schedule')!.status).toBe('skipped');
-    expect((await listEntriesUnfiltered(TB, 'o1')).length).toBe(promptsBefore); // no duplicate prompts
+    // The FIND-EXISTING message, not the claim's: each half of the double guard says its own.
+    expect(again.items.find((i) => i.kind === 'roster')).toMatchObject({ status: 'skipped', message: `persona 'ops-lead' already present (${rosterBefore[0]})` });
+    expect(again.items.find((i) => i.kind === 'schedule')).toMatchObject({ status: 'skipped', message: `schedule ${importedJobId(TB)} already imported` });
     // Only the replace-in-place kinds re-apply (an agent profile is an upsert, an
-    // org chart a put); every create-kind is skipped.
+    // org chart a put); every create-kind is skipped (the prompt here for write
+    // access to TA's org, as in the round trip; its own re-import is the per-item case).
     expect(again.items.filter((i) => i.status === 'imported').map((i) => i.kind).sort()).toEqual(['agent', 'org-chart']);
   });
 
-  it('per-item isolation: a bad item never aborts the rest', async () => {
+  it('per-item isolation: a bad item never aborts the rest; the prompt it lands re-imports as a skip', async () => {
     expect((await createTenantTemplate('porta-iso', { templateId: 'tpl-porta-iso', version: '1.0.0', kind: 'user', text: 'Iso', name: 'tpl-porta-iso' })).ok).toBe(true);
     await createOrg({ tenantId: 'porta-iso', createdBy: 'test', name: 'Iso Org', orgId: 'o-iso', ownerSubject: 'test' });
     const mixed = {
@@ -281,13 +330,25 @@ describe('real import — materializes via the owning services, inert + idempote
       source: { origin: 'adapter:test' },
       items: [
         { kind: 'schedule', ref: 'bad-sched', payload: {} }, // no cronExpr → skipped
+        // A department with no `roles` array makes the chart service THROW (not skip),
+        // so the per-item catch is what keeps the next item alive.
+        { kind: 'org-chart', ref: 'bad-chart', payload: { departments: [{ departmentId: 'dx' }] } },
         { kind: 'prompt-template', ref: 'good-pt', payload: { name: 'isolated-prompt', orgId: 'o-iso', promptRef: 'tpl-porta-iso' } },
       ],
     };
     const result = await applyImport('porta-iso', 'test', mixed);
+    expect(result.refs).toEqual(['bad-sched', 'bad-chart', 'good-pt']); // the throwing item runs BEFORE the good one
     expect(result.items.find((i) => i.ref === 'bad-sched')).toMatchObject({ status: 'skipped', message: 'payload.cronExpr missing' });
-    expect(result.items.find((i) => i.ref === 'good-pt')!.status).toBe('imported');
+    expect(result.items.find((i) => i.ref === 'bad-chart')!.status).toBe('failed');
+    expect(result.items.find((i) => i.ref === 'good-pt')).toMatchObject({ status: 'imported', message: "prompt 'isolated-prompt' created in org o-iso" });
     expect(result.imported).toBe(1);
+    // Read back: the row exists, once.
+    expect((await listEntriesUnfiltered('porta-iso', 'o-iso')).map((e) => e.name)).toEqual(['isolated-prompt']);
+
+    // Re-import: the prompt's find-existing check answers (its own message), no second row.
+    const again = await applyImport('porta-iso', 'test', mixed);
+    expect(again.items.find((i) => i.ref === 'good-pt')).toMatchObject({ status: 'skipped', message: "prompt 'isolated-prompt' already present in org o-iso" });
+    expect((await listEntriesUnfiltered('porta-iso', 'o-iso')).map((e) => e.name)).toEqual(['isolated-prompt']);
   });
 });
 

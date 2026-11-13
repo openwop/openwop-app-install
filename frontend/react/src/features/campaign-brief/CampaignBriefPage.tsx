@@ -21,10 +21,11 @@ import { Modal } from '../../ui/Modal.js';
 import { ConfirmDialog } from '../../ui/ConfirmDialog.js';
 import { TextField, TextareaField, SelectField, CheckboxField } from '../../ui/Field.js';
 import { Tabs, TabPanel, useUrlTab } from '../../ui/Tabs.js';
-import { IntelWorkspace } from './IntelWorkspace.js';
+import { IntelWorkspace, type StrategistIntent } from './IntelWorkspace.js';
+import { stageComposerDraft } from '../../chat/composerSeed.js';
 import { BriefKnowledgeField } from './BriefKnowledgeField.js';
 import { toast } from '../../ui/toast.js';
-import { MegaphoneIcon, PlusIcon, TrashIcon, SparklesIcon, CheckIcon, AlertIcon, ArrowLeftIcon, XIcon, PencilIcon } from '../../ui/icons/index.js';
+import { MegaphoneIcon, PlusIcon, TrashIcon, SparklesIcon, AlertIcon, ArrowLeftIcon, PencilIcon } from '../../ui/icons/index.js';
 import {
   listPersonas, createPersona, updatePersona, deletePersona,
   listBriefs, createBrief, updateBrief, deleteBrief, duplicateBrief, validateBriefById,
@@ -185,7 +186,12 @@ function BriefsTab({ t, orgs, orgsFailed, brands, brandsFailed, onDisabled, onEr
         t={t} brief={current} brands={brands} brandsFailed={brandsFailed} personas={personas} personasReadFailed={personasReadFailed}
         onBack={() => { setSelected(null); void refresh(); }}
         onChanged={refresh} onError={onError}
-        onOpenStrategist={() => navigate(`/?agent=${encodeURIComponent(BRIEF_STRATEGIST_AGENT)}`)}
+        onOpenStrategist={(intent) => {
+          // CC-UX-2 — open the ONE chat with a draft that names this brief by id, so the
+          // Strategist reads it with get-brief instead of making the marketer re-identify it.
+          stageComposerDraft(t(intent === 'research' ? 'strategistResearchDraft' : 'strategistKernelDraft', { name: current.name, briefId: current.id, orgId: current.orgId }));
+          void navigate(`/?agent=${encodeURIComponent(BRIEF_STRATEGIST_AGENT)}`);
+        }}
       />
     );
   }
@@ -321,7 +327,7 @@ function CreateBriefModal({ t, orgs, onClose, onCreated, onError }: { t: TFn; or
 
 function BriefDetail({ t, brief, brands, brandsFailed, personas, personasReadFailed, onBack, onChanged, onError, onOpenStrategist }: {
   t: TFn; brief: CampaignBrief; brands: BrandRef[]; brandsFailed: boolean; personas: Persona[]; personasReadFailed: boolean;
-  onBack: () => void; onChanged: () => Promise<void>; onError: (m: string) => void; onOpenStrategist: () => void;
+  onBack: () => void; onChanged: () => Promise<void>; onError: (m: string) => void; onOpenStrategist: (intent: StrategistIntent) => void;
 }): JSX.Element {
   const [objective, setObjective] = useState(brief.objective);
   const [productName, setProductName] = useState(brief.productName);
@@ -505,6 +511,15 @@ function BriefDetail({ t, brief, brands, brandsFailed, personas, personasReadFai
     || toneOverride !== (brief.messaging.toneOverride ?? '')
   ), [objective, productName, productDescription, industryVertical, groundingPolicy, kbCollectionId, brandId, competitors, valueProp, proofPoints, ctaStrategy, personaIds, channels, budgetTotal, currency, utmSource, utmMedium, utmCampaign, utmTerm, utmContent, toneOverride, brief]);
 
+  // CC-UX-2 review — the staged draft asks the Strategist to read the SAVED brief,
+  // so with unsaved edits on screen save first (CB-G2's rule), and say so in the label.
+  const openStrategist = async (intent: StrategistIntent): Promise<void> => {
+    if (busy) return;
+    if (dirty && !(await save())) return;
+    onOpenStrategist(intent);
+  };
+  const strategistLabel = dirty ? t('saveAndGenerateWithStrategist') : t('generateWithStrategist');
+
   const validate = async (): Promise<void> => {
     if (validating || busy) return;
     setValidating(true);
@@ -577,20 +592,19 @@ function BriefDetail({ t, brief, brands, brandsFailed, personas, personasReadFai
 
       {view === 'intel' ? (
         <TabPanel idBase="brief-detail" tabId="intel">
-          <IntelWorkspace brief={brief} onError={onError} onOpenStrategist={onOpenStrategist} />
+          <IntelWorkspace brief={brief} onError={onError} onOpenStrategist={(intent) => void openStrategist(intent)} />
         </TabPanel>
       ) : (
       <TabPanel idBase="brief-detail" tabId="editor">
 
       {validation ? (
         <div aria-label={t('validationSummaryLabel')} role="group">
-          <Notice variant={validation.valid ? 'success' : 'warning'}>
-            <Button variant="link" className="u-fs-11" onClick={() => setValidation(null)} aria-label={t('common:close')}><XIcon size={12} /></Button>
+          <Notice variant={validation.valid ? 'success' : 'warning'} onDismiss={() => setValidation(null)} dismissLabel={t('common:close')}>
             {validation.valid
-              ? <span><CheckIcon size={14} /> {t('validValid', { channels: validation.enabledChannels.map((c) => t(`channel_${c}`)).join(', ') })}</span>
+              ? <span>{t('validValid', { channels: validation.enabledChannels.map((c) => t(`channel_${c}`)).join(', ') })}</span>
               : (
                 <div>
-                  <p className="u-m-0 u-fw-600"><AlertIcon size={14} /> {t('validInvalidCount', { count: validation.issues.length })}</p>
+                  <p className="u-m-0 u-fw-600">{t('validInvalidCount', { count: validation.issues.length })}</p>
                   {/* CB-G1 — one row per issue, each naming the section the
                       server pointed at, each a control that takes the reader
                       there. A jump is offered only for a field we can place;
@@ -619,7 +633,7 @@ function BriefDetail({ t, brief, brands, brandsFailed, personas, personasReadFai
       {brief.kernel ? (
         <section className="surface-card u-mb-4">
           <div className="u-flex u-items-center u-gap-2 u-mb-2"><SparklesIcon size={16} /> <h3 className="u-m-0">{t('kernelTitle')}</h3>{brief.kernelStale ? <span className="chip chip--warning">{t('kernelStale')}</span> : null}</div>
-          {brief.kernelStale && !pendingKernelRunId ? <p className="u-fs-13 muted u-mt-0">{t('kernelStaleExplain')} <Button variant="link" onClick={onOpenStrategist}>{t('generateWithStrategist')}</Button></p> : null}
+          {brief.kernelStale && !pendingKernelRunId ? <p className="u-fs-13 muted u-mt-0">{t('kernelStaleExplain')} <Button variant="link" onClick={() => void openStrategist('kernel')}>{strategistLabel}</Button></p> : null}
           <p className="u-fw-600 u-mb-1">{brief.kernel.headline}</p>
           <p className="muted u-mt-0">{brief.kernel.supportingStatement}</p>
           {brief.kernel.proofPoints.length ? <ul>{brief.kernel.proofPoints.map((p, i) => <li key={i}>{p}</li>)}</ul> : null}
@@ -629,7 +643,7 @@ function BriefDetail({ t, brief, brands, brandsFailed, personas, personasReadFai
           {brief.kernel.generatedAt ? <p className="u-fs-13 muted u-m-0">{t('kernelGeneratedAt', { when: formatDateTime(brief.kernel.generatedAt) })}</p> : null}
         </section>
       ) : pendingKernelRunId ? null : (
-        <Notice variant="info">{t('noKernelYet')} <Button variant="link" onClick={onOpenStrategist}>{t('generateWithStrategist')}</Button></Notice>
+        <Notice variant="info">{t('noKernelYet')} <Button variant="link" onClick={() => void openStrategist('kernel')}>{strategistLabel}</Button></Notice>
       )}
 
       <section className="surface-card u-mb-4" ref={sectionRefs.product} tabIndex={-1}>

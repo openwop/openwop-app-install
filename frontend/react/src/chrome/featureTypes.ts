@@ -55,13 +55,18 @@ export interface FeatureNav {
    *  Category display order is set by `GROUP_ORDER` in chrome/features.tsx;
    *  an unlisted group sorts after the known ones (stable by first appearance). */
   group: string;
-  label: string;
+  /** English menu label — only for an entry WITHOUT a `labelKey` (an adopter's
+   *  feature with no catalog). With a key, the English lives in the `nav`
+   *  catalog alone: a literal here would ship a second copy in the entry chunk
+   *  (ADR 0874 P3). Every entry has one or the other (`navCopyRatchet`). */
+  label?: string;
   icon: IconCmp;
-  hint: string;
-  /** i18n key in the `nav` namespace for `label` (English fallback stays in
-   *  `label`). Consumers resolve via `t(labelKey, { defaultValue: label })`. */
+  /** English hint, on the same terms as `label`. */
+  hint?: string;
+  /** i18n key in the `nav` namespace for the label. Read it only through
+   *  `navLabel()` (chrome/navText.ts), never `t(labelKey)` by hand. */
   labelKey?: string;
-  /** i18n key in the `nav` namespace for `hint` (English fallback in `hint`). */
+  /** i18n key in the `nav` namespace for the hint; read through `navHint()`. */
   hintKey?: string;
   /** POSITION within the group (lower = earlier). How a feature declares where
    *  it slots relative to its siblings, so the registry — not render code — owns

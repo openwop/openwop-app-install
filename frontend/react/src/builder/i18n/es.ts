@@ -7,6 +7,7 @@ export const messages = {
   errCanonicalSourceOutput: "La salida de origen guardada no es válida. Vuelve a cargar el flujo antes de guardar.",
   defaultSourceOutput: "Salida predeterminada",
   missingSourceOutput: "Salida no disponible: {{name}}",
+  undeclaredSourceOutput: "{{name}} (el nodo no lo declara)",
   defaultSourceOutputHelp: "Usa la propiedad output si existe; de lo contrario, pasa el mapa de salidas del origen.",
   sourceOutputDescription: "Salida del origen: {{name}} ({{type}})",
 

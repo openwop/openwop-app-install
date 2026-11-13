@@ -10,10 +10,15 @@
  *    BUDGET, the ad account and the dispatch time. All four were dropped,
  *    leaving an opaque platform id as the only fact about a live ad object.
  *
- * Sabotage: rendering the budget as `/100` reds the DAILY BUDGET case; dropping
- * the campaignName span reds the platform-side-name case; rendering the
- * account line unconditionally reds the missing-optional-fields case; editing
- * the deleteBody disclosure reds the ORCH-G1 case.
+ * ADR 0941 D5 moved the campaign detail onto its own route, so the cases mount
+ * the list and the detail as the app routes them and open the detail from a row.
+ *
+ * Sabotage-probed at 3bcc187f9 (/grade-tests w106, `w106g3-d*`): rendering the
+ * budget as `/100` reds the DAILY BUDGET case; dropping the campaignName, the
+ * account, the dispatch time or the platform id reds the platform-side-name
+ * case; rendering the budget or account line unconditionally reds the
+ * missing-optional-fields case; dropping or editing the deleteBody disclosure
+ * reds the ORCH-G1 case.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('../CampaignLedgerSection.js', () => ({ CampaignLedgerSection: () => null })); // own tests: campaignLedgerSection.test.tsx
@@ -23,28 +28,38 @@ vi.mock('../CommandSection.js', () => ({ CommandSection: () => null })); // own 
 vi.mock('../CampaignVariantsSection.js', () => ({ CampaignVariantsSection: () => null })); // own tests: campaignVariantsSection.test.tsx
 import { render, screen, cleanup, fireEvent, act, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import type * as C from '../campaignStudioClient.js';
 import type { AdDispatch, MarketingCampaign } from '../campaignStudioClient.js';
 
-const listCampaigns = vi.fn();
-const listDispatches = vi.fn();
+const listCampaigns = vi.fn<typeof C.listCampaigns>();
+const listDispatches = vi.fn<typeof C.listDispatches>();
 
 vi.mock('../campaignStudioClient.js', async (orig) => {
-  const actual = await orig<Record<string, unknown>>();
+  const actual = await orig<typeof import('../campaignStudioClient.js')>();
   return {
     ...actual,
-    listCampaigns: () => listCampaigns(),
-    listDispatches: (...a: unknown[]) => listDispatches(...a),
-    listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'Acme' }]),
-    listBriefs: vi.fn(async () => []),
-    deleteCampaign: vi.fn(async () => {}),
-    // ADR 0941 D5 — the detail is its own route; it reads the campaign by id.
-    getCampaign: async (id: string) => ((await listCampaigns()) as MarketingCampaign[]).find((c) => c.id === id),
-    getCampaignLinks: vi.fn(async () => ({
-  products: { status: 'ok', items: [] }, project: { status: 'ok', items: [] },
-  assets: { status: 'ok', items: [] }, runs: { status: 'ok', items: [] }, emailSends: { status: 'ok', items: [] },
-  adDispatches: { status: 'ok', items: [] }, plans: { status: 'ok', items: [] }, opsAssets: { status: 'ok', items: [] }, assetTotal: 0,
-})),
-    updateCampaign: vi.fn(async () => ({})),
+    listCampaigns: (orgId?: string) => listCampaigns(orgId),
+    listDispatches: (campaignId: string) => listDispatches(campaignId),
+    listOrgs: vi.fn<typeof actual.listOrgs>(async () => [{ orgId: 'org-1', name: 'Acme' }]),
+    listBriefs: vi.fn<typeof actual.listBriefs>(async () => []),
+    deleteCampaign: vi.fn<typeof actual.deleteCampaign>(async () => {}),
+    // ADR 0941 D5 — the detail is its own route; it reads the campaign by id,
+    // and a missing one is the route's 404 ("not found"), as in production.
+    getCampaign: async (id: string): Promise<MarketingCampaign> => {
+      const found = (await listCampaigns()).find((c) => c.id === id);
+      if (!found) throw new Error(`campaign ${id} not found`);
+      return found;
+    },
+    getCampaignLinks: vi.fn<typeof actual.getCampaignLinks>(async () => ({
+      products: { status: 'ok', items: [] }, project: { status: 'ok', items: [] },
+      assets: { status: 'ok', items: [] }, runs: { status: 'ok', items: [] }, emailSends: { status: 'ok', items: [] },
+      adDispatches: { status: 'ok', items: [] }, plans: { status: 'ok', items: [] }, opsAssets: { status: 'ok', items: [] }, assetTotal: 0,
+    })),
+    updateCampaign: vi.fn<typeof actual.updateCampaign>(async (id) => {
+      const found = (await listCampaigns()).find((c) => c.id === id);
+      if (!found) throw new Error(`campaign ${id} not found`);
+      return found;
+    }),
   };
 });
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
@@ -103,8 +118,9 @@ describe('ORCH-G2: the dispatch ledger shows the facts it already has', () => {
   it('shows the platform-side name, the ad account and when it was dispatched', async () => {
     await openDetail();
     expect(await screen.findByText('Spring push — Meta')).toBeTruthy();
-    expect(screen.getByText(/act_123456/)).toBeTruthy();
-    expect(screen.getByText(/Dispatched/)).toBeTruthy();
+    expect(screen.getByText('Account act_123456')).toBeTruthy();
+    // WHEN, not just the word: the dispatch time is formatted into the line.
+    expect(screen.getByText(/^Dispatched .*2026/)).toBeTruthy();
     // The platform id is still there — it just isn't the ONLY thing there.
     expect(screen.getByText('mc-999')).toBeTruthy();
   });

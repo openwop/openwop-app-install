@@ -1,5 +1,5 @@
 import { lazy } from 'react';
-import { ActivityIcon } from '../../ui/icons/index.js';
+import { ClockIcon } from '../../ui/icons/index.js';
 import type { FeatureRoute } from '../../chrome/featureTypes.js';
 import type { FrontendFeature } from '../registry.js';
 
@@ -16,9 +16,10 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Workspace',
-      label: 'Scheduled chats', labelKey: 'scheduledChatsLabel',
-      icon: ActivityIcon,
-      hint: 'Recurring agent chats', hintKey: 'scheduledChatsHint',
+      labelKey: 'scheduledChatsLabel',
+      order: 50,
+      icon: ClockIcon,
+      hintKey: 'scheduledChatsHint',
       // ADR 0820 §8.2 — `scheduled-agent-chats` has a toggle again (default ON,
       // Agents bundle), so this gate names a LIVE toggle. Until then it named a
       // retired id, which hid the rail item for everyone (core-audit M5).

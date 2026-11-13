@@ -147,6 +147,7 @@ export const EXECUTOR_CTX_POLICY: Readonly<Record<string, CtxKeyPolicy>> = {
   // ── run context (data, not capabilities) ──
   signal: { kind: 'run-context', why: 'the run abort signal' },
   runId: { kind: 'run-context', why: 'identity' },
+  loopback: { kind: 'run-context', why: 'ADR 1058 / RFC 0258: a loopback gate\'s rounds taken, cap and spent flag; set only when OPENWOP_BOUNDED_LOOPBACK admitted the edge' },
   nodeId: { kind: 'run-context', why: 'identity' },
   tenantId: { kind: 'run-context', why: 'identity' },
   scopeId: { kind: 'run-context', why: 'identity' },

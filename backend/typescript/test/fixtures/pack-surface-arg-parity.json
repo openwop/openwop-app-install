@@ -1,14 +1,14 @@
 {
   "callSites": {
-    "literalNoSpread": 279,
-    "spread": 100,
+    "literalNoSpread": 281,
+    "spread": 99,
     "nonLiteral": 18
   },
   "methods": {
-    "readable": 359,
+    "readable": 360,
     "opaque": 16
   },
-  "assertedPairs": 267,
+  "assertedPairs": 269,
   "opaqueMethods": [
     "accessibility.checkContent",
     "bi.runMetric",
@@ -118,7 +118,6 @@
     "feature.funnels.nodes/index.mjs:73 spread → funnels.create",
     "feature.funnels.nodes/index.mjs:81 nonLiteral → funnels.setSteps",
     "feature.media.nodes/index.mjs:26 spread → media.select",
-    "feature.notebooks.nodes/index.mjs:269 spread → documents.createDocument",
     "feature.orgs.nodes/index.mjs:70 spread → orgs.invite",
     "feature.orgs.nodes/index.mjs:76 spread → orgs.listInvitations",
     "feature.orgs.nodes/index.mjs:83 spread → orgs.revokeInvitation",

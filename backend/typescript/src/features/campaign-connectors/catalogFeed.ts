@@ -2,7 +2,8 @@
  * ADR 0952 D6 (P7) — a product feed GENERATED from the one commerce catalog.
  *
  * Team-lead decision Q4 (2026-10-20, David can override): no second product
- * store. The feed is built on request from `listProducts` (ADR 0410's catalog),
+ * store. The feed is built on request from `iterateCatalog` (ADR 0410's catalog,
+ * read one page at a time since ADR 1110),
  * served at a SIGNED public URL that Google Merchant Center and Meta Catalog can
  * fetch on a schedule, and pushed by API through `host/catalogPushAdapter.ts`
  * (fixture-only until the accounts exist).
@@ -24,7 +25,7 @@ import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { readSessionSecret } from '../../middleware/cookieSession.js';
 import { vendorPublicUrl } from '../featureRoute.js';
-import { listProducts, isPubliclyListed } from '../commerce/commerceService.js';
+import { catalogSize, iterateCatalog, isPubliclyListed, type Product } from '../commerce/commerceService.js';
 import { OpenwopError } from '../../types.js';
 import { isoExponent, adsCatalogPushEnabled } from '../../host/adsWire.js';
 import { pushCatalogItems, type CatalogPlatform, type CatalogPushResult, type ItemResult } from '../../host/catalogPushAdapter.js';
@@ -75,15 +76,17 @@ function hashItem(item: Omit<FeedItem, 'contentHash'>): string {
   return createHash('sha256').update(JSON.stringify(item)).digest('hex');
 }
 
-/** Build the feed for one org. `baseUrl` is the public origin. */
-export async function buildProductFeed(tenantId: string, orgId: string, baseUrl: string): Promise<ProductFeed> {
-  const products = (await listProducts(tenantId, orgId)).filter(isPubliclyListed); // ADR 1098 — a quote-only product never reaches an ad catalog
+/** ADR 1110 P3 — the feed items of a set of products (pure). `baseUrl` is the public
+ *  origin. Callers pass listed products only (ADR 1098 — a quote-only product never
+ *  reaches an ad catalog); this re-checks, so a stale caller cannot leak one. */
+export function feedForProducts(products: readonly Product[], orgId: string, baseUrl: string): ProductFeed {
   const items: FeedItem[] = [];
   const excluded: ExcludedItem[] = [];
   const base = baseUrl.replace(/\/+$/, '');
   const assetUrl = (token: string): string => vendorPublicUrl(base, `/assets/${encodeURIComponent(token)}`);
   const link = `${base}/store/${encodeURIComponent(orgId)}`;
   for (const p of products) {
+    if (!isPubliclyListed(p)) continue;
     if (!p.imageAssetTokens?.length) { excluded.push({ productId: p.productId, reason: 'no_image' }); continue; }
     if (!Number.isFinite(p.price) || p.price <= 0) { excluded.push({ productId: p.productId, reason: 'no_price' }); continue; }
     if (isoExponent(p.currency) === null) { excluded.push({ productId: p.productId, reason: 'invalid_currency' }); continue; }
@@ -114,22 +117,80 @@ export async function buildProductFeed(tenantId: string, orgId: string, baseUrl:
   return { items, excluded };
 }
 
+/** ADR 1110 P3 — the org's feed, one batch of products at a time (name order), so no
+ *  caller holds the whole catalog: the public XML streams it, the push walks it, the
+ *  settings view counts it. */
+export async function* feedBatches(tenantId: string, orgId: string, baseUrl: string, batch = 500): AsyncGenerator<ProductFeed> {
+  let products: Product[] = [];
+  for await (const p of iterateCatalog(tenantId, orgId, batch)) {
+    if (isPubliclyListed(p)) products.push(p);
+    if (products.length >= batch) { yield feedForProducts(products, orgId, baseUrl); products = []; }
+  }
+  if (products.length > 0) yield feedForProducts(products, orgId, baseUrl);
+}
+
+/** Most items the settings view counts, and excluded products it lists. */
+const FEED_COUNT_CAP = 10_000;
+/** Most products the settings view reads to count the feed. */
+const FEED_SCAN_CAP = 20_000;
+/** Most changes (upserts + removals) one push sends, as one approved change set. */
+let PUSH_CHANGE_CAP = 10_000;
+/** Test-only: lower the push cap so a test can cross it without 10,000 products. */
+export function __setPushChangeCapForTest(n: number | null): void { PUSH_CHANGE_CAP = n ?? 10_000; }
+const EXCLUDED_LIST_CAP = 200;
+
+/** ADR 1110 P3 — the settings view's figures, bounded: items counted up to
+ *  `FEED_COUNT_CAP` (then `itemsCapped`), the first `EXCLUDED_LIST_CAP` exclusions and
+ *  how many there were. */
+export async function feedSummary(tenantId: string, orgId: string, baseUrl: string): Promise<{ items: number; itemsCapped: boolean; excluded: ExcludedItem[]; excludedTotal: number }> {
+  let items = 0;
+  let excludedTotal = 0;
+  let products = 0;
+  const excluded: ExcludedItem[] = [];
+  for await (const b of feedBatches(tenantId, orgId, baseUrl)) {
+    items += b.items.length;
+    excludedTotal += b.excluded.length;
+    products += b.items.length + b.excluded.length;
+    for (const e of b.excluded) if (excluded.length < EXCLUDED_LIST_CAP) excluded.push(e);
+    // Bounded by products READ, not items counted: a catalog where most products are
+    // left out (no image) must not be walked to the end inside a settings request.
+    if (items >= FEED_COUNT_CAP || products >= FEED_SCAN_CAP) return { items, itemsCapped: true, excluded, excludedTotal };
+  }
+  return { items, itemsCapped: false, excluded, excludedTotal };
+}
+
+/** ADR 1110 (round fix) — the largest catalog a push walks inside its request. Above it
+ *  the push refuses (`catalog_too_large`): the signed feed URL, which the platforms fetch
+ *  on their own schedule, is the lane for a catalog that size. */
+export const PUSH_CATALOG_MAX = 20_000;
+
 const xml = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 
+type FeedChannel = { title: string; link: string; brand: string };
+
 /** RSS 2.0 with Google's `g:` namespace (accepted by Merchant Center and Meta). */
-export function renderFeedXml(feed: ProductFeed, channel: { title: string; link: string; brand: string }): string {
+export function renderFeedXml(feed: ProductFeed, channel: FeedChannel): string {
+  return `${feedXmlHead(channel)}${feedXmlItems(feed.items, channel.brand)}${FEED_XML_TAIL}`;
+}
+
+/** ADR 1110 P3 — the same document in three parts, so it can be streamed batch by batch. */
+export function feedXmlHead(channel: FeedChannel): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<rss version="2.0" xmlns:g="http://base.google.com/ns/1.0"><channel><title>${xml(channel.title)}</title><link>${xml(channel.link)}</link>`;
+}
+export const FEED_XML_TAIL = '</channel></rss>\n';
+export function feedXmlItems(feedItems: readonly FeedItem[], brand: string): string {
   const tag = (k: string, v: string): string => `<g:${k}>${xml(v)}</g:${k}>`;
-  const items = feed.items.map((i) => [
+  const items = feedItems.map((i) => [
     '<item>',
     tag('id', i.id), `<title>${xml(i.title)}</title>`, `<description>${xml(i.description)}</description>`, `<link>${xml(i.link)}</link>`,
     tag('image_link', i.image_link), ...(i.additional_image_link ?? []).map((u) => tag('additional_image_link', u)),
     tag('availability', i.availability), tag('price', i.price), tag('condition', i.condition),
     ...(i.item_group_id ? [tag('item_group_id', i.item_group_id)] : []),
     ...(i.product_type ? [tag('product_type', i.product_type)] : []),
-    tag('brand', channel.brand), tag('identifier_exists', i.identifier_exists),
+    tag('brand', brand), tag('identifier_exists', i.identifier_exists),
     '</item>',
   ].join(''));
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<rss version="2.0" xmlns:g="http://base.google.com/ns/1.0"><channel><title>${xml(channel.title)}</title><link>${xml(channel.link)}</link>${items.join('')}</channel></rss>\n`;
+  return items.join('');
 }
 
 // ── Feed settings + the signed public URL ────────────────────────────────────
@@ -219,10 +280,14 @@ interface PushLedgerRow { key: string; tenantId: string; orgId: string; platform
 const pushLedger = new DurableCollection<PushLedgerRow>('campaign-connectors:catalog-push', (r) => `${r.tenantId}::${r.orgId}::${r.platform}::${r.itemId}`);
 
 export type CatalogPushOutcome =
-  | { outcome: 'pushed'; sent: number; unchanged: number; removed: number; failed: number; excluded: ExcludedItem[]; failures: Array<Extract<ItemResult, { outcome: 'failed' }>> }
+  /** `excluded` lists at most EXCLUDED_LIST_CAP of `excludedTotal`; `remaining` is how many
+   *  changes waited past PUSH_CHANGE_CAP for the next push (absent when none did). */
+  | { outcome: 'pushed'; sent: number; unchanged: number; removed: number; failed: number; excluded: ExcludedItem[]; excludedTotal: number; failures: Array<Extract<ItemResult, { outcome: 'failed' }>>; remaining?: number }
   | { outcome: 'unsupported' | 'no_connection' | 'disabled' }
   /** The store does not serve (commerce off, or the owner lapsed): every listing would link to a dead store. */
   | { outcome: 'commerce_off' }
+  /** ADR 1110 — over PUSH_CATALOG_MAX products: use the signed feed URL instead. */
+  | { outcome: 'catalog_too_large'; max: number }
   | { outcome: 'not_configured'; missing: string }
   | Extract<CatalogPushResult, { outcome: 'refused' }>
   | Extract<CatalogPushResult, { outcome: 'requires_approval' }>;
@@ -251,17 +316,53 @@ export async function pushCatalog(deps: BrokeredEgressDeps, tenantId: string, or
   // Before anything else: an unverified platform never reports `pushed`, even
   // when there is nothing to send.
   if (!adsCatalogPushEnabled(platform)) return { outcome: 'unsupported' };
+  if ((await catalogSize(tenantId, orgId)) > PUSH_CATALOG_MAX) return { outcome: 'catalog_too_large', max: PUSH_CATALOG_MAX };
   const org = await getOrg(orgId);
   const brand = org?.name ?? orgId; // the seller's own name: these are the org's own products
-  const feed = await buildProductFeed(tenantId, orgId, baseUrl);
   const prefix = `${tenantId}::${orgId}::${platform}::`;
-  const ledger = new Map((await pushLedger.listByPrefix(prefix)).filter((r) => r.tenantId === tenantId && r.orgId === orgId).map((r) => [r.itemId, r]));
   const hashOf = (i: FeedItem): string => createHash('sha256').update(`${i.contentHash}:${brand}`).digest('hex');
-  const upserts = feed.items.filter((i) => ledger.get(i.id)?.hash !== hashOf(i));
-  const live = new Set(feed.items.map((i) => i.id));
-  const deletes = [...ledger.keys()].filter((id) => !live.has(id));
+  // ADR 1110 P3 — the feed is walked a batch at a time and the ledger read by key, so a
+  // push never holds the catalog. One push sends at most PUSH_CHANGE_CAP changes as ONE
+  // approved change set (the gate binds its hash: approve what you see); the rest wait
+  // for the next push, which finds them still changed because only sent items move
+  // the ledger.
+  const upserts: FeedItem[] = [];
+  const live = new Set<string>();
+  let unchanged = 0;
+  let remaining = 0;
+  let excludedTotal = 0;
+  const excluded: ExcludedItem[] = [];
+  for await (const batch of feedBatches(tenantId, orgId, baseUrl)) {
+    excludedTotal += batch.excluded.length;
+    for (const e of batch.excluded) if (excluded.length < EXCLUDED_LIST_CAP) excluded.push(e);
+    for (let i = 0; i < batch.items.length; i += 16) {
+      const slice = batch.items.slice(i, i + 16);
+      const rows = await Promise.all(slice.map((it) => pushLedger.get(`${prefix}${it.id}`)));
+      slice.forEach((it, j) => {
+        live.add(it.id);
+        const row = rows[j];
+        const same = row && row.tenantId === tenantId && row.orgId === orgId && row.hash === hashOf(it);
+        if (same) unchanged += 1;
+        else if (upserts.length < PUSH_CHANGE_CAP) upserts.push(it);
+        else remaining += 1;
+      });
+    }
+  }
+  // Removals: ledger rows whose item left the feed, read a page at a time.
+  const deletes: string[] = [];
+  let afterId: string | undefined;
+  for (;;) {
+    const page = await pushLedger.listByPrefixPage(prefix, { ...(afterId !== undefined ? { afterId } : {}), limit: 500 });
+    for (const r of page.items) {
+      if (r.tenantId !== tenantId || r.orgId !== orgId || live.has(r.itemId)) continue;
+      if (upserts.length + deletes.length < PUSH_CHANGE_CAP) deletes.push(r.itemId); else remaining += 1;
+    }
+    if (!page.lastId) break;
+    afterId = page.lastId;
+  }
+  const more = remaining > 0 ? { remaining } : {};
   if (upserts.length === 0 && deletes.length === 0) {
-    return { outcome: 'pushed', sent: 0, unchanged: feed.items.length, removed: 0, failed: 0, excluded: feed.excluded, failures: [] };
+    return { outcome: 'pushed', sent: 0, unchanged, removed: 0, failed: 0, excluded, excludedTotal, failures: [], ...more };
   }
   const r = await pushCatalogItems(deps, platform, settings, upserts.map(({ contentHash: _h, identifier_exists: _x, ...i }) => ({ ...i, brand })), deletes);
   if (r.outcome !== 'pushed') return r.outcome === 'not_configured' || r.outcome === 'refused' || r.outcome === 'requires_approval' ? r : { outcome: r.outcome };
@@ -277,8 +378,8 @@ export async function pushCatalog(deps: BrokeredEgressDeps, tenantId: string, or
   return {
     outcome: 'pushed',
     sent: r.results.filter((x) => x.op === 'upsert' && x.outcome === 'ok').length,
-    unchanged: feed.items.length - upserts.length,
+    unchanged,
     removed: r.results.filter((x) => x.op === 'delete' && x.outcome === 'ok').length,
-    failed: failures.length, excluded: feed.excluded, failures,
+    failed: failures.length, excluded, excludedTotal, failures, ...more,
   };
 }

@@ -18,9 +18,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Planning',
-      label: 'Priority Matrix', labelKey: 'priorityMatrixLabel',
+      labelKey: 'priorityMatrixLabel',
       icon: ListOrderedIcon,
-      hint: 'Score & rank ideas, plan sessions', hintKey: 'priorityMatrixHint',
+      hintKey: 'priorityMatrixHint',
       order: 37,
       featureId: 'priority-matrix',
     },

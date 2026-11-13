@@ -326,9 +326,16 @@ export function refuseUnlistedProduct(p: Pick<Product, 'productId' | 'unlisted'>
 // Inventory (ledger), both here — generic kernel writes are blocked, so the
 // stock ledger stays authoritative by construction (money-truth).
 import {
-  mintSystemType, type EntityRecord,
+  mintSystemType, getSystemEntities, countSystemEntities, iterateSystemEntities, listSystemTypeTenants, type EntityRecord,
 } from '../entities/entitiesService.js';
 import { makeKernelAdapter } from '../entities/kernelAdapter.js';
+import {
+  afterSystemWrite, beforeSystemWrite, builtTenants, checkSystemIndex, drainSystemIndexBuilds, ensureSystemIndexBuilt, indexedCount, indexedFamilyCount,
+  indexedTenantCount, listIndexPage, pendingIntentCount, queuedBuildCount, queueSystemIndexBuild, registerStoreIndex, registerSystemIndex, repairSystemIndex,
+} from '../entities/systemIndex.js';
+import {
+  PRODUCT_INDEX, foldText, nameKeyOf, readRowProjection, readSearchProjection, searchProjection, tokensOf, type ProductRowProjection, type ProductSearchProjection,
+} from './productIndex.js';
 
 const COMMERCE_PRODUCT_TYPE = 'commerce.product';
 const PRODUCT_SCALARS = [
@@ -341,8 +348,13 @@ const PRODUCT_SCALARS = [
   { key: 'inventory', label: 'Inventory', type: 'number', required: false },
   { key: 'active', label: 'Active', type: 'boolean', required: false },
 ];
+/** ADR 1110 D2 — the kernel's sanity ceiling for products per TENANT. The host has no
+ *  cap on workspaces per tenant, so this cannot be derived from the per-org cap, which
+ *  stays commerce's (`maxProductsPerOrg`, ADR 1110 P4). */
+const PRODUCT_ROW_CAP_PER_TENANT = 5_000_000;
+registerSystemIndex(COMMERCE_PRODUCT_TYPE, PRODUCT_INDEX); // ADR 1110 D1
 async function ensureProductType(tenantId: string): Promise<void> {
-  await mintSystemType({ tenantId, name: COMMERCE_PRODUCT_TYPE, displayName: 'Product', fields: PRODUCT_SCALARS, actor: 'system:commerce' });
+  await mintSystemType({ tenantId, name: COMMERCE_PRODUCT_TYPE, displayName: 'Product', fields: PRODUCT_SCALARS, rowCap: PRODUCT_ROW_CAP_PER_TENANT, actor: 'system:commerce' });
 }
 function productToKernel(p: Product): { values: Record<string, unknown>; ext: Record<string, unknown> } {
   return {
@@ -354,7 +366,15 @@ function productToKernel(p: Product): { values: Record<string, unknown>; ext: Re
     ext: { product: p },
   };
 }
-const kernelToProduct = (rec: EntityRecord): Product => (rec.ext?.product as Product);
+/** ADR 1110 — the row's own tenant and org win over the copies inside `ext.product`.
+ *  The anon→user fold (`tenantMigration.rewriteRowContentTenant`) rewrites a row's
+ *  TOP-LEVEL fields only, so after a fold `ext.product.tenantId` still named the anon
+ *  tenant and `getProduct` refused every folded product. The next write stores the
+ *  corrected copy. */
+const kernelToProduct = (rec: EntityRecord): Product => {
+  const p = rec.ext?.product as Product;
+  return p ? { ...p, tenantId: rec.tenantId, ...(rec.orgId !== undefined ? { orgId: rec.orgId } : {}) } : p;
+};
 const legacyProducts = new DurableCollection<Product>('commerce:product', (p) => p.productId, undefined, (p) => p.tenantId);
 
 /** The kernel-backed product store (KERNEL-5 shared factory). `cas` is
@@ -434,49 +454,405 @@ const currencyOf = (raw: unknown): string => {
  *  two-decimal currency (the pre-R2 behaviour, byte for byte). */
 export const quantizeMoney = (amount: number, currency: string): number => fromStripeMinorUnits(toStripeMinorUnits(amount, currency), currency);
 
-/** DEF-3 (ADR 0239) — relevance-ranked product search. Multi-token AND (every query
- *  token must appear somewhere searchable) with a light field-weighted score (a name hit
- *  outranks a description/tag hit), so "red shirt" finds a product named "shirt" tagged
- *  "red" — not just a literal "red shirt" substring. In-memory over the tenant-indexed
- *  slice (products are `assertCap`-bounded per org); see the ADR for why this does NOT
- *  ride a `host.db.search` index (that surface is an equivalent O(n) scan on the durable
- *  backend, and a synced product index would be a parallel read model). */
-export async function listProducts(tenantId: string, orgId: string, q?: string, opts: { category?: string; tag?: string } = {}): Promise<Product[]> {
-  const tokens = (q ?? '').trim().toLowerCase().split(/\s+/).filter(Boolean);
-  const category = opts.category?.trim().toLowerCase();
-  const tag = opts.tag?.trim().toLowerCase();
-  const phrase = tokens.join(' ');
-  const scoreOf = (p: Product): number => {
-    if (tokens.length === 0) return 1; // no query ⇒ every product qualifies equally
-    const name = p.name.toLowerCase();
-    const desc = (p.description ?? '').toLowerCase();
-    const tags = (p.tags ?? []).map((t) => t.toLowerCase());
-    let score = 0;
-    for (const tok of tokens) {
-      let hit = 0;
-      if (name.includes(tok)) hit = Math.max(hit, 3); // a token in the name outranks tag/desc
-      if (tags.some((t) => t.includes(tok))) hit = Math.max(hit, 2);
-      if (desc.includes(tok)) hit = Math.max(hit, 1);
-      if (hit === 0) return 0; // AND semantics — a token that matches nothing drops the product
-      score += hit;
-    }
-    // Phrase/name bonuses so a product matching MORE tokens in its name ranks above one
-    // that only matches via a tag: full-phrase-in-name > name-starts-with > exact name.
-    if (name === phrase) score += 6;
-    else if (name.startsWith(phrase)) score += 4;
-    else if (name.includes(phrase)) score += 3;
-    return score;
-  };
-  return (await products.listForTenant(tenantId))
-    .filter((p) => p.orgId === orgId && (!category || (p.categories ?? []).includes(category)) && (!tag || (p.tags ?? []).includes(tag)))
-    .map((p) => ({ p, score: scoreOf(p) }))
-    .filter((x) => x.score > 0)
-    .sort((a, b) => b.score - a.score || a.p.name.localeCompare(b.p.name))
-    .map((x) => x.p);
-}
+/** ADR 1110 P3 — `listProducts` (the whole catalog, scored in memory) is DELETED. Read
+ *  a page (`listProductsPage`), by id (`getProduct`, `getProducts`), or, for a job that
+ *  needs every product, `iterateCatalog` / `collectCatalog`. `test/adr1110-no-whole-catalog-read`
+ *  fails if a whole-catalog read comes back. */
 export async function getProduct(tenantId: string, orgId: string, productId: string): Promise<Product | null> {
   const p = await products.get(tenantId, productId);
   return p && p.tenantId === tenantId && p.orgId === orgId ? p : null;
+}
+
+// ── ADR 1110 — the paged catalog read (D2 counted cap, D3 paged read, D4 iterator) ──
+// Reads go through the kernel's declared index for commerce.product (productIndex.ts),
+// never a whole-catalog load. Each page is hydrated to full products and every filter
+// is applied again to the full row, so a marker a crash left stale can hide a product
+// until the repair sweep reaches it, never show one that no longer matches.
+
+/** Matches ranked per search, and markers read to fill one window or page. */
+const SEARCH_WINDOW = 2000;
+const SCAN_BUDGET_FACTOR = 4;
+const MAX_QUERY_TOKENS = 4;
+const MAX_PAGE = 200;
+
+/** Tenants whose index this process has seen built (a point read saved per call). */
+const catalogIndexReady = new Set<string>();
+/** Is the tenant's catalog index usable? False while a large tenant's index is built in
+ *  the background (ADR 1110 round fix): the caller reads through its fallback. */
+async function ensureCatalogIndex(tenantId: string): Promise<boolean> {
+  if (catalogIndexReady.has(tenantId)) return true;
+  await ensureProductType(tenantId);
+  if ((await ensureSystemIndexBuilt(tenantId, COMMERCE_PRODUCT_TYPE)) !== 'built') return false;
+  catalogIndexReady.add(tenantId);
+  return true;
+}
+
+// ── ADR 1110 round fix — the fallback while a tenant's index is being built ──────────
+// Only a tenant whose products predate the index is ever unbuilt for long (a new tenant
+// builds inline), so the fallback is the old shape: scan the kernel rows of the type.
+// It is bounded by the size that tenant had under the old caps, and lasts until the
+// background sweep finishes the build.
+async function* scanOrgProducts(tenantId: string, orgId: string): AsyncGenerator<Product> {
+  for await (const rec of iterateSystemEntities(tenantId, COMMERCE_PRODUCT_TYPE)) {
+    const p = kernelToProduct(rec);
+    if (p && p.orgId === orgId) yield p;
+  }
+}
+const CURSOR_FALLBACK = 'f.';
+async function fallbackProductsPage(tenantId: string, orgId: string, query: ProductPageQuery, limit: number): Promise<ProductPage> {
+  const keep = facetFilter(query);
+  const q = (query.q ?? '').trim();
+  const tokens = [...new Set(tokensOf(q).filter((t) => t.length >= 2))].slice(0, MAX_QUERY_TOKENS);
+  const phrase = tokensOf(q).join(' ');
+  const prefix = q && tokens.length === 0 ? nameKeyOf(q) : '';
+  const hits: { p: Product; score: number }[] = [];
+  let all = 0;
+  for await (const p of scanOrgProducts(tenantId, orgId)) {
+    all += 1;
+    if (!keep(p)) continue;
+    const score = !q ? 1 : tokens.length > 0 ? searchScore(searchProjection(p), tokens, phrase) : (nameKeyOf(p.name).startsWith(prefix) ? 1 : 0);
+    if (score > 0) hits.push({ p, score });
+  }
+  hits.sort((a, b) => b.score - a.score || nameKeyOf(a.p.name).localeCompare(nameKeyOf(b.p.name)) || a.p.productId.localeCompare(b.p.productId));
+  const from = query.cursor?.startsWith(CURSOR_FALLBACK) ? Number(query.cursor.slice(CURSOR_FALLBACK.length)) || 0 : 0;
+  const page = hits.slice(from, from + limit).map((h) => h.p);
+  const unfiltered = !q && !query.category?.trim() && !query.tag?.trim() && !query.listedOnly && !query.activeOnly && !query.archivedOnly && !query.type?.trim();
+  return {
+    products: page,
+    ...(from + limit < hits.length ? { nextCursor: `${CURSOR_FALLBACK}${from + limit}` } : {}),
+    ...(unfiltered ? { total: all } : {}),
+    ...(tokens.length > 0 ? { ranked: { window: hits.length, past: false } } : {}),
+  };
+}
+/** Test-only: forget which tenants were seen built. */
+export function __forgetCatalogIndexReady(): void { catalogIndexReady.clear(); }
+
+/** D2 — the per-org cap from the maintained counter; recounted only at the boundary. */
+/** ADR 1110 D5 / P4 — the per-org product cap, a deployment setting. */
+export const PRODUCT_CAP_SETTING = 'OPENWOP_COMMERCE_MAX_PRODUCTS_PER_ORG';
+export const PRODUCT_CAP_DEFAULT = 5000;
+export const PRODUCT_CAP_CEILING = 500_000;
+let warnedCap: string | undefined;
+/** The cap in force: the setting when it is a whole number from 1 to the ceiling, else
+ *  the default. A bad value is logged and NEVER raises the cap: falling back keeps the
+ *  catalog where it was, where refusing to boot would crash-loop a deploy over a typo. */
+export function maxProductsPerOrg(): number {
+  const raw = process.env[PRODUCT_CAP_SETTING];
+  if (raw === undefined || raw.trim() === '') return PRODUCT_CAP_DEFAULT;
+  const n = Number(raw);
+  if (Number.isInteger(n) && n >= 1 && n <= PRODUCT_CAP_CEILING) return n;
+  if (warnedCap !== raw) {
+    warnedCap = raw;
+    log.error('commerce_product_cap_invalid', { setting: PRODUCT_CAP_SETTING, value: raw.slice(0, 40), using: PRODUCT_CAP_DEFAULT, allowed: `1..${PRODUCT_CAP_CEILING}` });
+  }
+  return PRODUCT_CAP_DEFAULT;
+}
+
+async function assertProductCap(tenantId: string, orgId: string): Promise<void> {
+  const ready = await ensureCatalogIndex(tenantId);
+  const cap = maxProductsPerOrg();
+  let n = 0;
+  if (!ready) { for await (const _p of scanOrgProducts(tenantId, orgId)) n += 1; }
+  else {
+    n = await indexedCount(tenantId, COMMERCE_PRODUCT_TYPE, orgId);
+    if (n >= cap) n = await indexedCount(tenantId, COMMERCE_PRODUCT_TYPE, orgId, { exact: true });
+  }
+  if (n >= cap) {
+    throw new OpenwopError('validation_error', `This org has the maximum ${cap} products. A deployment can raise it with ${PRODUCT_CAP_SETTING} (up to ${PRODUCT_CAP_CEILING}).`, 409, { max: cap, setting: PRODUCT_CAP_SETTING });
+  }
+}
+
+/** D3 — several products by id, org-guarded, in the order asked; missing ids are dropped. */
+export async function getProducts(tenantId: string, orgId: string, productIds: readonly string[]): Promise<Product[]> {
+  const ids = [...new Set(productIds.filter((id) => typeof id === 'string' && id.length > 0))];
+  if (ids.length === 0) return [];
+  await ensureProductType(tenantId);
+  return (await getSystemEntities(tenantId, COMMERCE_PRODUCT_TYPE, ids))
+    .map(kernelToProduct)
+    .filter((p): p is Product => Boolean(p) && p.tenantId === tenantId && p.orgId === orgId);
+}
+
+export interface ProductPageQuery {
+  q?: string | undefined;
+  category?: string | undefined;
+  tag?: string | undefined;
+  /** Only `isPubliclyListed` products (the public and outward-facing lanes). */
+  listedOnly?: boolean;
+  activeOnly?: boolean;
+  /** Only archived (inactive) products — the console's state filter. */
+  archivedOnly?: boolean;
+  /** Only products of this type (physical, digital, service…). */
+  type?: string | undefined;
+  limit?: number;
+  cursor?: string | undefined;
+}
+export interface ProductPage {
+  products: Product[];
+  nextCursor?: string;
+  /** The org's whole catalog size; only on an unfiltered read without `q`. */
+  total?: number;
+  /** Set on a search: pages inside the first `window` matches are ranked, later ones are in name order. */
+  ranked?: { window: number; past: boolean };
+}
+
+type Facets = Pick<ProductRowProjection, 'active' | 'categories' | 'tags'> & { unlisted?: boolean | true; type?: string };
+
+function facetFilter(query: ProductPageQuery): (p: Facets) => boolean {
+  const category = query.category?.trim().toLowerCase() || undefined;
+  const tag = query.tag?.trim().toLowerCase() || undefined;
+  const type = query.type?.trim() || undefined;
+  return (p) => (!query.listedOnly || isPubliclyListed(p))
+    && (!query.activeOnly || p.active !== false)
+    && (!query.archivedOnly || p.active === false)
+    && (!type || p.type === undefined || p.type === type)
+    && (!category || (p.categories ?? []).includes(category))
+    && (!tag || (p.tags ?? []).includes(tag));
+}
+
+/** Walk one family slice from `cursor`, keeping rows `keep` accepts, until `limit` are
+ *  kept or the scan budget is spent. The cursor returned resumes after the last row
+ *  CONSUMED, so nothing is skipped when a page fills part-way through a read. */
+async function scanSlice<P>(
+  tenantId: string, orgId: string, family: string,
+  opts: { segments?: string[]; openLast?: boolean; cursor?: string | undefined; limit: number; budget: number },
+  read: (p: Record<string, unknown>) => P | null,
+  keep: (p: P, id: string) => boolean,
+): Promise<{ ids: string[]; rows: { id: string; p: P }[]; cursor?: string }> {
+  const rows: { id: string; p: P }[] = [];
+  let cursor = opts.cursor;
+  let seen = 0;
+  for (;;) {
+    const page = await listIndexPage(tenantId, COMMERCE_PRODUCT_TYPE, family, orgId, {
+      ...(opts.segments ? { segments: opts.segments } : {}), ...(opts.openLast ? { openLast: true } : {}),
+      ...(cursor ? { cursor } : {}), limit: Math.min(MAX_PAGE, Math.max(opts.limit, 50)),
+    });
+    for (const [i, row] of page.rows.entries()) {
+      seen += 1;
+      cursor = row.cursor;
+      const p = read(row.p); // a malformed marker is skipped, like a corrupt row
+      if (p && keep(p, row.id)) rows.push({ id: row.id, p });
+      if (rows.length >= opts.limit || seen >= opts.budget) {
+        // The slice's very last row ends it: no cursor, so a caller never pages into nothing.
+        const exhausted = i === page.rows.length - 1 && !page.cursor;
+        return { ids: rows.map((r) => r.id), rows, ...(exhausted ? {} : { cursor }) };
+      }
+    }
+    if (!page.cursor) return { ids: rows.map((r) => r.id), rows }; // slice exhausted
+    cursor = page.cursor;
+  }
+}
+
+async function hydrate(tenantId: string, orgId: string, ids: string[], keep: (p: Facets) => boolean): Promise<Product[]> {
+  return (await getProducts(tenantId, orgId, ids)).filter(keep);
+}
+
+const CURSOR_BROWSE = 'b.';
+const CURSOR_SEARCH = 's.';
+
+/** ADR 1110 D3 — one page of an org's catalog, browsed in name order or searched. */
+export async function listProductsPage(tenantId: string, orgId: string, query: ProductPageQuery = {}): Promise<ProductPage> {
+  const ready = await ensureCatalogIndex(tenantId);
+  const limit = Math.min(Math.max(Math.trunc(query.limit ?? 50), 1), MAX_PAGE);
+  if (!ready) return fallbackProductsPage(tenantId, orgId, query, limit);
+  const keep = facetFilter(query);
+  const q = (query.q ?? '').trim();
+  if (!q) {
+    const category = query.category?.trim().toLowerCase() || undefined;
+    const tag = query.tag?.trim().toLowerCase() || undefined;
+    // The narrowest family the filters allow.
+    const [family, segments] = category ? ['c', [category]] as const : tag ? ['t', [tag]] as const : ['n', []] as const;
+    const from = query.cursor?.startsWith(CURSOR_BROWSE) ? query.cursor.slice(CURSOR_BROWSE.length) : undefined;
+    const got = await scanSlice<ProductRowProjection>(tenantId, orgId, family, { segments: [...segments], cursor: from, limit, budget: limit * SCAN_BUDGET_FACTOR }, readRowProjection, keep);
+    const unfiltered = !category && !tag && !query.listedOnly && !query.activeOnly && !query.archivedOnly && !query.type?.trim();
+    return {
+      products: await hydrate(tenantId, orgId, got.ids, keep),
+      ...(got.cursor ? { nextCursor: CURSOR_BROWSE + got.cursor } : {}),
+      ...(unfiltered ? { total: await indexedCount(tenantId, COMMERCE_PRODUCT_TYPE, orgId) } : {}),
+    };
+  }
+  return searchPage(tenantId, orgId, q, query, limit, keep);
+}
+
+interface SearchCursor { m: 'r'; o: number }
+interface UnrankedCursor { m: 'u'; t: string; c: string }
+
+function decodeSearchCursor(raw: string | undefined): SearchCursor | UnrankedCursor | null {
+  if (!raw?.startsWith(CURSOR_SEARCH)) return null;
+  try {
+    const v = JSON.parse(Buffer.from(raw.slice(CURSOR_SEARCH.length), 'base64url').toString('utf8')) as Record<string, unknown>;
+    if (v.m === 'r' && typeof v.o === 'number' && Number.isInteger(v.o) && v.o >= 0) return { m: 'r', o: v.o };
+    if (v.m === 'u' && typeof v.t === 'string' && typeof v.c === 'string') return { m: 'u', t: v.t, c: v.c };
+  } catch { /* an unreadable cursor starts the search over */ }
+  return null;
+}
+const encodeSearchCursor = (c: SearchCursor | UnrankedCursor): string => CURSOR_SEARCH + Buffer.from(JSON.stringify(c), 'utf8').toString('base64url');
+
+/** ADR 0239 DEF-3's ranking over the search projection: a query token found as a prefix
+ *  of a name word scores 3, of a tag or category 2, of a variant name 1; every token must
+ *  be found (AND); a whole-phrase name match adds 6, a name starting with it 4, a name
+ *  containing it 3. The description is not searched (ADR 1110 D3). */
+function searchScore(p: ProductSearchProjection, tokens: string[], phrase: string): number {
+  const nameWords = tokensOf(p.name);
+  const facetWords = [...(p.tags ?? []), ...(p.categories ?? [])].flatMap(tokensOf);
+  const variantWords = (p.variantNames ?? []).flatMap(tokensOf);
+  let score = 0;
+  for (const tok of tokens) {
+    const hit = nameWords.some((w) => w.startsWith(tok)) ? 3 : facetWords.some((w) => w.startsWith(tok)) ? 2 : variantWords.some((w) => w.startsWith(tok)) ? 1 : 0;
+    if (hit === 0) return 0;
+    score += hit;
+  }
+  const name = foldText(p.name).trim();
+  if (name === phrase) score += 6;
+  else if (name.startsWith(phrase)) score += 4;
+  else if (name.includes(phrase)) score += 3;
+  return score;
+}
+
+async function searchPage(tenantId: string, orgId: string, q: string, query: ProductPageQuery, limit: number, keep: (p: Facets) => boolean): Promise<ProductPage> {
+  const tokens = [...new Set(tokensOf(q).filter((t) => t.length >= 2))].slice(0, MAX_QUERY_TOKENS);
+  if (tokens.length === 0) {
+    // A one-character query: a name prefix, in name order.
+    const prefix = nameKeyOf(q);
+    const from = query.cursor?.startsWith(CURSOR_BROWSE) ? query.cursor.slice(CURSOR_BROWSE.length) : undefined;
+    const got = await scanSlice<ProductRowProjection>(tenantId, orgId, 'n', { segments: [prefix], openLast: true, cursor: from, limit, budget: limit * SCAN_BUDGET_FACTOR }, readRowProjection, keep);
+    return { products: await hydrate(tenantId, orgId, got.ids, keep), ...(got.cursor ? { nextCursor: CURSOR_BROWSE + got.cursor } : {}) };
+  }
+  const phrase = tokensOf(q).join(' ');
+  const matches = (p: ProductSearchProjection): boolean => keep(p) && searchScore(p, tokens, phrase) > 0;
+  const cursor = decodeSearchCursor(query.cursor);
+
+  if (cursor?.m === 'u') {
+    // Past the ranked window: continue the same token's slice in name order.
+    const seen = new Set<string>();
+    const got = await scanSlice<ProductSearchProjection>(tenantId, orgId, 'w', { segments: [cursor.t], openLast: true, cursor: cursor.c, limit, budget: limit * SCAN_BUDGET_FACTOR },
+      readSearchProjection, (p, id) => !seen.has(id) && matches(p) && (seen.add(id), true));
+    return {
+      products: await hydrate(tenantId, orgId, got.ids, keep),
+      ...(got.cursor ? { nextCursor: encodeSearchCursor({ m: 'u', t: cursor.t, c: got.cursor }) } : {}),
+      ranked: { window: SEARCH_WINDOW, past: true },
+    };
+  }
+
+  // The rarest token, by a bounded read of each slice.
+  let rarest = tokens[0]!;
+  let rarestSize = Number.POSITIVE_INFINITY;
+  for (const tok of tokens) {
+    const probe = await listIndexPage(tenantId, COMMERCE_PRODUCT_TYPE, 'w', orgId, { segments: [tok], openLast: true, limit: SEARCH_WINDOW + 1 });
+    const size = probe.cursor ? SEARCH_WINDOW + 1 : probe.rows.length;
+    if (size < rarestSize) { rarest = tok; rarestSize = size; }
+    if (size === 0) return { products: [], ranked: { window: SEARCH_WINDOW, past: false } };
+  }
+  // The ranked window: the first SEARCH_WINDOW matches of the rarest slice.
+  const seen = new Set<string>();
+  const window = await scanSlice<ProductSearchProjection>(tenantId, orgId, 'w', { segments: [rarest], openLast: true, limit: SEARCH_WINDOW, budget: SEARCH_WINDOW * SCAN_BUDGET_FACTOR },
+    readSearchProjection, (p, id) => !seen.has(id) && matches(p) && (seen.add(id), true));
+  const ranked = window.rows
+    .map((r) => ({ id: r.id, score: searchScore(r.p, tokens, phrase), name: r.p.name }))
+    .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+  const offset = cursor?.m === 'r' ? cursor.o : 0;
+  const slice = ranked.slice(offset, offset + limit);
+  const next = offset + limit < ranked.length
+    ? encodeSearchCursor({ m: 'r', o: offset + limit })
+    : window.cursor ? encodeSearchCursor({ m: 'u', t: rarest, c: window.cursor }) : undefined;
+  return {
+    products: await hydrate(tenantId, orgId, slice.map((r) => r.id), keep),
+    ...(next ? { nextCursor: next } : {}),
+    ranked: { window: SEARCH_WINDOW, past: false },
+  };
+}
+
+/** ADR 1110 D1 + round fix — the catalog and order indexes' upkeep, run by their own
+ *  sweep (`catalogIndexSweep.ts`, so a long rebuild never holds up reservation release):
+ *  unfinished write intents every tick (bounded, fresh ones left to their writers), one
+ *  queued background build per tick, and once per UTC HOUR a drift check of every built
+ *  tenant of both types (a mismatch queues a rebuild; counters are recounted) plus a
+ *  backfill queue for product tenants whose index was never built. Hourly, not daily: an
+ *  older revision still serving during a deploy overlap writes rows without markers, and
+ *  those must reappear in lists within the hour, not the next day. */
+const catalogIndexDay = new DurableCollection<{ k: string; day: number }>('commerce:catalog-index-day', (r) => r.k);
+export async function repairCatalogIndex(now = Date.now()): Promise<{ repaired: number; built: number; drifted: number }> {
+  const { repaired } = await repairSystemIndex({ limit: 100, now });
+  const builtNow = await drainSystemIndexBuilds({ limit: 1 });
+  const hour = Math.floor(now / 3_600_000);
+  const cur = await catalogIndexDay.get('day');
+  if (cur && cur.day >= hour) return { repaired, built: builtNow, drifted: 0 };
+  if (!(await catalogIndexDay.compareAndSwap(cur, { k: 'day', day: hour }))) return { repaired, built: builtNow, drifted: 0 };
+  let drifted = 0;
+  for (const type of [COMMERCE_PRODUCT_TYPE, COMMERCE_ORDER_TYPE]) {
+    for await (const tenantId of builtTenants(type)) if (!(await checkSystemIndex(tenantId, type))) drifted += 1;
+  }
+  for (const tenantId of await listSystemTypeTenants(COMMERCE_PRODUCT_TYPE)) await queueSystemIndexBuild(tenantId, COMMERCE_PRODUCT_TYPE);
+  if (drifted > 0) log.warn('catalog_index_drift_queued', { tenants: drifted });
+  return { repaired, built: builtNow, drifted };
+}
+
+/** ADR 1104 gauge — read-only: tenants whose catalog index drifted from the kernel, and
+ *  the write intents still waiting. Both should read 0. */
+export async function catalogIndexGauge(): Promise<Record<string, number>> {
+  let tenants = 0;
+  let driftTenants = 0;
+  for (const tenantId of await listSystemTypeTenants(COMMERCE_PRODUCT_TYPE)) {
+    tenants += 1;
+    if ((await countSystemEntities(tenantId, COMMERCE_PRODUCT_TYPE)) !== (await indexedTenantCount(tenantId, COMMERCE_PRODUCT_TYPE))) driftTenants += 1;
+  }
+  return { tenants, driftTenants, pendingIntents: await pendingIntentCount(), queuedBuilds: await queuedBuildCount() };
+}
+
+/** The most low-stock products the summary lists. */
+const LOW_STOCK_LIMIT = 200;
+
+/** ADR 1110 P2 — physical products under their low-stock threshold, read from the `low`
+ *  index slice (which holds every product at or under it, a superset) and decided on the
+ *  full row, so the exact rule (`inventory < lowStockThreshold`) is unchanged. */
+async function lowStockProducts(tenantId: string, orgId: string): Promise<CommerceSummary['lowStock']> {
+  const out: CommerceSummary['lowStock'] = [];
+  const isLow = (p: Product): boolean => p.type === 'physical' && p.inventory !== undefined && p.lowStockThreshold !== undefined && p.inventory < p.lowStockThreshold;
+  if (!(await ensureCatalogIndex(tenantId))) {
+    for await (const p of scanOrgProducts(tenantId, orgId)) {
+      if (isLow(p) && p.inventory !== undefined && p.lowStockThreshold !== undefined) out.push({ productId: p.productId, name: p.name, inventory: p.inventory, lowStockThreshold: p.lowStockThreshold });
+      if (out.length >= LOW_STOCK_LIMIT) break;
+    }
+    return out;
+  }
+  let cursor: string | undefined;
+  do {
+    const page = await listIndexPage(tenantId, COMMERCE_PRODUCT_TYPE, 'low', orgId, { ...(cursor ? { cursor } : {}), limit: 200 });
+    for (const p of await getProducts(tenantId, orgId, page.rows.map((r) => r.id))) {
+      if (p.type === 'physical' && p.inventory !== undefined && p.lowStockThreshold !== undefined && p.inventory < p.lowStockThreshold) {
+        out.push({ productId: p.productId, name: p.name, inventory: p.inventory, lowStockThreshold: p.lowStockThreshold });
+      }
+    }
+    cursor = page.cursor;
+  } while (cursor && out.length < LOW_STOCK_LIMIT);
+  return out.slice(0, LOW_STOCK_LIMIT);
+}
+
+/** ADR 1110 P3 — the org's products that `keep` accepts, read through `iterateCatalog`
+ *  (one page in memory at a time; the result holds only what was kept). For seeders and
+ *  jobs that select a small subset, e.g. by `createdBy`. */
+export async function collectCatalog(tenantId: string, orgId: string, keep: (p: Product) => boolean): Promise<Product[]> {
+  const out: Product[] = [];
+  for await (const p of iterateCatalog(tenantId, orgId)) if (keep(p)) out.push(p);
+  return out;
+}
+
+/** ADR 1110 — the org's catalog size, from the maintained counter (one point read). */
+export async function catalogSize(tenantId: string, orgId: string): Promise<number> {
+  if (!(await ensureCatalogIndex(tenantId))) { let n = 0; for await (const _p of scanOrgProducts(tenantId, orgId)) n += 1; return n; }
+  return indexedCount(tenantId, COMMERCE_PRODUCT_TYPE, orgId);
+}
+
+/** ADR 1110 D4 — every product of the org, in name order, one page of `batch` at a time.
+ *  The ONE whole-catalog read: export, the catalog feed and index builds use it. */
+export async function* iterateCatalog(tenantId: string, orgId: string, batch = 500): AsyncGenerator<Product> {
+  if (!(await ensureCatalogIndex(tenantId))) { yield* scanOrgProducts(tenantId, orgId); return; }
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await listIndexPage(tenantId, COMMERCE_PRODUCT_TYPE, 'n', orgId, { ...(cursor ? { cursor } : {}), limit: batch });
+    for (const p of await getProducts(tenantId, orgId, page.rows.map((r) => r.id))) yield p;
+    if (!page.cursor) return;
+    cursor = page.cursor;
+  }
 }
 
 /** ADR 0455 — a TENANT-scoped product read (no org arg). A challenge↔product link
@@ -495,7 +871,7 @@ export async function getProductInTenant(tenantId: string, productId: string): P
   return p && p.tenantId === tenantId ? p : null;
 }
 export async function createProduct(input: { tenantId: string; orgId: string; createdBy: string; type: unknown; name: unknown; description?: unknown; price?: unknown; cost?: unknown; kind?: unknown; components?: unknown; subscription?: unknown; currency?: unknown; imageAssetTokens?: unknown; downloadAssetTokens?: unknown; inventory?: unknown; lowStockThreshold?: unknown; variants?: unknown; categories?: unknown; tags?: unknown; attributes?: unknown; weightGrams?: unknown; dims?: unknown; customFields?: unknown; unlisted?: unknown }): Promise<Product> {
-  assertCap((await listProducts(input.tenantId, input.orgId)).length, 'products');
+  await assertProductCap(input.tenantId, input.orgId);
   const ts = nowIso();
   const type: ProductType = (PRODUCT_TYPES as readonly string[]).includes(String(input.type)) ? (input.type as ProductType) : 'physical';
   const cleanedAttrs = cleanAttributes(input.attributes);
@@ -776,7 +1152,72 @@ function couponDiscount(coupon: Coupon, subtotal: number, currency: string): num
   }
   return 0;
 }
-const orders = new DurableCollection<Order>('commerce:order', (o) => o.orderId, undefined, (o) => o.tenantId);
+const orderRows = new DurableCollection<Order>('commerce:order', (o) => o.orderId, undefined, (o) => o.tenantId);
+
+// ── ADR 1110 P5 — the declared order index (systemIndex over commerce's own store) ──
+//  at   `<org>:<newestFirst>`          every order, newest first: the paged list
+//  st   `<org>:<status>:<newestFirst>` one status, newest first: `?status=`
+//  live `<org>`                        every order that is not canceled: the counted family
+// No projection: the list hydrates by id and decides on the full row. Every write of an
+// order goes through `orders` below, which wraps the store with the index's hooks.
+const COMMERCE_ORDER_TYPE = 'commerce.order';
+/** Newest first in byte order: 13 digits of (max − createdAt ms). */
+const newestFirst = (iso: string): string => String(9_999_999_999_999 - (Date.parse(iso) || 0)).padStart(13, '0');
+function isOrder(v: unknown): v is Order {
+  return typeof v === 'object' && v !== null && typeof (v as { orderId?: unknown }).orderId === 'string'
+    && typeof (v as { tenantId?: unknown }).tenantId === 'string' && typeof (v as { orgId?: unknown }).orgId === 'string';
+}
+registerStoreIndex<Order>(COMMERCE_ORDER_TYPE, {
+  isRow: isOrder,
+  idOf: (o) => o.orderId,
+  tenantOf: (o) => o.tenantId,
+  orgOf: (o) => o.orgId,
+  countedFamily: 'live',
+  markers: (o) => [
+    { family: 'at', segments: [newestFirst(o.createdAt)], p: {} },
+    { family: 'st', segments: [o.status, newestFirst(o.createdAt)], p: {} },
+    ...(o.status !== 'canceled' ? [{ family: 'live', segments: [], p: {} }] : []),
+  ],
+  read: async (tenantId, id) => { const o = await orderRows.get(id); return o && o.tenantId === tenantId ? o : null; },
+  scan: async function* (tenantId) { for (const o of await orderRows.listForTenantIndexed(tenantId)) yield o; },
+  count: (tenantId) => orderRows.countForTenantIndexed(tenantId),
+  everyRowFamily: 'at',
+});
+/** The order store with the index's hooks around every write (ADR 1110 P5): intent
+ *  before, sync after, and an index failure never fails the order write. */
+const orders = {
+  get: (id: string) => orderRows.get(id),
+  listForTenantIndexed: (tenantId: string) => orderRows.listForTenantIndexed(tenantId),
+  /** Every order of every tenant: the guest-shipping retention sweep only (pre-existing). */
+  list: () => orderRows.list(),
+  async put(o: Order): Promise<void> {
+    await beforeSystemWrite(COMMERCE_ORDER_TYPE, o.tenantId, o.orderId, o);
+    await orderRows.put(o);
+    await afterSystemWrite(COMMERCE_ORDER_TYPE, o.tenantId, o.orderId, o);
+  },
+  async compareAndSwap(expected: Order | null, next: Order): Promise<boolean> {
+    await beforeSystemWrite(COMMERCE_ORDER_TYPE, next.tenantId, next.orderId, next);
+    const ok = await orderRows.compareAndSwap(expected, next);
+    await afterSystemWrite(COMMERCE_ORDER_TYPE, next.tenantId, next.orderId, ok ? next : await orderRows.get(next.orderId));
+    return ok;
+  },
+  async delete(id: string): Promise<boolean> {
+    const cur = await orderRows.get(id);
+    if (cur) await beforeSystemWrite(COMMERCE_ORDER_TYPE, cur.tenantId, id, null);
+    const gone = await orderRows.delete(id);
+    if (cur) await afterSystemWrite(COMMERCE_ORDER_TYPE, cur.tenantId, id, null);
+    return gone;
+  },
+  __clear: () => orderRows.__clear(),
+};
+
+/** Seeder use only: move an order's `createdAt` (the demo backdates its order history),
+ *  through the indexed store so the newest-first keys follow. */
+export async function __backdateOrderForSeed(tenantId: string, orderId: string, createdAt: string): Promise<void> {
+  const o = await orderRows.get(orderId);
+  if (!o || o.tenantId !== tenantId) return;
+  await orders.put({ ...o, createdAt });
+}
 
 // DEF-7 (ADR 0238) — append-only refund ledger. One row per partial refund, keyed by
 // the deterministic `commerce:refund:<tenant>:<org>:<order>:<refundKey>` id so a retry
@@ -844,6 +1285,79 @@ export async function listOrderRefunds(tenantId: string, orgId: string, orderId:
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
+/** Tenants whose order index this process has seen built. */
+const orderIndexReady = new Set<string>();
+/** Is the tenant's order index usable? False while it builds in the background; the
+ *  readers then fall back to the whole-order read they used before ADR 1110 P5. */
+async function ensureOrderIndex(tenantId: string): Promise<boolean> {
+  if (orderIndexReady.has(tenantId)) return true;
+  if ((await ensureSystemIndexBuilt(tenantId, COMMERCE_ORDER_TYPE)) !== 'built') return false;
+  orderIndexReady.add(tenantId);
+  return true;
+}
+/** Test-only. */
+export function __forgetOrderIndexReady(): void { orderIndexReady.clear(); }
+
+/** ADR 1110 P5 — the live-order cap from the maintained counter, recounted at the cap. */
+async function assertOrderCap(tenantId: string, orgId: string): Promise<void> {
+  if (!(await ensureOrderIndex(tenantId))) {
+    assertCap((await listOrders(tenantId, orgId)).filter((o) => o.status !== 'canceled').length, 'orders');
+    return;
+  }
+  let n = await indexedCount(tenantId, COMMERCE_ORDER_TYPE, orgId);
+  if (n >= MAX.perOrg) n = await indexedCount(tenantId, COMMERCE_ORDER_TYPE, orgId, { exact: true });
+  assertCap(n, 'orders');
+}
+
+/** Several orders by id, org-guarded, in the order asked (16 point reads at a time). */
+export async function getOrders(tenantId: string, orgId: string, orderIds: readonly string[]): Promise<Order[]> {
+  const out: (Order | null)[] = new Array(orderIds.length).fill(null);
+  for (let i = 0; i < orderIds.length; i += 16) {
+    const got = await Promise.all(orderIds.slice(i, i + 16).map((id) => orderRows.get(id)));
+    got.forEach((o, j) => { if (o && o.tenantId === tenantId && o.orgId === orgId) out[i + j] = o; });
+  }
+  return out.filter((o): o is Order => o !== null);
+}
+
+export interface OrderPage { orders: Order[]; nextCursor?: string }
+
+/** ADR 1110 P5 — one page of the org's orders, newest first, optionally of one status. */
+export async function listOrdersPage(tenantId: string, orgId: string, query: { status?: OrderStatus | undefined; limit?: number; cursor?: string | undefined } = {}): Promise<OrderPage> {
+  const limit = Math.min(Math.max(Math.trunc(query.limit ?? 50), 1), MAX_PAGE);
+  if (!(await ensureOrderIndex(tenantId))) {
+    const all = await listOrders(tenantId, orgId, query.status);
+    const from = query.cursor?.startsWith(CURSOR_FALLBACK) ? Number(query.cursor.slice(CURSOR_FALLBACK.length)) || 0 : 0;
+    return { orders: all.slice(from, from + limit), ...(from + limit < all.length ? { nextCursor: `${CURSOR_FALLBACK}${from + limit}` } : {}) };
+  }
+  const page = await listIndexPage(tenantId, COMMERCE_ORDER_TYPE, query.status ? 'st' : 'at', orgId, {
+    ...(query.status ? { segments: [query.status], openLast: false } : {}), ...(query.cursor ? { cursor: query.cursor } : {}), limit,
+  });
+  // Decided on the full row: a stale status marker cannot list an order under the wrong status.
+  const rows = (await getOrders(tenantId, orgId, page.rows.map((r) => r.id))).filter((o) => !query.status || o.status === query.status);
+  return { orders: rows, ...(page.cursor ? { nextCursor: page.cursor } : {}) };
+}
+
+/** ADR 1110 P5 — how many orders the org has in all (one indexed count). */
+export async function orderCount(tenantId: string, orgId: string): Promise<number> {
+  if (!(await ensureOrderIndex(tenantId))) return (await listOrders(tenantId, orgId)).length;
+  return indexedFamilyCount(tenantId, COMMERCE_ORDER_TYPE, 'at', orgId);
+}
+
+/** ADR 1110 P5 — every order of the org, newest first, one page at a time. */
+export async function* iterateOrders(tenantId: string, orgId: string, batch = 500): AsyncGenerator<Order> {
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await listOrdersPage(tenantId, orgId, { limit: Math.min(batch, MAX_PAGE), ...(cursor ? { cursor } : {}) });
+    for (const o of page.orders) yield o;
+    if (!page.nextCursor) return;
+    cursor = page.nextCursor;
+  }
+}
+
+/** The org's orders, whole. ADR 1110 P5 residue: the aggregate readers (promotion usage,
+ *  funnel stats, strategy metrics, CRM lead signals, recommendation affinity, child
+ *  orders) still call it; orders grow with sales, not with the catalog. Request paths use
+ *  `listOrdersPage`. */
 export async function listOrders(tenantId: string, orgId: string, status?: OrderStatus): Promise<Order[]> {
   return (await orders.listForTenantIndexed(tenantId)).filter((o) => o.orgId === orgId && (!status || o.status === status)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
@@ -936,7 +1450,7 @@ async function createOrderInner(input: Parameters<typeof createOrderCore>[0]): P
 async function createOrderCore(input: { tenantId: string; orgId: string; createdBy: string; contactId?: string; /** ADR 0875 D1 — `false` on the PUBLIC lanes: the contact came from a typed email nobody verified, so it is LINKED (CRM, receipt) but never used to price, to unlock an exclusive assortment, or to target a promotion. Default `true` (every authenticated lane). */ buyerVerified?: boolean; /** ADR 0875 D7 — the public storefront sells only ACTIVE, LISTED products (ADR 1098; operator lanes may still order an archived or unlisted one, and a quote converts without it). */ activeOnly?: boolean; couponCode?: string; affiliateCode?: string; funnelRef?: { funnelId?: unknown; stepId?: unknown }; parentOrderId?: string; pmSaveRequested?: boolean; /** ADR 0877 M5 — ROUTE-derived from `resolveStorefrontSettlement`, never client input. */ settlement?: OrderSettlementStamp; lines: { productId: string; quantity: number; /** INTERNAL (quote conversion, C3): honor a negotiated snapshot price instead of resolving. Route callers never populate this. */ unitPriceOverride?: number; /** ADR 0296 — line provenance; ROUTE-derived (from the separate `bumps` array / the one-click path), never client-marked. */ origin?: 'bump' | 'upsell' }[]; requireApprovalOverThreshold?: boolean; shippingAddress?: { name?: unknown; line1?: unknown; line2?: unknown; city?: unknown; region?: unknown; postalCode?: unknown; country?: unknown } }, holds: { ids: string[] } = { ids: [] }): Promise<Order> {
   // ADR 0875 D7 — the cap counts LIVE orders. Counting canceled rows let ~5000
   // abandoned public checkouts disable a store for good.
-  assertCap((await listOrders(input.tenantId, input.orgId)).filter((o) => o.status !== 'canceled').length, 'orders');
+  await assertOrderCap(input.tenantId, input.orgId); // ADR 1110 P5 — counted, never a list
   // ADR 0875 D1 — the identity pricing may trust (see `buyerVerified`).
   const pricingContactId = input.buyerVerified === false ? undefined : input.contactId;
   const items: OrderItem[] = [];
@@ -1922,7 +2436,9 @@ export interface CommerceSummary {
   lowStock: { productId: string; name: string; inventory: number; lowStockThreshold: number }[];
 }
 export async function commerceSummary(tenantId: string, orgId: string): Promise<CommerceSummary> {
-  const [allOrders, allProducts] = await Promise.all([listOrders(tenantId, orgId), listProducts(tenantId, orgId)]);
+  // ADR 1110 P2 — products through the low-stock index slice, never the catalog.
+  // ADR 1110 P5 — the orders are read a page at a time (the aggregate still visits every order).
+  const lowStockRows = await lowStockProducts(tenantId, orgId);
   // Initialize EVERY status (a transient 'refunding' or a persisted 'partially_refunded'
   // must not land as NaN via `undefined + 1`).
   const orderCounts = Object.fromEntries(ORDER_STATUSES.map((s) => [s, 0])) as Record<OrderStatus, number>;
@@ -1936,7 +2452,7 @@ export async function commerceSummary(tenantId: string, orgId: string): Promise<
     if (!a) { a = { gmv: 0, refunded: 0, revenueOrders: 0, coupons: new Map(), products: new Map() }; byCcy.set(ccy, a); }
     return a;
   };
-  for (const o of allOrders) {
+  for await (const o of iterateOrders(tenantId, orgId)) {
     orderCounts[o.status] += 1;
     const acc = accFor(o.currency);
     // A partially_refunded order was a real sale (still counts toward GMV); its refunded
@@ -1980,9 +2496,7 @@ export async function commerceSummary(tenantId: string, orgId: string): Promise<
     orderCounts,
     topProducts: primary.topProducts,
     couponUsage: primary.couponUsage,
-    lowStock: allProducts
-      .filter((p) => p.type === 'physical' && p.inventory !== undefined && p.lowStockThreshold !== undefined && p.inventory < p.lowStockThreshold)
-      .map((p) => ({ productId: p.productId, name: p.name, inventory: p.inventory!, lowStockThreshold: p.lowStockThreshold! })),
+    lowStock: lowStockRows,
   };
 }
 

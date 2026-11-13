@@ -467,6 +467,12 @@ export interface NodeContext {
   scopeId?: string;
   inputs: unknown;
   config?: Record<string, unknown>;
+  /** ADR 1058 / RFC 0258 — present only on a node that is the gate of a
+   *  declared loopback edge: the rounds taken before this visit, the cap, and
+   *  whether it is spent. The host's count is the only count; a gate that has
+   *  its own (e.g. `core.chat.approvalGate`'s `maxRequestChangesIterations`)
+   *  defers to it. Read-only data, folded from the log. */
+  loopback?: NodeLoopbackState;
   /** Multi-Agent Shift Phase 1 — the node's authoring-time agent pin
    *  (`node.agent`, an `agent-ref.schema.json`), surfaced so node modules
    *  can honor `nodes[].agent.agentId`. Undefined when the node carries no
@@ -1065,6 +1071,28 @@ export interface EdgeDef {
     value?: unknown;
   };
   label?: string;
+  /** ADR 1058 / RFC 0258 (`Draft`) — a declared, bounded refine loopback from
+   *  an approval gate back to an ancestor. Admitted only under
+   *  `OPENWOP_BOUNDED_LOOPBACK` (`executor/loopback.ts`). */
+  loopback?: EdgeLoopback;
+}
+
+/** ADR 1058 — `NodeContext.loopback`. */
+export interface NodeLoopbackState {
+  readonly round: number;
+  readonly maxIterations: number;
+  readonly exhausted: boolean;
+}
+
+/** RFC 0258 §A — `WorkflowEdge.loopback`. */
+export interface EdgeLoopback {
+  on: 'refine';
+  /** The most rounds this edge may be taken in one run. >= 1; no unlimited. */
+  maxIterations: number;
+  /** Default `withdraw`. */
+  onExhausted?: 'withdraw' | 'fail';
+  /** The target's port that receives the round history (RFC 0258 §C.4). */
+  historyInput?: string;
 }
 
 /** Workflow definition — stored either in the workflows table or in-memory.

@@ -1148,6 +1148,14 @@ const approvalGateNode: NodeModule = {
       const label = optionLabels[key] ?? humanizePortName(key);
       options.push({ key, label, content: value });
     }
+    // CC-UI-3 — ONE string beside structured data is metadata, not the deliverable:
+    // the kernel generator emits `priorKernelAt` next to its `kernel` object, a
+    // channel generator `itemsKey` next to its `draft`. A one-entry option made
+    // `GateEvidence` skip the artifact, so the reviewer saw "ItemsKey: emails" and
+    // never the draft. A lone string draft (no structured sibling) is still the
+    // content and stays inline; ≥2 strings is the fan-in picker, unchanged.
+    const hasStructured = Object.values(inputs).some((v) => v !== null && typeof v === 'object');
+    const showOptions = options.length >= 2 || (options.length === 1 && !hasStructured);
     return {
       status: 'suspended',
       interrupt: {
@@ -1161,7 +1169,7 @@ const approvalGateNode: NodeModule = {
         data: {
           prompt: typeof cfg.prompt === 'string' ? cfg.prompt : (typeof cfg.title === 'string' ? cfg.title : 'Please approve to continue.'),
           actions: Array.isArray(cfg.actions) ? cfg.actions : ['approve', 'reject'],
-          ...(options.length >= 1 ? { options } : {}),
+          ...(showOptions ? { options } : {}),
           ...(typeof cfg.requiredApprovals === 'number' ? { requiredApprovals: cfg.requiredApprovals } : {}),
           ...(typeof cfg.rejectionPolicy === 'string' ? { rejectionPolicy: cfg.rejectionPolicy } : {}),
           ...(Array.isArray(cfg.approversList) ? { approversList: cfg.approversList } : {}),

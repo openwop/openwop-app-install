@@ -1,6 +1,4 @@
 export const messages = {
-  creativeVideoLabel: 'Vídeo com IA',
-  creativeVideoHint: 'Gerar vídeos com avatar',
   eyebrow: 'Canvas',
   title: 'Vídeo com IA',
   lede: 'Gere um vídeo com avatar a partir de um roteiro — o resultado é salvo como um recurso na sua biblioteca de mídia e se compõe em fluxos de trabalho.',

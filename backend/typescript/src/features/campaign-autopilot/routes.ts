@@ -16,6 +16,8 @@ import { loadCampaignScoped } from '../campaign-orchestration/routes.js';
 import { AUTOPILOT_TOGGLE } from './ids.js';
 import { runPreflight } from './preflight.js';
 import { launchAutopilot } from './launch.js';
+import { personalTenantOf } from '../../host/requestSubject.js';
+import { planExemptStampOf } from '../../host/operatorPlanExemption.js';
 
 const BASE = '/host/openwop-app/campaign-autopilot';
 
@@ -48,7 +50,13 @@ export function registerCampaignAutopilotRoutes(deps: RouteDeps): void {
       const actingUserId = req.userId ?? req.principal?.principalId;
       if (!actingUserId) throw new OpenwopError('unauthenticated', 'Sign in to launch a campaign.', 401, {});
       const campaign = await loadCampaignScoped(req, 'workspace:write');
-      const out = await launchAutopilot({ storage: deps.storage, hostSuite: deps.hostSuite }, { tenantId: tenantOf(req), campaign, actingUserId, ...(req.body?.ai !== undefined ? { ai: req.body.ai } : {}) });
+      const personal = personalTenantOf(req);
+      const out = await launchAutopilot({ storage: deps.storage, hostSuite: deps.hostSuite }, {
+        tenantId: tenantOf(req), campaign, actingUserId, ...(req.body?.ai !== undefined ? { ai: req.body.ai } : {}),
+        // CC-AUTH-4 / ADR 1108 — stamped like `POST /runs`: decided here, at the request.
+        ...(personal ? { personalTenant: personal } : {}),
+        ...(planExemptStampOf(req) ? { planExempt: true as const } : {}),
+      });
       res.status(out.reused ? 200 : 201).json(out);
     } catch (err) { next(err); }
   });

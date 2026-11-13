@@ -8,6 +8,7 @@
 import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useMemo, useState, type JSX } from 'react';
 import { useTranslation } from 'react-i18next';
+import { TableScroll } from '../../ui/DataTable.js';
 import type { TFunction } from 'i18next';
 import { PageHeader } from '../../ui/PageHeader.js';
 import { Panel } from '../../ui/layout.js';
@@ -436,7 +437,7 @@ function StatementsPanel({ orgId, plans, plansFailed, statements, statementsFail
       ) : visibleStatements.length === 0 ? (
         <StateCard icon={<ScaleIcon />} title={t('noMatchTitle')} body={t('noMatchBody')} action={<Button variant="secondary" onClick={clearFilters}>{t('clearFilters')}</Button>} />
       ) : (
-        <div className="u-overflow-x-auto">
+        <TableScroll label={t('statementsCaption')}>
           <table className="data-table">
             <caption className="u-text-sm u-text-muted u-text-left">{t('statementsCaption')}</caption>
             <thead>
@@ -494,7 +495,7 @@ function StatementsPanel({ orgId, plans, plansFailed, statements, statementsFail
               })}
             </tbody>
           </table>
-        </div>
+        </TableScroll>
       )}
     </Panel>
   );

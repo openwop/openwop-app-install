@@ -114,6 +114,19 @@ different tool, or answer. A turn that exhausts its rounds with no text returns 
 `tool_rounds_exhausted` error rather than an empty success (CLAUDE.md non-negotiable:
 "invalid model output is a typed failure, never success-with-empty").
 
+> **Correction (2026-11-12, CC-CHAT-1 — "with no text" was the wrong test).** The branch
+> fired only when the turn's text was empty, and `lastText` holds whatever a round wrote,
+> including the preamble a model writes BESIDE its tool calls. MEASURED live on
+> `373d4863a` (Anthropic Claude Sonnet 5.5, Campaign Brief Strategist, twice in a row):
+> the turn spent its five rounds on ten reads and ended on "I'm calling get-brief and
+> validate myself now. I'll start generation once they return." — rendered as a successful
+> reply, with nothing generated. The test pinning "a turn that said something keeps its
+> text … no exhaustion error" pinned that defect. Now: running out of rounds without the
+> model ending the turn (no final no-tool-call reply, no deferred approval, no structured
+> data) is `tool_rounds_exhausted` whether or not a round carried text; the text is kept
+> beside the error for context. Decided from the turn's own rounds, so a replay takes the
+> same branch. Test: `test/cc-chat-1-rounds-exhausted-preamble.test.ts`.
+
 ### D7 — a plan says what it cites, before the run builds anything (fixes #7) — P6
 
 > **Added 2026-10-25, after P5.** The witness run got through every gate D1 opened, then failed

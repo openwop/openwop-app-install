@@ -12,6 +12,17 @@
  * read only; the blind sum rendered; the caveat shown for one currency (this
  * leg was vacuous until wave 4 — it read the SKELETON of the second render)
  * or never.
+ *
+ * CRM-REPORT-ORG-PIPELINE-1 (ADR 0210, cd047d173) — request ownership, with
+ * real deferred promises: a new org never issues a new-org/old-pipeline report,
+ * and a stale catalog or report (older pipeline, StrictMode's discarded setup,
+ * pre-Retry) never paints over the current one. The guards: `key={orgId}`
+ * (one component lifetime per org) and the catalog/report sequence refs.
+ * DOUBLE GUARD: an OLD-ORG response is held both by the remount and by the
+ * sequence check, so the two org cases go red only when both are broken (held
+ * pair, /grade-tests w107); the same-org pipeline, Retry and StrictMode cases
+ * are held by the sequence refs alone. Sabotage (w107): the key dropped; either
+ * sequence check dropped; Retry choosing the first pipeline over the selected one.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent, within, act } from '@testing-library/react';

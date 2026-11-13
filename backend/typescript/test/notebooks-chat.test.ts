@@ -40,6 +40,7 @@ import { composeKnowledgeForSubject } from '../src/host/agentKnowledgeCompositio
 import { setSubjectKnowledge } from '../src/host/subjectKnowledge.js';
 import { createCollection, ingestDocument } from '../src/features/kb/kbService.js';
 import { addSubjectNote } from '../src/host/subjectMemory.js';
+import { NOTEBOOK_TRANSFORMATIONS } from '../src/features/notebooks/transformations.js';
 import {
   NOTEBOOKS_ASK_TOOL_ID, NOTEBOOKS_SEARCH_TOOL_ID, NOTEBOOKS_WRITE_TRANSFORMATION_TOOL_ID,
 } from '../src/features/notebooks/agentTools.js';
@@ -137,6 +138,49 @@ describe('notebooks — grounded chat ensure (ADR 0084 Phase 2)', () => {
     expect((await outsider.post('/host/openwop-app/test/login', { email: uniqEmail('nbchat-outsider'), tenantId })).status).toBe(201);
     expect((await outsider.post(`${NB}/${coId}/chat`)).status).toBe(404);
     expect(await getConversationMeta(tenantId, subjectConversationId(tenantId, projectSubject(coId))), 'a denied open must not mint the room').toBeNull();
+  });
+});
+
+describe('ADR 1103 D9 — one room, two doors', () => {
+  const RESEARCHER = 'agent:vendor.openwop-app.notebooks.agents.researcher';
+  it('a project VIEWER opens the notebook chat (the projects door\'s read rule), and the projects door keeps the researcher seated', async () => {
+    const { c, orgId, tenantId } = await ownerWithOrg('nbchat-d9');
+    const id = (await c.post<CreatedBody>(NB, { orgId, name: 'Two doors' })).body.notebook.id;
+    const viewer = client();
+    const vu = await viewer.post<LoginBody>('/host/openwop-app/test/login', { email: uniqEmail('nbchat-viewer'), tenantId });
+    expect(vu.status).toBe(201);
+    const add = await c.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: vu.body.user.userId, roles: ['viewer'] });
+    expect(add.status, JSON.stringify(add.body)).toBe(201);
+    // The viewer is refused writes (the control that they ARE a viewer)…
+    expect((await viewer.post(`${NB}/${id}/notes`, { text: 'x', origin: 'authored' })).status).toBe(403);
+    // …and opens the chat, as the projects door already let them.
+    const open = await viewer.post<ChatBody>(`${NB}/${id}/chat`);
+    expect(open.status, JSON.stringify(open.body)).toBe(201);
+    const seated = async (): Promise<boolean> =>
+      ((await getConversationMeta(tenantId, open.body.conversationId))?.participants ?? []).some((p) => p.subjectRef === RESEARCHER);
+    expect(await seated()).toBe(true);
+    // Opening the SAME room through the projects door used to prune the researcher
+    // (it is not a project member).
+    const viaProject = await c.post<{ sessionId: string }>(`/host/openwop-app/projects/${encodeURIComponent(id)}/chat`);
+    expect(viaProject.status, JSON.stringify(viaProject.body)).toBe(201);
+    expect(viaProject.body.sessionId).toBe(open.body.conversationId);
+    expect(await seated()).toBe(true);
+  });
+});
+
+describe('ADR 1103 D10 — the analyst prompt names the real template ids', () => {
+  it('the prompt\'s template list IS the catalog (generated SSoT, test-pinned)', async () => {
+    const agent = await getAgentRegistry().resolve('vendor.openwop-app.notebooks.agents.researcher');
+    const prompt = agent!.systemPrompt ?? '';
+    // The sentence "`templateId` is one of `a`, `b`, … `z`;" — both directions: no
+    // catalog id missing, no id the catalog does not have.
+    const sentence = /`templateId` is one of ([^;]+);/.exec(prompt.replace(/\s+/g, ' '))?.[1] ?? '';
+    const listed = [...sentence.matchAll(/`([a-z-]+)`/g)].map((m) => m[1]).sort();
+    expect(listed.length, 'the template sentence was not found in the prompt').toBeGreaterThan(0);
+    expect(listed).toEqual(NOTEBOOK_TRANSFORMATIONS.map((t) => t.id).sort());
+    // And says the write STARTS a run (it used to say it "writes the Document").
+    expect(prompt).toMatch(/\*\*start\*\*/);
+    expect(prompt).not.toMatch(/writes\s+the Document\)/);
   });
 });
 

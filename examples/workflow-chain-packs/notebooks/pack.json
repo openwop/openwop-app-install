@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.notebooks",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "kind": "workflow-chain",
   "description": "Notebooks workflows (summarize, transform, ingest-audio, ingest-youtube), migrated from the deprecated builtins (ADR 0472 P4). chainIds keep the original ids so ignition + replay resolve unchanged; node outputRoles restored at registration.",
   "keywords": [
@@ -12,9 +12,10 @@
   "chains": [
     {
       "chainId": "notebooks.summarize",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "notebooks.summarize",
-      "description": "Notebooks notebooks.summarize workflow.",
+      "description": "Summarize one notebook source (read-source → core.ai.chatCompletion → store-summary). Host machinery: started by the notebook Sources panel's Summarize action (POST …/notebooks/:id/sources/:sid/summarize), which authorizes the caller and runs as them (ADR 1103).",
+      "internal": true,
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -37,7 +38,7 @@
         "nodes": [
           {
             "id": "read",
-            "typeId": "feature.notebooks.nodes.read-source@1.0.0",
+            "typeId": "feature.notebooks.nodes.read-source@1.1.0",
             "inputs": {
               "notebookId": "{{params.notebookId}}",
               "sourceId": "{{params.sourceId}}"
@@ -54,7 +55,7 @@
           },
           {
             "id": "store",
-            "typeId": "feature.notebooks.nodes.store-summary@1.1.0",
+            "typeId": "feature.notebooks.nodes.store-summary@1.2.0",
             "inputs": {
               "notebookId": "{{params.notebookId}}",
               "sourceId": "{{params.sourceId}}"
@@ -71,15 +72,21 @@
             "from": "generate.content",
             "to": "store.summary",
             "triggerRule": "all_success"
+          },
+          {
+            "from": "read.revision",
+            "to": "store.revision",
+            "triggerRule": "all_success"
           }
         ]
       }
     },
     {
       "chainId": "notebooks.transform",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "notebooks.transform",
-      "description": "Notebooks notebooks.transform workflow.",
+      "description": "Apply a transformation template to one notebook source and save the result as a notebook-owned Document (read-source → core.ai.chatCompletion → write-transformation). Host machinery: started by the Sources panel's Transform action or the Notebook Research Analyst's write-transformation tool, as the caller (ADR 1103).",
+      "internal": true,
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -127,7 +134,7 @@
         "nodes": [
           {
             "id": "read",
-            "typeId": "feature.notebooks.nodes.read-source@1.0.0",
+            "typeId": "feature.notebooks.nodes.read-source@1.1.0",
             "inputs": {
               "notebookId": "{{params.notebookId}}",
               "sourceId": "{{params.sourceId}}",
@@ -144,8 +151,9 @@
           },
           {
             "id": "write",
-            "typeId": "feature.notebooks.nodes.write-transformation@1.1.0",
+            "typeId": "feature.notebooks.nodes.write-transformation@1.2.0",
             "inputs": {
+              "notebookId": "{{params.notebookId}}",
               "orgId": "{{params.orgId}}",
               "title": "{{params.title}}",
               "kind": "{{params.kind}}",
@@ -170,9 +178,10 @@
     },
     {
       "chainId": "notebooks.ingest-audio",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "notebooks.ingest-audio",
-      "description": "Notebooks notebooks.ingest-audio workflow.",
+      "description": "Transcribe an uploaded audio/video file and add the transcript as a notebook source. Host machinery: started by the Sources panel's audio upload, as the caller (ADR 0085, ADR 1103).",
+      "internal": true,
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -213,7 +222,7 @@
         "nodes": [
           {
             "id": "transcribe",
-            "typeId": "feature.notebooks.nodes.transcribe-source@1.0.0",
+            "typeId": "feature.notebooks.nodes.transcribe-source@1.1.0",
             "inputs": {
               "audioBase64": "{{params.audioBase64}}",
               "mimeType": "{{params.mimeType}}",
@@ -222,7 +231,7 @@
           },
           {
             "id": "ingest",
-            "typeId": "feature.notebooks.nodes.ingest-source@1.1.0",
+            "typeId": "feature.notebooks.nodes.ingest-source@1.2.0",
             "inputs": {
               "notebookId": "{{params.notebookId}}",
               "title": "{{params.title}}",
@@ -241,9 +250,10 @@
     },
     {
       "chainId": "notebooks.ingest-youtube",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "label": "notebooks.ingest-youtube",
-      "description": "Notebooks notebooks.ingest-youtube workflow.",
+      "description": "Fetch a YouTube video's captions (or transcribe its audio) and add the transcript as a notebook source. Host machinery: started by the Sources panel's YouTube action, as the caller (ADR 0085, ADR 1103).",
+      "internal": true,
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -282,7 +292,7 @@
           },
           {
             "id": "ingest",
-            "typeId": "feature.notebooks.nodes.ingest-source@1.1.0",
+            "typeId": "feature.notebooks.nodes.ingest-source@1.2.0",
             "inputs": {
               "notebookId": "{{params.notebookId}}",
               "title": "{{params.title}}",

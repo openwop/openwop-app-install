@@ -4,11 +4,21 @@
  * declare it (a workspace entry would put the signed-in sidebar back around it
  * the moment the public branch stopped matching).
  *
- * Witness for fix 7380eceb1 (2026-10-14): a visitor reading the privacy policy
- * landed inside the signed-in workspace layout, whose sidebar links Dashboard,
- * Chat, Agents and Workflows. Sabotages that red it (/grade-tests w50): a
- * matcher without the trailing-slash form, a prefix match, and a manifest
- * entry at `/privacy` (chrome/features.tsx).
+ * Regression witness for #4786 (fix 7380eceb1, 2026-10-14): a visitor reading the
+ * privacy policy landed inside the signed-in workspace layout, whose sidebar links
+ * Dashboard, Chat, Agents and Workflows.
+ *
+ * Also (b20a583ca, e61b2156a): `privacyHref` accepts only an APP path for
+ * `VITE_BRAND_PRIVACY_URL` — an absolute, protocol-relative (`//evil…`) or `javascript:`
+ * value falls back to `/privacy`, so a misconfigured brand cannot turn every Privacy
+ * link into an off-site hop; and `privacyRedirect` sends `/privacy` to an adopted
+ * policy (the bookai.openwop.dev incident, 2026-10-27, below) but never redirects
+ * `/privacy` to itself, the adopted page, or another path.
+ *
+ * Breaks it (/grade-tests w50 + w106 probes): a matcher without the trailing-slash form,
+ * a prefix match, a manifest entry at `/privacy` (chrome/features.tsx), no trim, the
+ * `//` guard dropped, any-string accepted, the redirect gate on `href !== '/privacy'`
+ * dropped (a self-redirect), and a redirect from every path.
  */
 import { describe, it, expect } from 'vitest';
 import { matchPrivacyRoute, privacyRedirect } from '../privacyRoute.js';

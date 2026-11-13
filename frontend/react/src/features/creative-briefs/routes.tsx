@@ -16,10 +16,10 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Marketing',
-      label: 'Creative Briefs', labelKey: 'creativeBriefsLabel',
+      labelKey: 'creativeBriefsLabel',
       icon: FileTextIcon,
       order: 46,
-      hint: 'Visual briefs for designers — scene, directions, mood board', hintKey: 'creativeBriefsHint',
+      hintKey: 'creativeBriefsHint',
       featureId: 'creative-briefs',
     },
   },

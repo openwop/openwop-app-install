@@ -10,7 +10,8 @@
  * Pins: an identical repeat of the last call that RAN is answered with a note,
  * not re-executed; a different call in between (a read after a write) runs again;
  * a failed call may be repeated; the five-call loop ends `tool_rounds_exhausted`,
- * while a turn that did say something keeps its text. (The `continueTurn`
+ * and a turn that did say something keeps its text but still ends
+ * `tool_rounds_exhausted` (CC-CHAT-1 correction, 2026-11-12). (The `continueTurn`
  * exemption for a call that reported unfinished work, ADR 0773 B.7, at
  * `agentDispatch.ts` `lastRanCall = …`, is NOT exercised here — corrected in
  * grade-tests w74, TST-DUJ2.) The exhaustion branch has a second witness:
@@ -19,7 +20,7 @@
  * Red when (sabotage-witnessed, w74 probes tlr-*): the repeat check is removed
  * (the tool runs five times); `lastRanCall` is never cleared by another tool; a
  * failure is remembered; the exhaustion branch is removed (the loop returns an
- * empty success); the exhaustion branch ignores text the turn did say.
+ * empty success); the exhaustion branch treats a preamble as an answer.
  */
 import { describe, expect, it, vi } from 'vitest';
 import { runChatToolLoop, repeatedCallNote, TOOL_ROUNDS_EXHAUSTED, type CompiledTool } from '../src/host/agentDispatch.js';
@@ -80,10 +81,14 @@ describe('ADR 0975 D6 — the repeat guard', () => {
     expect(res.finalText).toBe('Here they are.');
   });
 
-  it('a turn that said something keeps its text when the rounds run out (no exhaustion error)', async () => {
+  // CC-CHAT-1 (2026-11-12) — CORRECTED: this used to pin "no exhaustion error",
+  // which is the live defect: a preamble beside a tool call ("Looking…") was
+  // returned as the turn's successful answer. The text is still kept (context),
+  // and the turn is now the typed failure.
+  it('a turn that said something keeps its text when the rounds run out, AND ends tool_rounds_exhausted', async () => {
     const callAIWithTools = async (): Promise<AiToolCallResult> => ({ content: 'Looking…', toolCalls: [{ id: 'x', name: 'candidates', input: {} }] });
     const res = await runChatToolLoop(opts(2), { callAIWithTools, executeTool: async () => ({ content: 'ok' }) });
     expect(res.finalText).toBe('Looking…');
-    expect(res.error).toBeUndefined();
+    expect(res.error).toMatchObject({ code: TOOL_ROUNDS_EXHAUSTED });
   });
 });

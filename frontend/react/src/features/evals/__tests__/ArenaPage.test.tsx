@@ -6,12 +6,20 @@
  *  - a contestant with no credential is refused with the keys hint, and nothing runs;
  *  - sides are assigned at random and hidden until the vote; the vote posts the two
  *    RUN ids and the server's reply names the models (the reveal);
+ *  - a verdict, a refusal (with its own sentence, never "retry") or a failed pane ends
+ *    the match; a repeat vote names the STORED verdict; two picks of one model are
+ *    refused before anything runs; leaving the page closes both runs;
  *  - a failed pane renders the keys hint and blocks voting;
  *  - replies ride the SHARED `MessageBubble`, the prompt the SHARED `ChatInput`.
  *
- * Witnessed: dropping the credential at session-open, ignoring a missing key,
- * printing the contestant in the pane header, posting model names instead of run
- * ids, swapping the run ids, and dropping the pane-error gate each red a case.
+ * Breaks it (grade-tests w106 probes): a fixed side order (either one), dropping the
+ * credential at session-open, ignoring a missing key, printing the contestant in the
+ * pane header, a reveal from the local picks, swapped ratings, swapped run ids, the
+ * replay sentence dropped, a refusal reason mapped to "retry", a refusal that leaves
+ * the bar up, the same-model check dropped, no close on unmount, a pane error
+ * swallowed, and the pane-error gate dropped. DOUBLE GUARD: "a further send goes
+ * nowhere" is held both by `submit`'s `over` return and by `ChatInput disabled={… over}`;
+ * the probe breaks `over` itself, which both read.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, waitFor, fireEvent, screen, within, cleanup } from '@testing-library/react';
@@ -110,12 +118,24 @@ async function driveMatch(): Promise<void> {
 }
 
 describe('ArenaPage', () => {
-  it('opens each side with its model AND the caller\'s credential for that provider, sides assigned at random', async () => {
+  // Both draws, so "at random" is witnessed in BOTH directions: a page that always put
+  // contestant 1 (or always contestant 2) on side A passes one row and reds the other.
+  const OPENED = {
+    google: { provider: 'google', model: 'gemini-test', credentialRef: 'byok:google' },
+    openai: { provider: 'openai', model: 'gpt-test', credentialRef: 'byok:openai' },
+  };
+  async function expectSides(draw: number, sideA: keyof typeof OPENED, sideB: keyof typeof OPENED): Promise<void> {
+    random.mockReturnValue(draw);
     await driveMatch();
     expect(openSession).toHaveBeenCalledTimes(2);
-    // Math.random() = 0.9 ⇒ contestant 2 (gemini) became side A, opened first.
-    expect(openSession.mock.calls[0]![0]).toEqual({ provider: 'google', model: 'gemini-test', credentialRef: 'byok:google' });
-    expect(openSession.mock.calls[1]![0]).toEqual({ provider: 'openai', model: 'gpt-test', credentialRef: 'byok:openai' });
+    expect(openSession.mock.calls[0]![0]).toEqual(OPENED[sideA]); // side A opens first
+    expect(openSession.mock.calls[1]![0]).toEqual(OPENED[sideB]);
+  }
+  it('Math.random()=0.9 puts google on side A: each side opens with its model AND the caller\'s credential', async () => {
+    await expectSides(0.9, 'google', 'openai'); // ≥ 0.5 ⇒ contestant 2 (gemini) is side A
+  });
+  it('Math.random()=0.1 puts openai on side A: each side opens with its model AND the caller\'s credential', async () => {
+    await expectSides(0.1, 'openai', 'google'); // < 0.5 ⇒ contestant 1 (gpt) is side A
   });
 
   it('refuses a contestant the caller holds no credential for, and runs nothing', async () => {
@@ -130,7 +150,10 @@ describe('ArenaPage', () => {
   });
 
   it('hides which model is which until the vote, posts the run ids, and reveals from the server', async () => {
-    captureArenaMatch.mockResolvedValue({ match: { modelA: 'gemini-test', modelB: 'gpt-test', winner: 'B' }, ratingA: 1484, ratingB: 1516 });
+    // The server names the models that ANSWERED each run (`ArenaMatchResult.match`),
+    // which need not be the picker's label — e.g. a dated revision. Distinct names here,
+    // so a reveal built from the local picks instead of the server's reply reds.
+    captureArenaMatch.mockResolvedValue({ match: { modelA: 'gemini-test-002', modelB: 'gpt-test-0125', winner: 'B' }, ratingA: 1484, ratingB: 1516 });
     await driveMatch();
     for (const label of ['Model A', 'Model B']) {
       const pane = screen.getByRole('region', { name: label });
@@ -139,20 +162,24 @@ describe('ArenaPage', () => {
     }
     fireEvent.click(screen.getByText(/b is better/i));
     await waitFor(() => expect(captureArenaMatch).toHaveBeenCalledWith('org-1', { runIdA: 'run-1', runIdB: 'run-2', winner: 'B' }));
-    expect(await screen.findByText(/Recorded: gpt-test.*1,516/)).toBeTruthy();
+    // The whole sentence: winner B is side B's model, and each rating sits beside its own model.
+    expect(await screen.findByText('Recorded: gpt-test-0125 — gemini-test-002 is now 1,484, gpt-test-0125 is now 1,516.')).toBeTruthy();
     // The verdict ends the match: a further send goes nowhere until "New match".
     expect(screen.getByText(/This match is decided/)).toBeTruthy();
     const sent = sendTurn.mock.calls.length;
     await send('one more?');
     expect(sendTurn.mock.calls.length).toBe(sent);
-    expect(within(screen.getByRole('region', { name: 'Model A' })).getByText('gemini-test')).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: 'Model A' })).getByText('gemini-test-002')).toBeTruthy();
+    expect(within(screen.getByRole('region', { name: 'Model B' })).getByText('gpt-test-0125')).toBeTruthy();
   });
 
   it('a repeat vote on the same pair says so', async () => {
     captureArenaMatch.mockResolvedValue({ match: { modelA: 'gemini-test', modelB: 'gpt-test', winner: 'A' }, ratingA: 1516, ratingB: 1484, replayed: true });
     await driveMatch();
     fireEvent.click(screen.getByText(/b is better/i));
-    expect(await screen.findByText(/Your earlier vote on this pair stands/)).toBeTruthy();
+    // It names the STORED verdict (A → gemini-test), not the button just clicked (B).
+    expect(await screen.findByText(/^Your earlier vote on this pair stands: gemini-test\. /)).toBeTruthy();
+    expect(screen.queryByText(/^Recorded: /)).toBeNull();
   });
 
   it('a refused verdict says why, instead of "retry"', async () => {

@@ -133,6 +133,33 @@ describe('brief validation summary', () => {
   });
 });
 
+describe('validation notice chrome (CC-UI-1)', () => {
+  // Live on a1d1dccb7 the valid notice read "✓ ✕ ✓ Ready to generate…": a
+  // leading close button plus a second status icon inside the children, on top
+  // of the one Notice already renders.
+  const statusIcons = (root: HTMLElement): number =>
+    [...root.querySelectorAll('svg')].filter((s) => !s.closest('button')).length;
+
+  it('valid: one status icon, message first, a trailing labelled dismiss', async () => {
+    validateBriefById.mockResolvedValue({ valid: true, issues: [], enabledChannels: ['email_sequence'] } satisfies ValidationResult);
+    const summary = await openAndValidate();
+    const box = summary.querySelector('.alert') as HTMLElement;
+    expect(statusIcons(box)).toBe(1);
+    const close = within(summary).getByRole('button', { name: 'Close' });
+    expect(box.lastElementChild).toBe(close);
+    expect(within(summary).getByText(/Ready to generate/).compareDocumentPosition(close) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(close);
+    await waitFor(() => expect(screen.queryByRole('group', { name: /validation result/i })).toBeNull());
+  });
+
+  it('invalid: one status icon, and the dismiss trails the issue list', async () => {
+    const summary = await openAndValidate();
+    const box = summary.querySelector('.alert') as HTMLElement;
+    expect(statusIcons(box)).toBe(1);
+    expect(box.lastElementChild).toBe(within(summary).getByRole('button', { name: 'Close' }));
+  });
+});
+
 describe('validate reports on the document you are looking at', () => {
   it('CB-G2: a clean form validates WITHOUT saving', async () => {
     await openAndValidate();

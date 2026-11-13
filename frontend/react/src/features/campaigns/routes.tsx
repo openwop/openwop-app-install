@@ -28,11 +28,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Marketing',
-      label: 'Campaign Studio',
-      labelKey: 'navLabel',
+      labelKey: 'campaignStudioLabel',
       icon: MegaphoneIcon,
-      hint: 'Briefs, campaigns, performance & intelligence in one place',
-      hintKey: 'navHint',
+      hintKey: 'campaignStudioHint',
       order: 25,
       featureId: 'campaigns',
     },

@@ -21,6 +21,7 @@
  */
 import type { SqlRunner } from './pgVectorVector.js';
 import { randomUUID } from 'node:crypto';
+import { jsonbSafeString, jsonbStringify } from '../../storage/jsonbSafe.js';
 
 const ident = (table: string): string => {
   if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(table)) throw new Error(`unsafe table identifier: ${table}`);
@@ -212,15 +213,21 @@ export function createPgLexical(run: SqlRunner, table = LEXICAL_TABLE): LexicalI
       return rows[0] ? String(rows[0].generation) : null;
     },
     async replaceNamespace(tenant, owner, namespace, generation, items) {
+      // CC-SEARCH-1b — terms and metadata come from sliced web/KB text: a lone UTF-16
+      // surrogate (or NUL) there fails the jsonb insert. The term-count KEYS are built
+      // from the terms, which a JSON replacer never sees, so the terms are made safe
+      // first (node-pg already maps a lone surrogate to U+FFFD for the text `tsv` input,
+      // so keys and tsv stay aligned).
+      const safeTerms = items.map((i) => jsonbSafeString(i.terms));
       const counts: string[] = []; const lengths: number[] = [];
-      for (const item of items) {
-        const words = item.terms.split(' ').filter(Boolean);
+      for (const terms of safeTerms) {
+        const words = terms.split(' ').filter(Boolean);
         const frequencies: Record<string, number> = Object.create(null);
         for (const word of words) frequencies[word] = (frequencies[word] ?? 0) + 1;
         counts.push(JSON.stringify(frequencies)); lengths.push(words.length);
       }
       const { rows } = await run(replaceLexicalNamespaceSql(table), [tenant, owner, namespace, generation,
-        items.map((i) => i.id), items.map((i) => i.terms), items.map((i) => JSON.stringify(i.metadata)), counts, lengths]);
+        items.map((i) => i.id), safeTerms, items.map((i) => jsonbStringify(i.metadata)), counts, lengths]);
       return rows.length > 0;
     },
     async searchReady(tenant, owner, namespace, terms, topK, sourceRevision = '') {

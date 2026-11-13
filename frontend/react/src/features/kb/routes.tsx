@@ -16,9 +16,9 @@ const routes: FeatureRoute[] = [
     tier: 'admin', archetype: 'admin',
     nav: {
       group: 'Data & knowledge',
-      label: 'Knowledge Base', labelKey: 'kbLabel',
+      labelKey: 'kbLabel',
       icon: DatabaseIcon,
-      hint: 'Document collections + semantic search (RAG)', hintKey: 'kbHint',
+      hintKey: 'kbHint',
       
     },
   },

@@ -15,10 +15,8 @@ const routes: FeatureRoute[] = [
       // 'Developer' (with UI Plugins) — config promotion/rollback is a
       // developer-workflow surface, not a general admin one.
       group: 'Developer',
-      label: 'Environments',
       labelKey: 'environmentsLabel',
       icon: ArrowUpToLineIcon,
-      hint: 'Config promotion & rollback',
       hintKey: 'environmentsHint',
       featureId: 'environments',
     },

@@ -22,9 +22,10 @@ import { DurableCollection } from './hostExtPersistence.js';
 import { resolveOne } from './featureToggles/service.js';
 import { listOrgs } from './accessControlService.js';
 import {
-  createProduct, listProducts, deleteProduct,
+  createProduct, collectCatalog, deleteProduct,
   createOrder, listOrders, deleteOrder, markAsPaid, updateFulfillment, refundOrder, partialRefundOrder,
   createCoupon, listCoupons, deleteCoupon,
+  __backdateOrderForSeed,
 } from '../features/commerce/commerceService.js';
 import { createPriceList, listPriceLists, deletePriceList } from '../features/commerce/pricing.js';
 import { createAffiliate, listAffiliates } from '../features/commerce/affiliate.js';
@@ -42,7 +43,6 @@ const log = createLogger('seed.demoCommerceDepth');
 
 // Direct handles for byproduct stores with no per-row delete API (clear + the
 // order-createdAt backdate patch, which the service exposes no hook for).
-const orderStore = new DurableCollection<{ orderId: string; tenantId: string; createdBy?: string; createdAt?: string }>('commerce:order', (o) => o.orderId, undefined, (o) => o.tenantId);
 const subStore = new DurableCollection<{ subscriptionId: string; tenantId: string; createdBy?: string; productId?: string }>('commerce:product-sub', (s) => s.subscriptionId, undefined, (s) => s.tenantId);
 const quoteStore = new DurableCollection<{ quoteId: string; tenantId: string; createdBy?: string }>('commerce:quote', (q) => q.quoteId, undefined, (q) => q.tenantId);
 const quoteRevStore = new DurableCollection<{ revisionId: string; tenantId: string; quoteId?: string }>('commerce:quote-revision', (r) => r.revisionId, undefined, (r) => r.tenantId);
@@ -62,7 +62,7 @@ async function orgIdFor(tenantId: string): Promise<string> {
 
 export async function countDemoCommerceDepth(tenantId: string): Promise<number> {
   const orgId = await orgIdFor(tenantId);
-  return (await listProducts(tenantId, orgId)).filter((p) => p.createdBy === DEMO_COMMERCE_ACTOR).length;
+  return (await collectCatalog(tenantId, orgId, (p) => p.createdBy === DEMO_COMMERCE_ACTOR)).filter((p) => p.createdBy === DEMO_COMMERCE_ACTOR).length;
 }
 
 /** Coffee products get whole-bean / ground / 2 lb variants with SKUs. */
@@ -97,7 +97,7 @@ export async function seedDemoCommerceDepth(tenantId: string): Promise<{ created
 
   // 2) Products — simple products first (bundles reference them). Idempotent by
   //    actor + name; image token resolved from the Phase-2 media library.
-  const existing = (await listProducts(tenantId, orgId)).filter((p) => p.createdBy === DEMO_COMMERCE_ACTOR);
+  const existing = (await collectCatalog(tenantId, orgId, (p) => p.createdBy === DEMO_COMMERCE_ACTOR)).filter((p) => p.createdBy === DEMO_COMMERCE_ACTOR);
   const idByName = new Map<string, string>(existing.map((p) => [p.name, p.productId]));
   const idBySlug = new Map<string, string>();
   const ordered = [...SOLSTICE_CATALOG].sort((a, b) => Number(!!a.bundleOf) - Number(!!b.bundleOf));
@@ -218,8 +218,8 @@ async function seedOrders(tenantId: string, orgId: string, nowMs: number, idBySl
     // Backdate createdAt over the past 60 days (newest = i=44). Targeted patch —
     // inventory was already reserved correctly by createOrder; only the timestamp
     // moves, and the tenant index is keyed by orderId (unaffected).
-    const row = await orderStore.get(order.orderId);
-    if (row) { row.createdAt = new Date(nowMs - Math.round((60 * (44 - i)) / 44) * 86400_000).toISOString(); await orderStore.put(row); }
+    // ADR 1110 P5 — through commerce, so the order index's newest-first keys follow.
+    await __backdateOrderForSeed(tenantId, order.orderId, new Date(nowMs - Math.round((60 * (44 - i)) / 44) * 86400_000).toISOString());
     n += 1;
   }
   return n;
@@ -271,7 +271,7 @@ export async function clearDemoCommerceDepth(tenantId: string): Promise<{ cleare
   }
   // Products (delete API) + their stock movements (no delete API → direct store).
   const demoProductIds = new Set<string>();
-  for (const p of (await listProducts(tenantId, orgId)).filter((x) => x.createdBy === DEMO_COMMERCE_ACTOR)) {
+  for (const p of (await collectCatalog(tenantId, orgId, (p) => p.createdBy === DEMO_COMMERCE_ACTOR)).filter((x) => x.createdBy === DEMO_COMMERCE_ACTOR)) {
     demoProductIds.add(p.productId);
     if (await deleteProduct(tenantId, orgId, p.productId)) cleared += 1;
   }

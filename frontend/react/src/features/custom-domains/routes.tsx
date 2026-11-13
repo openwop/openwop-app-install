@@ -16,7 +16,7 @@ const routes: FeatureRoute[] = [
     // Admin tier (product ruling 2026-07-06): domain wiring is operator
     // infrastructure, not a day-to-day workspace surface.
     tier: 'admin', archetype: 'admin',
-    nav: { group: 'Deployment & customization', label: 'Custom domains', labelKey: 'customDomainsLabel', icon: GlobeIcon, hint: 'Serve published content on your own hostname', hintKey: 'customDomainsHint', order: 64, featureId: 'custom-domains' },
+    nav: { group: 'Deployment & customization', labelKey: 'customDomainsLabel', icon: GlobeIcon, hintKey: 'customDomainsHint', order: 64, featureId: 'custom-domains' },
   },
 ];
 

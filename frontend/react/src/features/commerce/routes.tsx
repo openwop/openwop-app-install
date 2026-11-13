@@ -20,7 +20,7 @@ const routes: FeatureRoute[] = [
     path: '/commerce',
     element: <CommercePage />,
     tier: 'workspace', archetype: 'data-dense-index',
-    nav: { group: 'Commerce', label: 'Commerce', labelKey: 'commerceLabel', icon: PackageIcon, hint: 'Products, orders, quotes & pricing', hintKey: 'commerceHint', order: 60, featureId: 'commerce' },
+    nav: { group: 'Commerce', labelKey: 'commerceLabel', icon: PackageIcon, hintKey: 'commerceHint', order: 60, featureId: 'commerce' },
   },
   // Deep-linkable order detail (no nav — a detail route, gated internally on the
   // `commerce` toggle). The landing target for the commerce.order.paid notification.

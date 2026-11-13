@@ -1816,7 +1816,12 @@ pre {
 
 /* §A7: keep wide tables (runs index) horizontally scrollable on small
    screens rather than forcing the layout to overflow the viewport. */
-.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+/* `position: relative` makes the scroller the containing block of an absolutely
+   positioned descendant (a cell's `.sr-only` text), so it is clipped with the table.
+   Without it that text took the card as its block and widened the page at phone width. */
+.table-scroll { position: relative; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+/* <TableScroll> is focusable only while it overflows (scrollable-region-focusable). */
+.table-scroll:focus-visible { outline: 2px solid var(--clay-text); outline-offset: 2px; border-radius: var(--radius); }
 
 /* BIZ-3 — opt-in stacked-row reflow for wide tables on narrow viewports:
  * the header row hides, each <tr> becomes a bordered block, and each cell
@@ -2272,6 +2277,41 @@ a.muted:hover { color: var(--ink); }
 .tb-menu-item:hover:not(:disabled) { background: var(--paper-2); color: var(--ink); }
 .tb-menu-item:disabled { opacity: 0.45; cursor: not-allowed; }
 .tb-menu-sep { height: 1px; margin: var(--space-1) 0; background: var(--rule); }
+/* ADR 1110 P2 — the shared Combobox (ui/Combobox.tsx): the tb-menu popup look, under
+   the input, as wide as it, scrolling past ten rows. The active option is marked by
+   background AND an inline-start bar, so it never reads by colour alone. */
+.ui-combobox__wrap { position: relative; }
+.ui-combobox__popup {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  inset-inline: 0;
+  z-index: 20;
+  max-height: 22rem;
+  overflow-y: auto;
+  padding: var(--space-1);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px var(--ink-shadow);
+}
+.ui-combobox__list { list-style: none; margin: 0; padding: 0; }
+.ui-combobox__option {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-1-5) var(--space-2);
+  border-radius: var(--radius);
+  border-inline-start: 3px solid transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+.ui-combobox__option.is-active { background: var(--paper-2); border-inline-start-color: var(--clay); }
+.ui-combobox__option[aria-selected='true'] .ui-combobox__label { font-weight: var(--weight-emphasis); }
+.ui-combobox__label { overflow-wrap: anywhere; }
+.ui-combobox__hint { font-size: var(--text-sm); color: var(--ink-3); }
+.ui-combobox__note { margin: 0; padding: var(--space-1-5) var(--space-2); font-size: var(--text-sm); color: var(--ink-3); }
+/* Touch: every option is a 44px target (DESIGN.md §11). */
+@media (pointer: coarse) { .ui-combobox__option { min-height: 44px; justify-content: center; } }
 /* Left-aligned variant (the shared ui/Menu's align="start"). */
 .tb-menu-list--start { inset-inline-start: 0; inset-inline-end: auto; }
 /* Open above the trigger (composer mic, footer menus) so it never clips off the
@@ -5674,7 +5714,7 @@ a.btn.btn-sm { font-size: 12px; padding: var(--space-1) var(--space-2); }
 /* Interactive chips used as list controls (e.g. the Territories model selector,
    ADR 0272): a hover cue + a visible SELECTED state, so selection is not exposed
    only via aria-pressed. Static tag chips are unaffected (button.chip only). */
-button.chip { cursor: pointer; }
+button.chip { cursor: pointer; min-block-size: 24px; } /* #5851 — was 23px (WCAG 2.5.8). */
 button.chip:hover { background: var(--paper); }
 /* A chip-styled ANCHOR (the ADR 0475 run-detail "Redriven" provenance link)
  * is interactive too — it navigates. Same background cue as the button arm;
@@ -5776,6 +5816,9 @@ a.chip:hover { background: var(--paper); }
   color: var(--ink-3); cursor: pointer; border-radius: var(--radius);
 }
 .tabdeck-tab__close:hover, .tabdeck-tab__pin:hover, .tabdeck-tab__popout:hover { background: var(--paper-2); color: var(--ink); }
+/* #5851 (WCAG 2.5.8) — a 24px hit area around the 20px and 16px glyph buttons, drawing unchanged. */
+.tabdeck-tab__close, .convlineup-chip__remove { position: relative; }
+.tabdeck-tab__close::after, .convlineup-chip__remove::after { content: ""; position: absolute; inset: min(0px, calc((100% - 24px) / 2)); }
 /* Pop-out (ADR 0140 G6) is hover/focus-revealed like pin; disabled (unsaved tab) is dim + no pointer. */
 .tabdeck-tab__popout { visibility: hidden; }
 .tabdeck-tab:hover .tabdeck-tab__popout,
@@ -5918,7 +5961,8 @@ a.chip:hover { background: var(--paper); }
  * separation, given an actual primitive. Wrap a page's major sections in
  * .page-stack so band-level gaps are consistent; reserve u-gap-4/3 for
  * INTRA-section grouping. */
-.page-stack { display: grid; gap: var(--space-5); align-content: start; }
+/* #5851 — the implicit auto column could not shrink below a card's widest row: /inbox scrolled 21px sideways at 380px. */
+.page-stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-5); align-content: start; }
 
 /* ─── PageHeader — the editorial page-title primitive (DESIGN.md §5) ─── */
 .page-header {
@@ -7336,7 +7380,8 @@ a.btn-accent-solid:hover { color: var(--color-on-scrim); }
  * / `.wfprog-header` duplicates so the three tabs read the same. */
 .leftrail-panel-head { padding: var(--space-3) var(--space-3) var(--space-2); border-bottom: 1px solid var(--rule); display: flex; align-items: center; gap: var(--space-2); }
 .wfprog-runswitcher { padding: var(--space-1-5) var(--space-1); border-bottom: 1px solid var(--rule); max-height: 120px; overflow-y: auto; }
-.wfprog-run-btn { display: flex; align-items: center; gap: var(--space-1-5); width: 100%; text-align: start; padding: var(--space-1) 8px; font-size: var(--text-sm); border: none; cursor: pointer; min-height: 0; }
+/* #5845 — it paints a tint and declared no ink, so it took the base button's on-scrim white: 1.12:1. */
+.wfprog-run-btn { display: flex; align-items: center; gap: var(--space-1-5); width: 100%; text-align: start; padding: var(--space-1) 8px; font-size: var(--text-sm); color: var(--ink); border: none; cursor: pointer; min-height: 0; }
 .wfprog-run-dot { width: 8px; height: 8px; border-radius: var(--radius); flex-shrink: 0; }
 .wfprog-focused { flex: 1; overflow-y: auto; padding: var(--space-2-5) 12px; display: flex; flex-direction: column; gap: var(--space-2-5); }
 .wfprog-run-name { font-weight: var(--weight-head); font-size: var(--text-sm); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -7859,7 +7904,9 @@ a.btn-accent-solid:hover { color: var(--color-on-scrim); }
 .leftrail-tab.is-active { background: color-mix(in oklab, var(--clay-text) 14%, transparent); color: var(--ink, var(--ink)); border-left-color: var(--clay-text); }
 .leftrail-tab:focus-visible { outline: 2px solid var(--clay-text); outline-offset: -2px; }
 .leftrail-tab-icon { display: inline-flex; align-items: center; line-height: 1; }
-.leftrail-tab-badge { position: absolute; top: 5px; right: 7px; font-size: var(--text-eyebrow); min-width: 14px; padding: 0 var(--space-1); border-radius: var(--radius); background: var(--clay-text, var(--clay)); color: var(--color-on-scrim); text-align: center; line-height: 14px; }
+/* #5845 — this badge and .chathdr-badge filled with --clay-text, which is LIGHT on dark themes (white on it
+ * measured 1.42:1). --clay-strong is the fill white text is specified on (tokens.css). */
+.leftrail-tab-badge { position: absolute; top: 5px; right: 7px; font-size: var(--text-eyebrow); min-width: 14px; padding: 0 var(--space-1); border-radius: var(--radius); background: var(--clay-strong); color: var(--color-on-scrim); text-align: center; line-height: 14px; }
 
 /* WorkflowRunBubble.tsx */
 .wfrunbubble-box { max-width: var(--max-bubble-width, 75ch); width: 100%; padding: var(--space-2-5) 14px; border-radius: var(--radius-bubble, 16px); background: var(--color-msg-assistant-bg, var(--paper-2)); border: 1px solid var(--rule); color: var(--ink); font-size: var(--text-body); line-height: 1.5; }
@@ -7930,7 +7977,7 @@ a.btn-accent-solid:hover { color: var(--color-on-scrim); }
  * grows a clay ring when pressed; "open" reads as a soft fill (§4.5 rule 4). */
 .chathdr-rail-btn { padding: 0 var(--space-2); font-size: var(--text-eyebrow); min-height: 36px; height: 36px; display: inline-flex; align-items: center; gap: var(--space-1); border-radius: var(--radius); }
 .chathdr-rail-btn[aria-pressed='true'] { background: var(--clay-soft); color: var(--clay-text); }
-.chathdr-badge { font-size: var(--text-eyebrow); min-width: 14px; padding: 0 var(--space-1); border-radius: var(--radius); background: var(--clay-text, var(--clay)); color: var(--color-on-scrim); text-align: center; line-height: 14px; }
+.chathdr-badge { font-size: var(--text-eyebrow); min-width: 14px; padding: 0 var(--space-1); border-radius: var(--radius); background: var(--clay-strong); color: var(--color-on-scrim); text-align: center; line-height: 14px; }
 .chathdr-more-btn { display: inline-flex; align-items: center; justify-content: center; padding: var(--space-1) var(--space-2); min-height: 0; height: 26px; }
 /* ADR 0140 follow-on — the members-pane toggle in the sidebar header. */
 .chathdr-members-btn { gap: var(--space-1); }
@@ -8681,6 +8728,8 @@ button.teampage-skill-chip:not(:disabled):hover { background: var(--clay-soft); 
 .configprov-compact { display: inline-flex; align-items: center; gap: var(--space-1-5); padding: var(--space-1) 8px; border-radius: var(--radius-bubble); border: 1px solid var(--rule); background: var(--paper); font-size: var(--text-eyebrow); min-width: 0; }
 /* Keep the model name on ONE line with an ellipsis — without this it wrapped to
    five stacked lines ("Google · / Gemini / 2.5 / Flash- / Lite") in a narrow column. */
+/* #5851 — the compact card's Change button was 14px tall (u-minh-0); 24px is the WCAG 2.5.8 floor. */
+.configprov-change { min-height: 24px; }
 .configprov-compact > span:not(.configprov-badge) { min-width: 0; max-width: 22ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .configprov-compact .secondary { flex: 0 0 auto; }
 /* The ADR 0711 default marker escapes the ellipsis clamp above the same way
@@ -9787,6 +9836,7 @@ button.teampage-skill-chip:not(:disabled):hover { background: var(--clay-soft); 
   margin: 0 0 var(--space-3);
   font-family: var(--mono); font-size: var(--text-eyebrow); font-weight: var(--weight-head);
   letter-spacing: 0.08em; text-transform: uppercase; color: var(--clay-text);
+  overflow-wrap: anywhere; /* ADR 1105 D11: an authored heading may be one long word */
 }
 .public-shell .app-footer__group-links { display: grid; gap: var(--space-2-5); margin: 0; padding: 0; list-style: none; }
 .public-shell .app-footer__group--legal .app-footer__group-links { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: var(--space-5); }
@@ -10303,6 +10353,7 @@ a.fp-post__share { text-decoration: none; }
   margin: 0 0 var(--space-1); padding-inline: var(--space-3);
   font-family: var(--mono); font-size: 0.68rem; font-weight: var(--weight-emphasis);
   letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3);
+  overflow-wrap: anywhere; /* ADR 1105 D11: an authored heading may be one long word */
 }
 .public-menu__link {
   padding: var(--space-2) var(--space-3); border-radius: var(--radius);
@@ -13563,8 +13614,11 @@ mark.fp-mark { padding: 0 0.06em; background: linear-gradient(transparent 62%, c
      number and stays on it; the overlay's empty alternative text keeps it out of
      the accessibility tree. Every other path shows the digit itself. */
   @media (forced-colors: none) {
-    :root:not([data-reduce-motion="reduce"]) .fp-hero:not(.fp-motion--none) .fp-activity--play .fp-activity__n { position: relative; color: transparent; }
-    :root:not([data-reduce-motion="reduce"]) .fp-hero:not(.fp-motion--none) .fp-activity--play .fp-activity__n::after { content: counter(fp-n) / ""; counter-reset: fp-n var(--fp-n); position: absolute; inset-inline-start: 0; color: var(--ink); animation: fp-count calc(var(--rows, 1) * var(--tick-step)) steps(var(--rows, 1), end) both; animation-delay: 700ms; }
+    /* ACT-1: hide the digit only where the overlay can draw (alt-text `content`). */
+    @supports (content: "" / "") {
+      :root:not([data-reduce-motion="reduce"]) .fp-hero:not(.fp-motion--none) .fp-activity--play .fp-activity__n { position: relative; color: transparent; }
+      :root:not([data-reduce-motion="reduce"]) .fp-hero:not(.fp-motion--none) .fp-activity--play .fp-activity__n::after { content: counter(fp-n) / ""; counter-reset: fp-n var(--fp-n); position: absolute; inset-inline-start: 0; color: var(--ink); animation: fp-count calc(var(--rows, 1) * var(--tick-step)) steps(var(--rows, 1), end) both; animation-delay: 700ms; }
+    }
   }
   /* The marquee drifts unless the section's motion is `none`; the button, hover
      and keyboard focus pause it (WCAG 2.2.2). */
@@ -13620,40 +13674,44 @@ mark.fp-mark { padding: 0 0.06em; background: linear-gradient(transparent 62%, c
        the count is off there. Everywhere this block does not apply, the real
        number shows. */
     @media (forced-colors: none) {
-      :root:not([data-reduce-motion="reduce"]) .fp-stats:not(.fp-motion--none) .fp-stat { view-timeline: --fp-stat block; }
-      :root:not([data-reduce-motion="reduce"]) .fp-stats:not(.fp-motion--none) .fp-count { position: relative; -webkit-text-fill-color: transparent; font-variant-numeric: tabular-nums; }
-      :root:not([data-reduce-motion="reduce"]) .fp-stats:not(.fp-motion--none) .fp-count::after {
-        content: counter(fp-n) / "";
-        counter-reset: fp-n var(--fp-n);
-        position: absolute;
-        inset-inline-start: 0;
-        -webkit-text-fill-color: currentColor;
-        animation-name: fp-count;
-        animation-duration: auto;
-        animation-timing-function: linear;
-        animation-fill-mode: both;
-        animation-timeline: --fp-stat;
-        animation-range: entry 0% entry 100%;
-      }
-      /* ADR 1063 P2c/P2d — a bento tile's `count` rides the same mechanism
-         (one count-up in the app, not two), on the tile's own timeline. Kept
-         as separate rules so the stats rules above stay byte-identical. */
-      :root:not([data-reduce-motion="reduce"]) .fp-bento:not(.fp-motion--none) .fp-bento__tile:has(.fp-bento__count) { view-timeline: --fp-stat block; }
-      :root:not([data-reduce-motion="reduce"]) .fp-bento:not(.fp-motion--none) .fp-bento__count .fp-count { position: relative; -webkit-text-fill-color: transparent; font-variant-numeric: tabular-nums; }
-      :root:not([data-reduce-motion="reduce"]) .fp-bento:not(.fp-motion--none) .fp-bento__count .fp-count::after {
-        content: counter(fp-n) / "";
-        counter-reset: fp-n var(--fp-n);
-        position: absolute;
-        inset-inline-start: 0;
-        -webkit-text-fill-color: currentColor;
-        animation-name: fp-count;
-        animation-duration: auto;
-        animation-timing-function: linear;
-        animation-fill-mode: both;
-        animation-timeline: --fp-stat;
-        animation-range: entry 0% entry 100%;
+      /* ACT-1: hide the digit only where the overlay can draw (alt-text `content`). */
+      @supports (content: "" / "") {
+        :root:not([data-reduce-motion="reduce"]) .fp-stats:not(.fp-motion--none) .fp-stat { view-timeline: --fp-stat block; }
+        :root:not([data-reduce-motion="reduce"]) .fp-stats:not(.fp-motion--none) .fp-count { position: relative; -webkit-text-fill-color: transparent; font-variant-numeric: tabular-nums; }
+        :root:not([data-reduce-motion="reduce"]) .fp-stats:not(.fp-motion--none) .fp-count::after {
+          content: counter(fp-n) / "";
+          counter-reset: fp-n var(--fp-n);
+          position: absolute;
+          inset-inline-start: 0;
+          -webkit-text-fill-color: currentColor;
+          animation-name: fp-count;
+          animation-duration: auto;
+          animation-timing-function: linear;
+          animation-fill-mode: both;
+          animation-timeline: --fp-stat;
+          animation-range: entry 0% entry 100%;
+        }
+        /* ADR 1063 P2c/P2d — a bento tile's `count` rides the same mechanism
+           (one count-up in the app, not two), on the tile's own timeline. Kept
+           as separate rules so the stats rules above stay byte-identical. */
+        :root:not([data-reduce-motion="reduce"]) .fp-bento:not(.fp-motion--none) .fp-bento__tile:has(.fp-bento__count) { view-timeline: --fp-stat block; }
+        :root:not([data-reduce-motion="reduce"]) .fp-bento:not(.fp-motion--none) .fp-bento__count .fp-count { position: relative; -webkit-text-fill-color: transparent; font-variant-numeric: tabular-nums; }
+        :root:not([data-reduce-motion="reduce"]) .fp-bento:not(.fp-motion--none) .fp-bento__count .fp-count::after {
+          content: counter(fp-n) / "";
+          counter-reset: fp-n var(--fp-n);
+          position: absolute;
+          inset-inline-start: 0;
+          -webkit-text-fill-color: currentColor;
+          animation-name: fp-count;
+          animation-duration: auto;
+          animation-timing-function: linear;
+          animation-fill-mode: both;
+          animation-timeline: --fp-stat;
+          animation-range: entry 0% entry 100%;
+        }
       }
     }
+
   }
 }
 @keyframes fp-rail { from { transform: scaleY(0); } to { transform: scaleY(1); } }

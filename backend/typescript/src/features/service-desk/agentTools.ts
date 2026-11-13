@@ -16,7 +16,7 @@
  * ticket is readable but not writable, `not_found` when it is not even readable).
  */
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
+import { resolveFeatureToggle, type ToolAccessScope } from '../../host/agentToolKit.js';
 import { getTicket, listTickets, projectTicketForAgent } from './tickets.js';
 import { TICKET_STATUSES } from './ticketTypes.js';
 import { setStatus } from './tickets.js';
@@ -27,9 +27,9 @@ export const SD_GET_TOOL_ID = 'openwop:servicedesk.get-ticket';
 export const SD_DRAFT_TOOL_ID = 'openwop:servicedesk.draft-reply';
 export const SD_STATUS_TOOL_ID = 'openwop:servicedesk.set-status';
 
-async function enabled(tenantId: string, userId?: string): Promise<boolean> {
-  const a = await resolveOne('service-desk', { tenantId, ...(userId ? { userId } : {}) }).catch(() => null);
-  return a?.enabled === true;
+async function enabled(scope: ToolAccessScope): Promise<boolean> {
+  // ADR 1108 — the kit's subject: the route's shape plus the operator exemption.
+  return resolveFeatureToggle('service-desk', scope);
 }
 
 const empty = (note: string): { content: string } => ({ content: JSON.stringify({ note }) });
@@ -84,7 +84,7 @@ export function registerServiceDeskAgentTools(): void {
       },
     },
     async run(input, scope) {
-      if (!scope.actingUserId || !(await enabled(scope.tenantId, scope.actingUserId))) return empty('service desk unavailable');
+      if (!scope.actingUserId || !(await enabled(scope))) return empty('service desk unavailable');
       const orgId = String(input.orgId ?? '');
       // Read gate: the caller-supplied orgId MUST be one the acting user has
       // workspace:read on. Fail EMPTY (an unauthorized org is indistinguishable
@@ -106,7 +106,7 @@ export function registerServiceDeskAgentTools(): void {
       inputSchema: { type: 'object', properties: { ticketId: { type: 'string', minLength: 1 } }, required: ['ticketId'], additionalProperties: false },
     },
     async run(input, scope) {
-      if (!scope.actingUserId || !(await enabled(scope.tenantId, scope.actingUserId))) return empty('service desk unavailable');
+      if (!scope.actingUserId || !(await enabled(scope))) return empty('service desk unavailable');
       // Read gate on the ticket's OWN org. An unreadable ticket returns the SAME
       // `{ ticket: null }` as an unknown id (no existence leak).
       const loaded = await loadTicketForTool(scope.tenantId, scope.actingUserId, String(input.ticketId ?? ''), 'workspace:read');
@@ -134,7 +134,7 @@ export function registerServiceDeskAgentTools(): void {
       },
     },
     async run(input, scope) {
-      if (!scope.actingUserId || !(await enabled(scope.tenantId, scope.actingUserId))) return empty('service desk unavailable');
+      if (!scope.actingUserId || !(await enabled(scope))) return empty('service desk unavailable');
       // Write gate on the ticket's OWN org: unreadable ⇒ typed not_found (no
       // existence leak); readable-but-not-writable ⇒ typed forbidden_scope.
       const loaded = await loadTicketForTool(scope.tenantId, scope.actingUserId, String(input.ticketId ?? ''), 'workspace:write');
@@ -181,7 +181,7 @@ export function registerServiceDeskAgentTools(): void {
       },
     },
     async run(input, scope) {
-      if (!scope.actingUserId || !(await enabled(scope.tenantId, scope.actingUserId))) return empty('service desk unavailable');
+      if (!scope.actingUserId || !(await enabled(scope))) return empty('service desk unavailable');
       // Write gate on the ticket's OWN org (same shape as draft-reply).
       const loaded = await loadTicketForTool(scope.tenantId, scope.actingUserId, String(input.ticketId ?? ''), 'workspace:write');
       if (!loaded.ok) {

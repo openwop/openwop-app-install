@@ -12,6 +12,18 @@
 .fp-stable__table th { text-align: start; padding: var(--space-3) var(--space-4); font-family: var(--mono); font-size: var(--text-eyebrow); letter-spacing: 0.08em; text-transform: uppercase; font-weight: var(--weight-emphasis); color: var(--fp-eyebrow-color); background: var(--paper-2); border-bottom: 1px solid var(--rule-2); }
 .fp-stable__table td { padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--rule); color: var(--ink); vertical-align: top; }
 .fp-stable__table tbody tr:last-child td { border-bottom: 0; }
+/* #5765 — the points under the head, as a ruled list. */
+.fp-stable__points { list-style: none; margin: var(--space-4) 0 0; padding: 0; border-top: 1px solid var(--rule); }
+.fp-stable__points li { padding: var(--space-3) 0; border-bottom: 1px solid var(--rule); color: var(--ink); }
+/* `head: 'split'`: the head (and its points) beside the table, like the split FAQ.
+   The generic split head puts the lede in a second column; here the head is
+   one column of its own, so that grid is undone. */
+.fp-stable.fp-split .fp-stable__intro .fp-head { display: block; max-width: none; margin-bottom: 0; }
+.fp-stable.fp-split .fp-stable__intro { margin-bottom: var(--space-6); }
+@media (min-width: 900px) {
+  .fp-stable.fp-split .fp-shell { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr); column-gap: calc(var(--space-6) * 2); align-items: start; }
+  .fp-stable.fp-split .fp-stable__intro { margin-bottom: 0; }
+}
 .fp-stable__table td:first-child { font-family: var(--mono); font-size: var(--text-sm); color: var(--fp-eyebrow-color); white-space: nowrap; }
 
 /* D2 date calculator */
@@ -26,6 +38,75 @@
 .fp-calc__why, .fp-calc__note { margin: 0; color: var(--ink-2); }
 .fp-calc__why { padding-top: var(--space-4); border-top: 1px solid var(--rule); }
 .fp-calc__note { font-size: var(--text-sm); }
+/* ADR 1105 D1/D9 — party views: the ADR 1080 D4 picker, then each party's
+   needs beside a hero-queue card of what that party sees. */
+.fp-parties__pick { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-5); }
+.fp-parties .fp-parties__btn { min-height: 44px; padding: var(--space-2) var(--space-4); border: 1px solid var(--rule-control); border-radius: var(--radius-pill); font-weight: var(--weight-emphasis); color: var(--ink); background: transparent; }
+.fp-parties .fp-parties__btn[aria-pressed='true'], .fp-parties .fp-parties__btn[aria-pressed='true']:hover { color: var(--color-on-scrim); background: var(--clay-strong); border-color: var(--clay-strong); }
+.fp-parties__panel { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: var(--space-6); align-items: start; }
+.fp-parties__panel[hidden] { display: none; }
+.fp-parties__needs .fp-eyebrow { margin: 0 0 var(--space-3); }
+.fp-parties__list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); border-top: 1px solid var(--rule-2); }
+.fp-parties__list li { padding: var(--space-2) 0; border-bottom: 1px solid var(--rule); color: var(--ink); }
+.fp-parties__note { margin: 0; color: var(--ink-2); }
+/* UXG-1105-1/2 — on the accent band (itself --clay-strong) a pressed picker in
+   --clay-strong showed only as a border. Invert it there, as the band's primary
+   button does. One rule for every CMS picker; the doubled class outranks each
+   picker's own pressed rule whatever order the stylesheets load in. */
+.cms-public-section.fp-tone--accent :is(.fp-psim__mode, .fp-psim__preset, .fp-parties__btn, .fp-convo__ask, .fp-findex__pick, .fp-dtree__tree)[aria-pressed='true'],
+.cms-public-section.fp-tone--accent :is(.fp-psim__mode, .fp-psim__preset, .fp-parties__btn, .fp-convo__ask, .fp-findex__pick, .fp-dtree__tree)[aria-pressed='true']:hover,
+.cms-public-section.fp-tone--accent .fp-psim__ctl--primary,
+.cms-public-section.fp-tone--accent .fp-psim__ctl--primary:hover { color: var(--clay-strong); background: var(--tone-inverse-ink); border-color: var(--tone-inverse-ink); }
+/* A party's view rows carry no id, so the reused queue card drops its id column. */
+.fp-parties .fp-queue__row { grid-template-columns: minmax(0, 1fr) auto; }
+.fp-parties .fp-queue__id { display: none; }
+
+/* ADR 1105 D2/D8 — stage chart: a labelled list drawn as bars, columns from
+   900px (14 stages need about 53px each; at 640px a count broke over lines). A group is told apart by pattern as well as color, and named in the
+   legend with its total. */
+.fp-schart { --fp-schart-fill: var(--clay-text); --fp-schart-line: var(--clay-text); }
+.fp-schart--g0 { --fp-schart-fill: var(--clay-text); --fp-schart-line: var(--clay-text); }
+.fp-schart--g1 { --fp-schart-fill: repeating-linear-gradient(45deg, var(--clay-text) 0 3px, transparent 3px 7px); --fp-schart-line: var(--clay-text); }
+.fp-schart--g2 { --fp-schart-fill: var(--ink-3); --fp-schart-line: var(--ink-3); }
+.fp-schart--g3 { --fp-schart-fill: repeating-linear-gradient(-45deg, var(--ink-3) 0 3px, transparent 3px 7px); --fp-schart-line: var(--ink-3); }
+.fp-schart__bars { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+.fp-schart__stage { display: grid; grid-template-columns: minmax(0, 9rem) minmax(0, 1fr) auto; align-items: center; gap: var(--space-2); }
+.fp-schart__label { grid-column: 1; grid-row: 1; font-size: var(--text-sm); color: var(--ink-2); overflow-wrap: anywhere; }
+.fp-schart__bar { grid-column: 2; grid-row: 1; block-size: 0.75rem; inline-size: calc(var(--v, 0) * 100%); min-inline-size: 2px; background: var(--fp-schart-fill); border: 1px solid var(--fp-schart-line); border-radius: var(--radius); box-sizing: border-box; }
+.fp-schart__count { grid-column: 3; grid-row: 1; font-family: var(--mono); font-size: var(--text-sm); color: var(--ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
+@media (min-width: 900px) {
+  .fp-schart__bars { grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); align-items: end; gap: var(--space-2); }
+  .fp-schart__stage { display: flex; flex-direction: column; justify-content: flex-end; align-items: stretch; gap: var(--space-1); text-align: center; }
+  .fp-schart__bar { inline-size: 100%; block-size: calc(var(--v, 0) * 12rem); min-block-size: 2px; }
+  .fp-schart__label { font-size: var(--text-eyebrow); }
+  .fp-schart__unit { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+}
+.fp-schart__legend { list-style: none; margin: var(--space-5) 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: var(--space-3) var(--space-5); }
+.fp-schart__key { display: inline-flex; align-items: center; gap: var(--space-2); font-size: var(--text-sm); color: var(--ink-2); }
+.fp-schart__key strong { color: var(--ink); font-variant-numeric: tabular-nums; }
+.fp-schart__swatch { display: inline-block; inline-size: 0.875rem; block-size: 0.875rem; background: var(--fp-schart-fill); border: 1px solid var(--fp-schart-line); border-radius: 2px; }
+.fp-schart__note { margin: var(--space-4) 0 0; font-size: var(--text-sm); color: var(--ink-2); }
+/* ADR 1105 D4 — the allowance worksheet: a table of editable figures beside the
+   total. Below 640px each line stacks as a small card, its column labels taken
+   from the cells' data-label (localized text in the DOM). */
+.fp-gap { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-6); align-items: start; }
+/* The table needs about 420px; beside the result only once both fit. */
+@media (min-width: 1024px) { .fp-gap { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); } }
+.fp-gap__table { inline-size: 100%; border-collapse: collapse; font-size: var(--text-sm); }
+.fp-gap__table th, .fp-gap__table td { padding: var(--space-2); border-bottom: 1px solid var(--rule); text-align: start; vertical-align: middle; }
+.fp-gap__table thead th { font-family: var(--mono); font-size: var(--text-eyebrow); letter-spacing: 0.08em; text-transform: uppercase; color: var(--fp-eyebrow-color); border-bottom-color: var(--rule-2); }
+.fp-gap__table tbody th { font-weight: var(--weight-emphasis); color: var(--ink); }
+.fp-gap__table input { min-height: 44px; box-sizing: border-box; inline-size: 100%; min-inline-size: 6rem; padding: var(--space-2); font-family: var(--sans); font-size: var(--text-body); color: var(--ink); background: var(--paper); border: 1px solid var(--rule-control); border-radius: var(--radius); }
+.fp-gap__over { font-variant-numeric: tabular-nums; color: var(--ink-2); white-space: nowrap; }
+.fp-gap__over--late { color: var(--color-danger-text); font-weight: var(--weight-emphasis); }
+@media (max-width: 640px) {
+  .fp-gap__table thead { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .fp-gap__table tr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--space-2); padding-block: var(--space-3); border-bottom: 1px solid var(--rule); }
+  .fp-gap__table tbody th { grid-column: 1 / -1; }
+  .fp-gap__table th, .fp-gap__table td { display: grid; gap: var(--space-1); padding: 0; border: 0; }
+  .fp-gap__table td::before { content: attr(data-label); font-size: var(--text-eyebrow); color: var(--ink-3); }
+  .fp-gap__over { grid-column: 1 / -1; }
+}
 
 /* D3 conversation */
 .fp-convo__grid { display: flex; flex-wrap: wrap; gap: var(--space-6); align-items: flex-start; }
@@ -84,6 +165,14 @@
 .fp-queue__what { display: grid; gap: 2px; font-size: var(--text-sm); color: var(--ink-3); }
 .fp-queue__what strong { font-size: var(--text-body); color: var(--ink); }
 .fp-queue__note { padding: var(--space-3) var(--space-5); font-size: var(--text-sm); color: var(--ink-2); }
+/* #5779 B7 — the queue over a photo: from 900px the card overlaps the photo's
+   lower edge; on a phone it stacks under the photo. */
+.fp-hero__queue-stage { display: grid; gap: var(--space-4); min-width: 0; }
+.fp-hero__queue-stage .fp-hero__photo { block-size: clamp(240px, 30vw, 420px); border-radius: var(--radius-lg); }
+@media (min-width: 900px) {
+  .fp-hero__queue-stage { gap: 0; }
+  .fp-hero__queue-stage .fp-queue { position: relative; margin: calc(var(--space-6) * -3) var(--space-5) 0; }
+}
 
 /* D5 picture on the start side, D8 card */
 @media (min-width: 900px) { .fp-prose__split--start > :last-child { order: -1; } }

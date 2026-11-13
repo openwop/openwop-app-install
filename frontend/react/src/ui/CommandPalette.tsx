@@ -10,6 +10,7 @@ import { useLockedNav } from '../featureToggles/lockedTargets.js';
 import { SearchIcon, PlayIcon, BotIcon, ScaleIcon, DatabaseIcon, LockIcon } from './icons/index.js';
 import { getContributedCommands, getQueryCommandSources, routeCommandsFor, subscribeCommandSources, subscribeQueryCommandSources } from './commandContributions.js';
 import { GROUP_LABEL_KEYS } from '../chrome/features.js';
+import { navHint, navLabel } from '../chrome/navText.js';
 
 /**
  * <CommandPalette> — the app-wide ⌘K / Ctrl+K jump-to-anything (gap #2).
@@ -124,8 +125,8 @@ export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JS
     ...contributed.map((c) => ({ id: c.id, label: c.label, hint: c.hint, group: c.group, icon: c.icon, run: c.run })),
     ...[...workspace, ...admin].flatMap((g) => g.items.map((it) => ({
       id: `nav-${it.to}`,
-      label: it.labelKey ? tn(it.labelKey, { defaultValue: it.label }) : it.label,
-      hint: it.hintKey ? tn(it.hintKey, { defaultValue: it.hint }) : it.hint,
+      label: navLabel(it, tn),
+      hint: navHint(it, tn),
       group: g.custom ? g.label : tn(GROUP_LABEL_KEYS[g.id] ?? '', { defaultValue: g.label }),
       icon: it.icon, to: it.to,
       ...(it.featureId ? { featureId: it.featureId } : {}),

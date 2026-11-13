@@ -12,6 +12,20 @@
  *    unserializable graph keeps the previous value (stale beats invalid).
  *  - ECHO SAFETY: a remote transaction materializes into the store without
  *    bouncing back through the local push debounce.
+ *  - METADATA CARRIAGE (ADR 0440 / 0523): the room's `definition` carries the
+ *    raw launch defaults in `customProperties['openwop-app.builder']` beside
+ *    every unknown sibling, a blank default is a value (not "absent"), and Y
+ *    undo/redo restores it; an incompatible editor slot is a VISIBLE failed sync
+ *    (`builder_editor_metadata_conflict`) that keeps the old scalar and the local
+ *    text, and a passive load of such metadata never throws.
+ *
+ * Sabotage that turns it red (/grade-tests w107): sorting before commit; the
+ * echo guard dropped; the blank-room bailout dropped; the leave duties moved out
+ * of `finally`; the collabLive autosave short-circuit dropped; the definition
+ * debounce shortened; the scalar written as `snap.metadata` (not
+ * `definitionMetadataFor`); the editor sibling spread dropped; a blank default
+ * read as absent; the metadata-conflict failed-sync signal dropped; the pristine
+ * compare letting a metadata refusal escape `loadFromSaved`.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as Y from 'yjs';

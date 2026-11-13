@@ -160,6 +160,9 @@ const PG_MEM_INCOMPAT = new Set<string>([
   // covered against a REAL Postgres in the testcontainers parity file; the
   // sqlite half runs here.
   'dispatch outbox claim \u2192 reschedule \u2192 complete',
+  // ADR 1114 — pg-mem joins `jsonb || jsonb` as text ("invalid input syntax for type
+  // json") and has no jsonb_build_object; the testcontainers file runs it on Postgres 16.
+  'resolveRequestNotifications stamps only open request rows',
 ]);
 // Every skip goes through this one call with the key as a LITERAL, so the
 // integrity guard at the end of the file can match keys to call sites from
@@ -746,6 +749,35 @@ describe('Storage parity: tenant reassign (anon → user migration)', () => {
     expect((await s.listNotifications({ tenantId: toT })).length).toBe(1);
     expect((await s.listPushSubscriptions(fromT)).length).toBe(0);
     expect((await s.listPushSubscriptions(toT)).length).toBe(1);
+  });
+
+  // ADR 1114 (#5868) — retiring a finished step's requests, the same on both adapters:
+  // one interrupt's row stamped and read, metadata merged; non-request, archived and
+  // already-stamped rows untouched; a run end stamps the rest; a repeat is a no-op.
+  it.each(backendNames)('%s: resolveRequestNotifications stamps only open request rows', async (name) => {
+    if (trackedSkipPgMem(name, 'resolveRequestNotifications stamps only open request rows')) return;
+    const s = S(name);
+    const t = `rr-${name}-${Math.random().toString(36).slice(2)}`;
+    const base = { tenantId: t, type: 'openwop-app.workflow.approval-needed', priority: 'high' as const, status: 'unread' as const, title: 't', message: 'm', createdAt: new Date().toISOString(), runId: 'run-1' };
+    await s.insertNotification({ ...base, notificationId: `${t}-a`, interruptId: 'i1', metadata: { kind: 'approval' } });
+    await s.insertNotification({ ...base, notificationId: `${t}-b`, interruptId: 'i2' });
+    await s.insertNotification({ ...base, notificationId: `${t}-c`, type: 'workflow.failed' });
+    await s.insertNotification({ ...base, notificationId: `${t}-d`, interruptId: 'i3', status: 'archived' });
+    const at = '2026-11-13T01:00:00.000Z';
+
+    expect(await s.resolveRequestNotifications({ tenantId: t, runId: 'run-1', interruptId: 'i1', resolution: { state: 'approved', at } })).toBe(1);
+    const a = await s.getNotification(`${t}-a`);
+    expect(a?.status).toBe('read');
+    expect(a?.readAt).toBe(at);
+    expect(a?.metadata).toEqual({ kind: 'approval', resolution: { state: 'approved', at } });
+    expect((await s.getNotification(`${t}-b`))?.status).toBe('unread');
+
+    expect(await s.resolveRequestNotifications({ tenantId: t, runId: 'run-1', resolution: { state: 'run-ended', at } })).toBe(1);
+    expect((await s.getNotification(`${t}-b`))?.metadata).toEqual({ resolution: { state: 'run-ended', at } });
+    expect((await s.getNotification(`${t}-a`))?.metadata?.resolution).toEqual({ state: 'approved', at });
+    expect((await s.getNotification(`${t}-c`))?.metadata?.resolution).toBeUndefined();
+    expect((await s.getNotification(`${t}-d`))?.metadata?.resolution).toBeUndefined();
+    expect(await s.resolveRequestNotifications({ tenantId: t, runId: 'run-1', resolution: { state: 'run-ended', at } })).toBe(0);
   });
 
   // ADR 0003 Phase 4c: reassignTenant must ALSO re-key host-ext content rows

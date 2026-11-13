@@ -28,6 +28,7 @@ import {
 import { SyncSettingsCard } from './SyncSettingsCard.js';
 import { syncReasonText, syncFailureHint } from './syncReason.js';
 import { CatalogFeedCard } from './CatalogFeedCard.js';
+import { TableScroll } from '../../ui/DataTable.js';
 
 type TFn = ReturnType<typeof useTranslation>['t'];
 const fmt = (n: number): string => formatNumber(Math.round(n));
@@ -235,7 +236,7 @@ export function CampaignConnectorsPage(): JSX.Element {
 
               <section className="surface-card">
                 <h2 className="u-mt-0 u-fs-15">{t('byPlatformTitle')}</h2>
-                <div className="table-scroll table--stack">
+                <TableScroll className="table--stack" label={t('byPlatformTitle')}>
                 <table className="u-w-full">
                   <thead>
                     <tr className="muted u-fs-13">
@@ -258,7 +259,7 @@ export function CampaignConnectorsPage(): JSX.Element {
                     ))}
                   </tbody>
                 </table>
-                </div>
+                </TableScroll>
                 {kpi.dateRange ? <p className="u-fs-13 muted u-mt-3">{t('dateRange', { start: kpi.dateRange.start, end: kpi.dateRange.end, count: kpi.recordCount })}</p> : null}
               </section>
 

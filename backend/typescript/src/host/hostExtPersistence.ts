@@ -245,13 +245,35 @@ export async function purgeTenantHostExt(
   let ghostRows = 0;
   const live = HOSTEXT_COLLECTIONS.map((c) => c.prefix);
   // (`hostextidx:`/`hostextidxmeta:` keyspaces don't match the `hostext:` prefix —
-  // the scan sees content rows only.)
-  for (const { key, value } of await requireStorage().kvList('hostext:')) {
-    if (live.some((p) => key.startsWith(p))) continue; // handled above
+  // the scan sees content rows only.) ADR 1110 — paged, and a live namespace is skipped
+  // as a key RANGE (jump past it), so a huge live collection is never read here.
+  const storage = requireStorage();
+  const ghost = async (key: string, value: string): Promise<void> => {
     let parsed: unknown;
-    try { parsed = JSON.parse(value); } catch { continue; }
-    if (jsonTenantId(parsed) !== tenantId) continue;
-    if (await requireStorage().kvDelete(key)) ghostRows += 1;
+    try { parsed = JSON.parse(value); } catch { return; }
+    if (jsonTenantId(parsed) !== tenantId) return;
+    if (await storage.kvDelete(key)) ghostRows += 1;
+  };
+  if (!storage.kvListPage) {
+    for (const { key, value } of await storage.kvList('hostext:')) {
+      if (live.some((p) => key.startsWith(p))) continue; // handled above
+      await ghost(key, value);
+    }
+  } else {
+    let after: string | undefined;
+    for (;;) {
+      const rows = await storage.kvListPage('hostext:', { ...(after !== undefined ? { after } : {}), limit: 500 });
+      if (rows.length === 0) break;
+      let jumped = false;
+      for (const { key, value } of rows) {
+        after = key;
+        const livePrefix = live.find((p) => key.startsWith(p));
+        // A live namespace is handled above: jump past its whole key range.
+        if (livePrefix) { after = `${livePrefix}\uffff`; jumped = true; break; }
+        await ghost(key, value);
+      }
+      if (!jumped && rows.length < 500) break;
+    }
   }
   return { deleted, ghostRows, collections };
 }
@@ -348,6 +370,15 @@ export class DurableCollection<T> {
      * does not fire it.
      */
     private readonly onDeleted?: (id: string) => Promise<void>,
+    /**
+     * ADR 1110 — OPTIONAL shape facts that let teardown stay bounded on a huge collection.
+     *  - `tenantKeyed`: every id starts with `${tenantId}:` (the tenant as a raw,
+     *    colon-bounded segment), so a tenant's rows are ONE key range: teardown deletes
+     *    that range a page at a time instead of reading the whole collection.
+     *  - `derived`: the rows are an index of other rows (rebuilt from them), never an
+     *    org's own data, so the refuse-while-populated org guard does not count them.
+     */
+    private readonly shape: { tenantKeyed?: boolean; derived?: boolean } = {},
   ) {
     // ADR 0284 — every collection self-registers so tenant teardown can walk the
     // full live surface with no hand-kept manifest (complete by construction, the
@@ -362,7 +393,7 @@ export class DurableCollection<T> {
       indexed: this.tenantOf !== undefined,
       deleteById: (id: string) => this.delete(id),
       purge: (tenantId: string) => this.purgeTenantRows(tenantId),
-      countFor: (tenantId: string, orgId?: string) => this.countRowsFor(tenantId, orgId),
+      countFor: (tenantId: string, orgId?: string) => (this.shape.derived ? Promise.resolve(0) : this.countRowsFor(tenantId, orgId)),
     };
     if (at >= 0) HOSTEXT_COLLECTIONS[at] = entry; else HOSTEXT_COLLECTIONS.push(entry);
     // Namespace-scoped, and deliberately SET-ONLY: a later handle over the same
@@ -466,6 +497,53 @@ export class DurableCollection<T> {
       if (decoded !== null) items.push(decoded);
     }
     return { items, truncated: rows.length > limit };
+  }
+
+  /**
+   * ADR 1110 — one page of the entities whose id starts with `idPrefix`, with id
+   * greater than `afterId` in UTF-8 byte order (the order `kvListPage` reads), so a
+   * caller can walk a slice of any size one page at a time. `lastId` is the id of
+   * the last key READ, including a corrupt row the decoder skipped, so paging never
+   * stalls on one; it is absent when the slice is exhausted. A backend without
+   * `kvListPage` falls back to a complete sorted `kvList`.
+   */
+  async listByPrefixPage(idPrefix: string, opts: { afterId?: string; limit: number }): Promise<{ items: T[]; lastId?: string }> {
+    const storage = requireStorage();
+    const prefix = this.prefix() + idPrefix;
+    const after = opts.afterId === undefined ? undefined : this.prefix() + opts.afterId;
+    const limit = Math.max(1, Math.floor(opts.limit));
+    let rows: ReadonlyArray<{ key: string; value: string }>;
+    if (storage.kvListPage) {
+      rows = await storage.kvListPage(prefix, { ...(after !== undefined ? { after } : {}), limit });
+    } else {
+      const all = [...(await storage.kvList(prefix))].sort((a, b) => Buffer.compare(Buffer.from(a.key), Buffer.from(b.key)));
+      const from = after === undefined ? 0 : all.findIndex((r) => Buffer.compare(Buffer.from(r.key), Buffer.from(after)) > 0);
+      rows = from < 0 ? [] : all.slice(from, from + limit);
+    }
+    const items: T[] = [];
+    for (const row of rows) {
+      const decoded = this.decode(row.value); // corrupt / invalid → skipped
+      if (decoded !== null) items.push(decoded);
+    }
+    const last = rows.length === limit ? rows[rows.length - 1] : undefined;
+    return { items, ...(last ? { lastId: last.key.slice(this.prefix().length) } : {}) };
+  }
+
+  /** ADR 1110 — how many rows the tenant has, counted on its secondary-index slice in
+   *  the database (requires `tenantOf`). */
+  async countForTenantIndexed(tenantId: string): Promise<number> {
+    if (!this.tenantOf || !tenantId) return 0;
+    const storage = requireStorage();
+    const prefix = this.idxPrefix(tenantId);
+    return storage.kvCount ? storage.kvCount(prefix) : (await storage.kvList(prefix)).length;
+  }
+
+  /** ADR 1110 — how many rows have an id starting with `idPrefix`, counted by the
+   *  database (`kvCount`) when the backend can, else by a complete `kvList`. */
+  async countByPrefix(idPrefix: string): Promise<number> {
+    const storage = requireStorage();
+    const prefix = this.prefix() + idPrefix;
+    return storage.kvCount ? storage.kvCount(prefix) : (await storage.kvList(prefix)).length;
   }
 
   /**
@@ -667,6 +745,19 @@ export class DurableCollection<T> {
   async purgeTenantRows(tenantId: string): Promise<number> {
     if (!tenantId) return 0;
     let deleted = 0;
+    if (this.shape.tenantKeyed) {
+      // ADR 1110 — the tenant's rows are one key range: delete it a page at a time.
+      // Re-read from the start each pass (the rows just deleted are gone), so the walk
+      // ends when the range is empty. `${tenantId}:` cannot match a longer tenant's range.
+      for (;;) {
+        const page = await this.listByPrefixPage(`${tenantId}:`, { limit: 500 });
+        const ids = page.items.map((r) => this.idOf(r));
+        if (ids.length === 0) break;
+        for (const id of ids) if (await this.delete(id)) deleted += 1;
+        if (!page.lastId) break;
+      }
+      return deleted;
+    }
     for (const { key, value } of await requireStorage().kvList(this.prefix())) {
       let parsed: unknown;
       try { parsed = JSON.parse(value); } catch { continue; }

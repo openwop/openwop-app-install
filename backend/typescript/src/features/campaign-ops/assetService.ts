@@ -11,6 +11,8 @@ import { cleanString } from '../../host/boundedStrings.js';
 import { OpenwopError } from '../../types.js';
 import { assertCampaignRef } from '../../host/campaignRefs.js';
 import { adapterFor } from './adapters/registry.js';
+import { pageFields } from './adapters/cmsPage.js';
+import { listPages } from '../cms/cmsService.js';
 import { getClient } from './clientService.js';
 import { DESTINATION_KINDS, type AssetLocator, type CampaignAsset, type DestinationKind } from './types.js';
 
@@ -97,7 +99,19 @@ export async function addAsset(input: {
   const editableFields = [...new Set(input.editableFields.map(String))];
   const unknown = editableFields.filter((f) => !(f in snap.fields));
   if (unknown.length > 0) {
-    throw new OpenwopError('validation_error', `Some editable fields do not exist on this ${destination === 'openwop.cms.page' ? 'page' : 'template'}.`, 400, { field: 'editableFields', unknown });
+    // CC-OPS-1 — point the caller at the list of paths that DO exist. The paths
+    // themselves are not echoed here: a section path embeds the section's UUID,
+    // which the error-envelope sanitizer (secret-leakage invariant) redacts as
+    // high-entropy, so an inline list would arrive as `sections[<redacted…>]`.
+    // The candidates route returns them in a 200 body, unredacted. The pointer is
+    // a route NAME, not a path: a full URL path is itself ≥32 base64-class chars
+    // (`/` is in the class), so the sanitizer would redact that too.
+    throw new OpenwopError(
+      'validation_error',
+      `Some editable fields do not exist on this ${destination === 'openwop.cms.page' ? 'page' : 'template'}. The client's asset-candidates route lists every valid field path for each page.`,
+      400,
+      { field: 'editableFields', unknown, validFieldsRoute: 'asset-candidates' },
+    );
   }
 
   const now = nowIso();
@@ -122,6 +136,40 @@ export async function addAsset(input: {
   }
   await assets.put(asset);
   return asset;
+}
+
+/** One CMS page of the client org that could be registered, with its editable fields. */
+export interface PageCandidate {
+  pageId: string;
+  title: string;
+  status: string;
+  /** Already registered as an asset of this client. */
+  registered: boolean;
+  /** The adapter's own field paths with a short preview of each current value. */
+  fields: Array<{ path: string; preview: string }>;
+}
+
+/**
+ * CC-OPS-1 — the client org's CMS pages an agency member can register as assets,
+ * each with the field paths the CMS adapter accepts (the same `pageFields` the
+ * adapter reads and `addAsset` validates against), so the UI never guesses.
+ */
+export async function listPageCandidates(tenantId: string, orgId: string): Promise<PageCandidate[]> {
+  const client = await getClient(tenantId, orgId);
+  if (!client) throw new OpenwopError('not_found', 'Client not found.', 404, { orgId });
+  const registered = new Set(
+    (await listAssets(tenantId, orgId)).flatMap((a) => ('pageId' in a.locator ? [a.locator.pageId] : [])),
+  );
+  const pages = await listPages(tenantId, orgId);
+  return pages
+    .map((p) => ({
+      pageId: p.pageId,
+      title: p.title,
+      status: p.status,
+      registered: registered.has(p.pageId),
+      fields: Object.entries(pageFields(p)).slice(0, MAX_EDITABLE_FIELDS).map(([path, value]) => ({ path, preview: value.slice(0, 80) })),
+    }))
+    .sort((a, b) => a.title.localeCompare(b.title));
 }
 
 /** Re-read `lastKnown` through the adapter. The only writer of `lastKnown`. */

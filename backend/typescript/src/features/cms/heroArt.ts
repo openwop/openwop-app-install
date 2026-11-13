@@ -108,9 +108,11 @@ export const HERO_ART_VISUALS = Object.keys(HERO_ART_SPECS) as HeroArtVisual[];
  * List-item keys whose value is presentation, never prose: like the ADR 1038 D8
  * `state`, they follow the base layer on every write (`restoreItemStates`), so a
  * model asked to translate values cannot turn `success` into `succès` or a fill of
- * 0.4 into "40 %".
+ * 0.4 into "40 %". ADR 1105 D5 adds the numbers an item carries: a worksheet
+ * line's `allowance` and `specified`, a stage chart's `group`, and a `count` (the columns stat tile's, ADR
+ * 1063, which before this an overlay could change per locale).
  */
-export const ITEM_BASE_KEYS = ['state', 'accent', 'members', 'fill'] as const;
+export const ITEM_BASE_KEYS = ['state', 'accent', 'members', 'fill', 'count', 'allowance', 'specified', 'group'] as const;
 
 function asObject(v: unknown): Record<string, unknown> | undefined {
   return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;

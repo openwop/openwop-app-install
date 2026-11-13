@@ -12,7 +12,7 @@ import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface, type FeatureSurfaceOrgPolicy } from '../../host/featureSurfaces.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import {
-  listProducts, getProduct, updateProduct, listOrders, getOrder, createOrder,
+  listProductsPage, getProduct, updateProduct, listOrdersPage, getOrder, createOrder,
   refundOrder, updateFulfillment, listCoupons, createCoupon,
   FULFILLMENT_STATUSES, type FulfillmentStatus, liveStripeKeyFor,
 } from './commerceService.js';
@@ -71,11 +71,13 @@ function found<T extends object>(row: T | null, what: string, field: string, id:
 export function buildCommerceSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
   return {
-    listProducts: async (args) => ({ products: (await listProducts(tenantId, str(args.orgId), optStr(args.q))).map(project) }),
+    // ADR 1110 P2 — the first 200 matches, never the whole catalog (the node takes `q` to narrow).
+    listProducts: async (args) => ({ products: (await listProductsPage(tenantId, str(args.orgId), { q: optStr(args.q), limit: 200 })).products.map(project) }),
     // ADR 0875 D11 — a missing row is a typed failure, never `success` with null (a chain
     // fed an empty id used to carry on and hand the model nothing to ground on).
     getProduct: async (args) => ({ product: project(found(await getProduct(tenantId, str(args.orgId), str(args.productId)), 'Product', 'productId', args.productId)) }),
-    listOrders: async (args) => ({ orders: (await listOrders(tenantId, str(args.orgId))).map(project) }),
+    // ADR 1110 P5 — the newest 200 orders, never every order.
+    listOrders: async (args) => ({ orders: (await listOrdersPage(tenantId, str(args.orgId), { limit: 200 })).orders.map(project) }),
     getOrder: async (args) => ({ order: project(found(await getOrder(tenantId, str(args.orgId), str(args.orderId)), 'Order', 'orderId', args.orderId)) }),
     // WRITE (role:action node) — create an order from lines; recorded output ⇒ replay-safe.
     // AGENT path ⇒ requireApprovalOverThreshold (gap plan §5B B3): an at/over-threshold

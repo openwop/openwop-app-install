@@ -12,6 +12,7 @@ import { Button } from '../../ui/Button.js';
 import { Notice } from '../../ui/Notice.js';
 import { formatDate, formatNumber } from '../../i18n/format.js';
 import { applyReallocationPlan, listReallocations, type ApplyReallocationOutcome, type ReallocationPlanDto, type ReallocationStatus } from './campaignIntelClient.js';
+import { TableScroll } from '../../ui/DataTable.js';
 
 const STATUS_CHIP: Record<ReallocationStatus, string> = {
   proposed: 'chip chip--warning', approved: 'chip chip--warning', applying: 'chip chip--muted',
@@ -86,7 +87,7 @@ export function ReallocationPlansPanel({ orgId, refreshKey = 0 }: { orgId: strin
                   </span>
                 ) : null}
               </div>
-              <div className="table-scroll table--stack">
+              <TableScroll className="table--stack" label={t('reallocTitle')}>
                 <table className="u-w-full u-fs-13">
                   <thead><tr className="muted"><th scope="col" className="u-text-left u-py-1">{t('reallocColCampaign')}</th><th scope="col" className="u-text-right u-py-1">{t('reallocColFrom')}</th><th scope="col" className="u-text-right u-py-1">{t('reallocColTo')}</th><th scope="col" className="u-text-right u-py-1">{t('reallocColChange')}</th><th scope="col" className="u-text-left u-py-1">{t('reallocColOutcome')}</th></tr></thead>
                   <tbody>
@@ -104,7 +105,7 @@ export function ReallocationPlansPanel({ orgId, refreshKey = 0 }: { orgId: strin
                     })}
                   </tbody>
                 </table>
-              </div>
+              </TableScroll>
               {p.dropped.length > 0 ? <p className="muted u-fs-13 u-mb-0">{t('reallocDropped', { list: p.dropped.map((d) => `${d.campaignId}: ${reason(d.reason)}`).join('; ') })}</p> : null}
               {result?.planId === p.planId ? (() => {
                 const text = result.outcome === 'error' ? (result.message || t('reallocApplyFailed')) : t(`reallocResult_${result.outcome}`);

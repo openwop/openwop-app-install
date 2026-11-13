@@ -144,6 +144,12 @@ export interface FrontendFeature {
    */
   projectTabs?: ProjectTab[];
   /**
+   * ADR 1109 D5 — notification types this feature emits that mean "a person must
+   * act before the work advances", so they appear under the inbox's "Action
+   * needed". The host's two are always included.
+   */
+  actionNeededTypes?: readonly string[];
+  /**
    * ADR 0916 (Book AI P16) — the feature's nav label/hint translations, per
    * locale, merged into the `nav` namespace when the registry loads, so a
    * route's `labelKey`/`hintKey` resolves on first render without the feature's
@@ -303,6 +309,11 @@ export function featureRoutes(): FeatureRoute[] {
 export function featureProjectTabs(): Array<ProjectTab & { featureId: string }> {
   return FRONTEND_FEATURES.flatMap((f) => (f.projectTabs ?? []).map((t) => ({ ...t, featureId: f.id })))
     .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.key.localeCompare(b.key));
+}
+
+/** ADR 1109 D5 — every composed feature's action-needed notification types. */
+export function featureActionNeededTypes(): ReadonlySet<string> {
+  return new Set(FRONTEND_FEATURES.flatMap((f) => f.actionNeededTypes ?? []));
 }
 
 export function featureAgentWorkspaceTabs(): Array<AgentWorkspaceTab & { featureId: string }> {

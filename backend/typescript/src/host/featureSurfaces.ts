@@ -45,6 +45,7 @@
 
 import type { BundleScope, SurfaceArgs, SurfaceFn } from './inMemorySurfaces.js';
 import { resolveOne } from './featureToggles/service.js';
+import { scopeToggleSubject } from './operatorPlanExemption.js';
 import { assertRunScopeOrg, assertTenantScope, type Scope } from './accessControlService.js';
 import { createLogger } from '../observability/logger.js';
 import { getToggleDefault } from './featureToggles/registry.js';
@@ -144,7 +145,9 @@ function gate(id: string, scope: BundleScope, surface: FeatureSurface, policy: F
         // user-listed closed-beta member resolves here as on the route. NOT
         // `orgScopeSubject` (ADR 0832 D3): the causing member is not the actor,
         // and a closed-beta listing is a grant.
-        const assignment = await resolveOne(id, { tenantId: scope.tenantId, ...(scope.actingUserId ? { userId: scope.actingUserId } : {}) });
+        // ADR 1108 — plus the operator's plan exemption the run was launched
+        // under (`run.metadata.planExempt`, re-checked against the allowlist).
+        const assignment = await resolveOne(id, scopeToggleSubject(scope));
         if (!assignment || !assignment.enabled) {
           throw Object.assign(
             new Error(`feature '${id}' is not enabled for this tenant — ctx.features.${id} is unavailable`),

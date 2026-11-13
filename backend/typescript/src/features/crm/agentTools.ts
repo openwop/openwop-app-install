@@ -38,8 +38,7 @@
  */
 
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
-import { toolFailLog } from '../../host/agentToolKit.js';
+import { toolFailLog, resolveFeatureAccess, resolveFeatureToggle, type ToolAccessScope } from '../../host/agentToolKit.js';
 import { createLogger } from '../../observability/logger.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { assertTenantScope, type Scope } from '../../host/accessControlService.js';
@@ -101,9 +100,9 @@ function capList<T extends Record<string, unknown>>(result: T, key: keyof T & st
 /** Per-call toggle honesty (ADR 0308 D2): per-tenant + per-user, dynamic,
  *  fail-closed — resolves against the SAME `{tenantId, userId}` subject the
  *  routes' `subjectOf` builds, so a beta/cohort narrowing can't drift. */
-async function crmEnabled(tenantId: string, actingUserId: string | undefined): Promise<boolean> {
-  const assignment = await resolveOne(TOGGLE_ID, { tenantId, ...(actingUserId ? { userId: actingUserId } : {}) }).catch(() => null);
-  return Boolean(assignment?.enabled);
+async function crmEnabled(scope: ToolAccessScope): Promise<boolean> {
+  // ADR 1108 — the kit's subject: the route's shape plus the operator exemption.
+  return resolveFeatureToggle(TOGGLE_ID, scope);
 }
 
 /**
@@ -120,7 +119,7 @@ async function orgGate(
   orgIdInput: unknown,
   opts: { scope: Scope; onNoUser: ToolResult },
 ): Promise<{ orgId: string; actingUserId: string } | ToolResult> {
-  if (!(await crmEnabled(scope.tenantId, scope.actingUserId))) {
+  if (!(await crmEnabled(scope))) {
     return toolError('feature_disabled', 'CRM is not enabled for this workspace — tell the user you cannot read or update CRM here.');
   }
   const actingUserId = scope.actingUserId;
@@ -149,7 +148,7 @@ async function orgGate(
  *  segment tools refused the caller inside their OWN `anon:<sid>` sandbox while
  *  the HTTP lane granted it. Never re-derive: read what the request stamped. */
 async function tenantGate(scope: BundleScope, onNoUser: ToolResult): Promise<{ actingUserId: string } | ToolResult> {
-  if (!(await crmEnabled(scope.tenantId, scope.actingUserId))) {
+  if (!(await crmEnabled(scope))) {
     return toolError('feature_disabled', 'CRM is not enabled for this workspace — tell the user you cannot author segments here.');
   }
   if (!scope.actingUserId) return onNoUser;
@@ -429,7 +428,7 @@ export function registerCrmAgentTools(): void {
       if (scope.actingUserId) {
         return toolError('use_governed_write', 'Creating a CRM contact from a signed-in turn goes through the governed CRM write, not this tool.');
       }
-      if (!(await crmEnabled(scope.tenantId, undefined))) {
+      if (!(await crmEnabled({ tenantId: scope.tenantId }))) {
         return toolError('feature_disabled', 'CRM is not enabled for this workspace — you cannot capture a lead here.');
       }
       const email = str(input.email);
@@ -499,7 +498,7 @@ export function registerCrmAgentTools(): void {
       if (scope.actingUserId) {
         return toolError('use_governed_write', 'Qualification answers from a signed-in turn are recorded by the lead assessment, not this tool.');
       }
-      const [crmOn, intel] = await Promise.all([crmEnabled(scope.tenantId, undefined), resolveOne(LEAD_INTEL_TOGGLE, { tenantId: scope.tenantId })]);
+      const [crmOn, intel] = await Promise.all([crmEnabled({ tenantId: scope.tenantId }), resolveFeatureAccess(LEAD_INTEL_TOGGLE, { tenantId: scope.tenantId })]);
       if (!crmOn || !intel?.enabled) {
         return toolError('feature_disabled', 'Lead qualification is not enabled for this workspace.');
       }

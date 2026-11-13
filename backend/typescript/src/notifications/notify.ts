@@ -25,6 +25,7 @@ import { sanitizeFreeText } from '../byok/textRedaction.js';
 import { getNotificationEmitter } from './emitter.js';
 import { deliverApprovalEmail } from '../host/emailApprovalDelivery.js';
 import { gateApproverRefs, resolveNotificationRecipients } from '../host/approverResolution.js';
+import { resolveTenantWorkflow } from '../host/resolveLaunchDefinition.js';
 
 const KIND_LABEL: Record<InterruptRecord['kind'], string> = {
   approval: 'Approval needed',
@@ -56,6 +57,78 @@ const KIND_TYPE: Record<InterruptRecord['kind'], NotificationRecord['type']> = {
   credential: 'workflow.input_needed',
 };
 
+const nonBlank = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v : undefined);
+
+/**
+ * ADR 1109 D2 — what a request says, read from `interrupt.data` in one place.
+ * `title` is the gate's heading; `text` is its prompt, then description, then
+ * summary. The wire projector (`interruptRequestedPayload.ts`) reads the same
+ * keys, so the bell and the `interrupt.requested` event cannot disagree.
+ */
+export function requestWordsOf(data: unknown): { title?: string; text?: string } {
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) return {};
+  const d = data as Record<string, unknown>;
+  const title = nonBlank(d.title);
+  const text = nonBlank(d.prompt) ?? nonBlank(d.description) ?? nonBlank(d.summary);
+  return { ...(title ? { title } : {}), ...(text ? { text } : {}) };
+}
+
+type WorkflowNameResolver = (tenantId: string, workflowId: string) => Promise<string | undefined>;
+let workflowNameResolver: WorkflowNameResolver | null = null;
+
+/**
+ * ADR 1109 D3 — late-bound at boot (`index.ts`), like the compensation resolver:
+ * the catalog lives on the host suite, not on Storage. The boot wiring resolves
+ * through `resolveTenantWorkflow`, so another tenant's id reads as unknown.
+ * Unset (tests, a bare boot), the label is today's `workflowName || workflowId`.
+ */
+export function setNotificationWorkflowNameResolver(fn: WorkflowNameResolver | null): void {
+  workflowNameResolver = fn;
+}
+
+/**
+ * The boot resolver: the definition's `metadata.name`, read through the tenant
+ * boundary. A tenant's own copy (`wf.copy.*`, a seed, a builder workflow) carries
+ * the name `chainInstantiation` stamped on it; another tenant's id reads as
+ * unknown, so the notification falls back to the id and names nothing it cannot see.
+ */
+export function catalogWorkflowNameResolver(
+  catalog: Parameters<typeof resolveTenantWorkflow>[0],
+): WorkflowNameResolver {
+  return async (tenantId, workflowId) => {
+    const name = (await resolveTenantWorkflow(catalog, tenantId, workflowId))?.definition.metadata?.['name'];
+    return typeof name === 'string' ? name : undefined;
+  };
+}
+
+/** `workflowName` (dispatcher-stamped), then the definition's name (a chain's
+ *  `label`), then the id. A failed lookup never blocks the notification. */
+async function workflowLabelOf(run: RunRecord): Promise<string> {
+  const stamped = nonBlank(run.metadata?.workflowName);
+  if (stamped) return stamped;
+  if (workflowNameResolver) {
+    try {
+      const name = nonBlank(await workflowNameResolver(run.tenantId, run.workflowId));
+      if (name) return name;
+    } catch { /* fall through to the id */ }
+  }
+  return run.workflowId;
+}
+
+/**
+ * ADR 1109 D4 — what the request is about, from HOST-written run metadata only.
+ * Today that is a project schedule's owner (`scheduleDaemon.ts` stamps
+ * `schedule.ownerScope` from the job's subject). No name is stored: the SPA
+ * resolves it through the projects the reader can see.
+ */
+export function runSubjectOf(run: Pick<RunRecord, 'metadata'>): { kind: 'project'; id: string } | undefined {
+  const schedule = run.metadata?.schedule as { ownerScope?: unknown } | undefined;
+  const scope = nonBlank(schedule?.ownerScope);
+  if (!scope?.startsWith('project:')) return undefined;
+  const id = scope.slice('project:'.length);
+  return id ? { kind: 'project', id } : undefined;
+}
+
 export async function emitInterruptNotification(
   storage: Storage,
   interrupt: InterruptRecord,
@@ -63,22 +136,19 @@ export async function emitInterruptNotification(
   try {
     const run = await storage.getRun(interrupt.runId);
     if (!run) return;
-    const title = KIND_LABEL[interrupt.kind] ?? 'Action needed';
     // Workflow names from `run.metadata` can themselves contain
     // user-supplied text — run through redaction. `workflowId` is
     // engine-controlled so it's safe.
-    const workflowLabel = sanitizeForNotification(
-      (run.metadata?.workflowName as string | undefined) || run.workflowId,
-    );
-    // The subject of what's being approved (the gate's prompt) — far more useful
+    const workflowLabel = sanitizeForNotification(await workflowLabelOf(run));
+    // ADR 1109 D2 — the gate's own words, through the one reader. Far more useful
     // to a reviewer than the opaque node id. Bounded + redacted (user-supplied).
-    const data = (interrupt.data ?? {}) as { prompt?: unknown; summary?: unknown };
-    const rawSubject = typeof data.prompt === 'string' ? data.prompt
-      : typeof data.summary === 'string' ? data.summary : undefined;
-    const subject = rawSubject ? sanitizeForNotification(rawSubject.slice(0, 140)) : undefined;
-    const message = subject
-      ? `${workflowLabel} — ${subject}`
+    const words = requestWordsOf(interrupt.data);
+    const title = words.title ? sanitizeForNotification(words.title.slice(0, 140)) : (KIND_LABEL[interrupt.kind] ?? 'Action needed');
+    const text = words.text ? sanitizeForNotification(words.text.slice(0, 140)) : undefined;
+    const message = text
+      ? `${workflowLabel} — ${text}`
       : `${workflowLabel} needs your input`;
+    const subject = runSubjectOf(run);
     const base = {
       tenantId: run.tenantId,
       type: KIND_TYPE[interrupt.kind] ?? 'openwop-app.workflow.approval-needed',
@@ -90,7 +160,7 @@ export async function emitInterruptNotification(
       nodeId: interrupt.nodeId,
       interruptId: interrupt.interruptId,
       actionUrl: `/inbox`,
-      metadata: stripSecretsFromPersisted({ kind: interrupt.kind }),
+      metadata: stripSecretsFromPersisted({ kind: interrupt.kind, ...(subject ? { subject } : {}) }),
     };
     // ADR 0075 §D6 — when the gate NAMES approvers, address the notification to
     // each of them (recipientUserId) instead of broadcasting to the whole tenant.
@@ -159,9 +229,7 @@ export async function emitRunFailureNotification(
   try {
     const run = await storage.getRun(runId);
     if (!run) return;
-    const workflowLabel = sanitizeForNotification(
-      (run.metadata?.workflowName as string | undefined) || run.workflowId,
-    );
+    const workflowLabel = sanitizeForNotification(await workflowLabelOf(run));
     // ADR 0710 option C — this emit set NEITHER `recipientUserId` NOR
     // `recipientRole`, which the emitter's own contract defines as a TENANT-WIDE
     // BROADCAST, and web push fanned it to every subscribed member. The message is
@@ -255,9 +323,7 @@ export async function emitRunCompletedNotification(
   run: RunRecord,
 ): Promise<void> {
   try {
-    const workflowLabel = sanitizeForNotification(
-      (run.metadata?.workflowName as string | undefined) || run.workflowId,
-    );
+    const workflowLabel = sanitizeForNotification(await workflowLabelOf(run));
     await getNotificationEmitter().emit({
       tenantId: run.tenantId,
       type: 'workflow.completed',

@@ -7,6 +7,18 @@
  * keeps applying after it, or if the selector stops being a pure function of its
  * inputs (every case below pins an EXACT decision, so a non-deterministic or
  * clock-reading selector reds them — the replay/fork property ADR 0130 relies on).
+ * Exact means `toEqual` with the `ruleIndex` (ADR 1016's preview answer), and the
+ * threshold and cooldown window are pinned at their boundaries.
+ *
+ * ADR 1016 D4/D5 added: a target is eligible only if this conversation can call
+ * it (its own `dispatchProvider`, a model the catalog lists, vision judged per
+ * MODEL), and the fallback is optional (none ⇒ null, the turn keeps its model).
+ *
+ * Red when (probe-witnessed, w107): the dispatch-provider check, the unlisted
+ * (`null`) check, the per-model probe argument, the vision check, the fallback
+ * filter, the no-fallback guard, the cooldown eligibility or window, the
+ * threshold comparison, the attachment or conversationKind match, or `ruleIndex`
+ * is broken.
  */
 import { describe, it, expect } from 'vitest';
 import { routeTurn, type ModelRouterConfig, type CapabilityProbe } from '../src/features/model-router/routeTurn.js';
@@ -33,12 +45,14 @@ const config: ModelRouterConfig = {
 describe('routeTurn', () => {
   it('matches a threshold rule', () => {
     const d = routeTurn({ tokenEstimate: 9000 }, config, probe, 0);
-    expect(d).toMatchObject({ reason: 'rule', target: { provider: 'anthropic', model: 'big' } });
+    expect(d).toEqual({ reason: 'rule', target: { provider: 'anthropic', model: 'big' }, ruleIndex: 0 });
+    // `tokensOver` is strict: exactly the threshold does not match.
+    expect(routeTurn({ tokenEstimate: 8000 }, config, probe, 0)).toEqual({ reason: 'rule', target: { provider: 'openai', model: 'cheap' }, ruleIndex: 2 });
   });
 
   it('falls through to the always rule for a small turn', () => {
     const d = routeTurn({ tokenEstimate: 100 }, config, probe, 0);
-    expect(d?.target).toMatchObject({ provider: 'openai', model: 'cheap' });
+    expect(d).toEqual({ reason: 'rule', target: { provider: 'openai', model: 'cheap' }, ruleIndex: 2 });
   });
 
   it('skips non-vision RULES for an attachment turn and lands on the vision-capable fallback', () => {
@@ -53,7 +67,7 @@ describe('routeTurn', () => {
 
   it('applies cooldown stickiness when the sticky target is still eligible', () => {
     const d = routeTurn({ tokenEstimate: 9000 }, config, probe, 1000, { lastTarget: { provider: 'google', model: 'sticky' }, lastAtMs: 0 });
-    expect(d).toMatchObject({ reason: 'cooldown', target: { provider: 'google', model: 'sticky' } });
+    expect(d).toEqual({ reason: 'cooldown', target: { provider: 'google', model: 'sticky' } });
   });
 
   it('drops a sticky target that is no longer eligible (attachment + sticky non-vision)', () => {
@@ -66,6 +80,12 @@ describe('routeTurn', () => {
   it('expires cooldown after the window', () => {
     const d = routeTurn({ tokenEstimate: 100 }, config, probe, 70_000, { lastTarget: { provider: 'google', model: 'sticky' }, lastAtMs: 0 });
     expect(d).toEqual({ reason: 'rule', target: { provider: 'openai', model: 'cheap' }, ruleIndex: 2 });
+    // The window is half-open: at exactly cooldownMs it has already expired,
+    // and one ms before it the sticky target still holds.
+    expect(routeTurn({ tokenEstimate: 100 }, config, probe, 60_000, { lastTarget: { provider: 'google', model: 'sticky' }, lastAtMs: 0 }))
+      .toEqual({ reason: 'rule', target: { provider: 'openai', model: 'cheap' }, ruleIndex: 2 });
+    expect(routeTurn({ tokenEstimate: 100 }, config, probe, 59_999, { lastTarget: { provider: 'google', model: 'sticky' }, lastAtMs: 0 }))
+      .toEqual({ reason: 'cooldown', target: { provider: 'google', model: 'sticky' } });
   });
 });
 
@@ -82,11 +102,11 @@ describe('routeTurn — attachment rule genuinely fires (CHAT-FIRST-PORT A8)', (
   };
   it('an attachment turn routes THROUGH the attachment rule to the vision target', () => {
     const d = routeTurn({ hasAttachment: true, tokenEstimate: 100 }, cfg, visionProbe, 0);
-    expect(d).toMatchObject({ reason: 'rule', target: { provider: 'anthropic', model: 'vision-model' } });
+    expect(d).toEqual({ reason: 'rule', target: { provider: 'anthropic', model: 'vision-model' }, ruleIndex: 0 });
   });
   it('a text-only turn skips the attachment rule (falls to the always rule)', () => {
     const d = routeTurn({ tokenEstimate: 100 }, cfg, visionProbe, 0);
-    expect(d).toMatchObject({ reason: 'rule', target: { provider: 'openai', model: 'cheap' } });
+    expect(d).toEqual({ reason: 'rule', target: { provider: 'openai', model: 'cheap' }, ruleIndex: 1 });
   });
 });
 
@@ -113,14 +133,14 @@ describe('ADR 0714 D1 — the FALLBACK is capability-filtered too, not just the 
     // Proves the refusal is caused by the attachment invariant and not by a broken config
     // — without this leg, a selector that returned null unconditionally would pass above.
     const d = routeTurn({ tokenEstimate: 100 }, nonVisionFallback, probe, 0);
-    expect(d).toMatchObject({ reason: 'rule', target: { provider: 'openai', model: 'cheap' } });
+    expect(d).toEqual({ reason: 'rule', target: { provider: 'openai', model: 'cheap' }, ruleIndex: 0 });
   });
 
   it('CONTROL: an attachment turn WITH a vision-capable fallback still routes to it', () => {
     // The other polarity: the filter must not refuse a fallback that IS eligible.
     const cfg: ModelRouterConfig = { ...nonVisionFallback, fallback: { provider: 'anthropic', model: 'vision' } };
     const d = routeTurn({ hasAttachment: true, tokenEstimate: 100 }, cfg, probe, 0);
-    expect(d).toMatchObject({ reason: 'fallback', target: { provider: 'anthropic', model: 'vision' } });
+    expect(d).toEqual({ reason: 'fallback', target: { provider: 'anthropic', model: 'vision' } });
   });
 });
 

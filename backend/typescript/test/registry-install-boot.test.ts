@@ -20,6 +20,10 @@
  * refused before the network; a partial success or nothing attempted does not.
  * Sabotage (witnessed): dropping the call on the all-refused early return reds
  * the strict case; dropping the post-install call reds the all-throw case.
+ *
+ * ADR 0919 (correction): feature packs arrive by NAME and a pin is resolved only
+ * for a pack absent from disk, so a boot never depends on a pin it does not
+ * install. Resolving before the presence filter reds the by-NAME case.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -156,8 +160,8 @@ describe('ensureRegistryPacksInstalled (grade-code C-5)', () => {
       resolve: (name) => { asked.push(name); return { name, version: '2.3.4' }; },
     });
     expect(asked, 'a present pack must not read its pin').toEqual(['feature.absent.nodes']);
-    expect(installed).toContain('feature.absent.nodes@2.3.4');
-    expect(installed.some((i) => i.startsWith('feature.present.nodes'))).toBe(false);
+    expect(installed, 'only the absent pack is installed, at its resolved pin').toEqual(['feature.absent.nodes@2.3.4']);
+    expect(registryInstallStatus()).toMatchObject({ attempted: 1, installed: 1, failed: [] });
     balanced();
   });
 
@@ -188,7 +192,7 @@ describe('zero registry installs is ONE error (ADR 0713 OQ1, A-04)', () => {
     throwFor.set('core.b', {});
     await ensureRegistryPacksInstalled();
     expect(noneSucceeded()).toHaveLength(1);
-    expect(noneSucceeded()[0]![2]).toMatchObject({
+    expect(noneSucceeded()[0]![2]).toEqual({
       reasonCode: 'registry_install_none_succeeded', attempted: 2, failed: 2, codes: ['install_failed', 'pack_signature_invalid'],
     });
   });
@@ -198,7 +202,11 @@ describe('zero registry installs is ONE error (ADR 0713 OQ1, A-04)', () => {
     process.env.OPENWOP_STRICT_REGISTRY = 'true';
     vendor('core.a', '1.2.0');
     await ensureRegistryPacksInstalled();
+    expect(installed).toEqual([]); // refused before the network
     expect(noneSucceeded()).toHaveLength(1);
+    expect(noneSucceeded()[0]![2]).toEqual({
+      reasonCode: 'registry_install_none_succeeded', attempted: 1, failed: 1, codes: ['pin_below_vendored'],
+    });
   });
 
   it('CONTROL: one success among failures, or nothing attempted, logs no error', async () => {

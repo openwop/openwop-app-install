@@ -235,6 +235,12 @@ describe('ADR 0954 D6 — rungs', () => {
       expect(next.chosen).not.toBe(r.chosen);
       expect(next.skipped).toEqual(expect.arrayContaining([{ subject: r.chosen, reason: 'previous_owner' }]));
       expect(next.sla?.firstTouchMinutes).toBe(30);
+      // CC-AUTH-5 review (ADR 1108 D7) — the timer-started child acts for nobody: it
+      // must not inherit the parent's personal tenant (an implicit-owner grant at
+      // assertTenantScope/assertOrgScope) or a plan exemption from a non-operator.
+      const childMeta = ((await hostExtStorage().getRun(next.runId))?.metadata ?? {}) as Record<string, unknown>;
+      expect(childMeta.personalTenant).toBeUndefined();
+      expect(childMeta.planExempt).toBeUndefined();
       await openTimer(next.runId);
       // Fired again (a dispatch retry): the recorded outcome, no second round.
       expect(await fireSlaRung({ tenantId: TENANT, orgId: orgA, contactId, routingEpoch: r.epoch, rung: 2, runId: r.runId })).toEqual({ outcome: 'rerouted', fired: false });

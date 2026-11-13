@@ -24,7 +24,7 @@
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
-import { seedTutorials, listTutorials, getTutorial, countTutorialRows, clearTutorialRows } from '../src/features/tutorials/tutorialsService.js';
+import { seedTutorials, listTutorials, getTutorial, countTutorialRows, clearTutorialRows, tutorialIntegrityGauge } from '../src/features/tutorials/tutorialsService.js';
 import { SEED_TUTORIALS } from '../src/features/tutorials/seedTutorials.js';
 import { TUTORIAL_DOC_KIND, TUTORIAL_FIELDS, TUTORIAL_TYPE } from '../src/features/tutorials/tutorialType.js';
 import { getSystemEntity } from '../src/features/entities/entitiesService.js';
@@ -136,5 +136,19 @@ describe('the tutorial-doc validator bounds what it cannot type', () => {
     let deep: unknown = 'leaf';
     for (let i = 0; i < 40; i += 1) deep = [deep];
     expect(() => validate(deep)).toThrow(/nests deeper/);
+  });
+});
+
+// ADR 1104 (DEBT-1105-3) — the integrity gauge against the REAL kernel. The
+// gauge's own test mocks the kernel, so nothing showed that its cross-tenant read
+// (`listAllSystemRowsBounded('tutorials.lesson')`) finds rows the seeder wrote.
+// Prod read `rows: 0` on 2026-11-11; this is what makes that zero mean "no rows".
+describe('the tutorials integrity gauge reads real rows (ADR 1104)', () => {
+  it('counts every seeded row as a current seed copy', async () => {
+    await seedTutorials(TENANT);
+    const g = await tutorialIntegrityGauge();
+    expect(g.rows).toBeGreaterThanOrEqual(SEED_TUTORIALS.length);
+    expect(g.seedCopies).toBeGreaterThanOrEqual(SEED_TUTORIALS.length);
+    expect(g.staleSeedCopies).toBe(0);
   });
 });

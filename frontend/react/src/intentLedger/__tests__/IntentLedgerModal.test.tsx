@@ -15,6 +15,19 @@
  * action, not staging the seed / not deep-linking the governance agent / not closing,
  * dropping the goal pre-fill or any inherited list, rendering the region for a null
  * pre-fill, or a failed pre-fill read rendered as "nothing inherited".
+ *
+ * ADR 0896 D8 — approve what you saw: a decision carries the ledger id, revision
+ * and digest RENDERED; a refused-as-changed decision reloads and says so; a viewer
+ * the server would not honour gets no Approve/Reject and is told who decides; and
+ * the page states what approving means (no allowed tools ⇒ talk only; the TTL).
+ * IL2UX-1 — an unknown conversation is a translated, ANNOUNCED state with no
+ * form, and an empty goal is an inline field error. IL2UX-2 — the launcher's link
+ * names this conversation. Re-probed at 3bcc187f9 (/grade-tests w106,
+ * `w106g3-i*`): a decision naming another revision or digest, a dropped
+ * "changed" notice or reload, the decide controls / notice gates opened or shut,
+ * the talk-only line or the hour unit dropped, the not-found copy, the form or
+ * the announcement under an error, and a toast-only or still-submitting empty
+ * goal each turn a named case red.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, waitFor, fireEvent, screen } from '@testing-library/react';
@@ -48,12 +61,17 @@ vi.mock('../intentLedgerClient.js', async (importOriginal) => {
 
 import IntentLedgerModal from '../IntentLedgerModal.js';
 import { LedgerChangedError, MissionNotFoundError, type IntentLedger } from '../intentLedgerClient.js';
+import { announce, currentAnnouncements } from '../../ui/announce.js';
 
 beforeEach(() => {
   navSpy.mockReset();
   stageSpy.mockReset();
   api.getLedger.mockReset().mockResolvedValue({ ledger: null, viewer: { mayEdit: true, mayDecide: true } });
   api.decideLedger.mockReset();
+  api.draftLedger.mockReset();
+  // The live regions are module state — clear them so an announcement is THIS case's.
+  announce('');
+  announce('', { assertive: true });
   api.getReckoning.mockReset().mockResolvedValue(null);
   api.getPrefill.mockReset().mockResolvedValue(null);
 });
@@ -131,7 +149,7 @@ describe('IntentLedgerModal — the team-ledger pre-fill (ADR 0856 D2)', () => {
 describe('IntentLedgerModal — the decision names the version shown (ADR 0896)', () => {
   const draft: IntentLedger = {
     ledgerId: 'il-1', tenantId: 't', conversationId: 's1', goal: 'Summarise the thread', allowed: [], forbidden: ['openwop:email.send'],
-    requireApproval: [], successCriteria: [], expiresAtRelMs: 7_200_000, status: 'draft', proposedBy: 'extractor', revision: 4, digest: 'sha256:shown', createdAt: 'x',
+    requireApproval: [], successCriteria: [], expiresAtRelMs: 7_200_000, status: 'draft', proposedBy: 'extractor', revision: 4, digest: 'sha256:shown', createdAt: '2026-10-15T08:00:00.000Z',
   };
 
   it('Approve sends the ledger id, revision and contract digest it rendered', async () => {
@@ -176,6 +194,8 @@ describe('IntentLedgerModal — states (IL2UX-1)', () => {
     renderModal();
     await waitFor(() => expect(screen.getAllByText(/send a message first/i).length).toBeGreaterThan(0));
     expect(screen.queryByText(/conversation "s1" not found/)).toBeNull();
+    // Announced (the modal's error Notice is assertive), with the translated copy.
+    await waitFor(() => expect(currentAnnouncements().assertive).toMatch(/send a message first/i));
     expect(screen.queryByText(/only the conversation’s owner/i)).toBeNull();
     expect(screen.queryByText(/create draft/i)).toBeNull();
   });

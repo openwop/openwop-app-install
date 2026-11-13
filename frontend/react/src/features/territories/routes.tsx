@@ -17,9 +17,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Sales',
-      label: 'Territories', labelKey: 'territoriesLabel',
+      labelKey: 'territoriesLabel',
       icon: GlobeIcon,
-      hint: 'Sales regions, hierarchy, quotas & attainment', hintKey: 'territoriesHint',
+      hintKey: 'territoriesHint',
       order: 47,
       featureId: 'territories',
     },

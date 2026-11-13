@@ -15,6 +15,7 @@ import { resolveHeadlessAi } from '../../host/headlessAi.js';
 import { OpenwopError } from '../../types.js';
 import type { ChatMessage } from '../../providers/dispatch.js';
 import { restoreItemStates, sanitizeSectionOverlay, type SectionType } from './cmsService.js';
+import { AI_PARTS_DEADLINE_MS, AI_SECTION_MAX_BATCHES, AI_SECTION_MAX_CHARS, joinParts, partReplyMismatch, planParts, PartsStopped, runParts } from './aiParts.js';
 import { createLogger } from '../../observability/logger.js';
 
 const log = createLogger('feature.cms.rewrite');
@@ -97,35 +98,61 @@ export async function rewriteSectionData(
   instruction?: string,
 ): Promise<Record<string, unknown>> {
   if (Object.keys(data).length === 0) return {};
-  const messages: ChatMessage[] = [
-    { role: 'system', content: SYSTEM_PROMPT },
-    { role: 'user', content: buildRewritePrompt(data, action, instruction) },
-  ];
+  // ADR 1112 P6 — the translate lane's parts (`aiParts`): words and ids only, a large
+  // scheduleSim split by its decisions, at most AI_SECTION_MAX_BATCHES parts under one deadline.
+  const plan = planParts(sectionType, data);
+  if (!plan.ok) {
+    const message = plan.batches === undefined
+      ? `This section is too large for AI rewriting (${Math.ceil(plan.chars / 1000)}k characters; the limit is ${AI_SECTION_MAX_CHARS / 1000}k). Edit it by hand, or split it into smaller sections.`
+      : `This section has too many decisions for AI rewriting: it would take ${plan.batches} requests, and the limit is ${AI_SECTION_MAX_BATCHES}. Edit it by hand, or split its decisions across smaller sections.`;
+    throw new OpenwopError('validation_error', message, 400, { reason: 'too_large', chars: plan.chars, limit: AI_SECTION_MAX_CHARS, ...(plan.batches === undefined ? {} : { batches: plan.batches, maxBatches: AI_SECTION_MAX_BATCHES }) });
+  }
   const dispatch = await resolveHeadlessAi(tenantId, 'text');
   if (!dispatch) throw new OpenwopError('internal_error', 'No text-capable AI provider is available for rewriting.', 503, {});
 
-  const attempt = (completion: string): Record<string, unknown> | null => {
+  // A part's reply is usable when it parses, answers every decision it was sent with the same
+  // ids (parts join by position), and keeps something after the clean-up.
+  const usable = (completion: string, part: Record<string, unknown>): Record<string, unknown> | null => {
     const extracted = extractObject(completion);
-    if (!extracted) return null;
-    // ADR 1038 D8 — a rewrite changes words, never a list item's state.
-    const cleaned = sanitizeSectionOverlay(sectionType, restoreItemStates(data, extracted));
-    if (Object.keys(cleaned).length === 0) return null;
-    return keepNonText(data, { ...data, ...cleaned }) as Record<string, unknown>;
+    if (!extracted || partReplyMismatch(part, extracted)) return null;
+    if (Object.keys(sanitizeSectionOverlay(sectionType, restoreItemStates(data, extracted, sectionType))).length === 0) return null;
+    return extracted;
+  };
+  const rewritePart = async (part: Record<string, unknown>, signal: AbortSignal | undefined): Promise<Record<string, unknown>> => {
+    const callOpts = { maxTokens: MAX_TOKENS, ...(signal ? { signal } : {}) };
+    const messages: ChatMessage[] = [
+      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'user', content: buildRewritePrompt(part, action, instruction) },
+    ];
+    const first = await dispatch(messages, callOpts);
+    let reply = usable(first, part);
+    if (!reply) {
+      const second = await dispatch([
+        ...messages,
+        { role: 'assistant', content: first },
+        { role: 'user', content: 'Your previous reply was not a usable JSON object with the same keys (and every list item, in the same order, with the same ids). Return ONLY the edited JSON object, with exactly the keys of the source — no prose, no code fences.' },
+      ], callOpts);
+      reply = usable(second, part);
+      if (!reply) {
+        throw new OpenwopError('rewrite_invalid', 'The rewrite came back unusable. Try again, or edit the text yourself.', 502, { sectionType, action, repairAttempted: true });
+      }
+      log.info('rewrite_repaired', { sectionType, action });
+    }
+    return reply;
   };
 
-  const first = await dispatch(messages, { maxTokens: MAX_TOKENS });
-  let result = attempt(first);
-  if (!result) {
-    const second = await dispatch([
-      ...messages,
-      { role: 'assistant', content: first },
-      { role: 'user', content: 'Your previous reply was not a usable JSON object with the same keys. Return ONLY the edited JSON object, with exactly the keys of the source — no prose, no code fences.' },
-    ], { maxTokens: MAX_TOKENS });
-    result = attempt(second);
-    if (!result) {
-      throw new OpenwopError('rewrite_invalid', 'The rewrite came back unusable. Try again, or edit the text yourself.', 502, { sectionType, action, repairAttempted: true });
+  let replies: Record<string, unknown>[];
+  try {
+    replies = await runParts(plan.parts, rewritePart);
+  } catch (err) {
+    if (err instanceof PartsStopped) {
+      throw new OpenwopError('rewrite_invalid', `The rewrite of this section took longer than ${AI_PARTS_DEADLINE_MS / 1000} seconds. Try again, or split its decisions across smaller sections.`, 504, { sectionType, action, reason: 'timeout', batches: plan.parts.length });
     }
-    log.info('rewrite_repaired', { sectionType, action });
+    throw err;
   }
-  return result;
+  // ADR 1038 D8 — a rewrite changes words, never a list item's state; restore and clean once,
+  // on the joined reply, against the whole section.
+  const cleaned = sanitizeSectionOverlay(sectionType, restoreItemStates(data, joinParts(replies), sectionType));
+  if (plan.parts.length > 1) log.info('rewrite_in_parts', { sectionType, action, batches: plan.parts.length });
+  return keepNonText(data, { ...data, ...cleaned }) as Record<string, unknown>;
 }

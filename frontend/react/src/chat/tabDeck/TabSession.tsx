@@ -395,9 +395,15 @@ function TabSessionImpl({
       // Persist an @-mentioned agent as a participant so the per-tab lineup is
       // reconstructible server-side (ADR 0140 G2), mirroring ChatSidebar.
       onAgentActivated: (agentId) => onAddParticipant?.(sessionId, `agent:${agentId}`),
+      // CC-CHAT-4 — a deep-link-scoped agent becomes a member on its first turn, so a
+      // reopened conversation lists it again as a member — not selected (ADR 0140:
+      // restore never changes the voice). Skip when already a member: no write per turn.
+      onAgentRouted: (agentId) => {
+        if (!(participants ?? []).some((p) => p.subjectRef === `agent:${agentId}`)) onAddParticipant?.(sessionId, `agent:${agentId}`);
+      },
     }, [conveneInterceptor, boardInterceptor]);
   approvalContinueRef.current = (text: string) => { void onUserSubmit(text); };
-  }, [send, cancel, reset, config, runWorkflowMention, agentEntries, activeAgents, emitSystem, getSubmitExtras, onAddParticipant, sessionId, conveneInterceptor, boardInterceptor, conversationType, loadSessionFromBackend, refreshConversations, tenantId]);
+  }, [send, cancel, reset, config, runWorkflowMention, agentEntries, activeAgents, emitSystem, getSubmitExtras, onAddParticipant, participants, sessionId, conveneInterceptor, boardInterceptor, conversationType, loadSessionFromBackend, refreshConversations, tenantId]);
 
   return (
     <div className="u-flex u-flex-col u-flex-1 u-minh-0 u-relative">

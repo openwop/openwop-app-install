@@ -138,11 +138,20 @@ const lazyLoaded = new Set<string>();
  * (default + SUPPORTED + pseudo) are already present and no-op; a lazy preview
  * locale (e.g. `fr`) is fetched as its own chunk and merged on first use.
  */
+/** Whether `locale`'s shell catalog is in i18next. Not `hasResourceBundle`: the
+ *  backend above answers a lazy locale's shell namespaces with `{}`, and i18next
+ *  stores that as an EMPTY bundle, so "has a bundle" was true before the shell
+ *  loaded and the load was skipped. Every es/fr/pt-BR visitor then read the
+ *  shell (nav, chrome, common) in English. */
+function shellLoaded(locale: string): boolean {
+  return Object.keys(i18n.getResourceBundle(locale, 'common') ?? {}).length > 0;
+}
+
 async function ensureLocaleLoaded(locale: string): Promise<void> {
   if (
     lazyLoaded.has(locale) ||
     resourcesByLocale[locale] ||
-    i18n.hasResourceBundle(locale, 'common')
+    shellLoaded(locale)
   ) {
     return;
   }
@@ -165,7 +174,7 @@ async function ensureLocaleLoaded(locale: string): Promise<void> {
  * as the degraded path, so i18n can never brick boot.
  */
 export const i18nReady: Promise<void> = (() => {
-  if (resourcesByLocale[initialLocale] || i18n.hasResourceBundle(initialLocale, 'common')) {
+  if (resourcesByLocale[initialLocale] || shellLoaded(initialLocale)) {
     return Promise.resolve();
   }
   const load = ensureLocaleLoaded(initialLocale)

@@ -18,7 +18,7 @@ import { DataTable, type DataColumn } from '../../ui/DataTable.js';
 import { toast } from '../../ui/toast.js';
 import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
 import { useFormat } from '../../i18n/useFormat.js';
-import { listOrgs, listPages, listVersions, type Org, type Page, type PageVersion } from '../cms/cmsClient.js';
+import { listOrgs, listPages, listVersions, type Org, type Page, type PageVersionSummary } from '../cms/cmsClient.js';
 import { listFunnels, type Funnel } from '../funnels/funnelsClient.js';
 import { createExperiment, listExperiments, type Experiment, type SurfaceKind } from './experimentsClient.js';
 import { ExperimentStatusChip } from './ExperimentStatusChip.js';
@@ -51,7 +51,7 @@ export function ExperimentsPage(): JSX.Element {
   const [pages, setPages] = useState<Page[]>([]);
   const [funnels, setFunnels] = useState<Funnel[]>([]);
   const [target, setTarget] = useState('');
-  const [versions, setVersions] = useState<PageVersion[]>([]);
+  const [versions, setVersions] = useState<PageVersionSummary[]>([]);
   const [variantRef, setVariantRef] = useState('');
   const [busy, setBusy] = useState(false);
   // A picker whose read failed says so; an empty list must mean "none exist".

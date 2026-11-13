@@ -3,7 +3,7 @@
  * "Marketing" nav group, gated on the `webinars` toggle.
  */
 import { lazy } from 'react';
-import { MegaphoneIcon } from '../../ui/icons/index.js';
+import { MonitorIcon } from '../../ui/icons/index.js';
 import type { FeatureRoute } from '../../chrome/featureTypes.js';
 import type { FrontendFeature } from '../registry.js';
 
@@ -16,9 +16,9 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Marketing',
-      label: 'Webinars', labelKey: 'webinarsLabel',
-      icon: MegaphoneIcon,
-      hint: 'Zoom webinars → CRM attendance', hintKey: 'webinarsHint',
+      labelKey: 'webinarsLabel',
+      icon: MonitorIcon,
+      hintKey: 'webinarsHint',
       order: 45,
       featureId: 'webinars',
     },

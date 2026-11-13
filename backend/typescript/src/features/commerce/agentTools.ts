@@ -23,14 +23,13 @@
  */
 import { registerFeatureAgentTool, type BuiltinTool } from '../../host/agentToolProvider.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { Scope } from '../../host/accessControlService.js';
 import { OpenwopError } from '../../types.js';
-import { listProducts, getProduct, listOrders, getOrder, listCoupons } from './commerceService.js';
+import { listProductsPage, getProduct, listOrdersPage, orderCount, getOrder, listCoupons } from './commerceService.js';
 import { resolvePrice } from './pricing.js';
 import { createQuote, getQuote, listQuotes, type QuoteLineInput } from './quotes.js';
-import { untrustedToolError } from '../../host/agentToolKit.js';
+import { untrustedToolError, resolveFeatureToggle, type ToolAccessScope } from '../../host/agentToolKit.js';
 
 const COMMERCE_TOGGLE = 'commerce';
 const NS = 'openwop:feature.commerce.nodes.';
@@ -77,9 +76,9 @@ function capRows<T extends Record<string, unknown>>(payload: T, key: keyof T & s
   return { ...payload, [key]: rows.slice(0, LIST_CAP), truncated: true };
 }
 
-async function commerceEnabled(tenantId: string, userId?: string): Promise<boolean> {
-  const a = await resolveOne(COMMERCE_TOGGLE, { tenantId, ...(userId ? { userId } : {}) }).catch(() => null);
-  return a?.enabled === true;
+async function commerceEnabled(scope: ToolAccessScope): Promise<boolean> {
+  // ADR 1108 — the kit's subject: the route's shape plus the operator exemption.
+  return resolveFeatureToggle(COMMERCE_TOGGLE, scope);
 }
 
 /** The model-facing projection the workflow surface uses — strips internal keys. */
@@ -124,7 +123,7 @@ function readTool(
     def,
     async run(input, scope) {
       if (!scope.actingUserId) return empty('No acting user on this turn — commerce access is resolved per signed-in user.');
-      if (!(await commerceEnabled(scope.tenantId, scope.actingUserId))) return empty('E-Commerce is not enabled for this workspace.');
+      if (!(await commerceEnabled(scope))) return empty('E-Commerce is not enabled for this workspace.');
       const org = await resolveOrg(scope, input.orgId, 'workspace:read');
       if (isResult(org)) return org;
       try {
@@ -146,21 +145,28 @@ export function registerCommerceAgentTools(): void {
     {
       name: COMMERCE_LIST_PRODUCTS_TOOL_ID,
       description:
-        'List the store catalog (products with price, inventory, variants, type). Optional free-text `q` filters by name. '
-        + 'Use it to reference REAL products/prices instead of inventing them. Returns at most 50 products (`truncated:true` '
-        + 'when the catalog has more, though `total` is the true count — narrow with `q`). Read-only.',
+        'List the store catalog (products with price, inventory, variants, type). Optional free-text `q` searches product '
+        + 'names, tags, categories and variant names (word prefixes; every word must match). Use it to reference REAL '
+        + 'products/prices instead of inventing them. Returns at most 50 products; when more match, `truncated:true` and '
+        + '`nextCursor` is set: pass it back as `cursor` for the next page, or narrow with `q`. Read-only.',
       inputSchema: {
         type: 'object',
         properties: {
           orgId: { type: 'string', description: 'The organization id (omit when the workspace has exactly one).' },
-          q: { type: 'string', description: 'Optional free-text name filter.' },
+          q: { type: 'string', description: 'Optional search: words matched as prefixes of the name, tags, categories or variant names.' },
+          cursor: { type: 'string', description: 'The `nextCursor` from a previous call, to read the next page.' },
         },
         additionalProperties: false,
       },
     },
     async (input, orgId, scope) => {
-      const products = (await listProducts(scope.tenantId, orgId, optStr(input.q))).map(project);
-      return ok(capRows({ orgId, total: products.length, products }, 'products'));
+      // ADR 1110 P2 — one page of 50, never the whole catalog.
+      const page = await listProductsPage(scope.tenantId, orgId, { q: optStr(input.q), cursor: optStr(input.cursor), limit: 50 });
+      return ok({
+        orgId, products: page.products.map(project),
+        ...(page.total !== undefined ? { total: page.total } : {}),
+        ...(page.nextCursor ? { truncated: true, nextCursor: page.nextCursor } : {}),
+      });
     },
     'untrusted',   // customer-authored names, addresses, order notes
     'read',
@@ -192,16 +198,23 @@ export function registerCommerceAgentTools(): void {
   registerFeatureAgentTool(readTool(
     {
       name: COMMERCE_LIST_ORDERS_TOOL_ID,
-      description: 'List the org\'s orders (id, status, fulfillment, total, customer). Returns at most 50 orders (`truncated:true` when more exist, though `total` is the true count). Read-only.',
+      description: 'List the org\'s orders, newest first (id, status, fulfillment, total, customer). Returns at most 50; when more exist, `truncated:true` and `nextCursor` is set: pass it back as `cursor` for the next page. `total` is the true count. Read-only.',
       inputSchema: {
         type: 'object',
-        properties: { orgId: { type: 'string', description: 'The organization id (omit when the workspace has exactly one).' } },
+        properties: {
+          orgId: { type: 'string', description: 'The organization id (omit when the workspace has exactly one).' },
+          cursor: { type: 'string', description: 'The `nextCursor` from a previous call, to read the next page.' },
+        },
         additionalProperties: false,
       },
     },
-    async (_input, orgId, scope) => {
-      const orders = (await listOrders(scope.tenantId, orgId)).map(project);
-      return ok(capRows({ orgId, total: orders.length, orders }, 'orders'));
+    async (input, orgId, scope) => {
+      // ADR 1110 P5 — one page of 50, never every order.
+      const page = await listOrdersPage(scope.tenantId, orgId, { cursor: optStr(input.cursor), limit: 50 });
+      return ok({
+        orgId, total: await orderCount(scope.tenantId, orgId), orders: page.orders.map(project),
+        ...(page.nextCursor ? { truncated: true, nextCursor: page.nextCursor } : {}),
+      });
     },
     'untrusted',   // customer-authored names, addresses, order notes
     'read',
@@ -339,7 +352,7 @@ export function registerCommerceAgentTools(): void {
     },
     async run(input, scope) {
       if (!scope.actingUserId) return toolError('acting_user_required', 'Quotes can only be drafted from a human-initiated turn.');
-      if (!(await commerceEnabled(scope.tenantId, scope.actingUserId))) return toolError('feature_disabled', 'E-Commerce is not enabled for this workspace.');
+      if (!(await commerceEnabled(scope))) return toolError('feature_disabled', 'E-Commerce is not enabled for this workspace.');
       const org = await resolveOrg(scope, input.orgId, 'workspace:write');
       if (isResult(org)) return org;
       const rawLines = Array.isArray(input.lines) ? input.lines : [];

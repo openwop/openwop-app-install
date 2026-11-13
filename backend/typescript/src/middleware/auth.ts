@@ -543,8 +543,8 @@ export { sessionSecretConfigError, issueUserSession, clearSessionCookie };
 // CORRECTED 2026-11-05 (ADR 1045, TST-FUD-GC-1): the subject was
 // `bearer:<first 8 chars>` and this check matched ANY configured key with that
 // prefix, so a surviving key B vouched for a removed key A's delegations. The
-// subject is now `bearer:<sha256(key) 16 hex>`; a legacy 8-char issuer matches
-// only when exactly one configured key has that prefix (`envKeyPrincipal.ts`).
+// subject is now `bearer:<sha256(key) 16 hex>`. Since CHAN-F14 (2026-11-12) a
+// legacy 8-char issuer matches nothing (`envKeyPrincipal.ts`).
 registerOperatorIssuerCheck(isConfiguredEnvKeyIssuer);
 
 /**

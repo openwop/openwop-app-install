@@ -14,7 +14,7 @@
  * which wraps the host-extension routes 1:1.
  */
 import { Button } from '../../ui/Button.js';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate } from 'react-router-dom';
 import { StateCard } from '../../ui/StateCard.js';
@@ -22,6 +22,7 @@ import { Skeleton } from '../../ui/Skeleton.js';
 import { TextField, TextareaField } from '../../ui/Field.js';
 import { toast } from '../../ui/toast.js';
 import { announce } from '../../ui/announce.js';
+import { confirm } from '../../ui/confirm.js';
 import { formatNumber, formatRelativeTime } from '../../i18n/format.js';
 import {
   PlusIcon, FileTextIcon, ClipboardIcon, SearchIcon, MessageSquareIcon, SparklesIcon, ZapIcon, ArrowRightIcon,
@@ -36,6 +37,7 @@ import {
   type Notebook, type NotebookSource, type NotebookNote, type NotebookSearchResult, type SourceContextLevel,
   type TransformationTemplate, type Transformation,
 } from './notebooksClient.js';
+import { getRun } from '../../client/runsClient.js';
 
 /** Approximate tokens for a source. Heuristic: ~250 tokens per KB chunk (the KB
  *  chunker targets ~1k chars/chunk; ~4 chars per token ⇒ ~250 tokens/chunk). This
@@ -90,9 +92,11 @@ type StallSubject =
   /** A source that is not one of the ids present when the upload started. */
   | { kind: 'ingest'; baselineSourceIds: readonly string[] }
   /** THIS source reporting `hasSummary`. */
-  | { kind: 'summarize'; sourceId: string }
+  /** `resummarize` — the source ALREADY had a summary, so "has a summary" proves
+   *  nothing about this run; only the run finishing does (UX re-grade #2). */
+  | { kind: 'summarize'; sourceId: string; resummarize?: boolean }
   /** A transformation that is not one of the ids present when it was applied. */
-  | { kind: 'transform'; baselineTransformationIds: readonly string[] };
+  | { kind: 'transform'; baselineTransformationIds: readonly string[]; sourceId?: string };
 
 /** A stated give-up + how many rechecks came back empty (what makes a repeat
  *  click observable, NBU-19) + whether the LAST recheck could not be performed
@@ -105,7 +109,13 @@ type StallSubject =
  *  threw it away with a bare `await`, so the give-up card was a dead end: the
  *  one artifact that could say WHY nothing arrived was discarded at the moment
  *  it was created. The card is exactly where a `/runs/:id` link belongs. */
-interface StallState { subject: StallSubject; rechecks: number; lastRecheckFailed: boolean; runId?: string }
+interface StallState {
+  subject: StallSubject; rechecks: number; lastRecheckFailed: boolean; runId?: string;
+  /** ADR 1103 D9 — the run ENDED without the awaited item (failed, cancelled, or
+   *  completed with nothing written). Not a stall: the card says it failed, names
+   *  why when it can, and stops offering "Check again". */
+  failed?: { code?: string; endedEmpty?: boolean; sourceTitle?: string };
+}
 
 /**
  * Give-ups outlive the component that raised them, keyed by notebook.
@@ -148,7 +158,7 @@ function stallSatisfied(
     return sources.some((s) => !seen.has(s.documentId));
   }
   if (subject.kind === 'summarize') {
-    if (!sources) return false;
+    if (!sources || subject.resummarize) return false; // a re-summarize lands by its run, not by the list
     return sources.find((s) => s.documentId === subject.sourceId)?.hasSummary === true;
   }
   if (!transformations) return false;
@@ -167,7 +177,28 @@ const PANEL_STALL_KINDS: Record<'sources' | 'transformations', readonly StallKin
   transformations: ['transform'],
 };
 
-function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
+/** UX re-grade #16 — a status read that hangs must not stall the poll forever: it
+ *  answers "unknown" after a few seconds and the poll's own cap still applies. */
+const RUN_STATUS_TIMEOUT_MS = 5000;
+async function runStatusOf(runId: string): Promise<Awaited<ReturnType<typeof getRun>> | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), RUN_STATUS_TIMEOUT_MS); });
+  try {
+    return await Promise.race([getRun(runId).catch(() => null), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function NotebookWorkspace({ notebook, readOnly = false, onDirtyChange }: {
+  notebook: Notebook;
+  /** ADR 1103 D9 — a project viewer: every write control is absent, not offered and
+   *  then refused (each used to 403 into a raw English toast). */
+  readOnly?: boolean;
+  /** ADR 1103 D9 — unsaved drafts (source text, YouTube URL, note) for the project
+   *  page's tab-switch guard. */
+  onDirtyChange?: (dirty: boolean) => void;
+}): JSX.Element {
   const { t } = useTranslation('notebooks');
   const navigate = useNavigate();
   const [chatBusy, setChatBusy] = useState(false);
@@ -220,8 +251,95 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
   // Sources mid-transform (the run is async — show pending until a new artifact
   // lands). Keyed by documentId.
   const [transforming, setTransforming] = useState<Set<string>>(new Set());
+  // NBK92-15 — the template picked for each source. Choosing one no longer starts a
+  // billable run; the Apply button does.
+  const [chosenTemplate, setChosenTemplate] = useState<Readonly<Record<string, string>>>({});
 
-  const msgOf = useCallback((err: unknown): string => (err instanceof Error ? err.message : t('loadFailed')), [t]);
+  // ADR 1103 D9 (`NBK92-9`) — report unsaved drafts so the project page's tab guard
+  // can ask before a tab switch unmounts them. Cleared on unmount (the guard must not
+  // outlive the panel it protects).
+  const dirty = Boolean(srcTitle.trim() || srcText.trim() || ytUrl.trim() || noteText.trim());
+  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+
+  /** UX re-grade #7 — leaving the page by one of this panel's own links asks first
+   *  when a draft would be lost (the tab guard covers only tab switches). */
+  const leave = useCallback(async (to: string): Promise<boolean> => {
+    if (dirty && !(await confirm({ title: t('ui:unsavedLeaveTitle'), body: t('ui:unsavedLeaveBody'), danger: true, confirmLabel: t('ui:unsavedLeaveConfirm') }))) return false;
+    navigate(to);
+    return true;
+  }, [dirty, navigate, t]);
+
+  /** Round-2 UX #5 — a plain `<Link>` out of the panel asks too when a draft is dirty. */
+  const guardLink = useCallback((e: { preventDefault: () => void; metaKey: boolean; ctrlKey: boolean; shiftKey: boolean; button: number; currentTarget: { getAttribute: (n: string) => string | null } }) => {
+    // A new-tab / new-window click keeps this page (and its draft): leave it alone.
+    if (!dirty || e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+    e.preventDefault();
+    const to = e.currentTarget.getAttribute('href');
+    if (to) void leave(to);
+  }, [dirty, leave]);
+
+  /** NBK92-18 — a template / transformation kind in the user's words. Literal `t()`
+   *  calls (not a built key) so the i18n reference miner sees every one. */
+  const templateLabel = useCallback((id: string, fallback: string): string => {
+    switch (id) {
+      case 'summary': case 'notebook-summary': return t('templateSummary');
+      case 'key-concepts': case 'notebook-key-concepts': return t('templateKeyConcepts');
+      case 'methodology': case 'notebook-methodology': return t('templateMethodology');
+      case 'takeaways': case 'notebook-takeaways': return t('templateTakeaways');
+      case 'questions': case 'notebook-questions': return t('templateQuestions');
+      default: return fallback;
+    }
+  }, [t]);
+
+  /**
+   * ADR 1103 D9 (`NBK92-12`) — server English never reaches the page. A refusal is
+   * named by its HTTP status in the user's locale; anything else falls back to the
+   * action's own localized sentence. (The server's `message` is an English sentence
+   * written for logs and API callers.)
+   */
+  const errText = useCallback((err: unknown, fallback: string): string => {
+    const status = (err as { status?: unknown } | null)?.status;
+    if (status === 403) return t('errForbidden');
+    if (status === 404) return t('errNotFound');
+    if (status === 409) return t('errConflict');
+    if (status === 413) return t('errTooLarge');
+    if (status === 415) return t('errUnsupportedType');
+    if (status === 429) return t('errRateLimited');
+    return fallback;
+  }, [t]);
+  const msgOf = useCallback((err: unknown): string => errText(err, t('loadFailed')), [errText, t]);
+  /** Round-2 UX #2/#3 — the failed card names WHAT failed, and for which source when
+   *  it knows; literal keys so the i18n miner sees each one. */
+  const failedTitleOf = useCallback((subject: StallSubject, title: string | undefined): string => {
+    if (subject.kind === 'summarize') return title ? t('failedSummarizeTitleFor', { title }) : t('failedSummarizeTitle');
+    if (subject.kind === 'transform') return title ? t('failedTransformTitleFor', { title }) : t('failedTransformTitle');
+    return t('failedIngestTitle');
+  }, [t]);
+  // The LATEST list, for a failure raised from a poll whose closure is older (round-3 UX #5).
+  const sourcesRef = useRef(sources);
+  useLayoutEffect(() => { sourcesRef.current = sources; }, [sources]);
+
+  /** ADR 1103 D4/D9 — a failed run's code, in the user's words. The codes are the
+   *  notebook nodes' own (`packs/feature.notebooks.nodes`); an unknown one gets the
+   *  general sentence, never the code itself. */
+  const runFailureText = useCallback((code: string | undefined): string => {
+    switch (code) {
+      case 'notebook_unavailable': return t('runFailedUnavailable');
+      case 'notebook_write_forbidden':
+      case 'notebook_write_needs_person': return t('runFailedForbidden');
+      case 'source_empty':
+      case 'source_unavailable': return t('runFailedSourceGone');
+      case 'source_changed': return t('runFailedSourceChanged');
+      case 'summary_empty':
+      case 'transformation_empty':
+      case 'transcript_empty':
+      case 'no_transcript': return t('runFailedEmptyResult');
+      case 'target_mismatch':
+      case 'notebook_required': return t('runFailedTarget');
+      default: return t('runFailedBody');
+    }
+  }, [t]);
   // The loaders RETURN their promise (they used to swallow it with `void`), which
   // is what makes `retryLoad` below able to know when a retry finished — see
   // NBU-19.
@@ -280,11 +398,11 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
       loadSources();
       toast.success(t('sourceAdded'));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('sourceAddFailed'));
+      toast.error(errText(err, t('sourceAddFailed')));
     } finally {
       setSrcBusy(false);
     }
-  }, [notebook.id, srcTitle, srcText, loadSources, t]);
+  }, [notebook.id, srcTitle, srcText, loadSources, t, errText]);
 
   // Sources mid-summarize (the run is async; show pending until listSources reports
   // hasSummary). Keyed by documentId.
@@ -383,7 +501,9 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
       if (prev.size === 0) return prev;
       let next: Map<StallKind, StallState> | null = null;
       for (const [kind, entry] of prev) {
-        if (!stallSatisfied(entry.subject, sources, transformations)) continue;
+        // A FAILURE is not cleared by evidence of arrival (round-2 UX #2): an unrelated
+        // source or transformation landing proves nothing about the run that failed.
+        if (entry.failed || !stallSatisfied(entry.subject, sources, transformations)) continue;
         next ??= new Map(prev);
         next.delete(kind);
       }
@@ -408,6 +528,50 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
     return stallSatisfied(subject, fresh, transformations);
   }, [notebook.id, sources, transformations]);
 
+  /**
+   * Turn a give-up into a stated FAILURE. `StateCard` announces only its title, so the
+   * reason is spoken here as well, right after the card's own announcement (the later
+   * `announce()` wins the live region) — a screen-reader user hears what failed AND why.
+   */
+  const failStall = useCallback((subject: StallSubject, runId: string | undefined, failed: { code?: string; endedEmpty?: boolean }) => {
+    // The source's title is fixed AT FAILURE, so the card and what is spoken agree even
+    // if the source is renamed or deleted afterwards.
+    const sourceTitle = 'sourceId' in subject && subject.sourceId
+      ? sourcesRef.current?.find((x) => x.documentId === subject.sourceId)?.title
+      : undefined;
+    setStalled((prev) => new Map(prev).set(subject.kind, {
+      subject, rechecks: 0, lastRecheckFailed: false, ...(runId ? { runId } : {}),
+      failed: { ...failed, ...(sourceTitle ? { sourceTitle } : {}) },
+    }));
+  }, [setStalled]);
+
+  /**
+   * Speak a failure's title AND reason (`StateCard` speaks only its title). A parent
+   * effect runs after its children's, so this lands after the card's own announcement
+   * and wins the live region deterministically (round-3 UX #2 — a `setTimeout` raced
+   * it). Once per failure; a restored card re-announces on remount like every card.
+   */
+  const spokenFailures = useRef(new Set<string>());
+  useEffect(() => {
+    // Speak only a failure whose card is actually on screen (round-4 UX #2: a restored
+    // failure was spoken before its panel's list had loaded, then overwritten by the
+    // card's bare title), and speak several as ONE message (the live region keeps the
+    // last write only).
+    const shown = (kind: StallKind): boolean => (kind === 'transform'
+      ? transformations !== null && !transformationsFailed
+      : sources !== null && !sourcesFailed);
+    const lines: string[] = [];
+    for (const [kind, entry] of stalled) {
+      if (!entry.failed || !shown(kind)) continue;
+      const key = `${kind}:${entry.runId ?? ''}:${entry.failed.code ?? ''}:${entry.failed.endedEmpty ? 1 : 0}`;
+      if (spokenFailures.current.has(key)) continue;
+      spokenFailures.current.add(key);
+      const reason = entry.failed.endedEmpty ? t('runEndedEmptyBody') : runFailureText(entry.failed.code);
+      lines.push(t('failedSpoken', { title: failedTitleOf(entry.subject, entry.failed.sourceTitle), reason }));
+    }
+    if (lines.length > 0) announce(lines.join(' '));
+  }, [stalled, sources, transformations, sourcesFailed, transformationsFailed, runFailureText, failedTitleOf, t]);
+
   /** The ONE poller. `landed` resolving true settles it; the cap STATES itself. */
   const pollUntilLanded = useCallback((opts: {
     subject: StallSubject;
@@ -425,12 +589,40 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
   }) => {
     clearStall(opts.subject.kind); // a fresh attempt supersedes an earlier give-up
     let attempts = 0;
+    let endedEmpty = 0;
+    const markFailed = (failed: { code?: string; endedEmpty?: boolean }): void => {
+      opts.onSettled?.();
+      failStall(opts.subject, opts.runId, failed);
+    };
+    // A re-summarize can only be proven by its run (the source already HAD a summary).
+    const runDecides = opts.subject.kind === 'summarize' && opts.subject.resummarize === true;
     const poll = async (): Promise<void> => {
       attempts += 1;
       if (!liveRef.current) return; // the workspace unmounted mid-poll
+      // ADR 1103 D9 — the run itself answers whether waiting is still honest. A run
+      // that failed or was cancelled, or that completed and still (one look later)
+      // left nothing, is a FAILURE, not a stall: polling on would only end in "still
+      // waiting" about something that is not coming.
+      const run = opts.runId ? await runStatusOf(opts.runId) : null;
+      if (!liveRef.current) return;
+      if (run && (run.status === 'failed' || run.status === 'cancelled')) {
+        const detailCode = run.error?.details?.['code'];
+        const code = typeof detailCode === 'string' ? detailCode : run.error?.code;
+        markFailed(code ? { code } : {});
+        return;
+      }
+      let looked = false;
       try {
-        if (await opts.landed()) { opts.onSettled?.(); return; }
+        const landed = await opts.landed();
+        looked = true;
+        if (runDecides ? run?.status === 'completed' : landed) { opts.onSettled?.(); return; }
       } catch { /* transient — keep polling until the cap */ }
+      // Round-2 UX #1 (the M1 rule): only a list read that ANSWERED counts toward
+      // "finished, but nothing was saved" — a read that failed observed nothing.
+      if (looked && run?.status === 'completed' && !runDecides) {
+        endedEmpty += 1;
+        if (endedEmpty >= 2) { markFailed({ endedEmpty: true }); return; }
+      }
       if (attempts >= opts.maxAttempts) {
         opts.onSettled?.();
         setStalled((prev) => new Map(prev).set(opts.subject.kind, { subject: opts.subject, rechecks: 0, lastRecheckFailed: false, ...(opts.runId ? { runId: opts.runId } : {}) }));
@@ -439,7 +631,7 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
       window.setTimeout(() => { void poll(); }, opts.intervalMs);
     };
     window.setTimeout(() => { void poll(); }, opts.firstDelayMs);
-  }, [clearStall, setStalled]);
+  }, [clearStall, setStalled, failStall]);
 
   /**
    * "Check again" — the SAME subject, re-read on demand.
@@ -467,7 +659,25 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
     if (!entry) return;
     setRecheckBusy((prev) => new Set(prev).add(kind));
     try {
-      const landed = await recheckSubject(entry.subject);
+      // Round-2 UX #4 — ask the run first: a run that has since failed turns the stall
+      // into the failure it is, instead of "still nothing new" forever.
+      const run = entry.runId ? await runStatusOf(entry.runId) : null;
+      if (run && (run.status === 'failed' || run.status === 'cancelled')) {
+        const detailCode = run.error?.details?.['code'];
+        const code = typeof detailCode === 'string' ? detailCode : run.error?.code;
+        failStall(entry.subject, entry.runId, code ? { code } : {});
+        return;
+      }
+      // A re-summarize is proven by its run, not by the list (it already had a summary).
+      const landed = entry.subject.kind === 'summarize' && entry.subject.resummarize && entry.runId
+        ? run?.status === 'completed' && (await recheckSubject({ ...entry.subject, resummarize: false }))
+        : await recheckSubject(entry.subject);
+      // A run that COMPLETED and a list that, read just now, still lacks the item: the
+      // run ended without saving it — say so instead of "still nothing new" forever.
+      if (!landed && run?.status === 'completed') {
+        failStall(entry.subject, entry.runId, { endedEmpty: true });
+        return;
+      }
       if (landed) {
         clearStall(kind);
         announce(t('stalledRecheckLanded'));
@@ -493,7 +703,7 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
     } finally {
       setRecheckBusy((prev) => { const next = new Set(prev); next.delete(kind); return next; });
     }
-  }, [stalled, clearStall, setStalled, recheckSubject, t]);
+  }, [stalled, clearStall, setStalled, recheckSubject, failStall, t]);
 
   /**
    * The stall card for one kind, or null. Matches the failed-read siblings.
@@ -510,6 +720,25 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
   const stallCard = useCallback((kind: StallKind, icon: React.ReactNode, title: string, body: string) => {
     const entry = stalled.get(kind);
     if (!entry) return null;
+    if (entry.failed) {
+      // UX re-grade #1/#4 — the title names WHAT did not happen (a run that completed
+      // with nothing saved did finish; "did not finish" would be false), and the body
+      // says why when the run's code is known.
+      return (
+        <StateCard
+          announce
+          icon={icon}
+          title={failedTitleOf(entry.subject, entry.failed.sourceTitle)}
+          body={entry.failed.endedEmpty ? t('runEndedEmptyBody') : runFailureText(entry.failed.code)}
+          action={(
+            <>
+              <Button variant="quiet" onClick={() => clearStall(kind)}>{t('dismiss')}</Button>
+              {entry.runId ? <Link to={`/runs/${encodeURIComponent(entry.runId)}`} onClick={guardLink} className="u-fs-12">{t('stalledViewRun')}</Link> : null}
+            </>
+          )}
+        />
+      );
+    }
     return (
       <StateCard
         announce
@@ -533,12 +762,12 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
             </Button>
             {/* `H4` — the run id was previously discarded at the call site, so the
                 one artifact that can say WHY nothing arrived was unreachable. */}
-            {entry.runId ? <Link to={`/runs/${encodeURIComponent(entry.runId)}`} className="u-fs-12">{t('stalledViewRun')}</Link> : null}
+            {entry.runId ? <Link to={`/runs/${encodeURIComponent(entry.runId)}`} onClick={guardLink} className="u-fs-12">{t('stalledViewRun')}</Link> : null}
           </>
         )}
       />
     );
-  }, [stalled, recheckBusy, recheckStall, t]);
+  }, [stalled, recheckBusy, recheckStall, runFailureText, clearStall, failedTitleOf, guardLink, t]);
 
   /** `M4` — the ONE suppression rule: a panel that is showing ANY give-up must
    *  not also claim to be empty. Stated once here instead of hand-written per
@@ -582,11 +811,11 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
       toast.success(t('audioEnqueued'));
       pollForNewSource(baseline, runId);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('audioFailed'));
+      toast.error(errText(err, t('audioFailed')));
     } finally {
       setAudioBusy(false);
     }
-  }, [notebook.id, sources, pollForNewSource, t]);
+  }, [notebook.id, sources, pollForNewSource, t, errText]);
 
   // Document file upload (text/PDF/DOCX) — extracted to text + ingested synchronously.
   const submitDocument = useCallback(async (file: File | undefined) => {
@@ -599,11 +828,11 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
       loadSources();
       toast.success(t('sourceAdded'));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('sourceAddFailed'));
+      toast.error(errText(err, t('sourceAddFailed')));
     } finally {
       setFileBusy(false);
     }
-  }, [notebook.id, loadSources, t]);
+  }, [notebook.id, loadSources, t, errText]);
 
   const submitYoutube = useCallback(async () => {
     if (!ytUrl.trim()) return;
@@ -615,11 +844,11 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
       toast.success(t('youtubeEnqueued'));
       pollForNewSource(baseline, runId);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('youtubeFailed'));
+      toast.error(errText(err, t('youtubeFailed')));
     } finally {
       setYtBusy(false);
     }
-  }, [notebook.id, ytUrl, sources, pollForNewSource, t]);
+  }, [notebook.id, ytUrl, sources, pollForNewSource, t, errText]);
 
   const changeLevel = useCallback(async (sourceId: string, level: SourceContextLevel) => {
     // Optimistic: flip the level locally, then reconcile with the server's projection.
@@ -628,10 +857,10 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
       const updated = await setSourceContextLevel(notebook.id, sourceId, level);
       setSources((prev) => prev?.map((s) => (s.documentId === sourceId ? updated : s)) ?? prev);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('contextLevelFailed'));
+      toast.error(errText(err, t('contextLevelFailed')));
       loadSources(); // roll back to the server truth
     }
-  }, [notebook.id, loadSources, t]);
+  }, [notebook.id, loadSources, t, errText]);
 
   const summarize = useCallback(async (sourceId: string) => {
     setSummarizing((prev) => new Set(prev).add(sourceId));
@@ -642,7 +871,11 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
       // until the source reports hasSummary rather than guessing a fixed delay; stop
       // on success, on max attempts, or if the page navigated away. Refresh the panel
       // on every poll so the user sees it land the moment it does.
-      const subject: StallSubject = { kind: 'summarize', sourceId };
+      const subject: StallSubject = {
+        kind: 'summarize', sourceId,
+        // Only a run can prove a re-summarize; with no run id, fall back to the list.
+        ...(runId && (sources ?? []).find((x) => x.documentId === sourceId)?.hasSummary ? { resummarize: true } : {}),
+      };
       pollUntilLanded({
         subject,
         ...(runId ? { runId } : {}),
@@ -656,10 +889,10 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
           setSummarizing((prev) => { const next = new Set(prev); next.delete(sourceId); return next; }),
       });
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('summarizeFailed'));
+      toast.error(errText(err, t('summarizeFailed')));
       setSummarizing((prev) => { const next = new Set(prev); next.delete(sourceId); return next; });
     }
-  }, [notebook.id, pollUntilLanded, t]);
+  }, [notebook.id, sources, pollUntilLanded, t, errText]);
 
   const transform = useCallback(async (sourceId: string, templateId: string) => {
     if (!templateId) return;
@@ -673,7 +906,7 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
       // every poll so the user sees it the moment it lands.
       // `M2` — identity, not count: another template's artifact landing must not
       // clear the card waiting for THIS one.
-      const subject: StallSubject = { kind: 'transform', baselineTransformationIds: (transformations ?? []).map((tr) => tr.documentId) };
+      const subject: StallSubject = { kind: 'transform', baselineTransformationIds: (transformations ?? []).map((tr) => tr.documentId), sourceId };
       pollUntilLanded({
         subject,
         ...(runId ? { runId } : {}),
@@ -683,14 +916,17 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
           setTransformations(fresh);
           return stallSatisfied(subject, null, fresh);
         },
-        onSettled: () =>
-          setTransforming((prev) => { const next = new Set(prev); next.delete(sourceId); return next; }),
+        onSettled: () => {
+          setTransforming((prev) => { const next = new Set(prev); next.delete(sourceId); return next; });
+          // Round-2 UX #6 — a settled run must not leave the choice armed for a second paid run.
+          setChosenTemplate((prev) => ({ ...prev, [sourceId]: '' }));
+        },
       });
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('transformFailed'));
+      toast.error(errText(err, t('transformFailed')));
       setTransforming((prev) => { const next = new Set(prev); next.delete(sourceId); return next; });
     }
-  }, [notebook.id, transformations, pollUntilLanded, t]);
+  }, [notebook.id, transformations, pollUntilLanded, t, errText]);
 
   // ADR 0601 — `origin` is a REQUIRED argument, not an option with a default: the
   // two lanes that reach this handler have genuinely different content provenance
@@ -712,12 +948,12 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
       toast.success(t('noteAdded'));
       return true;
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('noteAddFailed'));
+      toast.error(errText(err, t('noteAddFailed')));
       return false;
     } finally {
       setNoteBusy(false);
     }
-  }, [notebook.id, t]);
+  }, [notebook.id, t, errText]);
 
   /** The COMPOSER lane — the ONLY lane that may clear the composer, and only on
    *  success. The user's own words, so `'authored'` (ADR 0601). */
@@ -726,15 +962,17 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
   }, [saveNote, noteText]);
 
   const openChat = useCallback(async () => {
+    // Round-2 UX #5 — ask about a dirty draft BEFORE minting the room, not after.
+    if (dirty && !(await confirm({ title: t('ui:unsavedLeaveTitle'), body: t('ui:unsavedLeaveBody'), danger: true, confirmLabel: t('ui:unsavedLeaveConfirm') }))) return;
     setChatBusy(true);
     try {
       const { conversationId } = await ensureNotebookChat(notebook.id);
       navigate(`/chat?conversation=${encodeURIComponent(conversationId)}`);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('chatOpenFailed'));
+      toast.error(errText(err, t('chatOpenFailed')));
       setChatBusy(false);
     }
-  }, [notebook.id, navigate, t]);
+  }, [notebook.id, dirty, navigate, t, errText]);
 
   // NBU-5 — the sharpest defect on a grounded-retrieval surface. `answer` was set
   // ONLY on success and cleared NOWHERE, so a failed Ask left question 1's hits
@@ -767,11 +1005,11 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
       // the line at a failed ACTION (transient, owning no surface) versus a
       // failed panel READ (which owns the region it just emptied), and Ask is the
       // second kind.
-      setAskFailed(err instanceof Error ? err.message : t('askFailed'));
+      setAskFailed(errText(err, t('askFailed')));
     } finally {
       setAskBusy(false);
     }
-  }, [notebook.id, query, t]);
+  }, [notebook.id, query, t, errText]);
 
   return (
     <section className="u-grid u-gap-4">
@@ -792,6 +1030,9 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
               </span>
             ) : null}
           </div>
+{/* ADR 1103 D9 — a viewer is not offered writes the server refuses. */}
+          {readOnly ? null : (
+          <>
           <form className="u-grid u-gap-2" onSubmit={(e) => { e.preventDefault(); void submitSource(); }}>
             <TextField label={t('sourceTitleLabel')} value={srcTitle} onChange={(e) => setSrcTitle(e.target.value)} placeholder={t('sourceTitlePlaceholder')} />
             <TextareaField label={t('sourceTextLabel')} value={srcText} onChange={(e) => setSrcText(e.target.value)} rows={4} placeholder={t('sourceTextPlaceholder')} />
@@ -829,6 +1070,8 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
               <Button type="submit" variant="quiet" disabled={ytBusy || !ytUrl.trim()}><LinkIcon size={14} /> {t('addYoutubeBtn')}</Button>
             </form>
           </div>
+          </>
+          )}
           {sourcesFailed ? (
             <StateCard
               announce
@@ -847,7 +1090,7 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
               {stallCard('ingest', <FileTextIcon size={20} />, t('stalledIngestTitle'), t('stalledIngestBody'))}
               {stallCard('summarize', <FileTextIcon size={20} />, t('stalledSummarizeTitle'), t('stalledSummarizeBody'))}
               {sources.length === 0 && !panelStalled('sources') ? (
-                <StateCard icon={<FileTextIcon size={20} />} title={t('noSourcesTitle')} body={t('noSourcesBody')} />
+                <StateCard icon={<FileTextIcon size={20} />} title={t('noSourcesTitle')} body={readOnly ? t('sourcesNoneReadOnlyBody') : t('noSourcesBody')} />
               ) : sources.length === 0 ? null : (
             <ul className="nb-list">
               {sources.map((s) => {
@@ -865,6 +1108,12 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
                     <div className="nb-list__item-meta">
                       {t('chunkCount', { count: s.chunkCount })} · {t('approxTokens', { tokens: formatTokens(sourceTokens(s)) })}
                     </div>
+                    {readOnly ? (
+                      <span className="chip chip--muted">
+                        <span className="sr-only">{t('contextLevelLabel', { title: s.title })}: </span>
+                        {s.contextLevel === 'excluded' ? t('levelExcluded') : s.contextLevel === 'summary' ? t('levelSummary') : t('levelFull')}
+                      </span>
+                    ) : (
                     <div className="nb-level" role="group" aria-label={t('contextLevelLabel', { title: s.title })}>
                       <button
                         type="button"
@@ -893,6 +1142,8 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
                         {t('levelExcluded')}
                       </button>
                     </div>
+                    )}
+                    {readOnly ? null : (
                     <div className="action-bar">
                       <Button
                         variant="quiet"
@@ -901,6 +1152,9 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
                         title={s.hasSummary ? t('resummarizeHint') : t('summarizeHint')}
                       >
                         <SparklesIcon size={14} /> {isSummarizing ? t('summarizing') : s.hasSummary ? t('resummarize') : t('summarize')}
+                        {/* UX re-grade #6 — one of N identical buttons; the source it acts on
+                            is part of its accessible name (busy text included). */}
+                        <span className="sr-only">{t('forSource', { title: s.title })}</span>
                       </Button>
                       {templatesFailed ? (
                         <span className="u-label-sm muted" title={t('transformUnavailableHint')}>{t('transformUnavailable')}</span>
@@ -910,18 +1164,33 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
                           <span className="sr-only">{t('transformLabel', { title: s.title })}</span>
                           <select
                             className="nb-transform__select"
-                            value=""
+                            value={chosenTemplate[s.documentId] ?? ''}
                             disabled={transforming.has(s.documentId)}
-                            onChange={(e) => { const v = e.target.value; e.target.value = ''; void transform(s.documentId, v); }}
+                            onChange={(e) => { const v = e.target.value; setChosenTemplate((prev) => ({ ...prev, [s.documentId]: v })); }}
                           >
                             <option value="" disabled>
-                              {transforming.has(s.documentId) ? t('transforming') : t('transform')}
+                              {transforming.has(s.documentId) ? t('transforming') : t('chooseTemplate')}
                             </option>
-                            {templates.map((tpl) => <option key={tpl.id} value={tpl.id}>{tpl.label}</option>)}
+                            {templates.map((tpl) => <option key={tpl.id} value={tpl.id}>{templateLabel(tpl.id, tpl.label)}</option>)}
                           </select>
                         </label>
                       ) : null}
+                      {templates.length > 0 && !templatesFailed ? (
+                        <Button
+                          variant="quiet"
+                          aria-label={transforming.has(s.documentId) ? t('transformingFor', { title: s.title }) : t('transformApplyFor', { title: s.title })}
+                          loading={transforming.has(s.documentId)}
+                          disabled={!chosenTemplate[s.documentId]}
+                          onClick={() => {
+                            const v = chosenTemplate[s.documentId];
+                            if (v) void transform(s.documentId, v);
+                          }}
+                        >
+                          {t('transformApply')}
+                        </Button>
+                      ) : null}
                     </div>
+                    )}
                   </li>
                 );
               })}
@@ -934,10 +1203,12 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
         {/* Notes */}
         <div className="surface-card u-p-4 nb-panel">
           <h2 className="nb-panel__title"><ClipboardIcon size={16} /> {t('notesTitle')}</h2>
+          {readOnly ? null : (
           <form className="u-grid u-gap-2" onSubmit={(e) => { e.preventDefault(); void submitComposedNote(); }}>
             <TextareaField label={t('noteLabel')} value={noteText} onChange={(e) => setNoteText(e.target.value)} rows={3} placeholder={t('notePlaceholder')} />
             <Button variant="primary" type="submit" disabled={noteBusy || !noteText.trim()}><PlusIcon size={14} /> {t('addNote')}</Button>
           </form>
+          )}
           {notesFailed ? (
             <StateCard
               announce
@@ -949,12 +1220,15 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
           ) : notes === null ? (
             <Skeleton height={60} />
           ) : notes.length === 0 ? (
-            <StateCard icon={<ClipboardIcon size={20} />} title={t('noNotesTitle')} body={t('noNotesBody')} />
+            <StateCard icon={<ClipboardIcon size={20} />} title={t('noNotesTitle')} body={readOnly ? t('noNotesReadOnlyBody') : t('noNotesBody')} />
           ) : (
             <ul className="nb-list">
               {notes.map((n) => (
                 <li key={n.id} className="nb-list__item">
                   <div className="nb-note__body">{n.content}</div>
+                  {/* NBK92-16 — a note copied from a source is fenced for the analyst (ADR
+                      0601); say so, so the two kinds are not indistinguishable. */}
+                  {n.contentTrust === 'untrusted' ? <span className="chip chip--muted" title={t('noteFromSourceHint')}>{t('noteFromSource')}</span> : null}
                 </li>
               ))}
             </ul>
@@ -985,18 +1259,18 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
                   and the client had stopped waiting for it. */}
               {stallCard('transform', <ZapIcon size={20} />, t('stalledTransformTitle'), t('stalledTransformBody'))}
               {transformations.length === 0 && !panelStalled('transformations') ? (
-                <StateCard icon={<ZapIcon size={20} />} title={t('noTransformationsTitle')} body={t('noTransformationsBody')} />
+                <StateCard icon={<ZapIcon size={20} />} title={t('noTransformationsTitle')} body={readOnly ? t('noTransformationsReadOnlyBody') : t('noTransformationsBody')} />
               ) : transformations.length === 0 ? null : (
             <ul className="nb-list">
               {transformations.map((tr) => (
                 <li key={tr.documentId} className="nb-list__item">
                   <div className="nb-list__item-title">{tr.title}</div>
                   <div className="nb-list__item-meta">
-                    <span className="chip chip--accent">{tr.kind}</span>{' '}
+                    <span className="chip chip--accent">{templateLabel(tr.kind, t('templateGeneric'))}</span>{' '}
                     {formatRelativeTime(tr.createdAt)}
                   </div>
                   <div className="action-bar">
-                    <Button variant="quiet" onClick={() => navigate('/documents')}>
+                    <Button variant="quiet" onClick={() => void leave(`/documents/${encodeURIComponent(tr.documentId)}?org=${encodeURIComponent(notebook.orgId)}`)}>
                       <ArrowRightIcon size={14} /> {t('openInDocuments')}
                     </Button>
                   </div>
@@ -1036,14 +1310,18 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
                   <div key={h.chunkId} className="nb-hit">
                     <div className="nb-hit__head">
                       <span className="nb-list__item-title">{h.title}</span>
-                      <span className="chip chip--muted">{t('score', { score: Math.round(h.score * 100) })}</span>
+                      {/* Round-3 UX #1 — the CALIBRATED 0–1 relevance, not `score` (whose scale
+                          depends on the search mode: RRF ≈ 0.03, local rerank up to ≈ 8). */}
+                      {typeof h.relevance === 'number' ? <span className="chip chip--muted">{formatNumber(h.relevance, { style: 'percent', maximumFractionDigits: 0 })}</span> : null}
                     </div>
                     <div className="nb-hit__text">{h.text}</div>
+                    {readOnly ? null : (
                     <span className="action-bar">
                       <Button variant="quiet" onClick={() => void saveNote(h.text, 'third-party')} disabled={noteBusy}>
                         <ClipboardIcon size={14} /> {t('saveToNotes')}
                       </Button>
                     </span>
+                    )}
                   </div>
                 ))}
               </div>
@@ -1077,29 +1355,39 @@ function NotebookWorkspace({ notebook }: { notebook: Notebook }): JSX.Element {
  *  `ensure`-ing it. `ensure` is a POST that provisions a corpus; a viewer opening the tab
  *  used to fire it, get a 403, and see the raw "Missing required scope" text as a load
  *  failure. A project with no sources yet is a designed empty state, not an error. */
-export function ProjectSourcesPanel({ projectId, readOnly = false }: { projectId: string; readOnly?: boolean }): JSX.Element {
+export function ProjectSourcesPanel({ projectId, readOnly = false, onDirtyChange }: { projectId: string; readOnly?: boolean; onDirtyChange?: (dirty: boolean) => void }): JSX.Element {
   const { t } = useTranslation('notebooks');
   const [notebook, setNotebook] = useState<Notebook | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [none, setNone] = useState(false);
+  // Round-1 UX #14 — the panel-level failure offers a retry (its body says "try again").
+  const [reloadKey, setReloadKey] = useState(0);
+  const [retryingLoad, setRetryingLoad] = useState(false);
   useEffect(() => {
     let live = true;
+    // The failure card stays up (its Retry busy) until the read answers: clearing it
+    // first flashed a skeleton and dropped focus off the Retry button (round-3 UX #3).
     void (readOnly ? getNotebook(projectId) : ensureNotebook(projectId))
-      .then((nb) => { if (live) setNotebook(nb); })
+      .then((nb) => { if (live) { setNotebook(nb); setError(null); } })
       .catch((err: unknown) => {
         if (!live) return;
-        if (readOnly && (err as { status?: number }).status === 404) setNone(true);
-        else setError(err instanceof Error ? err.message : String(err));
-      });
+        if (readOnly && (err as { status?: number } | null)?.status === 404) setNone(true);
+        else {
+          setError(t('sourcesLoadFailedBody')); // NBK92-12 — never the server's English
+          // The card stays mounted across a retry, so its title is not re-announced:
+          // a retry that failed again says so (round-4 UX #1).
+          if (reloadKey > 0) announce(t('sourcesLoadFailedBody'));
+        }
+      })
+      .finally(() => { if (live) setRetryingLoad(false); });
     return () => { live = false; };
-  }, [projectId, readOnly]);
+  }, [projectId, readOnly, t, reloadKey]);
   if (none) return <StateCard title={t('sourcesNoneReadOnlyTitle')} body={t('sourcesNoneReadOnlyBody')} />;
-  if (error) return <StateCard announce title={t('loadFailed')} body={error} />;
+  if (error) return <StateCard announce title={t('loadFailed')} body={error} action={<Button variant="quiet" loading={retryingLoad} onClick={() => { setRetryingLoad(true); setReloadKey((k) => k + 1); }}>{t('retry')}</Button>} />;
   if (!notebook) return <Skeleton height={120} />;
   return (
     <>
-      {readOnly ? <p className="muted u-fs-12">{t('sourcesReadOnlyNote')}</p> : null}
-      <NotebookWorkspace notebook={notebook} />
+      <NotebookWorkspace notebook={notebook} readOnly={readOnly} {...(onDirtyChange ? { onDirtyChange } : {})} />
     </>
   );
 }
