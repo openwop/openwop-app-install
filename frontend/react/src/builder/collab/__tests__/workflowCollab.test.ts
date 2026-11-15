@@ -11,6 +11,20 @@
  *  - The graph scalars (name/defaultInputs) converge on the root map.
  *  - `workflowCollabSlice` keeps REST-owned identity fields (id/version/
  *    timestamps) OUT of the room.
+ *  - BUILDER-PORT-1 (ADR 0440/0773): an edge's `canonicalSourceOutput` binding —
+ *    `null` (the default output) or an exact name — survives the room through
+ *    concurrent per-field edits (A's label, B's condition) and reaches the wire
+ *    through `serializeWorkflow` (null → no `sourceOutput`, a name → that name).
+ *
+ * Red when (wave 109 w109g2-wc-* probes): the materializer drops a collection; id
+ * pairing falls back to positional; leftovers are rebuilt instead of updated per
+ * field; a collection is replaced whole on each commit; the undo manager tracks
+ * remote origins; the slice drops `variables` or keeps `id`; `buildItem` or
+ * `updateItem` treats a `null` field as absent; the serializer stops mapping a
+ * null binding to "no sourceOutput" or a name to itself.
+ * Not separable here: with these edges in the same order on both peers, id and
+ * positional pairing choose alike, so the BUILDER-PORT-1 case is held by the
+ * per-field update, not by id pairing (the swap and delete cases hold that).
  */
 import { describe, it, expect } from 'vitest';
 import * as Y from 'yjs';
@@ -161,7 +175,9 @@ it('concurrent edge label/condition changes keep null/exact output bindings thro
   const nodes = [node('a'), node('b')];
   const edges = [{ ...edge('default', 'a', 'b'), canonicalSourceOutput: null }, { ...edge('named', 'a', 'b'), canonicalSourceOutput: 'output' }];
   try {
-    A.seed({ name: 'Bindings', nodes, edges }); flush(); B.current();
+    A.seed({ name: 'Bindings', nodes, edges }); flush();
+    // The seed must carry the null binding by itself: the later per-field `set` rewrites the key and would hide a dropped null.
+    expect(B.current().edges).toEqual(edges);
     A.set({ name: 'Bindings', nodes, edges: edges.map(e => ({ ...e, label: 'peer A' })) });
     B.set({ name: 'Bindings', nodes, edges: edges.map(e => ({ ...e, condition: { path: 'ready', op: 'truthy' } })) });
     flush();

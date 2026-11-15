@@ -123,14 +123,18 @@ describe('the byok_required failure names the exits', () => {
     expect(err?.code).toBe('byok_required');
     expect(err?.message).toContain('This step needs a anthropic API key and this workspace has none.');
     expect(err?.message).toContain('Settings → Secrets Vault');
-    expect(err?.message).toContain('re-create the workflow choosing a provider you already have a key for');
+    expect(err?.message).toContain('use a provider you already have a key for: choose it when you start the run');
+    expect(err?.message).toContain('re-create the workflow with it');
+    // ADR 1117 (DAC-3): a deferred copy chooses its provider per run, so the copy
+    // must not claim the provider is fixed at creation.
+    expect(err?.message).not.toContain('fixed when the workflow is created');
   });
 
   it('states plainly that there is no silent provider fallback', () => {
     // The property that makes the message actionable rather than merely polite:
     // the user must know waiting/retrying will not help.
     expect(err?.code).toBe('byok_required');
-    expect(err?.message).toContain('will not fall back to a different one on its own');
+    expect(err?.message).toContain('will not fall back to a different provider on its own');
   });
 
   it('still carries availableRefs in details for operators', () => {

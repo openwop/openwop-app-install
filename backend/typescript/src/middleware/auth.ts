@@ -200,11 +200,13 @@ async function mfaGap(activeTenant: string, personalTenant: string | undefined, 
 async function refuseIfMfaRequired(
   req: import('express').Request,
   res: import('express').Response,
+  next: import('express').NextFunction,
   activeTenant: string,
   personalTenant: string | undefined,
 ): Promise<boolean> {
   if (isMfaGateExempt(req.path)) return false;
   if (!(await mfaGap(activeTenant, personalTenant, req.mfaVerified === true))) return false;
+  if (isAccessCheckedAssetRead(req.method, req.path)) { passAnonymous(req, next); return true; }
   res.status(401).json({
     error: 'unauthenticated',
     message: 'This workspace requires two-factor authentication. Enroll an authenticator app in Settings → Security, sign in again, and retry.',
@@ -675,7 +677,23 @@ export function resetFeaturePublicPathsForTests(): void { FEATURE_PUBLIC_PATHS.c
  * are admin writes that must never ride this carve-out.
  */
 export function isCredentialOptionalRead(method: string, path: string): boolean {
-  return (method === 'GET' || method === 'HEAD') && /^\/content\/pages\/[^/]+$/.test(path);
+  return ((method === 'GET' || method === 'HEAD') && /^\/content\/pages\/[^/]+$/.test(path)) || isAccessCheckedAssetRead(method, path);
+}
+
+/**
+ * ADR 1122 — an asset read once `OPENWOP_ASSET_ACCESS` is `report` or `enforce`.
+ * The serve route then decides who may read the bytes, so it has to see a
+ * credential when one is presented, which the public-prefix bypass never does.
+ * Like the content-page read above, no credential (and a stale or invalid cookie,
+ * which verifies to null) passes through anonymous: a published page's images must
+ * keep loading for a visitor whose old session expired. With the switch `off` the
+ * path stays a plain public prefix, exactly as before.
+ */
+function isAccessCheckedAssetRead(method: string, path: string): boolean {
+  const mode = process.env.OPENWOP_ASSET_ACCESS?.trim().toLowerCase();
+  return (mode === 'report' || mode === 'enforce')
+    && (method === 'GET' || method === 'HEAD')
+    && /^\/host\/openwop-app\/assets\/[^/]+$/.test(path);
 }
 
 
@@ -1101,14 +1119,34 @@ const SESSION_REFUSAL_CODES: ReadonlySet<string> = new Set(['account_disabled', 
  *  a definitive refusal; never mints an anon session on either outcome (the
  *  caller returns immediately — the SPA's sign-in modal owns recovery; a silent
  *  anon downgrade would mask the lockout). */
-function refuseSession(res: Parameters<RequestHandler>[1], next: Parameters<RequestHandler>[2], err: unknown): void {
+function refuseSession(req: Parameters<RequestHandler>[0], res: Parameters<RequestHandler>[1], next: Parameters<RequestHandler>[2], err: unknown): void {
   if (err instanceof OpenwopError && SESSION_REFUSAL_CODES.has(err.code)) {
     // ADR 0621 — a refusal is a security event; log it ids-only so an operator
     // can see a lockout land (the cookie clear is otherwise invisible).
     log.warn('session_refused', { code: err.code, status: err.httpStatus });
     clearSessionCookie(res);
+    // ADR 1122 — an asset read carries no session it could recover: a published
+    // page's image must still load. It continues anonymous, and the serve route
+    // decides the read without the refused identity.
+    if (isAccessCheckedAssetRead(req.method, req.path)) { passAnonymous(req, next); return; }
   }
   next(err);
+}
+
+/** ADR 1122 — continue an asset read as if no credential had been sent: none of
+ *  a refused session's identity may reach the serve route's decision. */
+function passAnonymous(req: Parameters<RequestHandler>[0], next: Parameters<RequestHandler>[2]): void {
+  delete req.principal;
+  delete req.userId;
+  delete req.tenantId;
+  delete req.personalTenant;
+  delete req.mfaVerified;
+  delete req.sessionEpoch;
+  delete req.cookieSession;
+  delete req.anonymousPrincipal;
+  delete req.oidcEmail;
+  delete req.oidcAuthTime;
+  next();
 }
 
 /** When bearer verification fails, the middleware can either (a) emit
@@ -1131,7 +1169,7 @@ export function authMiddleware(): RequestHandler {
   // (tenantRequiresMfa) — a transient DB error must become next(err), not a
   // hung request + process-level unhandled rejection.
   const inner: (req: Parameters<RequestHandler>[0], res: Parameters<RequestHandler>[1], next: Parameters<RequestHandler>[2]) => Promise<void> = async (req, res, next) => {
-    if (isPublicPath(req.path)) {
+    if (isPublicPath(req.path) && !isAccessCheckedAssetRead(req.method, req.path)) {
       next();
       return;
     }
@@ -1378,7 +1416,7 @@ export function authMiddleware(): RequestHandler {
               validatedEpoch = (await assertPersonalSubjectLive(personalTenant, subject, { session: unboundCookie }))?.epoch;
             }
           } catch (err: unknown) {
-            refuseSession(res, next, err);
+            refuseSession(req, res, next, err);
             return;
           }
           req.sessionEpoch = validatedEpoch;
@@ -1414,7 +1452,7 @@ export function authMiddleware(): RequestHandler {
               && bearerSignInS !== undefined && bearerSignInS < cookieSession.iat) {
             req.mfaVerified = true;
           }
-          if (await refuseIfMfaRequired(req, res, active, personalTenant)) return;
+          if (await refuseIfMfaRequired(req, res, next, active, personalTenant)) return;
           req.personalTenant = personalTenant;
           req.tenantId = active;
           // Bound (post-bind) callers present the stable `user:<userId>` principal;
@@ -1686,7 +1724,7 @@ export function authMiddleware(): RequestHandler {
       try {
         req.sessionEpoch = (await assertSessionSubjectLive(session))?.epoch;
       } catch (err: unknown) {
-        refuseSession(res, next, err);
+        refuseSession(req, res, next, err);
         return;
       }
       // Sliding-window refresh: if the cookie is past the refresh
@@ -1733,7 +1771,7 @@ export function authMiddleware(): RequestHandler {
     // was presented. Read `tier`, not the `anon:` tenant prefix: the prefix is
     // an encoding that could change, the tier is the decision.
     if (session.tier === 'anon') req.anonymousPrincipal = true;
-    if (await refuseIfMfaRequired(req, res, activeTenant, personalTenant)) return;
+    if (await refuseIfMfaRequired(req, res, next, activeTenant, personalTenant)) return;
     // ADR 0601 — the first two carry a real RBAC subject (`user:<id>` /
     // `oidc:<sub>`); the third is a throwaway anon session id that is a member of
     // nothing by construction. Recording which is which is what lets an authority

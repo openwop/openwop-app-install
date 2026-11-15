@@ -45,6 +45,7 @@
 import type { Express, Request } from 'express';
 import { OpenwopError } from '../types.js';
 import {
+  type Organization,
   BUILT_IN_ROLES,
   BUILT_IN_ROLE_IDS,
   resolveEffectiveAccess,
@@ -91,6 +92,7 @@ import {
 } from '../host/protocolAuthorization.js';
 import { callerSubject, isOwnPersonalWorkspace, tenantOf } from '../host/requestSubject.js';
 import { isSuperadmin, superadminNeedsMfa } from '../host/superadmin.js';
+import { recordLegacySubjectBind, type AddExistingGuards } from './orgAddExisting.js';
 import { actingAccess, actingMemberId, callerOrgAccess, callerTenantAccess } from '../host/actingAccess.js';
 import { memberAdded, memberRolesChanged, registerMemberLifecycleEvents } from '../host/memberLifecycleEvents.js';
 
@@ -328,9 +330,34 @@ async function loadOrgOwned(req: Request, orgId: string) {
 }
 
 /** The caller's organizations as `GET /orgs` lists them — the ONE reader that route
- *  and the Access hub summary share (ADR 0864 D2). */
-export function listCallerOrgs(req: Request) {
-  return listOrgs(tenantOf(req));
+ *  and the Access hub summary share (ADR 0864 D2).
+ *
+ *  Issue 5929 item 2 — it returned every org in the tenant, so in a workspace that
+ *  holds several clients every member saw every client's name in each org picker.
+ *  It now lists the orgs the caller can act in: those where `callerOrgAccess`
+ *  (narrowed by act-as) holds any scope. That resolver already carries the right
+ *  exits (the personal owner, the demo single-principal sandbox), so nothing here
+ *  is keyed on the RFC 0049 enforcement switch, which the org routes never read.
+ *  Everything is listed for an operator (superadmin, wildcard bearer, env key) and
+ *  for a workspace admin: `host:members:manage` on the ROOT of a membership-rooted
+ *  workspace. Elsewhere (the shared SSO `default` tenant) the tenant-level union
+ *  spans sub-orgs, so an admin of one client would see the others. There it is
+ *  per org. */
+export async function listCallerOrgs(req: Request): Promise<Organization[]> {
+  const tenantId = tenantOf(req);
+  const orgs = await listOrgs(tenantId);
+  if (orgs.length === 0) return orgs;
+  if (isSuperadmin(req) || req.principal?.tenants?.includes('*') === true || req.principal?.auth?.kind === 'env-key') return orgs;
+  if (isMembershipRootedWorkspace(tenantId) && callerSubject(req)) {
+    const admin = await actingAccess(req, await callerTenantAccess(req));
+    if (admin.scopes.includes('host:members:manage')) return orgs;
+  }
+  const visible: Organization[] = [];
+  for (const org of orgs) { // sequential: each resolve reads the member stores, and the pool is small
+    const access = await actingAccess(req, await callerOrgAccess(req, org.orgId), org.orgId);
+    if (access.scopes.length > 0) visible.push(org);
+  }
+  return visible;
 }
 
 /** Organization and workspace-member counts for the Access hub summary (ADR 0864).
@@ -340,6 +367,10 @@ export async function readOrgCounts(req: Request): Promise<{ orgs: number; membe
   const [orgs, members] = await Promise.all([listCallerOrgs(req), listWorkspaceRootMembers(tenantOf(req))]);
   return { orgs: orgs.length, members: members.length };
 }
+
+/** ADR 1123 — the guards `POST …/members` uses, handed to `orgAddExisting.ts`
+ *  (mounted next in `registerAllRoutes`) so the role and owner rules have one copy. */
+export const ACCESS_CONTROL_MEMBER_GUARDS: AddExistingGuards = { loadOrgOwned, requireScope, requireOwner, namesOwner, validRoleIds, parseRoleIds, listCallerOrgs };
 
 export function registerAccessControlRoutes(app: Express): void {
   registerMemberLifecycleEvents(); // ADR 0815 D5
@@ -563,7 +594,7 @@ export function registerAccessControlRoutes(app: Express): void {
 
   app.post('/host/openwop-app/orgs/:orgId/members', async (req, res, next) => {
     try {
-      await loadOrgOwned(req, req.params.orgId);
+      const org = await loadOrgOwned(req, req.params.orgId);
       const access = await requireScope(req, 'host:members:manage');
       const body = (req.body ?? {}) as {
         displayName?: unknown;
@@ -594,7 +625,10 @@ export function registerAccessControlRoutes(app: Express): void {
       });
       // ADR 0815 D5 — only a NEW row is a transition (`createMember` converges on
       // an existing root row, ADR 0697 D1).
-      if (member.createdAt >= startedAt) memberAdded(member, callerSubject(req));
+      if (member.createdAt >= startedAt) {
+        memberAdded(member, callerSubject(req));
+        await recordLegacySubjectBind(req, org, member); // ADR 1123 interim (#5945)
+      }
       res.status(201).json(member);
     } catch (err) {
       next(err);
@@ -603,7 +637,7 @@ export function registerAccessControlRoutes(app: Express): void {
 
   app.patch('/host/openwop-app/orgs/:orgId/members/:memberId', async (req, res, next) => {
     try {
-      await loadOrgOwned(req, req.params.orgId);
+      const org = await loadOrgOwned(req, req.params.orgId);
       const access = await requireScope(req, 'host:members:manage');
       const member = await getMember(req.params.memberId);
       if (!member || member.tenantId !== tenantOf(req) || member.orgId !== req.params.orgId) {
@@ -650,6 +684,8 @@ export function registerAccessControlRoutes(app: Express): void {
       });
       if (updated) {
         memberRolesChanged(updated, member.roles, updated.roles, callerSubject(req)); // ADR 0815 D5
+        // ADR 1123 interim (#5945) — a placeholder bound to a person through the old lane.
+        if (!member.subject && updated.subject) await recordLegacySubjectBind(req, org, updated, { placeholderMemberId: member.memberId });
         // ADR 0815 D4 — an invite is a delegation of `host:members:manage`; a
         // demotion that takes it away takes down what it delegated, as removal does.
         await cascadeLostManagement(req, req.params.orgId, managersBefore);

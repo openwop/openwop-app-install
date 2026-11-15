@@ -8,6 +8,7 @@
  * the suspended node's index + the resolved value as input.
  */
 
+import { gateRequiresSession, REQUIRES_SESSION_REASON } from '../host/approvalGateDecide.js';
 import { APPROVAL_DATA_LOOPBACK_FIELD, LOOPBACK_EXHAUSTED_REASON } from '../executor/loopbackWire.js';
 import { isRefineResolution } from '../executor/loopback.js';
 import { assertNotSubWorkflowMirror } from '../host/subWorkflowMirrorGuard.js';
@@ -426,7 +427,9 @@ ${bodyHtml}
         ? { title: 'Already decided', body: 'This request was already decided (or the run has finished). Nothing more to do.' }
         : err.httpStatus === 404
           ? { title: 'Link not valid', body: 'This link isn\u2019t valid. If you copied it from an email, make sure the whole link was copied.' }
-          : null;
+          : err.httpStatus === 403 && (err.details as { reason?: unknown } | undefined)?.reason === REQUIRES_SESSION_REASON
+            ? { title: 'Sign in to decide', body: 'This request can only be decided in the app, by a signed-in person.' }
+            : null;
     if (!copy) return false;
     res.status(err.httpStatus).type('html').send(confirmShell(copy.title,
       `<h1 style="font-size:1.1rem">${esc(copy.title)}</h1><p>${esc(copy.body)}</p><p><a href="/inbox">Review in the app</a></p>`));
@@ -447,6 +450,10 @@ ${bodyHtml}
       // Validates + surfaces the honest lifecycle answer BEFORE rendering the
       // form (an expired link gets the 410 story in plain language, not a form).
       const interrupt = await loadInterruptByTokenChecked(storage, token, { allowResolved: false });
+      // ADR 1120 — a signed-in gate gets no decide form from a token link.
+      if (gateRequiresSession(interrupt.data)) {
+        throw new OpenwopError('forbidden', 'This request can only be decided by a signed-in person, in the app.', 403, { reason: REQUIRES_SESSION_REASON });
+      }
       const data = (interrupt.data ?? {}) as { prompt?: unknown };
       const prompt = typeof data.prompt === 'string' ? data.prompt.slice(0, 300) : 'Please confirm your decision.';
       const heading = action === 'approve' ? 'Confirm approval' : 'Confirm rejection';
@@ -1638,6 +1645,13 @@ export async function resolveAndResume(
   }
   // ADR 1009 — the same rule for an approval in a run that read untrusted content.
   if (reviewer?.capabilityToken === true && reviewer.preclaimed !== true) await assertApprovalTokenLaneTrusted(storage, interrupt);
+  // ADR 1120 (Book AI P53) — a gate configured `decide: 'signed-in'` is never decided
+  // by presenting its resume token, on any token door. Keyed on the RECORDED gate data,
+  // so a leaked or newly minted token does not bypass it. The run-scoped door is the
+  // way in. Before any claim, so the refusal consumes nothing.
+  if (reviewer?.tokenPresented === true && reviewer.preclaimed !== true && gateRequiresSession(interrupt.data)) {
+    throw new OpenwopError('forbidden', 'This request can only be decided by a signed-in person, in the app.', 403, { interruptId, reason: REQUIRES_SESSION_REASON });
+  }
   // ADR 1001 D6 — an agent's question past its deadline is closed to people on
   // EVERY lane (the token lane already 410s on `expiresAt`); only the host's
   // expiry, preclaimed, resolves it. Otherwise a late answer would race the

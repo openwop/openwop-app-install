@@ -5,14 +5,18 @@
  * OUTPUTS; the never-compact-schema-reads rule is witnessed by
  * schema-read-exemption-completeness.test.ts): off ⇒ the same object back
  * (byte-identical request); on ⇒ the annotation denylist stripped at every depth,
- * through arrays, while every functional key ($ref/$defs, description, enum,
- * required, …) survives; and the caller's schema is never mutated (the replay
- * cache key projects the logical schema, ADR 0148 A3 replay-safety invariant).
+ * through arrays, but only in KEYWORD position (ADR 1003 D1: a parameter NAMED
+ * `title` is kept, and value positions such as `enum`/`default`/`const` are copied
+ * verbatim), while every functional key ($ref/$defs, description, enum, required, …)
+ * survives; and the caller's schema is never mutated (the replay cache key projects
+ * the logical schema, ADR 0148 A3 replay-safety invariant).
  *
- * Sabotage (grade-tests w28): ignoring the flag, un-listing an annotation key,
- * listing a functional key, skipping object or array recursion, or deleting keys
- * from the caller's schema each turn a case red. Every case builds a FRESH schema
- * so one case's mutation cannot pre-satisfy another's snapshot.
+ * Sabotage (grade-tests w28, re-probed w108 under TST-HEC-15): ignoring the flag,
+ * un-listing an annotation key, listing a functional key, skipping object or array
+ * recursion, or deleting keys from the caller's schema each turn a case red; so do
+ * walking a `properties` map as if it were a schema (the depth-blind first version)
+ * and recursing into `enum`/`default`/`const` values. Every case builds a FRESH
+ * schema so one case's mutation cannot pre-satisfy another's snapshot.
  */
 import { describe, it, expect } from 'vitest';
 import { compactToolSchema } from '../src/providers/toolSchemaCompaction.js';
@@ -119,8 +123,13 @@ describe('compactToolSchema', () => {
       },
     };
     const out = compactToolSchema(s, true);
-    expect(Object.keys(at(out, 'properties') as object).sort()).toEqual(['$id', 'deprecated', 'examples', 'title']);
-    expect(at(out, 'properties', 'title')).toEqual({ type: 'string', description: 'The title.' });
+    // Every parameter survives by NAME; only the `title` KEYWORD inside `title` goes.
+    expect(at(out, 'properties')).toEqual({
+      title: { type: 'string', description: 'The title.' },
+      examples: { type: 'array', items: { type: 'string' } },
+      deprecated: { type: 'boolean' },
+      $id: { type: 'string' },
+    });
     expect(at(out, 'required')).toEqual(['title']);
   });
 

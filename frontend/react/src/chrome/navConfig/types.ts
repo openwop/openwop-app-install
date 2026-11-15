@@ -25,8 +25,9 @@ export interface ItemOverride {
   group?: string;
   /** Position within its (possibly overridden) header. */
   order?: number;
-  /** Hide a feature-gated item from the menu. IGNORED for always-on items
-   *  (those without a `featureId`) — they can be moved but never hidden. */
+  /** Hide the item from the menu (presentation only; the route still
+   *  resolves). IGNORED for a `nav.lockVisible` entry (ADR 1106 D1), which can
+   *  be moved but never hidden. */
   hidden?: boolean;
 }
 

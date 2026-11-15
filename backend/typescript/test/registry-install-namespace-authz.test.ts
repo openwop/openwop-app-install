@@ -19,6 +19,14 @@
  * without the dot → `dot boundary` red; the D3 re-hash disabled → `SECOND root
  * pack.json` red; the namespace check's catch failing OPEN → `UNREACHABLE` red
  * (only with legacy paths on — see that case).
+ *
+ * Re-probed wave 109 (w109g2-ri-*), plus: the namespace predicate admitting nothing →
+ * `CONTROL` red; the staged re-hash moved back AFTER the swap into destDir → `a refused
+ * duplicate-pack.json` red (the prior install is destroyed); the namespace check moved
+ * after extraction → `refuses a key…` red on "nothing reached disk". Every refusal is
+ * asserted by its EXACT message, because `pack_signature_invalid` is also the bare
+ * signature-failure code and `pack_integrity_mismatch` is also the tarball SRI code:
+ * a code-only match could not tell which guard refused.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createHash, generateKeyPairSync, sign as edSign } from 'node:crypto';
@@ -121,7 +129,9 @@ describe('ADR 0660 D1 — the registry must AUTHORIZE the key for the pack names
     const tgz = tarball({ 'pack.json': pj, 'index.mjs': 'export default {}' });
     serve({ name: 'core.openwop.evil', version: '1.0.0', keyId: 'acme-key', tgz, signedBytes: Buffer.from(pj) });
 
-    await expect(install('core.openwop.evil')).rejects.toThrow(/pack_signature_invalid/);
+    await expect(install('core.openwop.evil')).rejects.toThrow(
+      'pack_signature_invalid: key acme-key is not authorized for the namespace of core.openwop.evil',
+    );
     expect(existsSync(join(packDir, 'core.openwop.evil')), 'nothing reached disk').toBe(false);
   });
 
@@ -139,7 +149,10 @@ describe('ADR 0660 D1 — the registry must AUTHORIZE the key for the pack names
     const tgz = tarball({ 'pack.json': pj, 'index.mjs': 'export default {}' });
     serve({ name: 'acme.widgets', version: '1.0.0', keyId: 'ghost-key', tgz, signedBytes: Buffer.from(pj), signingKeys: [{ keyId: 'someone-else', permittedNamespaces: ['acme.*'] }] });
 
-    await expect(install('acme.widgets')).rejects.toThrow(/pack_signature_invalid/);
+    await expect(install('acme.widgets')).rejects.toThrow(
+      `pack_signature_invalid: key ghost-key is not in ${REGISTRY} signingKeys[]`,
+    );
+    expect(existsSync(join(packDir, 'acme.widgets')), 'nothing reached disk').toBe(false);
   });
 
   it('an UNREACHABLE discovery document is a typed refusal, never a pass', async () => {
@@ -159,7 +172,11 @@ describe('ADR 0660 D1 — the registry must AUTHORIZE the key for the pack names
     // namespace check's own discovery read is the only thing left to refuse.
     process.env.OPENWOP_REGISTRY_LEGACY_V1_PATHS = 'true';
     try {
-      await expect(install('acme.widgets')).rejects.toThrow(/pack_registry_unreachable/);
+      // Anchored: the namespace check's own refusal, not the upstream endpoint
+      // resolver's `… did not answer` (the same code, a different guard).
+      await expect(install('acme.widgets')).rejects.toThrow(
+        /^pack_registry_unreachable: https:\/\/registry\.test\/\.well-known\/openwop-registry\.json$/,
+      );
       expect(existsSync(join(packDir, 'acme.widgets'))).toBe(false);
     } finally {
       delete process.env.OPENWOP_REGISTRY_LEGACY_V1_PATHS;
@@ -171,7 +188,10 @@ describe('ADR 0660 D1 — the registry must AUTHORIZE the key for the pack names
     const tgz = tarball({ 'pack.json': pj, 'index.mjs': 'export default {}' });
     serve({ name: 'acmecorp.widgets', version: '1.0.0', keyId: 'acme-key', tgz, signedBytes: Buffer.from(pj) });
 
-    await expect(install('acmecorp.widgets')).rejects.toThrow(/pack_signature_invalid/);
+    await expect(install('acmecorp.widgets')).rejects.toThrow(
+      'pack_signature_invalid: key acme-key is not authorized for the namespace of acmecorp.widgets',
+    );
+    expect(existsSync(join(packDir, 'acmecorp.widgets')), 'nothing reached disk').toBe(false);
   });
 });
 
@@ -191,6 +211,9 @@ function duplicatePackJsonTarball(version: string): { tgz: Buffer; benign: strin
   return { tgz: gzipSync(readFileSync(out)), benign };
 }
 
+/** The staged re-hash's own refusal — not the tarball SRI mismatch, which shares the code. */
+const D3_REFUSAL = 'pack_integrity_mismatch: the installed pack.json is not the bytes that were verified';
+
 describe('ADR 0660 D3 — verify one artifact, install another', () => {
   it('refuses a tarball whose SECOND root pack.json overwrites the one that was verified', async () => {
     // `extractPackJsonFromTarball` reads the FIRST entry; `tar -xzf` lets the LAST win on
@@ -198,7 +221,8 @@ describe('ADR 0660 D3 — verify one artifact, install another', () => {
     const { tgz, benign } = duplicatePackJsonTarball('1.0.0');
     serve({ name: 'acme.widgets', version: '1.0.0', keyId: 'acme-key', tgz, signedBytes: Buffer.from(benign) });
 
-    await expect(install('acme.widgets')).rejects.toThrow(/pack_integrity_mismatch/);
+    await expect(install('acme.widgets')).rejects.toThrow(D3_REFUSAL);
+    expect(existsSync(join(packDir, 'acme.widgets')), 'nothing reached disk').toBe(false);
   });
 
   /**
@@ -223,7 +247,7 @@ describe('ADR 0660 D3 — verify one artifact, install another', () => {
 
     const { tgz, benign } = duplicatePackJsonTarball('1.0.0');
     serve({ name: 'acme.widgets', version: '1.0.0', keyId: 'acme-key', tgz, signedBytes: Buffer.from(benign) });
-    await expect(install('acme.widgets')).rejects.toThrow(/pack_integrity_mismatch/);
+    await expect(install('acme.widgets')).rejects.toThrow(D3_REFUSAL);
 
     // The correct outcome: the refused bytes never land, and the prior install survives.
     const onDisk = readFileSync(join(packDir, 'acme.widgets', 'pack.json'), 'utf-8');

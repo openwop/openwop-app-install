@@ -30,24 +30,50 @@
  * Correction 2026-11-07 (ADR 0368): ordinary-mode evidence received `starting`
  * instead of `waiting-user`. Retain the current waiting continuation and clear
  * it on resolution/advance/teardown; the same body is now an ordinary regression.
+ *
+ * w108 re-grade — the continuation cases added with that fix, and what holds them:
+ *  - WITNESSED singly: the HITL branch's retention write; resolveWaitingStep's
+ *    owner check (`currentStepRef.current === current`) and its clear (the clear
+ *    nulls pendingRef AND currentStepRef — a DOUBLE GUARD, so the probe empties
+ *    the whole `if`); resume keeping the step identity (`continuation ??`);
+ *    confirmHitl's `pausedRef` check (the same-batch case: the captured
+ *    `confirm` still sees `waiting-user`); the completion callback's `live()`
+ *    and paused checks; the post-body `fetchOpenStep` re-check (the "body" row);
+ *    the subscription's run check.
+ *  - `fetchOpenStep`'s two run re-checks (after the response, after the body)
+ *    BOTH stop the "response" row (double guard): the break-both probe drops both.
+ *  - confirmHitl's `status !== 'waiting-user'` and `pausedRef` checks now BOTH
+ *    stop a confirm while paused (double guard): the break-both probe drops both.
+ *  - TRIPLE GUARDS (no single or held-pair edit reds them, by design): "advancing
+ *    to another node" (performStep's supersede, resume's nodeId match, and
+ *    performStep's continuation check) and "a %s clears paused continuation"
+ *    (teardown/attach clearing pendingRef + currentStepRef, and resume's runId
+ *    match). Their positive halves (status, step, resolve args) are witnessed.
+ * Mocks are typed against the real clients; fixtures are production-shaped
+ * (`CreateRunResponse`, `ResolveInterruptResponse`, `RunSnapshot` — the in-flight
+ * status is the real `waiting-input`, not the impossible `waiting_interrupt`).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { ReactNode } from 'react';
+import type { CreateRunResponse, ResolveInterruptResponse, RunSnapshot } from '@openwop/openwop';
+import type * as RunsClient from '../../client/runsClient.js';
+import type * as InterruptsClient from '../../client/interruptsClient.js';
+import type * as WorkflowsClient from '../../client/workflowsClient.js';
 
-const createRun = vi.fn();
-const cancelRun = vi.fn().mockResolvedValue(undefined);
+const createRun = vi.fn<typeof RunsClient.createRun>();
+const cancelRun = vi.fn<typeof RunsClient.cancelRun>().mockResolvedValue(undefined);
 // ADR 0730 C.4 — the resume-in-flight branch reads the run snapshot through
 // `getRun` (major 2, tenant-bound) instead of a raw `GET /v1/runs/{id}`. This
 // mock previously declared only createRun/cancelRun, so the new import resolved
 // to `undefined`, the call threw, and the branch fell through to a fresh start —
 // which looked exactly like the WALK-9 defect the test exists to catch.
-const getRun = vi.fn();
+const getRun = vi.fn<typeof RunsClient.getRun>();
 vi.mock('../../client/runsClient.js', () => ({
-  createRun: (...a: unknown[]) => createRun(...a),
-  cancelRun: (...a: unknown[]) => cancelRun(...a),
-  getRun: (...a: unknown[]) => getRun(...a),
+  createRun: (...a: Parameters<typeof RunsClient.createRun>) => createRun(...a),
+  cancelRun: (...a: Parameters<typeof RunsClient.cancelRun>) => cancelRun(...a),
+  getRun: (...a: Parameters<typeof RunsClient.getRun>) => getRun(...a),
 }));
 
 let onEvent: ((ev: Record<string, unknown>) => void) | null = null;
@@ -58,11 +84,23 @@ vi.mock('../../client/streamsClient.js', () => ({
   },
 }));
 
-const resolveByRun = vi.fn().mockResolvedValue({});
-vi.mock('../../client/interruptsClient.js', () => ({ resolveByRun: (...a: unknown[]) => resolveByRun(...a) }));
+const resolveByRun = vi.fn<typeof InterruptsClient.resolveByRun>();
+vi.mock('../../client/interruptsClient.js', () => ({
+  resolveByRun: (...a: Parameters<typeof InterruptsClient.resolveByRun>) => resolveByRun(...a),
+}));
 
-const getWorkflowDefinition = vi.fn().mockResolvedValue(null); // best-effort default: no def
-vi.mock('../../client/workflowsClient.js', () => ({ getWorkflowDefinition: (...a: unknown[]) => getWorkflowDefinition(...a) }));
+const getWorkflowDefinition = vi.fn<typeof WorkflowsClient.getWorkflowDefinition>(); // best-effort default: no def
+vi.mock('../../client/workflowsClient.js', () => ({
+  getWorkflowDefinition: (...a: Parameters<typeof WorkflowsClient.getWorkflowDefinition>) => getWorkflowDefinition(...a),
+}));
+
+/** Production-shaped client answers (the real exported types, no casts). */
+const created = (runId: string): CreateRunResponse => ({ runId, status: 'running', eventsUrl: `/runs/${runId}/events` });
+const resolvedStep = (runId: string, nodeId: string): ResolveInterruptResponse => ({ runId, nodeId, status: 'running' });
+const snapshotOf = (runId: string, status: RunSnapshot['status']): RunSnapshot => ({
+  runId, workflowId: 'walkthrough-inflight', status, eventLogSchemaVersion: 3,
+  owner: { tenant: 't1', subject: { issuer: 'urn:openwop:test', subjectId: 'u1', tenant: 't1', lane: 'session', kind: 'user' } },
+});
 
 import { WopError } from '@openwop/openwop';
 import { useWalkthroughPlayer } from '../useWalkthroughPlayer.js';
@@ -81,11 +119,12 @@ function stubInterrupts(rows: Array<Record<string, unknown>>): void {
 
 beforeEach(() => {
   __resetWalkthroughRegistryForTests();
-  createRun.mockReset().mockResolvedValue({ runId: 'run-1' });
+  createRun.mockReset().mockResolvedValue(created('run-1'));
   getRun.mockReset();
-  resolveByRun.mockReset().mockResolvedValue({});
+  resolveByRun.mockReset().mockImplementation(async (runId, nodeId) => resolvedStep(runId, nodeId));
   getWorkflowDefinition.mockReset().mockResolvedValue(null);
   cancelRun.mockClear();
+  onEvent = null; // no case may drive a previous case's subscription
   sessionStorage.clear();
 });
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -191,15 +230,19 @@ describe('useWalkthroughPlayer', () => {
     await waitFor(() => expect(result.current.status).toBe('waiting-user'));
     expect(resolveByRun).not.toHaveBeenCalled();
 
-    await act(async () => { await result.current.confirmHitl(); });
-    expect(resolveByRun).toHaveBeenCalledWith('run-1', 's9', { acked: true });
-
-    // Status guard: while PAUSED the step is still set and the run still active,
-    // so only `status !== 'waiting-user'` stops an "I did it" from resolving it.
-    resolveByRun.mockClear();
+    // Paused guard, driven while the step is still OWNED (unresolved): after a
+    // resolve, confirmHitl's owner check alone would stop it (w108 mid-run: the
+    // break-both probe stayed green here when this ran after the confirm).
+    // `status !== 'waiting-user'` AND `pausedRef` both stop this confirm (double
+    // guard since ADR 0368's 2026-11-07 fix; the break-both probe drops both).
     act(() => { result.current.pause(); });
     await act(async () => { await result.current.confirmHitl(); });
     expect(resolveByRun).not.toHaveBeenCalled();
+    act(() => { result.current.resume(); });
+    await waitFor(() => expect(result.current.status).toBe('waiting-user'));
+
+    await act(async () => { await result.current.confirmHitl(); });
+    expect(resolveByRun).toHaveBeenCalledWith('run-1', 's9', { acked: true });
 
     // Idle/no-step guard: a second confirm after completion is a no-op.
     resolveByRun.mockClear();
@@ -272,6 +315,9 @@ describe('useWalkthroughPlayer', () => {
     await act(async () => { await result.current.launch('walkthrough-resolved'); });
     await waitFor(() => expect(result.current.status).toBe('waiting-user'));
     await act(async () => { await result.current.confirmHitl(); });
+    // Resolved ⇒ released: a second "I did it" on the still-rendered step is a no-op.
+    await act(async () => { await result.current.confirmHitl(); });
+    expect(resolveByRun).toHaveBeenCalledTimes(1);
     act(() => { result.current.pause(); });
     await act(async () => { result.current.resume(); });
     expect(result.current.status).toBe('starting');
@@ -316,7 +362,7 @@ describe('useWalkthroughPlayer', () => {
       const emit = onEvent;
       await act(async () => { emit({ type: 'run.completed' }); });
     }
-    createRun.mockResolvedValueOnce({ runId: 'run-2' });
+    createRun.mockResolvedValueOnce(created('run-2'));
     stubInterrupts([]);
     await act(async () => { await result.current.launch('walkthrough-new'); });
     await act(async () => { result.current.resume(); });
@@ -330,7 +376,7 @@ describe('useWalkthroughPlayer', () => {
     registerWalkthroughAction('demo.late.resolve', { route: '/', resolve: () => input, verb: 'focus' });
     stubInterrupts([{ nodeId: 'first', kind: 'walkthrough-step', data: { actionId: 'demo.late.resolve', hitl: true } }]);
     let finish: (() => void) | undefined;
-    resolveByRun.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    resolveByRun.mockImplementationOnce((runId, nodeId) => new Promise<ResolveInterruptResponse>((resolve) => { finish = () => resolve(resolvedStep(runId, nodeId)); }));
     const { result } = renderHook(() => useWalkthroughPlayer(), { wrapper });
     await act(async () => { await result.current.launch('walkthrough-late-resolve'); });
     await waitFor(() => expect(result.current.status).toBe('waiting-user'));
@@ -358,7 +404,7 @@ describe('useWalkthroughPlayer', () => {
     registerWalkthroughAction('demo.same.node.resolve', { route: '/', resolve: () => input, verb: 'focus' });
     stubInterrupts([{ nodeId: 'same-node', kind: 'walkthrough-step', data: { actionId: 'demo.same.node.resolve', hitl: true } }]);
     let finish: (() => void) | undefined;
-    resolveByRun.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    resolveByRun.mockImplementationOnce((runId, nodeId) => new Promise<ResolveInterruptResponse>((resolve) => { finish = () => resolve(resolvedStep(runId, nodeId)); }));
     const { result } = renderHook(() => useWalkthroughPlayer(), { wrapper });
     await act(async () => { await result.current.launch('walkthrough-same-node-resolve'); });
     await waitFor(() => expect(result.current.status).toBe('waiting-user'));
@@ -423,7 +469,7 @@ describe('useWalkthroughPlayer', () => {
     }));
     const { result } = renderHook(() => useWalkthroughPlayer(), { wrapper });
     await act(async () => { await result.current.launch('walkthrough-old-response'); });
-    createRun.mockResolvedValueOnce({ runId: 'run-2' });
+    createRun.mockResolvedValueOnce(created('run-2'));
     await act(async () => { await result.current.launch('walkthrough-current'); });
     if (phase === 'response') {
       if (!finishResponse) throw new Error('Old response was not requested');
@@ -448,7 +494,7 @@ describe('useWalkthroughPlayer', () => {
     await waitFor(() => expect(result.current.status).toBe('waiting-user'));
     if (!onEvent) throw new Error('Old subscription is missing');
     const oldEvent = onEvent;
-    createRun.mockResolvedValueOnce({ runId: 'run-2' });
+    createRun.mockResolvedValueOnce(created('run-2'));
     stubInterrupts([{ nodeId: 'current', kind: 'walkthrough-step', data: { actionId: 'demo.current.hitl', hitl: true } }]);
     await act(async () => { await result.current.launch('walkthrough-current-subscription'); });
     await waitFor(() => expect(result.current.step?.nodeId).toBe('current'));
@@ -528,11 +574,11 @@ describe('useWalkthroughPlayer', () => {
   it("launch's resume-in-flight branch re-attaches to the caller's started run instead of creating one (WALK-9)", async () => {
     const btn = document.createElement('button');
     registerWalkthroughAction('demo.resume.click', { route: '/', resolve: () => btn, verb: 'click' });
-    // The in-flight run is `waiting_*`, which is what makes the branch re-attach
+    // The in-flight run is `waiting-*` (a real RunStatus), which is what makes the branch re-attach
     // rather than start fresh. Asserted through the client, not the transport:
     // the snapshot read is tenant-bound now, so a URL-matching stub would be
     // pinning the binding rather than the behaviour under test.
-    getRun.mockImplementation((id: string) => Promise.resolve({ runId: id, status: 'waiting_interrupt' }));
+    getRun.mockImplementation(async (id) => snapshotOf(id, 'waiting-input'));
     // Route-aware stub: progress row (started) -> open interrupts.
     vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
       const u = String(url);
@@ -558,7 +604,7 @@ describe('useWalkthroughPlayer', () => {
   it("launch's resume-in-flight branch starts FRESH when the started run is already terminal (WALK-9)", async () => {
     const btn = document.createElement('button');
     registerWalkthroughAction('demo.fresh.click', { route: '/', resolve: () => btn, verb: 'click' });
-    getRun.mockResolvedValue({ runId: 'run-55', status: 'completed' });
+    getRun.mockResolvedValue(snapshotOf('run-55', 'completed'));
     vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => {
       const u = String(url);
       if (u.includes('/walkthroughs/progress')) return Promise.resolve({ ok: true, json: async () => ({ progress: [{ walkthroughId: 'walkthrough-done', status: 'started', runId: 'run-55' }] }) });

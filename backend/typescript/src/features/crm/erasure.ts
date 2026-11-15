@@ -61,6 +61,7 @@ import { closeLeadBinding, eraseLeadAttribution, hasLeadBinding } from './leadIn
 import { eraseSlaSettingsSubjects } from './leadIntel/speedToLead.js';
 import { eraseRoutingPolicySubjects } from './leadIntel/routingPolicy.js';
 import { onCrmRecordDeleted } from '../../host/crmRecordLifecycle.js';
+import { eraseSenderHealthSeen } from './senderHealth.js';
 
 const log = createLogger('features.crm.erasure');
 
@@ -175,6 +176,10 @@ export async function eraseCrmSubject(tenantId: string, subjectKey: string): Pro
   if (!tenantId || !subjectKey) return; // fail-closed — never a tenant-wide sweep
   const keyType = subjectKey.includes('@') ? 'email' : subjectKey.startsWith('+') ? 'phone' : null;
   const resolvedId = keyType ? await resolveContactIdByIdentifier(tenantId, keyType, subjectKey) : null;
+  // CHAN-F19 — the sender-health bounce dedup rows are keyed by the bounced ADDRESS, which
+  // need not be an indexed contact (a bounce can arrive for an address no contact holds
+  // any more). So an email-keyed erasure reaches them before the no-contact return below.
+  if (keyType === 'email') await eraseSenderHealthSeen(tenantId, [subjectKey]);
   if (keyType && !resolvedId) return; // an address nobody is indexed at: nothing of ours to erase
   // Review N2 — an index key can point at a TOMBSTONE (last-writer-wins, never
   // pruned); follow `mergedInto` to the live survivor, the same way
@@ -377,6 +382,12 @@ export async function eraseCrmSubject(tenantId: string, subjectKey: string): Pro
     touched += 1;
   }
 
+  // 6c. crm:sender-health-seen (CHAN-F19) — the bounce/complaint dedup rows, whose KEY
+  //     ends in the address: hashed since CHAN-F19, raw before it (legacy rows, until the
+  //     2-day age-out removes them). Both shapes go, for every address in the key-set.
+  //     Not a derivation source for `values`, so its place before leg 7 is free.
+  touched += await eraseSenderHealthSeen(tenantId, [...values].filter((v) => v.includes('@')));
+
   // 7. cdp:contact-ident — the index whose KEY is `${tenantId}::email::<address>`
   //    and whose value field holds the normalized email/phone. Deleted outright: it
   //    is a derived lookup structure, not a business record, and leaving it would
@@ -470,6 +481,9 @@ export function registerCrmErasure(): void {
   declarePiiFields('crm:sign-request', ['signers', 'requestedBy']);
   declarePiiFields('crm:signature-record', ['typedName']);
   declarePiiFields('crm:suppression', ['email', 'note']);
+  // CHAN-F19 — the PII is in the row KEY (the address segment), and `key` is a generic
+  // field name, so it is NOT masked globally by name.
+  declarePiiFields('crm:sender-health-seen', ['key'], { maskGloballyByFieldName: false });
   declarePiiFields('crm:merge-event', ['filledFields', 'absorbedIdentifiers']);
   declarePiiFields('cdp:contact-ident', ['value']);
   declarePiiFields('crm:lead-model', ['createdBy']);

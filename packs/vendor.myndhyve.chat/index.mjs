@@ -300,6 +300,16 @@ function quorumPayload(config) {
   return out;
 }
 
+/** ADR 1120 (Book AI P53) — `decide: 'signed-in'`: only a signed-in person decides,
+ *  in the app; every token door refuses and the email carries no token. 'link' (the
+ *  default) forwards nothing, so a gate without the key is unchanged. Closed-world:
+ *  any other value is a typed failure. */
+function decidePayload(config) {
+  if (config.decide === undefined || config.decide === 'link') return {};
+  if (config.decide === 'signed-in') return { decide: 'signed-in' };
+  return null;
+}
+
 export async function approvalGate(ctx) {
   if (typeof ctx.suspend !== 'function') {
     throw Object.assign(new Error('host does not expose ctx.suspend'), {
@@ -307,6 +317,10 @@ export async function approvalGate(ctx) {
     });
   }
   const config = ctx.config ?? {};
+  const decide = decidePayload(config);
+  if (decide === null) {
+    return { status: 'failure', error: { code: 'invalid_config', message: `core.chat.approvalGate: decide must be "signed-in" or "link" (got ${JSON.stringify(config.decide)}).` } };
+  }
   const inputs = ctx.inputs ?? {};
   const {
     title,
@@ -386,6 +400,7 @@ export async function approvalGate(ctx) {
     // / a known policy is forwarded; anything else stays the single-approver gate.
     ...quorumPayload(config),
     ...wordsPayload(config),
+    ...decide,
   });
 
   // Resume payload shape: { action | decision, approved?, feedback?,

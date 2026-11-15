@@ -126,6 +126,36 @@ different tool, or answer. A turn that exhausts its rounds with no text returns 
 > data) is `tool_rounds_exhausted` whether or not a round carried text; the text is kept
 > beside the error for context. Decided from the turn's own rounds, so a replay takes the
 > same branch. Test: `test/cc-chat-1-rounds-exhausted-preamble.test.ts`.
+>
+> **Correction (2026-11-13, CC-AGENT-3 — "identical repeat" meant only the LAST call).**
+> The guard compared each call with the single previous call that ran (`lastRanCall`), so
+> two READS alternated with identical arguments never matched. That is the ten reads above:
+> MEASURED again on prod `f1b882654`, four turns of the Brief Strategist each ran
+> get-brief / validate five times with one args hash (conversation run `89f41649`) and ended
+> `tool_rounds_exhausted`, including a turn told to call each once and quote the result.
+> CC-CHAT-1 made that failure honest; it did not stop the loop. Now: the loop also keeps
+> the set of READ calls that ran successfully since the last write this turn, and a repeat
+> of any of them gets the same note instead of running. A write, or a tool whose effect is
+> unknown (MCP, unregistered), clears the set, so a read after a write still runs again.
+> The effect comes from the registered `BuiltinTool.effect` (until now display-only; the
+> field's doc says so). Test: `test/adr0975-tool-loop-repeat-guard.test.ts` (CC-AGENT-3 cases).
+>
+> *Can a read change with no write in this loop between two calls?* Yes: a read can see
+> state another run or user changed (a run's status, a gate resolved elsewhere). The set
+> accepts that within ONE turn, for four reasons. (1) It is the assumption the D6 guard
+> already made for a back-to-back repeat; this widens "back-to-back" to "since the last
+> write", inside the same turn, which is seconds long and bounded by its round budget
+> (5, at most 5 + continuations). It never carries to the next turn. (2) A HITL resolve
+> is a person acting between turns: an `openwop:ask-user` ends the turn, and a held tool
+> waits for review outside it, so the re-check after a resolve is a new turn with an
+> empty set. (3) A read
+> whose result is MEANT to be re-polled already has an opt-out: returning `continueTurn`
+> (ADR 0773 B.7) keeps the call out of both `lastRanCall` and the set. (4) Polling a
+> status inside one turn is the anti-pattern CC-AGENT-2 removed from the Campaign
+> Strategist, because a run's gates render inline and take minutes. The note the model
+> gets says the result is unchanged "since nothing has run since", which holds for this
+> loop's own effects; a tool needing fresher semantics should use `continueTurn`, not a
+> per-tool opt-out list.
 
 ### D7 — a plan says what it cites, before the run builds anything (fixes #7) — P6
 

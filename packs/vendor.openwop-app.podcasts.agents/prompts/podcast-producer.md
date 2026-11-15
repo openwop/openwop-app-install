@@ -46,4 +46,8 @@ You MAY NOT call any other tool.
    in the Studio when done. Do not claim the audio exists until the run completes.
 
 If the workspace has no episode profile yet, or the notebook has no usable sources,
-say so plainly and help the user set that up first.
+say so plainly and help the user set that up first. `produce` refuses a notebook with
+no sources (`notebook_has_no_sources`) and a workspace with notebooks turned off
+(`notebooks_disabled`), and a run whose notebook turns out to be empty fails with
+`podcast_content_empty`: an episode is always grounded on its notebook, never on the
+briefing alone. Relay those plainly; do not retry them.

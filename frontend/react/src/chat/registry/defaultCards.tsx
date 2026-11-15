@@ -17,6 +17,7 @@ import { ClarificationQuestions } from '../../interrupts/ClarificationQuestions.
 import { CLARIFICATION_SKIP, buildClarificationAnswers, parseAgentClarification, type AgentClarification, type ClarifyValues } from '../../interrupts/clarificationModel.js';
 import { TextField, TextareaField } from '../../ui/Field.js';
 import { GateEvidence, hasGateEvidence, isBrowserActionGate } from '../reviews/GateEvidence.js';
+import { gateActionLabel, gatePrompt, gateRejectConfirm, useGateWordingNamespaces } from '../reviews/gateWording.js';
 import { Notice } from '../../ui/index.js';
 import { useReviewStatusByRunNode } from '../reviews/reviewStatusStore.js';
 import { confirm } from '../../ui/confirm.js';
@@ -104,7 +105,10 @@ function ApprovalCard({ payload, onAction, isLoading, context, autoFocus }: Card
   // user is taken to the new gate instead of discovering it by scroll.
   const focusRef = useRef<HTMLInputElement>(null);
   useEffect(() => { if (autoFocus !== false) focusRef.current?.focus(); }, [autoFocus]);
-  const prompt = data.prompt ?? t('pleaseApprove');
+  // ADR 1040 D7 F1 — a feature's localized prompt wins when its key exists;
+  // its (lazy) namespace is loaded first and the card re-renders when it lands.
+  useGateWordingNamespaces(data);
+  const prompt = gatePrompt(t, data, data.prompt ?? t('pleaseApprove'));
   const actions = (data.actions ?? ['approve', 'reject', 'request-changes', 'defer', 'escalate']);
   const options = data.options ?? [];
   // Picker only makes sense when there are ≥2 alternatives to choose
@@ -144,13 +148,8 @@ function ApprovalCard({ payload, onAction, isLoading, context, autoFocus }: Card
   // Approve and option selection keep their existing ungated behavior.
   async function resolveWithRejectConfirm(action: string): Promise<void> {
     // ADR 0894 — a browser-action rejection has its own session-ending copy.
-    const browserGate = isBrowserActionGate(data);
-    if (action === 'reject' && !(await confirm({
-      title: t(browserGate ? 'interrupts:cuRejectConfirmTitle' : 'interrupts:rejectConfirmTitle'),
-      body: t(browserGate ? 'interrupts:cuRejectConfirmBody' : 'interrupts:rejectConfirmBody'),
-      danger: true,
-      confirmLabel: t('interrupts:actionReject'),
-    }))) return;
+    // ADR 1040 D7 F1 — an expected decline is confirmed without the failure copy.
+    if (action === 'reject' && !(await confirm(gateRejectConfirm(t, data, { browserGate: isBrowserActionGate(data) })))) return;
     await onAction('resolve', approvalResumeValue(action, comment));
   }
 
@@ -253,7 +252,7 @@ function ApprovalCard({ payload, onAction, isLoading, context, autoFocus }: Card
               disabled={disabled}
               onClick={() => { void resolveWithRejectConfirm(action); }}
             >
-              {ACTION_LABEL_KEYS[action] ? t(ACTION_LABEL_KEYS[action]) : action}
+              {gateActionLabel(t, data, action, ACTION_LABEL_KEYS[action] ? t(ACTION_LABEL_KEYS[action]) : action)}
             </Button>
           ))}
       </div>

@@ -116,6 +116,8 @@ export function useOrgsController() {
   // control and got a 403 on each. `null` = not membership-derived (the implicit
   // personal owner, an operator, a superadmin) — the server decides.
   const [ownScopes, setOwnScopes] = useState<Set<string> | null>(null);
+  // ADR 1123 D2 — offers the exact-email lookup; the server still decides.
+  const [isSuperadmin, setIsSuperadmin] = useState(false);
   const [rootScopes, setRootScopes] = useState<Set<string> | null>(null);
 
   // Memoized so the loaders below can depend on it without re-creating every
@@ -199,7 +201,7 @@ export function useOrgsController() {
     // judged without its tenant.
     const tenantId = orgsRef.current.find((o) => o.orgId === selectedOrgId)?.tenantId;
     getEffectiveAccess({ orgId: selectedOrgId })
-      .then((ea) => { if (live) setOwnScopes(scopesOf(ea, tenantId)); })
+      .then((ea) => { if (live) { setOwnScopes(scopesOf(ea, tenantId)); setIsSuperadmin(ea.superadmin === true); } })
       .catch(() => { /* unknown ⇒ the server decides; the load error path owns the banner */ });
     return () => { live = false; };
   }, [selectedOrgId, orgsLoaded]);
@@ -279,6 +281,13 @@ export function useOrgsController() {
     } catch (err) {
       fail(err);
     }
+  };
+
+  // ADR 1123 — after an add-existing or a link, refresh like a direct add does.
+  const onMembersChanged = async () => {
+    if (!selectedOrgId) return;
+    invalidateOrgMembers(selectedOrgId);
+    await loadOrgDetail(selectedOrgId);
   };
 
   const startEdit = (m: OrgMember) => {
@@ -498,6 +507,8 @@ export function useOrgsController() {
     onCreateTeam,
     onDeleteTeam,
     onCreateMember,
+    onMembersChanged,
+    isSuperadmin,
     startEdit,
     onSaveRoles,
     onDeleteMember,

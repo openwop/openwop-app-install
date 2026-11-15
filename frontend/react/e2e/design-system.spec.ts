@@ -35,7 +35,7 @@ test.use(pinnedConnectOptions());
 const SECTIONS = [
   'typography', 'buttons', 'chips', 'notices', 'states', 'inline-states',
   'fields', 'table', 'figures', 'identity', 'tabs', 'admin-shell', 'toasts',
-  'chat-recovery', 'chat-run-steps', 'video',
+  'chat-recovery', 'chat-run-steps', 'video', 'dialogs',
 ] as const;
 
 async function login(page: Page): Promise<void> {

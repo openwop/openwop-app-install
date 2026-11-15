@@ -412,10 +412,12 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
     await loadSessionFromBackend(id);
     const conv = sessionsCollection.sessions.find((s) => s.sessionId === id);
     if (conv?.participants && conv.participants.length > 0) {
+      // CC-CHAT-4 — a 1:1 agent conversation continues with the agent that answered last.
+      const oneToOne = conv.type !== 'channel' && conv.type !== 'group' && !conv.boardId;
       activeAgents.setLineup(participantsToLineup(conv.participants, (agentId) => {
         const e = agentEntries.find((x) => x.agentId === agentId);
         return e ? { persona: e.displayName, slug: e.slug, modelClass: e.modelClass } : null;
-      }));
+      }), { continueLastAgent: oneToOne });
     }
     void sessionsCollection.markRead(id);
     selectRailTab(null);

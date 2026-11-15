@@ -169,9 +169,12 @@ describe('ADR 1103 D2 — the run lane gives the door\'s answer', () => {
     expect(as<Refusal>(await viewerRun.getSourceText({ notebookId: f.nbA.id, sourceId: f.nbA.sourceId })).error?.code).toBe('notebook_unavailable');
     const system = buildNotebooksSurface({ tenantId: f.tenantId, runId: 'r' });
     expect(as<Refusal>(await system.getSourceText({ notebookId: f.nbA.id, sourceId: f.nbA.sourceId })).error?.code).toBe('notebook_unavailable');
-    // The editor (workspace:write in the org) writes a private notebook — the case
-    // NBK92-2 broke: the route's run reached it as a system run and was refused.
+    // ADR 1118: an org editor who is not a member is out of a private notebook too.
     const editorRun = asActor(f.tenantId, f.editorId);
+    expect(as<Refusal>(await editorRun.ingestSource({ notebookId: f.nbA.id, title: 'p', text: 'refused' })).error?.code).toBe('notebook_unavailable');
+    // Made a member, the editor writes it as themselves: the case NBK92-2 broke, where
+    // the route's run reached it as a system run and was refused.
+    await addProjectMember(f.tenantId, f.nbA.id, `user:${f.editorId}`, 'contributor');
     expect(as<{ ingested?: boolean }>(await editorRun.ingestSource({ notebookId: f.nbA.id, title: 'p', text: 'private add' })).ingested).toBe(true);
     // Made a project member, the viewer now reads it — exactly as the door does.
     await addProjectMember(f.tenantId, f.nbA.id, `user:${f.viewerId}`, 'viewer');

@@ -325,4 +325,7 @@ export const messages = {
   approvalsWarehouseLoadAsk_one: "Load {{count}} customer row into {{dataset}}.{{table}}",
   approvalsWarehouseLoadAsk_other: "Load {{count}} customer rows into {{dataset}}.{{table}}",
   toastApprovedWarehouseLoad: "Approved. Run the sync again to load these rows.",
+  // ADR 1120 — a deep link opened while signed out.
+  deepLinkSignInBody: "Sign in to review this request.",
+  deepLinkSignInCta: "Sign in",
 } as const;

@@ -460,6 +460,14 @@ describe('ADR 0439 — feature dependency graph integrity', () => {
     //    → still dropped) pinned by adr1024-destination-sync-egress.test.ts D2, which runs
     //    with consent at its default. UNDECLARED for the standing reason: `dependsOn` is a
     //    disable-LOCK, and destination-sync already `recommends` consent.
+    // +1 inside the existing slack, bound unchanged (ADR 1115 D1, row 93):
+    //  - `podcasts → notebooks`: `podcastsAccess.generateTargetAccess` calls the
+    //    notebooks feature's own `notebookAccess` (ADR 1103 D1), so "is this project a
+    //    provisioned notebook the caller can read" has one answer for both features.
+    //    STATIC and safe: notebooks does not import podcasts. UNDECLARED for the
+    //    standing reason: `dependsOn` is a disable-LOCK. Off-leg: with notebooks off,
+    //    `POST /episodes`, `/retry` and the `produce` tool refuse typed
+    //    (`notebooks_disabled`), pinned by podcasts-episode-access.test.ts.
     ).toBeLessThanOrEqual(122);
   });
 });

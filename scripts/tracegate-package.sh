@@ -8,15 +8,23 @@
 #   scripts/tracegate-package.sh shadow-compare <lane> <fork run dir>
 #       P1b, called by the gate after the fork's selection. The package selects into its
 #       OWN ledger (<git common dir>/tracegate-package/) and one row comparing the two
-#       selections is appended to compare-<lane>.tsv there. It can never fail the gate:
+#       selections is appended to compare-<lane>.tsv there. In shadow the package's
+#       selected.txt is the WHOLE lane (shadow runs everything), so what it would run is
+#       read from its predict.json: the files decided `run`. It can never fail the gate:
 #       it always exits 0, and is killed after TRACEGATE_PACKAGE_TIMEOUT_S (default 60).
 #       It uses only the INSTALLED package (never npx): not installed, it logs and skips.
 #   scripts/tracegate-package.sh record <lane>
 #       P1b, on demand and never in the gate: a whole shadow run of the lane, recorded by
 #       the package into its own ledger. This is a full suite; ask for a window first.
+#       It runs under a preemptible `daemon` lease on the FORK's broker, the one gates,
+#       trains and deploys register with, so any of them stops it at once (exit 75).
+#       No lease (no broker, exit 2), no recording; TRACEGATE_PACKAGE_NO_LEASE=1 skips
+#       the lease (tests). The broker sees the fork's environment; only the run inside
+#       the lease gets the package's config and ledger.
 #
-# The package is the root devDependency (P1a). TRACEGATE_PACKAGE_CLI and
-# TRACEGATE_PACKAGE_LEDGER override it and its ledger (tests).
+# The package is the root devDependency (P1a). TRACEGATE_PACKAGE_CLI,
+# TRACEGATE_PACKAGE_LEDGER and TRACEGATE_PACKAGE_BROKER override it, its ledger and the
+# fork's broker entry point (tests).
 set -uo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 export TRACEGATE_CONFIG="$ROOT/scripts/tracegate-package.config.json"
@@ -56,12 +64,24 @@ const path = require('path');
 const [out, forkSel, pkgSel, rc, secs, head, root] = process.argv.slice(2);
 // Both write absolute paths today; normalise anyway, so a relative list can't read as 0 overlap.
 const read = (f) => { try { return new Set(fs.readFileSync(f, 'utf8').split('\n').filter(Boolean).map((p) => path.resolve(root, p))); } catch { return null; } };
-const fork = read(forkSel), pkg = rc === '0' ? read(pkgSel) : null;
+// What the package WOULD run: in shadow its selected.txt lists every file, so the
+// decisions in predict.json are the selection. selected.txt only when there are none.
+const wouldRun = () => {
+  try {
+    const d = JSON.parse(fs.readFileSync(path.join(path.dirname(pkgSel), 'predict.json'), 'utf8')).decisions;
+    if (d && typeof d === 'object') return { set: new Set(Object.keys(d).filter((f) => d[f]?.run).map((f) => path.resolve(root, f))), basis: 'predict' };
+  } catch { /* none: fall back */ }
+  const set = read(pkgSel); return set ? { set, basis: 'selected' } : null;
+};
+const fork = read(forkSel), w = rc === '0' ? wouldRun() : null, pkg = w ? w.set : null;
 const status = rc === 'not-installed' ? 'not-installed' : rc === '124' ? 'timeout' : rc !== '0' ? `error-${rc}` : pkg ? 'ok' : 'no-selection';
 const onlyFork = pkg ? [...fork].filter((f) => !pkg.has(f)).length : '';
 const onlyPkg = pkg ? [...pkg].filter((f) => !fork.has(f)).length : '';
-const header = 'at\thead\tstatus\tsecs\tfork\tpackage\tonly_fork\tonly_package\tsuperset\n';
-const row = [new Date().toISOString(), head, status, secs, fork.size, pkg ? pkg.size : '', onlyFork, onlyPkg, pkg ? (onlyFork === 0 ? 'yes' : 'no') : ''].join('\t') + '\n';
+const header = 'at\thead\tstatus\tsecs\tfork\tpackage\tonly_fork\tonly_package\tsuperset\tbasis\n';
+const row = [new Date().toISOString(), head, status, secs, fork.size, pkg ? pkg.size : '', onlyFork, onlyPkg, pkg ? (onlyFork === 0 ? 'yes' : 'no') : '', w ? w.basis : ''].join('\t') + '\n';
+// A log with another header (the rows before `basis`, which compared the whole lane)
+// is set aside, never mixed in: those rows don't count toward the P1 exit.
+if (fs.existsSync(out) && fs.readFileSync(out, 'utf8').split('\n')[0] + '\n' !== header) fs.renameSync(out, out.replace(/\.tsv$/, `.before-${new Date().toISOString().slice(0, 10)}.tsv`));
 if (!fs.existsSync(out)) fs.writeFileSync(out, header);
 fs.appendFileSync(out, row);
 console.log(status === 'ok'
@@ -75,7 +95,19 @@ EOF
 
   record)
     lane="${2:-}"; [ -n "$lane" ] || { echo "usage: tracegate-package.sh record <lane>" >&2; exit 2; }
-    TRACEGATE_LEDGER="$PKG_LEDGER" exec $CLI run --lane "$lane" --mode shadow ;;
+    if [ "${TRACEGATE_PACKAGE_NO_LEASE:-0}" = 1 ]; then TRACEGATE_LEDGER="$PKG_LEDGER" exec $CLI run --lane "$lane" --mode shadow; fi
+    broker="${TRACEGATE_PACKAGE_BROKER:-$ROOT/scripts/vendor/tracegate-ci/src/broker/main.mjs}"
+    fork_ledger="${OPENWOP_TRACEGATE_LEDGER:-$(cd "$ROOT" && git rev-parse --path-format=absolute --git-common-dir)/tracegate}"
+    # As scripts/tracegate-daemon.sh takes its tick's lease: same broker, same class.
+    ( cd "$ROOT" && env -u TRACEGATE_CONFIG TRACEGATE_LEDGER="$fork_ledger" TRACEGATE_HOST="${OPENWOP_TRACEGATE_HOST:-}" \
+        node "$broker" lease --quiet --class daemon --tokens 2 --deadline-min 2 --label "package record $lane" \
+        -- env TRACEGATE_CONFIG="$TRACEGATE_CONFIG" TRACEGATE_LEDGER="$PKG_LEDGER" $CLI run --lane "$lane" --mode shadow ); rc=$?
+    case "$rc" in
+      0) ;;
+      75) echo "tracegate-package: the broker asked this recording to yield (a gate, train, deploy or measurement); nothing is kept from a stopped run. Record again in the next window." >&2 ;;
+      2) echo "tracegate-package: no broker lease (unreachable or refused), so nothing was recorded. A recording never runs outside a lease." >&2 ;;
+    esac
+    exit "$rc" ;;
 
   *)
     echo "tracegate-package: report-card | status | savings | shadow-compare <lane> <run> | record <lane>" >&2; exit 2 ;;

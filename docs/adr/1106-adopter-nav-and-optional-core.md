@@ -218,6 +218,15 @@ removing them.
   C would break the public site or auth, and default-off changes every existing
   workspace.
 
+> **P1 MEASURED 2026-11-14 (read-only, production, the user's go):** the `navigation-settings:config`
+> collection holds **0 rows** in production. That is against a floor of 224,266 `hostext:` rows, and
+> no namespace other than analytics mentions "menu" or "navigation". No workspace or person has
+> ever saved a menu layout there, so no stored `hidden` can come back, and P1 ships **no clearing
+> migration**. Read in a `READ ONLY` transaction through the Cloud SQL proxy on a checked local
+> port; the DSN was deleted afterwards. Only aggregate counts were read. Another deployment's
+> database (a white-label adopter's) is its own to count: a non-zero count there means an entry
+> hidden under an old toggle reappears hidden, the bounded effect D1 describes.
+
 ## Phases
 
 | Phase | What | Tests / witnesses |

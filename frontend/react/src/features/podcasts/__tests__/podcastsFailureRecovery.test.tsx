@@ -214,6 +214,17 @@ describe('PODU-3/-4 — the generation poll gives up HONESTLY and offers a way o
     fireEvent.click(screen.getByRole('button', { name: /check again/i }));
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     expect(screen.queryByText(/we stopped checking after about/i)).toBeNull();
+    // ADR 1115 D10 (`PODUX93R-3`) — the episode that landed is announced BY NAME, once;
+    // the generic "Finished" line would be a second message for the same event.
+    expect(announceSpy).toHaveBeenCalledWith(expect.stringMatching(/episode one.*is ready/i));
+    expect(announceSpy).not.toHaveBeenCalledWith(expect.stringMatching(/finished/i));
+  });
+
+  it('"Check again" whose cohort VANISHED (deleted) still says "Finished"', async () => {
+    await mountStudioAndExhaustPoll();
+    listEpisodes.mockResolvedValue([]);
+    fireEvent.click(screen.getByRole('button', { name: /check again/i }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     expect(announceSpy).toHaveBeenCalledWith(expect.stringMatching(/finished/i));
   });
 

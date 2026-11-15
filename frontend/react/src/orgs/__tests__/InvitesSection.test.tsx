@@ -18,11 +18,17 @@
  * Sabotage that turns it red: making the list read's catch `setInvites([])`
  * reds the IN-SP-7 failed-read case; dropping `|| Date.parse(expiresAt) <
  * Date.now()` reds the F5 + expired cases; removing `announce={error}` from the
- * failure Notice reds ORGINV-UX-7 (a)/(c′).
+ * failure Notice reds ORGINV-UX-7 (a)/(b′)/(c′) and the D5 delivery case; the
+ * refusal-reason → copy mapping (each `priorInviteStillValid` arm both ways),
+ * the `invalid_email`-only `aria-invalid`, the revoke toast/inviteId, Resend's
+ * visibility (expired OR declined), its confirm gate, its declined copy and
+ * its same email + role, and the stale-banner clears each red a named case.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent, waitFor } from '@testing-library/react';
 import type * as InvitesClient from '../invitesClient.js';
+import type * as Toast from '../../ui/toast.js';
+import type * as Confirm from '../../ui/confirm.js';
 
 const { listInvites, createInvite, revokeInvite } = vi.hoisted(() => ({
   listInvites: vi.fn<typeof InvitesClient.listInvites>(),
@@ -37,9 +43,11 @@ vi.mock('../../featureToggles/FeatureAccessContext.js', async () => {
   const { makeFeatureAccess } = await import('../../featureToggles/__testing__/makeFeatureAccess.js');
   return { useFeatureAccess: () => makeFeatureAccess() };
 });
-const { toastSuccess, toastError } = vi.hoisted(() => ({ toastSuccess: vi.fn(), toastError: vi.fn() }));
+const { toastSuccess, toastError } = vi.hoisted(() => ({
+  toastSuccess: vi.fn<typeof Toast.toast.success>(), toastError: vi.fn<typeof Toast.toast.error>(),
+}));
 vi.mock('../../ui/toast.js', () => ({ toast: { success: toastSuccess, error: toastError } }));
-const { confirmMock } = vi.hoisted(() => ({ confirmMock: vi.fn() }));
+const { confirmMock } = vi.hoisted(() => ({ confirmMock: vi.fn<typeof Confirm.confirm>() }));
 vi.mock('../../ui/confirm.js', () => ({ confirm: confirmMock }));
 
 import { InvitesSection } from '../InvitesSection.js';
@@ -88,6 +96,9 @@ describe('R2 IN-SP-7 — the inviter list tells the truth', () => {
     await mount();
     await screen.findByText(/couldn.t be loaded/i);
     expect(screen.queryByText(/http 500/)).toBeNull();
+    // A failed read is neither "empty" nor still "loading" (ADR 0779 D7).
+    expect(screen.queryByText(/no pending invitations/i)).toBeNull();
+    expect(screen.queryByText(/loading pending invitations/i)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /retry/i }));
     await screen.findByText('bob@acme.test');
   });
@@ -270,7 +281,7 @@ describe('ORGINV-UX-1 — loading and true-empty are designed states, never "ren
   it('a truly empty list says so', async () => {
     listInvites.mockResolvedValue([]);
     await mount();
-    expect(screen.getByText(/no pending invitations/i)).toBeTruthy();
+    await screen.findByText(/no pending invitations/i);
     expect(screen.queryByText(/loading pending invitations/i)).toBeNull();
   });
 });
@@ -280,7 +291,7 @@ describe('ORGINV-UX-2 — an expired row offers a one-click Resend with the repl
     listInvites.mockResolvedValue([{ ...INVITE, expiresAt: LAPSED }]);
     createInvite.mockResolvedValue(SENT);
     await mount();
-    fireEvent.click(screen.getByRole('button', { name: /resend/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /resend/i }));
     await act(async () => {});
     // The confirm body states the replace-at-mint consequence (old link dies).
     expect(confirmMock).toHaveBeenCalledWith(expect.objectContaining({
@@ -294,8 +305,9 @@ describe('ORGINV-UX-2 — an expired row offers a one-click Resend with the repl
     listInvites.mockResolvedValue([{ ...INVITE, expiresAt: LAPSED }]);
     confirmMock.mockResolvedValue(false);
     await mount();
-    fireEvent.click(screen.getByRole('button', { name: /resend/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /resend/i }));
     await act(async () => {});
+    expect(confirmMock).toHaveBeenCalledTimes(1); // the click reached the confirm gate
     expect(createInvite).not.toHaveBeenCalled();
   });
 
@@ -361,7 +373,7 @@ describe('ADR 0564 D4 — a declined invitation is VISIBLE to the inviter', () =
     listInvites.mockResolvedValue([DECLINED]);
     createInvite.mockResolvedValue(SENT);
     await mount();
-    fireEvent.click(screen.getByRole('button', { name: /resend/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /resend/i }));
     await act(async () => {});
     expect(confirmMock).toHaveBeenCalledWith(expect.objectContaining({
       body: expect.stringMatching(/declined the previous one/i),
@@ -374,7 +386,7 @@ describe('ADR 0564 D4 — a declined invitation is VISIBLE to the inviter', () =
     listInvites.mockResolvedValue([{ ...INVITE, expiresAt: LAPSED }]);
     createInvite.mockResolvedValue(SENT);
     await mount();
-    fireEvent.click(screen.getByRole('button', { name: /resend/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /resend/i }));
     await act(async () => {});
     expect(confirmMock.mock.calls[0]?.[0]?.body).not.toMatch(/declined/i);
   });

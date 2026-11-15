@@ -15,7 +15,7 @@ const routes: FeatureRoute[] = [
     path: '/menu-settings',
     element: <MenuSettingsPage />,
     tier: 'admin', archetype: 'admin',
-    nav: { group: 'Deployment & customization', labelKey: 'menuSettingsLabel', icon: SettingsIcon, hintKey: 'menuSettingsHint' },
+    nav: { group: 'Deployment & customization', labelKey: 'menuSettingsLabel', icon: SettingsIcon, hintKey: 'menuSettingsHint', lockVisible: true },
   },
 ];
 

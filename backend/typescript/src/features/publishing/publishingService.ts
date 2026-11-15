@@ -8,6 +8,7 @@
  * @see docs/adr/0012-publishing-seo.md
  */
 
+import { schedulePublicAssetResync } from '../../host/assetGrants.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
 import { contentUrl, optionalCleanContent, escapeXml } from '../../host/boundedStrings.js';
@@ -141,6 +142,8 @@ export async function putSeo(
     updatedAt: new Date().toISOString(),
   };
   await seoStore.put(next);
+  // ADR 1122 P1 — the og:image of a published page is public; resync its grant.
+  schedulePublicAssetResync('seo-page', tenantId, `${orgId}|${pageId}`);
   return next;
 }
 

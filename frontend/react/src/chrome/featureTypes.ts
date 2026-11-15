@@ -100,6 +100,10 @@ export interface FeatureNav {
    *  themselves always resolve). A positive check, so `resolveNav` stays the one
    *  nav gate; no fragile negative-gating logic. */
   hiddenWhenFeature?: string;
+  /** ADR 1106 D1: keep this entry in the menu whatever a menu layer says, so a
+   *  menu can always be repaired. Settings and Menu settings only. A locked
+   *  entry can still be moved. */
+  lockVisible?: boolean;
 }
 
 /** Which tabbed console a `hubTab` route projects into. ADR 0144 shipped the

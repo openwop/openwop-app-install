@@ -49,6 +49,7 @@ import { etagHeader, parseIfMatch } from '../host/entityVersion.js';
 import type { HostAdapterSuite } from '../host/index.js';
 import { resolveTenantWorkflow } from '../host/resolveLaunchDefinition.js';
 import { listOwned } from '../host/workflowOwnership.js';
+import { filterClientReadableRuns } from '../host/runClientAccess.js';
 
 const WORKFORCE_STATUSES: readonly WorkforceStatus[] = ['shadow', 'piloting', 'production'];
 
@@ -169,7 +170,9 @@ async function dashboardRuns(
   req: Request,
   workforceId: string,
 ): Promise<{ runs: Awaited<ReturnType<Storage['listRuns']>>; source: RunSource }> {
-  const own = await deps.storage.listRuns({ tenantId: tenantOf(req), limit: 5000 });
+  // ADR 1121 — the dashboards (and the trace search, which returns run content)
+  // read only runs whose client the caller may read.
+  const own = await filterClientReadableRuns(req, await deps.storage.listRuns({ tenantId: tenantOf(req), limit: 5000 }));
   if (own.some((r) => (r.metadata as { workforceId?: string }).workforceId === workforceId)) {
     return { runs: own, source: 'tenant' };
   }

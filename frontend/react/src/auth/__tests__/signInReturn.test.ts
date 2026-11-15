@@ -23,6 +23,14 @@ describe('sign-in return — same-origin allowlist (ADR 1097)', () => {
     expect(safeReturnPath('/start-trial/?bundle=crm&cadence=year')).toBe('/start-trial/?bundle=crm&cadence=year');
   });
 
+  it('ADR 1120: accepts the inbox with its deep link, and refuses inbox look-alikes', () => {
+    expect(safeReturnPath('/inbox?notification=n-1')).toBe('/inbox?notification=n-1');
+    expect(safeReturnPath('/inbox?approval=appr%3Aabc')).toBe('/inbox?approval=appr%3Aabc');
+    for (const bad of ['/inbox-evil', '/inbox/x', '//evil.example/inbox', 'https://evil.example/inbox?notification=n-1']) {
+      expect(safeReturnPath(bad), bad).toBeNull();
+    }
+  });
+
   it('refuses other origins, protocol-relative and backslash forms', () => {
     for (const bad of [
       'https://evil.example/start-trial?plan=pro',

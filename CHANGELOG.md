@@ -18,9 +18,26 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-11-15
+
+A MINOR release under ADR 0052. It adds readable Inbox requests that close
+when their step ends, feature wording on approval cards, hideable menu entries,
+paged product and order reads with a product cap you can set, and new CMS
+sections and site-nav options. Private projects now admit only their members
+and the org's admins. Listed operators keep their plan exemption inside runs and
+chat tools. An agent no longer denies a tool call it made after an approval.
+The model catalog is refreshed. One schema migration adds an index (sqlite 53 /
+postgres 51); app migrations stay at 26. It is rolling-safe, with no required
+stop. **New settings:** `OPENWOP_COMMERCE_MAX_PRODUCTS_PER_ORG`,
+`OPENWOP_COMMERCE_INDEX_SWEEP_MS` and `OPENWOP_CMS_OVERLAY_REALIGN`, plus two
+default-off flags, `OPENWOP_BOUNDED_LOOPBACK` and `OPENWOP_INTERRUPT_RESOLVED_VIA`.
+
 ### Added
 
+- Public-asset grants follow what public surfaces show (ADR 1122 P1a). With `OPENWOP_ASSET_ACCESS` at `report` or `enforce`, a published CMS page grants anonymous read of every picture its readers can reach: its own sections, shared sections, a running experiment's variants, and its SEO image. Unpublishing, deleting or editing it revokes what it no longer shows, within a minute for these paths and within about an hour for paths without a hook. A reconcile on a two-minute tick, under a lease and in bounded slices, keeps the grants in step and backfills pages published before the switch. A failing lookup keeps existing grants rather than revoking them. Nothing changes while the switch is `off`, the default.
+- `OPENWOP_ASSET_ACCESS` (`off` by default, `report` or `enforce`): the asset serve route (`GET /host/openwop-app/assets/:token`) decides who may read an asset instead of serving anyone holding the token (ADR 1122 P0, issue 5929 item 3). A read passes for an operator, a person who still belongs to the asset's workspace, or an asset a public surface has granted. `report` serves everything and logs `asset_access_would_deny`; `enforce` refuses with the same 404 an unknown token gets. Session reads are `private` and vary on Cookie, and public-grant reads are cacheable for 60 s. A stale or refused session cookie reads as no session, so public pages' images keep loading. No public surface registers grants yet (P1), so `enforce` waits for P1, P2 and seven days of `report`.
 - `OPENWOP_CMS_OVERLAY_REALIGN` (`report` or `apply`, unset by default): a one-shot background job, `cms-overlay-realign`, that puts the base's item states back into stored CMS translations saved before ADR 1038 D8 and ADR 1112 D6 aligned them (DG-1112-6). Until it runs, such a translation shows its own lock weeks, lead days and states. `report` logs the counts (`app_bg_job_cms_overlay_realign`) and writes nothing; `apply` repairs each page with a compare-and-swap, keeping its version, author and translation stamps, and marks the job done. The daily `staleItemOverlays` gauge then reads 0.
+- A page's `siteNav.ctaHref` sends its header and footer button (`siteNav.cta`) to an app route or a `#fragment` on that page instead of the page itself (ADR 1113 D5). It needs `cta`; an external href is refused.
 - A page's `siteNav.links` adds menu entries for destinations that are not CMS pages: an app route (`/discover`) or a `#fragment` on that page (ADR 1113). Each entry has its own label, group, optional description, order and group heading, so a site with two pages can fill a four-column mega menu and its grouped footer. Up to 12 per page; an external href is refused.
 - CMS AI rewrite (improve, shorten, fix, …) handles larger `scheduleSim` sections the way translation does (ADR 1112 P6): words and ids only, up to 8 parts, joined by id, under one 45 s deadline. Translate and rewrite now share one parts runner.
 - CMS AI translation handles larger `scheduleSim` sections (ADR 1112 P3): the model is sent the words and ids only, and a section still too large for one reply is translated in up to 8 parts (about 340 decisions), joined by id. Larger ones are still refused, with the number of parts they would take. The submit sweep counts each part against its budget.
@@ -41,6 +58,17 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
   `iterateCatalog`. A catalog-index sweep repairs unfinished index writes each tick and
   checks every tenant for drift hourly (a drifted one is rebuilt in the background); the `commerce-catalog-index` integrity gauge
   reports drift and the backlog. No caller moves yet and the cap is unchanged (5,000).
+- **Signed-in approval gates (ADR 1120, #5920).** `core.approvalGate` and `core.chat.approvalGate` take `decide: 'signed-in' | 'link'` (default `'link'`, unchanged). Under `'signed-in'` a token resolve is refused with 403 `interrupt_requires_session`, and the approval email carries no token, only a Review link to the person's Inbox row. `/inbox` survives sign-in (`signInReturn`). `vendor.myndhyve.chat` 1.5.0.
+- **Add a person who already has an account to an org (ADR 1123, #5944).** Org admins pick from the people in orgs they can act in (`GET /orgs/:orgId/member-candidates`), and superadmins can look up one vouched email. `POST …/members/add-existing` binds the person at once, and `POST …/members/:memberId/link` binds a row added without an account. Both are audited on the security chain, and only the person added is notified. Nothing links automatically at sign-in.
+- **Create forms open from a header button (#5923).** `/projects` puts "New project" in the page header and opens a shared `ui/CreateDialog`, instead of a permanent form above the list.
+- Approval gates can use a feature's own wording (ADR 1040 D7 phase D, #5542). `core.approvalGate` takes `actionLabels`, `promptKey` and `declineExpected`, checked closed-world (`invalid_config`); the chat, run-page and `/reviews` cards show them, and a key missing from the catalog falls back to the standard label. `declineExpected` swaps the red reject confirm for a neutral "Decline this?". A feature can register a result card for finished runs with `registerRunResultRenderer`.
+- Inbox requests are readable (ADR 1109, #5797, #5832): a request shows the gate's own title and prompt under the chain's name, with a chip linking its project. The Needs-you banner no longer says "all clear" above waiting requests.
+- An Inbox request is marked done once its step ends anywhere: chat, email link, API, CLI, a timeout or the run ending (ADR 1114, #5868, #5870). "Archive finished requests" (`POST /host/openwop-app/notifications:archive-resolved`) clears rows left over from before this release. The schema migration adds a partial index on `notifications` for it.
+- Menu settings can hide any menu entry, not only feature-gated ones (ADR 1106 P1, #5903). Settings and Menu settings stay visible so a menu can always be fixed; they can still be moved. Hiding changes the menu only: the page still opens for whoever may open it.
+- Campaign Operations can add a client's CMS page as a campaign asset from the Operations page (`GET /host/openwop-app/campaign-ops/clients/:orgId/asset-candidates`, CC-OPS-1, #5852). A 400 for an unknown editable field lists the valid field paths in `details.valid`.
+- The builder shows config forms for the in-tree `core.email.draft` and `core.email.send` nodes (CC-SEO-1, #5862).
+- Bounded refine loopback from an approval gate back to the node it reviews (ADR 1058, RFC 0258, #5583, #5850, #5886). Off by default behind `OPENWOP_BOUNDED_LOOPBACK`; with it off, a definition with a `loopback` edge is refused `capability_required`.
+- Token resolutions can record `interrupt.resolved.resolvedVia` (ADR 1059, RFC 0259, #5585, #5848). Off by default behind `OPENWOP_INTERRUPT_RESOLVED_VIA=true`; with it on, a token resolution of an interrupt that has an approver list and no signed voter is refused `403 resolved_via_unbound`.
 
 ### Changed
 
@@ -89,9 +117,31 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
   Assistant's `list-orders` tool returns 50 with a `nextCursor`; the workflow surface
   returns the newest 200; the data export pages orders. The Orders tab loads more on
   request and finds a full order id directly.
+- A person added to an org through the older free-text `subject` lane of `POST`/`PATCH /orgs/:orgId/members` is now audited and notified like the new lanes (ADR 1123 interim, #5949). Service and IdP subjects are not notified.
+- Project membership and visibility changes are recorded on the security audit chain (ADR 1118, #5914).
+- Conformance suite and spec artifacts pinned to 2.49.1 (#5927).
+- **Private projects admit only their members and the org's admins and owners (ADR 1118, #5904).** Before, every org editor could read and write every private project. A non-member editor now gets 404, documents the project owns included; a member still needs `workspace:write` to write. Making a project private adds the person who did it as a lead. Org-visible projects are unchanged.
+- **Listed operators keep their plan exemption in chat tools and inside runs (ADR 1108; #5796, #5805, #5813, #5817, #5819, #5837, #5867, #5879, #5880).** `POST /runs` and `:fork` record it for a listed superadmin, and it is re-checked at each use; scheduled, triggered, heartbeat and sub-workflow runs never get it. A plan refusal from the campaign tools reads `not_entitled`, not `feature_disabled`.
+- **The model catalog is refreshed (November 2026, #5760).** Added `claude-sonnet-5-5`, `claude-haiku-5-5`, `claude-fable-5-2`, `gemini-4-argon` and `gemini-4-carbon`; the Anthropic `quick` default is `claude-haiku-5-5`. Removed as deprecated: `gemini-3.7-flash`, `gemini-3.5-flash`, `gemini-2.5-flash` and `gemini-2.5-pro`. A stored setting or agent that pins one of those needs a new model.
+- **A pack can no longer replace a node the host registers itself (#5808, #5810).** `core.web.search` always runs the host's node (SSRF-guarded, BYOK `web-search` key), even once the web-search pack has loaded.
+- **Adopter hook renamed (ADR 1099 P0, #5773):** `registerCollaborationOrgGate` is now `registerDefaultCollaborationSurface`, taking a collaboration surface. Only an adopter feature that called the old hook needs a change.
+- `POST /runs` refuses a run input that contradicts a parameter the chain bound when it was instantiated: `400 validation_error`, `reason: bound_param_conflict` (ADR 0237, CC-CHAIN-5, #5818).
+- Retired chain aliases are hidden from the chain gallery, and `from-chain` refuses them with 410 (`reason: retired_alias`). A background job, `retired-alias-seed-retract`, removes copies already seeded in /builder and the `/` picker, keeping any a user edited or scheduled (CC-CHAIN-4, #5826, #5834).
+- Podcasts use one access rule on every lane (ADR 1115, #5895). A run with no person is refused. A run writes only to the episode it claimed, while that episode is unpublished. Publishing needs audio and no live run. A non-member gets 404 at a private notebook's episode write routes.
+- Funnel steps refuse a stale messaging kernel with `kernel_stale`, as channel generators already did (ADR 1020 D8, CC-KERNEL-1, #5807).
+- The Campaign Strategist reports a run's steps when it starts the run, then ends its turn instead of polling. Campaign Studio's strategist buttons open the chat with the brief already named (CC-AGENT-1, CC-AGENT-2, CC-UX-2, #5828, #5853, #5860).
+- Each nav group gives its entries distinct icons, and Settings sorts last in Workspace. The Needs-you tile names a run's workflow instead of showing its id (#5786, #5788, #5791).
+- Every native single-line `<select>` draws its arrow inside the field, mirrored for right-to-left; forced-colors mode keeps the system arrow (#5883, #5884, #5894). The base CSS now sets `appearance: none`, so a brand rule using `background` or `padding` shorthands on a select erases the arrow; a brand-CSS patch for this can be dropped.
+- The Google font hosts are preconnected only when `VITE_BRAND_FONTS_HREF` points at Google Fonts, so a self-hosted font setup no longer contacts Google (#5762). `index.html` gains a `{{BRAND_FONTS_PRECONNECT}}` slot the build fills: a fork of `index.html` should take it and drop the hard-coded Google preconnect lines.
+- `OPENWOP_COMMERCE_INDEX_SWEEP_MS` sets how often the catalog and order index sweep runs (default 60000 ms, at least 10000; ADR 1110).
 
 ### Fixed
 
+- The media library's "used by" list now includes pages whose hero hub shows a picture, so deleting that picture warns that the page uses it (ADR 1122 P1a). It used to break the page without a warning.
+- A CMS page or shared-section edit (`PATCH`) that names no editable field, an unknown field, or a non-string title, slug or name is refused with 400 `validation_error` naming the field, and writes nothing (issue 5937). It used to return 200 and still record a new version, `updatedAt` and `updatedBy`, so a typo such as `{"section": …}` for `{"data": …}` read as a successful edit and skipped the approval gate's check. The SPA and the CLI send only known fields.
+- `GET /host/openwop-app/orgs` lists only the organizations the caller can act in (issue 5929 item 2). It listed every org in the workspace, so in a workspace holding several clients every member saw every client's name in each org picker. Operators and workspace admins (`host:members:manage` on the workspace root) still see every org. The Access hub's organization and endpoint counts follow the same list (ADR 0864 D2 correction).
+- A workflow step that names a model but no provider now runs on the provider that offers that model, instead of quietly running the workspace's default model (ADR 1117 correction). Found live: a run that chose MiniMax M3.1 Flash ran on the free tier. If the workspace has no key for that provider, the step says so and names it. The "needs an API key" message also no longer says the provider is fixed when the workflow is created, since a deferred copy chooses it per run.
+- A deferred workflow copy now runs with the AI provider and model chosen when the run starts, not the ones frozen when the copy was made (ADR 1117, #5897). Run `a7ee7b9a` asked for haiku and was billed sonnet. The run form also stops offering a copy's inputs that nothing reads (a frozen `orgId`, or the model of a copy made before this fix), and the builder shows a run-bound provider or model as "Set when the run starts". A fork keeps its source run's choice.
 - **Spanish, French and Portuguese visitors saw the app's frame in English.** With one of those languages saved, the nav, the rail, the admin menu and the shell's notices were English while feature pages were translated. The lazy catalog backend answers a lazy locale's frame catalogs with an empty set, and boot took that empty set as "already loaded", so the real catalogs were never fetched (reproduced on app.openwop.dev). Boot now checks the catalog has content.
 - A wide table no longer widens the whole page on a phone. Text kept for screen readers inside a table cell was positioned against the card rather than the table's scroller, so it escaped the scroller's clip: `/capabilities` measured 543 px wide on a 380 px screen and arrow keys scrolled the page instead of the table. The scroller is now the containing block.
 - A CMS page's size limit (975 kB with its shared sections resolved) now also holds when content reaches readers outside a publish: approving a review (refused before the review is consumed), starting or promoting a page experiment, and editing a shared section that a published page uses (the refusal names that page, in the editor's language). ADR 1112 residue, DG-1112-13.
@@ -116,6 +166,76 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
   fold rewrites a stored row's top-level tenant only, so a folded product kept the
   anonymous tenant inside its stored copy and `getProduct` refused it. The product read
   now takes the tenant and org from the row (ADR 1110).
+- A reopened agent conversation answers as the agent that answered last, not the default agent (CC-CHAT-4, #5938).
+- The builder no longer offers "Fill with AI" on a field bound to a run value (ADR 1117 D4, #5907).
+- The CMS approval-gate refusal reaches a non-English editor in their language (CMS-UX-1, #5917).
+- **Every open chat filed an "Input needed" Inbox item nobody could answer or clear (#5922, #5943).** A chat between turns waits on a `conversation` step, and that step notified like a request. It no longer does, and a one-time background job (`retire-conversation-requests`) marks the items already sent as read and "No longer waiting" on the first boot after the upgrade. It never archives or deletes, and touches nothing else.
+- **An agent denied a tool call it had just made.** A model round that called tools and wrote no text left no trace of the calls, so the next round read the result as if the person had pasted it; after an approved gated call the agent said it had made no call. Each round that calls tools now records an assistant turn naming each tool (`Called <tool>.`, never its arguments) before the results (ADR 1119, #5905). A replay fork of a run recorded before this release may call the model live from that agent's second tool round on; it can change the reply's text, never repeat a side effect.
+- A turn that runs out of tool rounds mid-plan ends `tool_rounds_exhausted` instead of passing the model's preamble off as a reply (ADR 0975 D6, CC-CHAT-1, #5806). Any identical repeat of a read since the last write is answered from the earlier result, so two reads called in turn no longer use up the rounds (CC-AGENT-3, #5885).
+- A rejected gate's decision record in chat reads Rejected, not Approved (CC-CHAT-2, #5809). The chat review strip drops a card once its gate is resolved anywhere; its buttons used to stay live and answer 409 (CC-CHAT-3, #5830). An agent opened with `?agent=` becomes a member of the conversation, so it is still there when the conversation reopens (CC-CHAT-4, #5831).
+- `chatCompletion` never sends a request with no user turn: the system prompt becomes the user turn, and with neither it fails `invalid_inputs`. 19 shipped chains were affected; the market-intel digests now pass their topic through (CC-CHAIN-6, CC-CHAIN-3, #5822). An HTTP fetch with no URL fails with a typed `INVALID_URL` (CC-CHAIN-2, #5823).
+- An approval gate shows the drafted deliverable, not a stray scalar such as "ItemsKey: emails"; gates already pending keep their stored data (CC-UI-3, #5824).
+- Text cut through an emoji (a lone UTF-16 surrogate) no longer fails Postgres `jsonb` writes for run events, run inputs and metadata, annotations or vector metadata (CC-SEARCH-1, #5825, #5833).
+- The run page shows a timer wait with its resume time, and a walkthrough step with a link to Guided walkthroughs, instead of "can't be shown here" (CC-UI-2, #5829).
+- The builder no longer labels a pack node's undeclared outputs "Missing output" (CC-BLD-1, #5861).
+- A wide table scrolls inside its own region, which keyboard users can focus and its caption names; every `DataTable` has a caption (#5863, #5865).
+- `Notice` puts its dismiss control after the message and shows one status icon (CC-UI-1, #5795). Button and badge contrast holds under a light brand accent; at 380 px `/inbox` no longer scrolls sideways, and small close and remove controls have 24 px tap targets (#5845, #5851, #5859).
+- The Campaign Intel budget planner gives a partial last week its share by days, not a full week's (CC-PERF-1, #5794).
+- CMS public lists: Safari VoiceOver announces all 30 as lists, engines without alt-text CSS show the counter digits, and a hero flow can't drop below two steps (#5758). After ADR 1105: pressed pickers show on the accent band, the dateCalc preview follows edits, and a target margin of 100% or more explains itself (#5790).
+
+### Security
+
+- **A client's runs are read only by that client's people (ADR 1121, #5929 item 1, #5931 and #5935).** `runs:read` held in one client org used to read every client's runs in the workspace. A run stamped with a client org now needs the scope in that org, checked live, unless the caller holds a tenant-level grant. A refused run reads as `run_not_found` and drops out of lists. This also covers the workforce dashboards, trace search and agent-eval promote/history.
+- Change requests (campaign-ops) and queued suggester text (team ledger) record their author and are erased with that person (ADR 0464 §9, CHAN-F19, #5940 and #5898).
+- Notebook runs act for the person who started them, with the route's own access (ADR 1103, NBK92-1, #5768). A run with no person reads only org-visible notebooks and writes nothing, so a run can no longer read or write another org's notebooks. A node that writes nothing now fails with a code instead of reporting success.
+- CRM sender-health bounce dedup rows (`crm:sender-health-seen`) were keyed by the raw email address and never expired. New rows are keyed by a hash of the address and age out after 2 days, and subject erasure deletes both key shapes (ADR 0464 §9, CHAN-F19, #5889). No migration.
+- The legacy bearer-id rewrite (`OPENWOP_LEGACY_BEARER_REWRITE=apply`) no longer touches the hash-chained `cdp:audit-chain` log, which an earlier `apply` would have broken for `verifyChain`; its report logs `valueCount` unmasked (ADR 1045 CHAN-F14, #5761). Run `report` again before `apply`.
+
+#### Upgrading from 0.13.0
+
+- **No required stop; rolling-safe.** `node scripts/upgrade-plan.mjs 0.13.0`
+  gives one step. One schema migration adds a partial index on `notifications`
+  (sqlite 53 / postgres 51); no new app migration.
+- **Inbox clean-up runs once on its own.** The first boot after the upgrade
+  runs the background job `retire-conversation-requests`: open idle-chat
+  "Input needed" items become read and "No longer waiting". It does not gate
+  readiness, archives and deletes nothing, and a re-run changes nothing.
+- **Deploy the backend before the frontend.** The SPA reads the new paged
+  product and order responses and the new Inbox fields.
+- **Private projects:** non-member editors lose access to a private project and
+  its documents. Before upgrading, add as members anyone who still needs one.
+- **Models:** a stored setting or agent pinning `gemini-2.5-flash`,
+  `gemini-2.5-pro`, `gemini-3.5-flash` or `gemini-3.7-flash` needs a model that
+  is still in the catalog.
+- **Legacy env-key ids:** if you have not run the rewrite, set
+  `OPENWOP_LEGACY_BEARER_REWRITE=report`, read the `legacy_bearer_rewrite` log
+  line, then `apply`. Run `report` again first if you ran `apply` before this
+  release.
+- **Client-scoped runs:** a member who reads runs only through one client org
+  no longer sees other clients' runs. Grant tenant admin to anyone who still
+  needs every client's runs.
+- **Asset access:** `OPENWOP_ASSET_ACCESS` is `off` by default. `report` logs
+  what `enforce` would refuse; leave `enforce` until the public-grant phases ship.
+- **New settings:** `OPENWOP_COMMERCE_MAX_PRODUCTS_PER_ORG` (default 5000, up to
+  500000) and `OPENWOP_COMMERCE_INDEX_SWEEP_MS` (default 60000). Optional:
+  `OPENWOP_CMS_OVERLAY_REALIGN=report`, then `apply`, repairs CMS translations
+  saved before ADR 1112. The two new flags stay off unless set. Unset is fine
+  for all of them.
+- **API callers:**
+  - campaign tools answer a plan refusal `not_entitled`;
+  - a turn that runs out of rounds is an error, not a reply;
+  - `POST /runs` may answer `400 bound_param_conflict`;
+  - `from-chain` answers 410 for a retired alias;
+  - a private notebook's podcast episode routes answer a non-member 404;
+  - product and order lists are paged (`cursor`, `limit`, `nextCursor`).
+- **Adopter code:** rename `registerCollaborationOrgGate` to
+  `registerDefaultCollaborationSurface`. A fork of `index.html` takes the
+  `{{BRAND_FONTS_PRECONNECT}}` slot. A brand rule styling `<select>` with
+  `background` or `padding` shorthands should use the longhands.
+- **Replay:** a fork of a run recorded before this release may call the model
+  live from an agent's second tool round on.
+- Back up the database before upgrading. After the upgrade, check that
+  `/readiness` reports `version: 0.14.0`.
 
 ## [0.13.0] — 2026-11-11
 

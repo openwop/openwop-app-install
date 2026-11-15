@@ -158,8 +158,12 @@ describe('5. a mixed round ends on the ask', () => {
     const said = res.pendingClarification?.messages ?? [];
     expect(JSON.stringify(said)).toContain('Tool \\"read.doc\\" was not run');
     // The checkpointed transcript holds the ask, so the model can read the
-    // answer against its own question after a resume.
-    expect(said.find((m) => m.role === 'assistant')?.content).toBe('Which?');
+    // answer against its own question after a resume. ADR 1119: the round's
+    // calls are recorded first, so the ask is the second assistant turn.
+    expect(said.filter((m) => m.role === 'assistant').map((m) => m.content)).toEqual([
+      'Called read.doc.\n\nCalled openwop:ask-user.\n\nCalled read.doc.',
+      'Which?',
+    ]);
   });
 });
 

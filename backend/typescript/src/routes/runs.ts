@@ -90,6 +90,7 @@ import { mayReadRunPayload, runPayloadReader, withoutEventPayload, withoutRunPay
 import { decideTokenProjector } from './interrupts.js';
 import { dataResidencyEnabled, dataResidencyRegions, residencyRegionAdmissible, readResidencyRegion } from '../features/cdp/dataResidency.js';
 import { loadReadableRun, loadOwnedRun } from '../host/runAccess.js';
+import { assertRunClientReadable, filterClientReadableRuns, runClientReader } from '../host/runClientAccess.js';
 import { storedRunId } from '../host/evals/runIds.js';
 import { resolveRunArtifact } from '../host/runArtifactRead.js';
 import { artifact10 } from '../host/a2aCodec10.js';
@@ -1032,7 +1033,11 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
           const v = req.query[f];
           if (typeof v === 'string' && v.length > 0) filters[f] = v;
         }
-        const rows = await storage.listRuns({ tenantId, limit, ...filters, ...(before ? { before } : {}) });
+        const page = await storage.listRuns({ tenantId, limit, ...filters, ...(before ? { before } : {}) });
+        // ADR 1121 (#5929) — drop the runs for a client the caller may not read.
+        // The cursor still follows the unfiltered page, so a short page is not
+        // the end of the list.
+        const rows = await filterClientReadableRuns(req, page);
         // RFC 0151 §D — `compensationStatus` is on EVERY snapshot, the list
         // included. This branch used to project without it while the major-2
         // getRun carried it (the "second call site gets forgotten" class the
@@ -1045,8 +1050,8 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
           const snap = closeV2Snapshot(projectRunSnapshot(r, compensation.get(r.runId)));
           return mayReadPayload(r) ? snap : withoutRunPayload(snap);
         });
-        const last = rows[rows.length - 1];
-        const nextCursor = rows.length === limit && last !== undefined
+        const last = page[page.length - 1];
+        const nextCursor = page.length === limit && last !== undefined
           ? mintRunListCursor({ createdAt: last.createdAt, runId: last.runId })
           : undefined;
         res.json({ runs, ...(nextCursor !== undefined ? { nextCursor } : {}) });
@@ -1064,12 +1069,12 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       // (the cost heatmap's 'latest run' was wrong for busy tenants).
       const workflowId = typeof req.query.workflowId === 'string' ? req.query.workflowId : undefined;
       const limit = Math.min(Number(req.query.limit) || 50, 200);
-      const runs = await storage.listRuns({
+      const runs = await filterClientReadableRuns(req, await storage.listRuns({
         ...(tenantFilter ? { tenantId: tenantFilter } : {}),
         ...(status ? { status } : {}),
         ...(workflowId ? { workflowId } : {}),
         limit,
-      });
+      })); // ADR 1121 (#5929) — the client floor, per tenant bucket
       // RFC 0151 §D — ONE ledger scan for the whole page. `listRuns` may filter
       // across tenants for a superadmin read, so the rollup is resolved per
       // tenant bucket rather than assuming one; a run whose tenant produced no
@@ -1129,6 +1134,9 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
         // resource-forbidden code rather than expanding the set here).
         throw new OpenwopError('forbidden', 'caller lacks runs:read on both runs', 403);
       }
+      // ADR 1121 — and the client floor on both, which answers absent like the tenant gate.
+      await assertRunClientReadable(req, runA);
+      await assertRunClientReadable(req, runB);
 
       const [eventsA, eventsB] = await Promise.all([
         getEventLog().list(runId, { fromSeq: -1, limit: 100_000 }),
@@ -1560,6 +1568,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       // host codes vendor-prefixed), never the v1 `{ code, message }` object.
       const entryError = (code: string, message: string, details?: Record<string, unknown>): Record<string, unknown> =>
         ({ error: v2ErrorCode(code), message, ...(details ? { details } : {}) });
+      const clientCancel = await runClientReader(req, callerTenant, 'runs:cancel');
       for (const rawId of body.runIds) {
         if (typeof rawId !== 'string' || rawId.length === 0) {
           results.push({ runId: String(rawId), ok: false, error: entryError('invalid_request', 'runId MUST be a non-empty string') });
@@ -1578,6 +1587,11 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
         }
         const run = await storage.getRun(lookupId);
         if (!run || (!isOperator && run.tenantId !== callerTenant)) {
+          results.push({ runId: rawId, ok: false, error: entryError('not_found', `run ${rawId} not found`) });
+          continue;
+        }
+        // ADR 1121 — a client's run the caller may not cancel there is absent too.
+        if (!(await clientCancel(run))) {
           results.push({ runId: rawId, ok: false, error: entryError('not_found', `run ${rawId} not found`) });
           continue;
         }
@@ -1658,6 +1672,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       if (!run || run.tenantId !== tenantId) {
         throw new OpenwopError('run_not_found', `run ${req.params.runId} not found`, 404);
       }
+      await assertRunClientReadable(req, run, 'runs:cancel'); // ADR 1121
       const deleted = await storage.deleteRun(run.runId);
       if (!deleted) throw new OpenwopError('run_not_found', `run ${req.params.runId} not found`, 404);
       res.status(204).end();
@@ -1725,6 +1740,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       if (!run || run.tenantId !== tenantId) {
         throw new OpenwopError('run_not_found', `run ${req.params.runId} not found`, 404);
       }
+      await assertRunClientReadable(req, run); // ADR 1121
       const body = (req.body ?? {}) as {
         target?: { eventId?: string; nodeId?: string };
         signal?: { kind?: string; rating?: number; label?: string; correction?: string };
@@ -1778,6 +1794,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       if (!run || run.tenantId !== tenantId) {
         throw new OpenwopError('run_not_found', `run ${req.params.runId} not found`, 404);
       }
+      await assertRunClientReadable(req, run); // ADR 1121
       const records = await storage.listAnnotations(run.runId);
       // Defense-in-depth tenant scope (CTI-1) on top of the per-run query.
       const annotations = records.filter((r) => r.tenantId === tenantId).map((r) => r.payload);

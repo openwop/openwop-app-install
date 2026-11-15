@@ -86,6 +86,50 @@ export function resolveDeclaredInputs(
 }
 
 /**
+ * The `config` a node implementation sees, resolved against the run's variable bag.
+ *
+ * RFC 0124 §Rewrite targets, row 3: a deferred copy binds a WHOLE-VALUE config
+ * token to a variable-sourced PortValue, `{type:'variable', variableName}`, the
+ * same shape a deferred `node.inputs` entry carries (issue #5897). This resolves a
+ * top-level config value of exactly that shape from the bag, and DROPS the key when
+ * the bag holds no value, so an unset `provider`/`model` falls through to the ADR
+ * 0903 run default instead of reaching the node as a descriptor object.
+ *
+ * Replay-safe for the same reason inputs are: the bag is seeded once at run
+ * creation and a `:fork` copies the source's recorded variables verbatim, so the
+ * value is never re-resolved from the copy's current defaults.
+ *
+ * Then the legacy `{{inputs.NAME}}` string tokens (ADR 0237) interpolate as before.
+ * Returns the original object when there is nothing to resolve, so the common case
+ * allocates nothing.
+ */
+export function resolveNodeConfig(
+  config: Record<string, unknown> | undefined,
+  variableBag: Readonly<Record<string, unknown>> | null | undefined,
+): Record<string, unknown> {
+  const base = config ?? {};
+  let out: Record<string, unknown> | undefined;
+  for (const [key, val] of Object.entries(base)) {
+    const name = variableRefName(val);
+    if (name === undefined) continue;
+    out ??= { ...base };
+    const bound = variableBag?.[name];
+    if (bound === undefined) delete out[key];
+    else out[key] = bound;
+  }
+  const resolved = out ?? base;
+  return hasInputTokens(resolved) ? interpolateRunInputs(resolved, variableBag) : resolved;
+}
+
+/** The variable a value names when it is exactly `{type:'variable', variableName}`. */
+function variableRefName(val: unknown): string | undefined {
+  if (!val || typeof val !== 'object' || Array.isArray(val)) return undefined;
+  const ref = val as Record<string, unknown>;
+  if (ref.type !== 'variable' || typeof ref.variableName !== 'string') return undefined;
+  return Object.keys(ref).every((k) => k === 'type' || k === 'variableName') ? ref.variableName : undefined;
+}
+
+/**
  * Build the `ctx.inputs` a node implementation receives.
  *
  * Back-compat: many node implementations read `ctx.inputs` as a single payload

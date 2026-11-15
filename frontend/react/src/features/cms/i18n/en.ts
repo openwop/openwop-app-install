@@ -475,6 +475,11 @@ export const messages = {
   errAiTooLarge: "This section is too large to translate or rewrite automatically. Split its decisions across smaller sections.",
   errAiTimeout: "This took longer than the time limit. Try again, or split its decisions across smaller sections.",
   errSelfApproval: 'You submitted this page, so another approver in this organization has to approve it.',
+  errGateLive: "Changes here need approval because this is live on {{pages}}. An admin must unpublish it first, then submit it for review.",
+  errGateReview: "This is under review on {{pages}}. A reviewer must approve or reject it before it can change.",
+  errGateLiveAndReview: "This is live on {{live}} and under review on {{reviewing}}. An admin must unpublish the live pages, and a reviewer must decide on the others, before it can change.",
+  errGatePageLive: "This page needs approval to change. Unpublish it, edit it, then submit it for review.",
+  errGateApproval: "Publishing in this workspace needs approval. Submit the page for review, then approve it from the Approvals inbox.",
   errTranslatorScope: 'Your translator access covers only: {{locales}}.',
   translateInvalid: 'Automatic translation returned unusable output — edit the translation manually.',
   // ADR 0592 §9 — degraded auto-translate disclosure + grant validation.

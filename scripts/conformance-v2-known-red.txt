@@ -62,3 +62,6 @@
 # (ADR 0749's `v2-a2ui-v09-surface` entry RETIRED by ADR 0751: a fork at a
 # checkpoint inside a suspended run now inherits the open gate instead of
 # answering `501 fork_checkpoint_unsupported`, and `recorded-as-recorded` passes.)
+
+# (The 2026-11-13 `v2-telemetry-export` entry RETIRED at suite 2.48.1: openwop-be fixed
+# the RFC 0262 shape leg, which had omitted the required `until`.)

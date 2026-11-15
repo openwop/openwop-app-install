@@ -70,6 +70,14 @@
         "majority"
       ],
       "description": "With requiredApprovals > 1: 'any' (default) — one reject vetoes; 'majority' — more than half must reject."
+    },
+    "decide": {
+      "type": "string",
+      "enum": [
+        "link",
+        "signed-in"
+      ],
+      "description": "ADR 1120: 'link' (default) lets the emailed link decide; 'signed-in' means only a signed-in person decides, in the app. The email then carries a Review link and no token, and every token door refuses with 403."
     }
   },
   "additionalProperties": true

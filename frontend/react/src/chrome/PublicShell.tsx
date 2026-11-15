@@ -81,7 +81,7 @@ type NavGroupId = (typeof NAV_GROUP_ORDER)[number];
 /** The groups a page may NAME in its `siteNav` (server-validated, ADR 1049). */
 const AUTHORED_GROUPS: ReadonlySet<string> = new Set(['product', 'audience', 'resources', 'trust', 'company', 'legal']);
 interface NavGroup { id: NavGroupId; heading: string; links: NavLink[] }
-interface NavEntry extends NavLink { group: NavGroupId; order: number; primary: boolean; cta?: string; utility?: boolean; groupLabel?: string }
+interface NavEntry extends NavLink { group: NavGroupId; order: number; primary: boolean; cta?: string; ctaTo?: string; utility?: boolean; groupLabel?: string }
 
 /**
  * Primary actions owned by a public page (for example, "Open app") belong in
@@ -124,7 +124,7 @@ export function PublicMenuActions({ children }: { children: ReactNode }): JSX.El
 interface PublishedPage {
   slug: string;
   title: string;
-  nav?: { group?: Exclude<NavGroupId, 'pages'>; label?: string; description?: string; order?: number; primary?: boolean; cta?: string; utility?: boolean; groupLabel?: string; links?: AuthoredLink[] };
+  nav?: { group?: Exclude<NavGroupId, 'pages'>; label?: string; description?: string; order?: number; primary?: boolean; cta?: string; ctaHref?: string; utility?: boolean; groupLabel?: string; links?: AuthoredLink[] };
 }
 
 /** ADR 1113 — one entry a page authors for a destination that is not a CMS
@@ -132,6 +132,8 @@ interface PublishedPage {
 interface AuthoredLink { label: string; href: string; group: Exclude<NavGroupId, 'pages'>; description?: string; order?: number; groupLabel?: string }
 
 const FRAGMENT_HREF = /^#[A-Za-z][A-Za-z0-9_-]{0,79}$/;
+/** A `#fragment` lands on the owning page; an internal path stands as is. */
+const resolveHref = (page: string, href: string): string => (FRAGMENT_HREF.test(href) ? `${page}${href}` : href);
 
 /** Defensive read of `nav.links`, like {@link readNav}: an entry missing its
  *  label, group or a safe href is dropped, never rendered. */
@@ -171,6 +173,12 @@ function readNav(raw: unknown): PublishedPage['nav'] {
   if (r.primary === true) nav.primary = true;
   // ADR 1056 — the grouped footer's call to action + bottom-bar utility links.
   if (typeof r.cta === 'string' && r.cta.trim()) nav.cta = r.cta.trim();
+  // ADR 1113 D5 — the button's destination: re-checked like a link's href, and
+  // kept only alongside a label.
+  if (nav.cta && typeof r.ctaHref === 'string') {
+    const h = r.ctaHref.trim();
+    if (FRAGMENT_HREF.test(h) || isInternalHref(h)) nav.ctaHref = h;
+  }
   if (r.utility === true) nav.utility = true;
   // ADR 1105 D11 — an authored heading for the page's group (only with a group).
   if (nav.group && typeof r.groupLabel === 'string' && r.groupLabel.trim()) nav.groupLabel = r.groupLabel.trim();
@@ -294,7 +302,7 @@ function usePublicNav(): { groups: NavGroup[]; flat: NavLink[]; primary: NavLink
         group: p.nav?.group ?? (c ? 'product' : 'pages'),
         order: p.nav?.order ?? c?.order ?? DEFAULT_PAGE_ORDER,
         primary: p.nav?.primary === true,
-        ...(p.nav?.cta ? { cta: p.nav.cta } : {}),
+        ...(p.nav?.cta ? { cta: p.nav.cta, ...(p.nav.ctaHref ? { ctaTo: resolveHref(`/p/${p.slug}`, p.nav.ctaHref) } : {}) } : {}),
         ...(p.nav?.utility ? { utility: true } : {}),
         ...(p.nav?.groupLabel ? { groupLabel: p.nav.groupLabel } : {}),
       };
@@ -308,7 +316,7 @@ function usePublicNav(): { groups: NavGroup[]; flat: NavLink[]; primary: NavLink
       group: pricingNav?.group ?? 'product',
       order: pricingNav?.order ?? 40,
       primary: pricingNav?.primary === true,
-      ...(pricingNav?.cta ? { cta: pricingNav.cta } : {}),
+      ...(pricingNav?.cta ? { cta: pricingNav.cta, ...(pricingNav.ctaHref ? { ctaTo: resolveHref('/pricing', pricingNav.ctaHref) } : {}) } : {}),
       ...(pricingNav?.utility ? { utility: true } : {}),
       ...(pricingNav?.groupLabel ? { groupLabel: pricingNav.groupLabel } : {}),
     },
@@ -325,7 +333,7 @@ function usePublicNav(): { groups: NavGroup[]; flat: NavLink[]; primary: NavLink
   for (const p of published) {
     const page = p.slug === 'pricing' ? '/pricing' : `/p/${p.slug}`;
     for (const l of p.nav?.links ?? []) {
-      const to = FRAGMENT_HREF.test(l.href) ? `${page}${l.href}` : l.href;
+      const to = resolveHref(page, l.href);
       if (listed.has(to)) continue;
       listed.add(to);
       entries.push({
@@ -367,12 +375,13 @@ function usePublicNav(): { groups: NavGroup[]; flat: NavLink[]; primary: NavLink
     : entries.filter((e) => e.group === 'product' && (e.to === '/p/features' || e.to === '/pricing')).sort(byOrderThenLabel)
   ).map(toLink);
   // ADR 1056 — the grouped footer's call to action is the first page (group,
-  // then order) that sets `siteNav.cta`; its label is the button text. Utility
+  // then order) that sets `siteNav.cta`; its label is the button text, and its
+  // `siteNav.ctaHref` (ADR 1113 D5) sends it elsewhere than the page. Utility
   // pages also fill the footer's bottom bar, in the same order. Both are
   // grouped-mode only, so an ungrouped site's footer is unchanged.
   const ranked = [...entries].sort((a, b) => groupRank(a.group) - groupRank(b.group) || byOrderThenLabel(a, b));
   const ctaEntry = grouped ? ranked.find((e) => e.cta) : undefined;
-  const cta = ctaEntry?.cta ? { to: ctaEntry.to, label: ctaEntry.cta } : null;
+  const cta = ctaEntry?.cta ? { to: ctaEntry.ctaTo ?? ctaEntry.to, label: ctaEntry.cta } : null;
   const utility = grouped ? ranked.filter((e) => e.utility).map(({ to, label }) => ({ to, label })) : [];
   return { groups, flat: groups.flatMap((g) => g.links), primary, grouped, cta, utility, featured: grouped ? featured : null, hasLink: (to) => entries.some((e) => e.to === to) };
 }

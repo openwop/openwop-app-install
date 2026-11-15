@@ -160,10 +160,16 @@ const kB = (v: unknown): number | string => (typeof v === 'number' && Number.isF
  * i18n key (+ interpolation options), so the primary error surface speaks the
  * user's language and survives envelope localization. Conservative on
  * purpose: codes whose raw `message` carries load-bearing specificity a
- * generic string would DESTROY (validation details, the approval-gate 409
- * explanation) return null and keep the raw message. The one specificity this
- * RESTORES is the translator grant denial: `details.grantedLocales` rebuilds
- * the which-locales message that `localizeErrorEnvelope` flattens.
+ * generic string would DESTROY (validation details) return null and keep the raw
+ * message. It RESTORES what `localizeErrorEnvelope` flattens where `details`
+ * carries it: the translator grant denial (`details.grantedLocales`) and the
+ * approval-gate 409 (`details.gate`, `pages`, `status`).
+ *
+ * CORRECTED 2026-11-14 (CMS-UX-1, measured on prod): this comment used to keep the
+ * approval-gate 409 on its raw message for its specificity. Under a non-English
+ * editor the envelope replaces that message with the generic conflict text ("La
+ * solicitud entra en conflicto…"), so the page names and the remedy never reached
+ * the person. They are rebuilt from `details` below.
  */
 export function cmsErrorInfo(e: unknown): { key: string; options?: Record<string, unknown> } | null {
   if (!(e instanceof CmsApiError) || !e.code) return null;
@@ -203,6 +209,20 @@ export function cmsErrorInfo(e: unknown): { key: string; options?: Record<string
         case 'too_large': return { key: 'errAiTooLarge' }; // the rewrite lane's refusal
         default: return null;
       }
+    }
+    case 'conflict': {
+      if (e.details?.gate !== 'cms-approval-gate') return null;
+      const pages = Array.isArray(e.details.pages) ? (e.details.pages as Array<{ title?: unknown; status?: unknown }>) : null;
+      if (pages) {
+        const titles = (status: string): string => pages.filter((p) => p?.status === status).map((p) => `“${String(p.title ?? '')}”`).join(', ');
+        const live = titles('published');
+        const reviewing = titles('in_review');
+        if (live && reviewing) return { key: 'errGateLiveAndReview', options: { live, reviewing } };
+        if (live) return { key: 'errGateLive', options: { pages: live } };
+        if (reviewing) return { key: 'errGateReview', options: { pages: reviewing } };
+      }
+      if (e.details.status === 'published' || e.details.status === 'in_review') return { key: 'errGatePageLive' };
+      return { key: 'errGateApproval' };
     }
     case 'host_capability_missing':
       return { key: 'translateUnavailable' };

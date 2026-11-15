@@ -50,6 +50,11 @@ describe('RFC 0258 §B — admission (flag on)', () => {
     expect((g.outgoing.get('gate') ?? []).map((e) => e.targetNodeId)).toEqual(['apply']);
   });
 
+  it('planLoopbacks names the edge `edgeId` when the definition spells it only `id` (an unvalidated fixture)', () => {
+    const raw = wf([...base, { id: 'again', sourceNodeId: 'gate', targetNodeId: 'draft', loopback: LOOP }]) as WorkflowDefinition;
+    expect(planLoopbacks(raw).get('gate')?.edge.edgeId).toBe('again');
+  });
+
   it.each([
     ['maxIterations missing (no unlimited)', { on: 'refine' }, 'validation_error'],
     ['maxIterations 0', { on: 'refine', maxIterations: 0 }, 'validation_error'],

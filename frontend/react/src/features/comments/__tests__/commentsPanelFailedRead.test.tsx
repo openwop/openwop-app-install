@@ -18,12 +18,28 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor, fireEvent, act } from '@testing-library/react';
+import type * as CC from '../commentsClient.js';
+import type * as OM from '../../../orgs/orgMembers.js';
 
+// Every mock is typed against the real export, so a fixture the client could
+// never return is a compile error rather than a silently passing case.
 const api = vi.hoisted(() => {
-  const a = { listThread: vi.fn(), postComment: vi.fn(), updateComment: vi.fn(), deleteComment: vi.fn() };
-  // ADR 0881 D7 — the panel reads through `readThread` ({comments, viewer}); it
-  // delegates to the `listThread` mock so every case below keeps driving one fn.
-  return { ...a, readThread: vi.fn(async (...args: unknown[]) => ({ comments: await (a.listThread as (...x: unknown[]) => Promise<unknown>)(...args), viewer: null })) };
+  const listThread = vi.fn<typeof CC.listThread>();
+  return {
+    listThread,
+    postComment: vi.fn<typeof CC.postComment>(),
+    updateComment: vi.fn<typeof CC.updateComment>(),
+    deleteComment: vi.fn<typeof CC.deleteComment>(),
+    // ADR 0881 D7 — the panel reads through `readThread` ({comments, viewer}); it
+    // delegates to the `listThread` mock so every case below keeps driving one fn.
+    // `viewer: null` is the shape of a host that sends no capabilities, so the
+    // org write access below decides the composer (these cases are about the
+    // read/write lanes, not ownership).
+    readThread: vi.fn<typeof CC.readThread>(async (orgId, resourceType, resourceId) => ({
+      comments: await listThread(orgId, resourceType, resourceId),
+      viewer: null,
+    })),
+  };
 });
 vi.mock('../commentsClient.js', async (importOriginal) => {
   const orig = await importOriginal<typeof import('../commentsClient.js')>();
@@ -45,18 +61,24 @@ vi.mock('../../../ui/confirm.js', () => ({ confirm: vi.fn(async () => true) }));
 const toasts = vi.hoisted(() => ({ error: vi.fn(), success: vi.fn(), info: vi.fn() }));
 vi.mock('../../../ui/toast.js', () => ({ toast: toasts }));
 
-const members = vi.hoisted(() => ({ loadOrgMembers: vi.fn() }));
+const members = vi.hoisted(() => ({ loadOrgMembers: vi.fn<typeof OM.loadOrgMembers>() }));
 vi.mock('../../../orgs/orgMembers.js', () => ({ loadOrgMembers: members.loadOrgMembers, invalidateOrgMembers: vi.fn() }));
 
 import { CommentsPanel } from '../CommentsPanel.js';
 import { CommentsHttpError, type Comment } from '../commentsClient.js';
-import type { EffectiveAccess } from '../../../client/accessClient.js';
+import type { EffectiveAccess, OrgMember } from '../../../client/accessClient.js';
 import { announce, currentAnnouncements } from '../../../ui/announce.js';
 
 const comment = (id: string, body: string, over: Partial<Comment> = {}): Comment => ({
   commentId: id, orgId: 'org_1', resourceType: 'cms_page', resourceId: 'p1',
   body, authorId: 'user_a', status: 'open', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
   ...over,
+});
+
+/** A COMPLETE `OrgMember` — the directory row whose `subject` the backend stamps as `authorId`. */
+const member = (subject: string, displayName: string): OrgMember => ({
+  memberId: 'm1', orgId: 'org_1', tenantId: 't1', subject, displayName, roles: ['editor'], teamIds: [],
+  createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
 });
 
 function view(): void {
@@ -71,7 +93,10 @@ function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  // RESET, not clear: `mockClear` keeps a queued `mockResolvedValueOnce` from a
+  // case that stopped early, which would answer the NEXT case's read. Vitest 4's
+  // reset restores each `vi.fn(impl)` to its impl (`readThread`, `confirm`).
+  vi.resetAllMocks();
   members.loadOrgMembers.mockResolvedValue([]);
   // `ui/announce` keeps ONE module-level polite slot with no reset: without this an
   // "announces X" case can pass on an EARLIER case's announcement, and the "never
@@ -154,7 +179,7 @@ describe('CMNT-UX-3 — a write does not unmount the thread, and it announces', 
 
   it('RESOLVE: announces, and busy is PER-ROW (a sibling row stays operable)', async () => {
     api.listThread.mockResolvedValue([comment('c1', 'first'), comment('c2', 'second')]);
-    let release: (v: unknown) => void = () => {};
+    let release: (v: CC.CommentWrite) => void = () => {};
     api.updateComment.mockImplementation(() => new Promise((res) => { release = res; }));
     view();
     await screen.findByText('first');
@@ -195,15 +220,17 @@ describe('CMNT-UX-3 — a write does not unmount the thread, and it announces', 
     await screen.findByText('existing');
     fireEvent.change(screen.getByLabelText(/New comment/i), { target: { value: 'nope' } });
     fireEvent.click(screen.getByRole('button', { name: /^Comment$/i }));
-    await waitFor(() => expect(api.postComment).toHaveBeenCalled());
+    // Wait for the REJECTION to be handled (the toast), not for the call: right
+    // after the call is observed the catch has not run yet, so a success
+    // announcement made in the failure path could not show (wave 109).
+    await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('Post failed.'));
     expect(currentAnnouncements().polite).not.toMatch(/Comment posted/i);
-    expect(toasts.error).toHaveBeenCalled(); // and it DID surface as an error
   });
 });
 
 describe('CMNT-UX-5 — authors are people, not raw subject ids', () => {
   it('renders the member’s display name for a human author', async () => {
-    members.loadOrgMembers.mockResolvedValue([{ memberId: 'm1', subject: 'user_a', displayName: 'Ada Lovelace', roles: ['editor'] }]);
+    members.loadOrgMembers.mockResolvedValue([member('user_a', 'Ada Lovelace')]);
     api.listThread.mockResolvedValue([comment('c1', 'hello')]);
     view();
     expect(await screen.findByText('Ada Lovelace')).toBeTruthy();
@@ -219,7 +246,7 @@ describe('CMNT-UX-5 — authors are people, not raw subject ids', () => {
   });
 
   it('CONTROL: a successful read shows NO fallback notice', async () => {
-    members.loadOrgMembers.mockResolvedValue([{ memberId: 'm1', subject: 'user_a', displayName: 'Ada Lovelace', roles: ['editor'] }]);
+    members.loadOrgMembers.mockResolvedValue([member('user_a', 'Ada Lovelace')]);
     api.listThread.mockResolvedValue([comment('c1', 'hello')]);
     view();
     await screen.findByText('Ada Lovelace');
@@ -262,7 +289,8 @@ describe('CMNT-UX-9 — a delete refusal says which refusal it is', () => {
     view();
     await screen.findByText('not mine');
     fireEvent.click(screen.getByRole('button', { name: /Delete comment/i }));
-    await waitFor(() => expect(toasts.error).toHaveBeenCalledWith(expect.stringMatching(/only its author or an organization admin can/i)));
+    // The whole sentence: the authority rule AND the resolve alternative.
+    await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('You can’t delete this comment — only its author or an organization admin can. You can resolve it instead.'));
   });
 
   it('409 names the DIFFERENT rule (foreign replies), not the 403 one', async () => {
@@ -271,8 +299,8 @@ describe('CMNT-UX-9 — a delete refusal says which refusal it is', () => {
     view();
     await screen.findByText('has replies');
     fireEvent.click(screen.getByRole('button', { name: /Delete comment/i }));
-    await waitFor(() => expect(toasts.error).toHaveBeenCalledWith(expect.stringMatching(/Other people have replied/i)));
-    expect(toasts.error).not.toHaveBeenCalledWith(expect.stringMatching(/only its author or an organization admin can/i));
+    await waitFor(() => expect(toasts.error).toHaveBeenCalledWith('Other people have replied to this comment, so only an organization admin can delete it. Resolve it instead to close the thread.'));
+    expect(toasts.error).toHaveBeenCalledTimes(1);
   });
 });
 

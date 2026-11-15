@@ -23,6 +23,10 @@ export const messages = {
   rejectConfirmBody: 'What happens next depends on the workflow; rejection can end the run. Work already done is not undone.',
   cuRejectConfirmTitle: 'Reject this action and end the browser session?',
   cuRejectConfirmBody: 'The browser agent will not take this action, and the session ends here. Anything it already did on the site stays done.',
+  // ADR 1040 D7 F1 — a gate that marks reject as an expected decline.
+  declineConfirmTitle: 'Decline this?',
+  declineConfirmBody: 'This says no to this request and ends this step. Nothing from it is applied, and the answer can’t be changed afterwards.',
+  declineConfirmLabel: 'Decline',
   actionRequestChanges: 'Request changes',
   actionRefine: 'Refine',
   actionDefer: 'Defer',

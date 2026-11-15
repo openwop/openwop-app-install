@@ -39,12 +39,12 @@ vi.mock('../csmClient.js', async (orig) => ({
   ...(await orig<typeof import('../csmClient.js')>()),
   ...api,
 }));
-// ADR 0882 (CSM2UX-4) — write controls follow `workspace:write`; `writeAccess.value`
-// lets a case render as a Viewer.
-const writeAccess = vi.hoisted(() => ({ value: true }));
+// ADR 0882 (CSM2UX-4) — write controls follow `workspace:write`. Every case here
+// renders as a WRITER (no case flips it; the Viewer arm is driven in
+// `csmRound2.test.tsx`), and the mock keeps the real access hook from fetching.
 vi.mock('../../../lib/writeAccess.js', async (orig) => ({
   ...(await orig<typeof import('../../../lib/writeAccess.js')>()),
-  useScopeWriteAccess: () => writeAccess.value,
+  useScopeWriteAccess: () => true,
 }));
 
 import { CsmPage } from '../CsmPage.js';
@@ -122,7 +122,8 @@ describe('CsmPage — ADR 0212 crmRef + healthFactors display', () => {
     renderPage();
     expect(await screen.findByText('1 factor')).toBeTruthy();
     expect(screen.getByText('openDeals')).toBeTruthy();
-    expect(screen.getByText(/computed/)).toBeTruthy();
+    // The provenance stamp, with its relative time filled in (not a bare word).
+    expect(screen.getByText(/^computed \S/)).toBeTruthy();
   });
 });
 

@@ -65,6 +65,10 @@ const TEST_SEAM_DECL =
 // the truth, so a walk that silently lost a fifth of src/ passed. Each floor is the
 // measured value − 1 (never a multiple of 10); a change that deletes files or seams lowers
 // the floor in the same commit, to its own measured value − 1.
+// RE-MEASURED 2026-11-13 on b976b6055 (grade-tests wave 109): 2336 src files, 405 seam
+// declarations, `__test` in 2 files. The first two floors have SLACK again (263 files, 33
+// seams) because the tree grew; they are left as they are (a floor is changed only by
+// the change that moves it) and the slack is raised as a human ask (TST-NZB-1).
 const MIN_SRC_FILES = 2073;
 const MIN_TEST_SEAM_EXPORTS = 372;
 const MIN_TEST_DECLARING_FILES = 2; // the exact `__test` count (13 until the KickTodo packages left, ADR 1031 P3); a 3rd raises it
@@ -96,7 +100,9 @@ describe('ADR 0734 — every test-only export in src/ has a reader', () => {
   // A mention in a COMMENT is not a reader. The repo has been burned by ratchets that
   // counted commented-out code as live; a docblock saying "we used to call __resetFoo"
   // must not hold __resetFoo alive. Strings are left intact (a string-keyed registry IS
-  // a real reference), and the `:` guard keeps `https://…` from eating the rest of a line.
+  // a real reference). The stripper is the shared scanner in `helpers/stripComments.ts`
+  // (#5422): it tokenises, so a `//` inside a URL string or a `/*` inside a regex cannot
+  // eat live code the way the old regex form did.
   const texts = new Map(searchFiles.map((f) => [f, stripComments(readFileSync(f, 'utf8'))]));
 
   // Keyed by `file#symbol`, NOT by symbol. A `Map<symbol, file>` silently collapses
@@ -183,11 +189,10 @@ describe('ADR 0734 — every test-only export in src/ has a reader', () => {
     // that is the adopter's suite the row exists for. The no-reader half applies
     // only where no adopter is composed, i.e. in openwop-app itself.
     const adopterTree = existsSync(join(SRC, 'adopter', 'features'));
-    for (const key of ADOPTER_TEST_SEAMS.keys()) {
-      const d = decls.get(key);
-      expect(d, `${key} is exempted but no longer declared — drop the row`).toBeDefined();
-      if (!adopterTree) expect(referenced(d!.sym, d!.file), `${key} has a reader in this repo now — drop the row`).toBe(false);
-    }
+    const keys = [...ADOPTER_TEST_SEAMS.keys()];
+    expect(keys.filter((key) => !decls.has(key)), 'exempted but no longer declared — drop these rows').toEqual([]);
+    const withReaderHere = adopterTree ? [] : keys.filter((key) => referenced(decls.get(key)!.sym, decls.get(key)!.file));
+    expect(withReaderHere, 'these have a reader in this repo now — drop the rows').toEqual([]);
   });
 
   it('no test-only export in src/ is unreferenced', () => {

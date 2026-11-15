@@ -2303,17 +2303,17 @@ function resolveCredential(
   // Challenge Factory run died here with `Available refs: (none)` and nothing
   // naming the two actual exits.
   //
-  // The provider is FROZEN into the node at expansion (ADR 0498 — a concrete
-  // provider is what keeps `providerKey` replay-stable), so "add a key" and
-  // "re-create the workflow on a provider you have" really are the only two
-  // exits; there is deliberately no silent fallback to another provider.
+  // The provider is fixed per call: frozen into the node at expansion (ADR 0498),
+  // or, in a deferred copy, chosen when the run starts (ADR 1117). Either way the
+  // exits are a key for it or a different provider; there is deliberately no
+  // silent fallback to another provider.
   // `availableRefs` stays in `details` for operators — ref NAMES only, never
   // values, and the names are already non-secret identifiers.
   throw new AiProviderError(
     'byok_required',
     `This step needs a ${provider} API key and this workspace has none. `
-    + `Add one in Settings → Secrets Vault, or re-create the workflow choosing a provider you already have a key for. `
-    + `The provider is fixed when the workflow is created, so it will not fall back to a different one on its own.`,
+    + `Add one in Settings → Secrets Vault, or use a provider you already have a key for: choose it when you start the run `
+    + `if the workflow asks for one, or re-create the workflow with it. It will not fall back to a different provider on its own.`,
     {
       provider,
       reason: 'no_default_credential',

@@ -418,3 +418,114 @@ Research note: practitioner GDPR guidance treats the data map as one versioned
 inventory, updated when a field is added, that erasure must cascade through. Two
 inventories that disagree (a PII registry no erasure gate reads) is the failure
 D2 removes.
+
+**P2 wave 3 (2026-11-13): 101 reviewed, baseline 212 → 111 (ceiling 111).** A
+read-only pre-sort with the census's own resolver split the 212: **75** carry a
+`PERSON_FIELD`, and **137** did not. Each of the 137 was then read by hand: the row
+type with its nested types, the key function, every free-text field, and the
+feature's `erasure.ts`. 101 hold nothing about a person (counters keyed by tenant
+and date, id-only index rows, provider and Stripe account ids of a business,
+operator configuration, business-object titles) and moved to
+`SIGNAL_FREE_REVIEWED` with their reasons. The other **36 stay**, and no field
+name gives them away:
+
+- *Covered by an eraser the census cannot see (14).* The subject is in the key or
+  in a nested payload: `analytics:replay` (`subjectKey`), `cdp:collected-event`,
+  `channel-ingress:conversation`, `claude-code:presence` (a device id),
+  `commissions:deal-claim` (the rep inside `statementId`), `goals`
+  (`owner.principal`), `job-search:attestation-hashidx` and `:digest`,
+  `kb:docrev`, `kb:enrichcache` and `kb:veccache` (a subject-keyed document id),
+  `orgs:invite-hashidx`, `campaign-ops:intake-bytes` and `prompts:entry-version`
+  (private bodies). They leave by a signal the census can read, not a review line.
+- *No eraser reaches them (17), tracked as `CHAN-F19`:* `crm:sender-health-seen`
+  (a raw recipient email in every bounce key, no age-out), `campaign-ops:request`
+  (`createdBy`, `answeredBy`, request text), `team-ledger:suggester-queue` (the
+  chat message text), `commerce:affiliate` and `commerce:payout` (an affiliate is
+  often a person), `portability:import-claims` and `settings:byok-usage` (a user id
+  in the key), `crm:dealkeyclaim` (a contact id in the key), `crm:lead-rr`,
+  `connections:pairing` (a DM chat id or phone number), `chatwidget:session` and
+  `:anonautowrite:session` (the visitor transcript's hash; TTL only),
+  `notebook-source-summary`, `channel-ingress:settings` (relay lanes keyed by a
+  personal device), `builder-pair:room` (partial), `analytics:replay-toggle-writes`
+  (copied toggle rows with `updatedBy`, minutes-lived) and `service-desk:legacy-none`
+  (typed as a full ticket; nothing writes it).
+- *Kept by design (1):* `commerce-connect:order`. Its eraser exempts it as a money
+  record (`commerce-connect/erasure.ts`), but the buyer may be a one-person
+  workspace, so "holds no subject data" would be false.
+- *Unresolved (4):* `crm:booking-link-slug` (a slug can be a rep's name),
+  `crm:companykeyclaim` (a contact's email domain), `crm:territory-rule` (a filter
+  literal can be a person's id) and `sales-maps:geocode` (a posted address).
+
+The pre-sort also misread one row type (`service-desk:legacy-none` resolved
+clean; it is a `Ticket`), which is why every candidate was read and none was
+reviewed on the scan alone. **Next:** the unreviewed set is now person-bearing, so
+the next waves are erasers (`CHAN-F19`) and census signals for the 14 covered
+stores, feature by feature, not review lines.
+
+**CHAN-F19 #1 (2026-11-13): `crm:sender-health-seen`, baseline 111 → 110 (ceiling
+110).** The ADR 0955 D7 breaker's bounce/complaint dedup row keyed
+`tenant::org::day::reason::<raw address>` and was never deleted, though it is only
+needed for the same UTC day. Three changes (`crm/senderHealth.ts`, `crm/erasure.ts`):
+- *The key holds a hash.* New rows key `h:<sha256(normalized address)>`. A hash of an
+  email is still personal data, so the hash keeps the address out of keys and logs;
+  the next two bullets are what bound and erase it.
+- *A 2-day age-out* (`registerKvAgeOut`, `timestampField: 'at'`). The sweep selects by
+  prefix and ages by `at`, which every row has carried since the store was created
+  (90a29103c), so legacy raw-key rows age out on the same lane. No migration: it would
+  duplicate the lane. During the switch, `recordBounceSignal` also reads the legacy key
+  (read-only) so a bounce seen just before the deploy still dedupes a same-day
+  redelivery after it; that read is marked for removal one TTL after the deploy.
+- *The crm eraser deletes both key shapes* (`eraseSenderHealthSeen`), for every address
+  in the contact's key-set and, before the no-contact return, for an email-keyed DSAR
+  whose address no contact holds. The TTL is the backstop, not the erasure story, so a
+  DSAR inside the first sweep window (before the per-tick cap clears legacy rows) still
+  removes the subject's rows.
+- *The census sees it:* `declarePiiFields('crm:sender-health-seen', ['key'], {
+  maskGloballyByFieldName: false })` is the D2 signal, and crm registers an eraser.
+  Tests: `test/chan-f19-sender-health-seen.test.ts` (six cases; seven sabotage probes, each red on its named case, plus the census red when the `declarePiiFields` line goes).
+
+**CHAN-F19 #2 (2026-11-13): `team-ledger:suggester-queue`, baseline 110 → 109 (ceiling
+109).** The ADR 0853 D3 decision suggester queued a person's chat text for the
+classifier with no author on the row. So no eraser could find it, and the text still
+reached the model after a DSAR. Three changes (`team-intent-ledger/decisionSuggester.ts`,
+`feature.ts`):
+- *The row names its author.* `authorUserId` comes from `HumanChatMessage`, which both
+  emitters (the channel post route, the conversation exchange) set when they know it.
+  It is a census signal (`USER_ID_FIELD`), and team-intent-ledger erases.
+- *A DSAR deletes the subject's queued rows* (`eraseSuggesterQueueSubject`, registered
+  beside the ledger and suggestion erasers), before the classifier can read them.
+- *A 7-day age-out* (`registerKvAgeOut` on `createdAt`) bounds what cannot be
+  attributed: rows queued before this change and rows whose emitter did not know the
+  author. The worker drains every 30 s, so a row still queued at 7 days is stale. A
+  DSAR inside that window misses an author-less legacy row; this is accepted and stated
+  here rather than guessed at by text.
+- *Not in this change:* a suggestion the agent already filed from an erased person's
+  message keeps the model's title and summary (`suggestedBy` is the agent, so
+  `eraseSuggestionSubject` does not match it). Tracked on the CHAN-F19 row.
+Tests: `test/chan-f19-suggester-queue-erasure.test.ts` (three cases through the real
+channel post route; five sabotage probes, each red on its named case, including the
+census red when the `authorUserId` field goes).
+
+**CHAN-F19 #3 (2026-11-14): `campaign-ops:request`, baseline 109 → 108 (ceiling 108).**
+An ADR 0923 change request names its creator (`createdBy`), each person who answered
+the planner's questions (`answers[].answeredBy`), and a person who overrode a duplicate
+warning (`duplicateOverride.by`), with the reason they wrote. The row type is
+`StoredRequest extends ChangeRequest`, and `ChangeRequest` lives in another file, so the
+census saw no signal, and campaign-ops' eraser never reached the store.
+- *The eraser leg* (`eraseRequestActors`, `campaign-ops/requestService.ts`, summed into
+  `eraseCampaignOpsSubject`): per field, each value in the subject's key forms becomes
+  the erased-user tombstone, and an override the subject made has its reason blanked.
+  Another person's fields on the same row are kept. One CAS per row, never through the
+  content writers, so the request keeps its version and is not re-interpreted.
+- *Kept, by decision:* the request text, its history and the answer values. They are
+  the client's change instruction, the same agency record as asset content (the rule in
+  `campaign-ops/erasure.ts`), and a change set is hashed from them (ADR 0923 D6). The
+  person's identity leaves; what they asked for does not. If a request's text itself
+  names a person, that is free text in the agency's record, the same as an asset.
+- *The census signal:* `declarePiiFields('campaign-ops:request', …)` beside the
+  collection (the D2 signal). No new eraser id, so the WF-CONS-2 manifest is unchanged.
+Tests: `test/chan-f19-campaign-ops-request-erasure.test.ts` (the real app's eraser set
+through `eraseSubject`: the erased person's fields on two requests, the other person
+kept, text and values and version kept, another workspace untouched). Four sabotage
+probes, each red: the leg unwired, the PII declaration dropped (census red), every
+answer tombstoned regardless of author, the override reason kept.

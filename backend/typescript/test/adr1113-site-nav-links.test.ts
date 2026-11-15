@@ -15,6 +15,8 @@
  * Sabotage witnesses: dropping `links` from `cleanSiteNav` reds the accepts
  * and route cases; accepting an external href, a missing group or a missing
  * label reds the refuses case; removing the cap reds the cap case.
+ * ADR 1113 D5: dropping `ctaHref` reds its keeps case; accepting an off-site
+ * href, or one without a label, reds its refuses case.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -110,6 +112,21 @@ describe('cleanSiteNav links (ADR 1113)', () => {
     const many = (n: number): unknown[] => Array.from({ length: n }, (_, i) => ({ label: `L${i}`, href: `/r${i}`, group: 'product' }));
     expect(cleanSiteNav({ links: many(12) })?.links).toHaveLength(12);
     expect(fieldOf(() => cleanSiteNav({ links: many(13) }))).toBe('siteNav.links');
+  });
+});
+
+describe('cleanSiteNav ctaHref (ADR 1113 D5)', () => {
+  it('keeps a trimmed internal path or fragment next to the button label', () => {
+    expect(cleanSiteNav({ cta: 'Find your challenge', ctaHref: ' /discover ' })).toEqual({ cta: 'Find your challenge', ctaHref: '/discover' });
+    expect(cleanSiteNav({ cta: 'Start', ctaHref: '#start' })).toEqual({ cta: 'Start', ctaHref: '#start' });
+    expect(cleanSiteNav({ cta: 'Start', ctaHref: '' })).toEqual({ cta: 'Start' }); // empty is absent
+  });
+
+  it('refuses an off-site, protocol-relative or script href, and an href with no label', () => {
+    for (const ctaHref of ['https://evil.example', '//evil.example', 'javascript:alert(1)', 42]) {
+      expect(fieldOf(() => cleanSiteNav({ cta: 'Go', ctaHref }))).toBe('siteNav.ctaHref');
+    }
+    expect(refusal(() => cleanSiteNav({ ctaHref: '/discover' })).message).toMatch(/needs `siteNav.cta`/);
   });
 });
 

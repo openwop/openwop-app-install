@@ -28,6 +28,15 @@
  *
  * (12) Every revoke (a sender, a device, a relay sender) asks first: the confirm's title is
  *      asserted, so dropping the confirm reds its case.
+ * (13) WA85UX-24 (ADR 1053 D10): a WhatsApp binding links to the WhatsApp settings only
+ *      while the `whatsapp` toggle is on (not channel-ingress's own toggle).
+ * (14) CHAN-F11 (ADR 1043): an admin switches ONE relay channel off and the devices
+ *      reload; a member gets no switches and a notice only when a channel is off (the
+ *      all-on case settles on the read, since it renders nothing); a device on a
+ *      switched-off channel reads as paused, whatever its heartbeat.
+ *      Sabotage-witnessed (w109): the link's toggle id and gate, the switch's sent
+ *      value, the view update, the reload, the member branch and its notice guard,
+ *      and the paused status.
  * The admin case's "no per-row Approve" rides the same `canApprove` guard as its 'Waiting for
  * approval' heading (the server sends no pending rows to an admin); the heading is the witness.
  *
@@ -37,7 +46,7 @@
  * `approveSender`.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, within, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, within, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 
@@ -344,6 +353,9 @@ describe('ChannelSettingsPage — the per-channel relay switch (CHAN-F11)', () =
     page();
     await screen.findByText('Your devices (relay)');
     await waitFor(() => expect(m.channels).toHaveBeenCalledTimes(2));
+    // An all-on member view renders NOTHING, so there is no element to wait for:
+    // settle on the read itself before asserting the notice is absent.
+    await act(async () => { await m.channels.mock.results[1]?.value; });
     expect(screen.queryByText(/switched these relay channels off/)).toBeNull();
   });
 

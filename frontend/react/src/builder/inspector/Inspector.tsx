@@ -24,7 +24,7 @@ import { NodeConnections } from './NodeConnections.js';
 import { NodeDebugSection } from './NodeDebugSection.js';
 import { MultiSelectInspector } from './MultiSelectInspector.js';
 import { WorkflowInspector } from './WorkflowInspector.js';
-import { useHostAdvertisedModelCapabilities } from './inspectorHelpers.js';
+import { runVariableName, useHostAdvertisedModelCapabilities } from './inspectorHelpers.js';
 import { TextField, SelectField } from '../../ui/Field.js';
 import { CheckIcon } from '../../ui/icons/index.js';
 import { classifyHttpError } from '../../client/classifyHttpError.js';
@@ -245,8 +245,10 @@ export function Inspector() {
                 field={f}
                 allFields={entry.configFields}
               />
-              {/* ADR 0773 D6 — per-field inline ask (self-gated on the toggle). */}
-              <FillWithAi nodeName={node.name} fieldLabel={f.label} />
+              {/* ADR 0773 D6 — per-field inline ask (self-gated on the toggle). Not on a
+                  field bound to a run variable (ADR 1117): filling it would write a fixed
+                  value over the binding and freeze the copy again. */}
+              {runVariableName(node.config[f.key]) === undefined && <FillWithAi nodeName={node.name} fieldLabel={f.label} />}
             </div>
           ))}
         </>

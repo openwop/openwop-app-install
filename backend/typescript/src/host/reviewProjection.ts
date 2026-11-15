@@ -18,6 +18,7 @@
  * @see docs/adr/0068-unified-review-projection.md
  */
 
+import { isWordingFailure, readApprovalGateWording, type ApprovalGateWording } from './approvalGateWording.js';
 import type { Storage } from '../storage/storage.js';
 import type { InterruptRecord, RunRecord } from '../types.js';
 import { timeoutApprovalGateIfDue } from '../executor/approvalGateTimeout.js';
@@ -151,6 +152,10 @@ export interface ReviewRequest extends FeatureReviewFields {
    *  carry anything a node put there. Absent for a kind the card cannot answer
    *  inline (credential, external-event, low-confidence, unknown). */
   answerForm?: ReviewAnswerForm;
+  /** ADR 1040 D7 F1 — an approval gate's own wording (i18n keys + the decline
+   *  flag), re-validated here so every card shows the same words for one gate.
+   *  A CLOSED shape: only these three fields, never the raw `data`. */
+  gateWording?: ApprovalGateWording;
   assistantAction?: {
     actionId: string;
     kind: string;
@@ -358,6 +363,16 @@ function interruptActions(it: InterruptRecord): ReviewAction[] {
   return [{ action: 'resolve', requiresValue: true, valueSchema: it.resumeSchema }];
 }
 
+/** ADR 1040 D7 F1 — the gate's wording, through the SAME validator the writer
+ *  used (a record from before the validator, or any other writer, that fails
+ *  it projects nothing rather than something unchecked). */
+function gateWordingOf(data: Record<string, unknown>): ApprovalGateWording | undefined {
+  if (data.actionLabels === undefined && data.promptKey === undefined && data.declineExpected === undefined) return undefined;
+  const actions = Array.isArray(data.actions) ? data.actions : ['approve', 'reject', 'request-changes', 'defer', 'escalate'];
+  const w = readApprovalGateWording('review', data, actions);
+  return isWordingFailure(w) || Object.keys(w).length === 0 ? undefined : w;
+}
+
 function interruptRisk(it: InterruptRecord): ReviewRequest['risk'] {
   const data = (it.data ?? {}) as { risk?: { level?: unknown; reasons?: unknown } };
   const risk = data.risk;
@@ -415,6 +430,7 @@ export function interruptToReview(it: InterruptRecord, run: RunRecord): ReviewRe
         .filter((a) => a.content || a.label)
     : [];
   const answerForm = interruptAnswerForm(it);
+  const wording = it.kind === 'approval' ? gateWordingOf(data) : undefined;
   const binding = artifactBinding(data);
   const assets: ReviewAsset[] = [
     ...optionAssets,
@@ -450,6 +466,7 @@ export function interruptToReview(it: InterruptRecord, run: RunRecord): ReviewRe
     ...(assets.length > 0 ? { assets } : {}),
     actions: interruptActions(it),
     ...(answerForm ? { answerForm } : {}),
+    ...(wording ? { gateWording: wording } : {}),
     provenanceRefs: [
       { kind: 'run', ref: it.runId },
       { kind: 'node', ref: it.nodeId },

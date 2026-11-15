@@ -105,4 +105,10 @@ export const messages = {
   videoAccess: 'Acessibilidade',
   videoAccessBody: 'Legendas em todos os filmes, geradas a partir das palavras faladas. Contraste de texto de pelo menos 4,5:1. Sem piscadas, e nenhum significado transmitido só por cor ou som.',
   videoTokens: 'Tokens publicados para o renderizador dos filmes:',
+  dialogs: 'Diálogos',
+  dialogOpen: 'Novo item',
+  dialogTitle: 'Novo item',
+  dialogSubmit: 'Criar item',
+  dialogField: 'Nome',
+  dialogError: 'Este exemplo nunca cria nada.',
 } as const;

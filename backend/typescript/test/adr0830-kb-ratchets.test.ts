@@ -21,7 +21,11 @@
  *
  * Measured (wave-6 /grade-tests), each red here: the kb surface without
  * `assertRunScopeOrg`, the seam without `floor()`, a pinned surface losing its shape,
- * a new absent-org surface, `actingUserId` dropped from routes/agents.ts, a feature's
+ * a new absent-org surface, `actingUserId` dropped from routes/agents.ts (since ADR
+ * 0889: the route's `actingUserId: callerSubject(req)` into `buildLiveDispatchLane`,
+ * or the lane's spread into `createScopedAgentToolProvider` — the lane half is a
+ * spelling within 300 chars, so a spread that names `actingUserId` but passes
+ * nothing still matches; grade-code TST-NZA-4), a feature's
  * namespace neither in the host set nor declared (was: `_kickbot` dropped from
  * TENANT_SCOPED_KB_ORGS), any of the three fence legs in the pack, the
  * reindex chain un-hidden, and a wrong delivery port in a KB chain.

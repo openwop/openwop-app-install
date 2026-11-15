@@ -98,7 +98,9 @@ const clipError = (s) => (typeof s === 'string' ? s : String(s)).slice(0, ERROR_
 async function failEpisode(pod, episodeId, code, message) {
   const text = clipError(message);
   if (pod && typeof pod.recordEpisodeResult === 'function' && episodeId) {
-    try { await pod.recordEpisodeResult({ episodeId, error: text }); } catch { /* reporting must not mask the failure */ }
+    // ADR 1115 D6 — the code rides beside the message, so the Studio can say what
+    // happened in the reader's language instead of printing this English.
+    try { await pod.recordEpisodeResult({ episodeId, error: text, errorCode: code }); } catch { /* reporting must not mask the failure */ }
   }
   return { status: 'failed', error: { code, message: text } };
 }
@@ -113,6 +115,55 @@ const episodeMissing = (episodeId) => ({
   },
 });
 
+/**
+ * ADR 1115 D2 — a read the surface REFUSED (`refused: <code>`) fails with that code: a
+ * run with no person says `podcast_run_needs_person`, not a misleading "not found". A
+ * hidden or missing episode keeps the `podcast_episode_not_found` it always had. No
+ * `failEpisode` write: a refused run may write nothing.
+ */
+const readRefused = (code, episodeId) => (
+  !code || code === EPISODE_MISSING
+    ? episodeMissing(episodeId)
+    : { status: 'failed', error: { code, message: `the podcasts surface refused this run (${clipError(code)})` } }
+);
+
+/**
+ * ADR 1115 D2 (architect finding 5) — the ONLY way a node writes to the episode. A
+ * write the surface refused (the run's person lost write, mid-run) or that found no row
+ * (deleted mid-run) fails the node typed, so the pipeline stops before its next paid
+ * call. `outline` and `transcript` used to discard this result, and `mix` ignored its
+ * second write, so a refused write left the node `success`.
+ * Returns `null` when the write landed, else the node's failure result.
+ */
+async function recordOrFail(pod, patch) {
+  const written = await pod.recordEpisodeResult(patch);
+  if (written && typeof written.refused === 'string') {
+    return { status: 'failed', error: { code: written.refused, message: `the episode store refused this run's write (${clipError(written.refused)})` } };
+  }
+  if (!written || written.found === false) return episodeMissing(patch.episodeId);
+  return null;
+}
+
+/**
+ * ADR 1115 D2 (code regrade `PODCD93-7`) — asked immediately before every PAID step (a
+ * model call, the TTS loop): may this run still write the episode? A membership revoked,
+ * the episode published, or the claim lost to a newer retry stops the next paid call,
+ * not only the next write. Returns `null` to proceed, else the node's failure result.
+ * A host without the method fails closed: it cannot answer the question.
+ */
+async function stillWritable(pod, episodeId) {
+  if (typeof pod.checkWrite !== 'function') {
+    return { status: 'failed', error: { code: 'host_capability_missing', message: 'the host podcasts surface cannot check write authority (ADR 1115)' } };
+  }
+  const r = await pod.checkWrite({ episodeId });
+  if (r && r.error) return { status: 'failed', error: { code: r.error.code, message: clipError(r.error.message) } };
+  return null;
+}
+
+/** Name the model in a failure message, or say whose default it was (ADR 1115 D9:
+ *  with no model on the profile the host chose it, and `(undefined)` helps no one). */
+const modelLabel = (model) => (model ? `the ${model} model` : "the run's default model");
+
 /** Derive the LLM provider from a model id (the EpisodeProfile stores model ids;
  *  the host routes provider internally — RFC 0091 Unresolved Q2). An id this
  *  cannot place returns undefined and the host's run default applies (ADR 0903). */
@@ -125,10 +176,11 @@ function providerForModel(model) {
   return undefined;
 }
 
-/** Resolve { episode, episodeProfile, speakerProfile } for a run, or nulls. */
+/** Resolve { episode, episodeProfile, speakerProfile } for a run, or nulls plus the
+ *  surface's `refused` code for the episode read (ADR 1115 D2). */
 async function resolveConfig(ctx, pod, episodeId) {
-  const { episode } = await pod.getEpisode({ episodeId });
-  if (!episode) return { episode: null, episodeProfile: null, speakerProfile: null };
+  const { episode, refused } = await pod.getEpisode({ episodeId });
+  if (!episode) return { episode: null, episodeProfile: null, speakerProfile: null, refused };
   const { profile: episodeProfile } = await pod.getEpisodeProfile({ id: episode.episodeProfileId });
   let speakerProfile = null;
   if (episodeProfile && typeof pod.getSpeakerProfile === 'function') {
@@ -137,29 +189,76 @@ async function resolveConfig(ctx, pod, episodeId) {
   return { episode, episodeProfile, speakerProfile };
 }
 
+/** A notebooks call that may be toggle-wrapped: a DISABLED toggle throws
+ *  `host_capability_disabled` per call (`host/featureSurfaces.ts`), which is "this run
+ *  cannot read the notebook", not a crash. Anything else still propagates. */
+async function notebooksCall(fn) {
+  try { return { value: await fn() }; } catch (err) {
+    if (err && err.code === 'host_capability_disabled') return { disabled: true };
+    throw err;
+  }
+}
+
+/**
+ * ADR 1115 D2 + D4 — authorize, then ground. TYPED failures, never a silent fallback:
+ *   1. `authorizeGeneration` first, so an unauthorized or unconfigured run fails before
+ *      any paid call (`podcast_run_needs_person`, `podcast_write_forbidden`,
+ *      `podcast_profile_missing`, `podcast_notebook_unavailable`, …);
+ *   2. the notebook must be readable by the run (`podcast_notebook_unavailable`);
+ *   3. it must have content (`podcast_content_empty`).
+ * This node used to return `success` with the briefing alone when notebooks was absent,
+ * and with `''` when the run could not read the notebook — which an actorless route
+ * run never could for a private one (`PODC93-1`) — and the pipeline then paid for an
+ * outline, a transcript and every TTS turn of an episode grounded on nothing.
+ */
 export async function selectContent(ctx) {
   const pod = ensurePodcasts(ctx);
   const episodeId = strInput(ctx, 'episodeId');
-  const { episode } = await pod.getEpisode({ episodeId });
-  if (!episode) return episodeMissing(episodeId);
+  const auth = typeof pod.authorizeGeneration === 'function'
+    ? await pod.authorizeGeneration({ episodeId })
+    : { error: { code: 'host_capability_missing', message: 'the host podcasts surface cannot authorize a generation (ADR 1115)' } };
+  if (auth && auth.error) {
+    const code = auth.error.code;
+    // A write refusal means nothing may be written; the rest are reportable on the row.
+    const writable = ![
+      'podcast_run_needs_person', 'podcast_write_forbidden', 'podcast_run_not_claimed', 'podcast_episode_published', EPISODE_MISSING,
+    ].includes(code);
+    if (code === EPISODE_MISSING) return episodeMissing(episodeId);
+    return writable ? failEpisode(pod, episodeId, code, auth.error.message) : { status: 'failed', error: { code, message: clipError(auth.error.message) } };
+  }
+  const episode = auth.episode;
   const nb = ctx.features && ctx.features.notebooks;
-  if (!nb || typeof nb.ask !== 'function') {
-    // Notebook grounding is optional — degrade to the briefing alone rather than fail.
-    return { status: 'success', outputs: { context: episode.briefing ?? '' } };
+  if (!nb || typeof nb.ask !== 'function' || typeof nb.getNotebook !== 'function') {
+    return failEpisode(pod, episodeId, 'podcast_notebook_unavailable',
+      'the notebooks feature is not available to this run, and an episode is generated from its notebook');
+  }
+  const read = await notebooksCall(() => nb.getNotebook({ notebookId: episode.notebookId }));
+  if (read.disabled || !read.value || !read.value.notebook) {
+    return failEpisode(pod, episodeId, 'podcast_notebook_unavailable',
+      read.disabled
+        ? 'notebooks are turned off for this workspace, and an episode is generated from its notebook'
+        : 'the notebook was deleted, or the person this run acts for can no longer read it');
   }
   const query = episode.briefing && episode.briefing.length > 0
     ? episode.briefing
     : 'Summarize the most important points, findings, and takeaways from this notebook.';
-  const out = await nb.ask({ notebookId: episode.notebookId, query });
-  return { status: 'success', outputs: { context: out.augmentedPrompt ?? '' } };
+  const asked = await notebooksCall(() => nb.ask({ notebookId: episode.notebookId, query }));
+  const context = !asked.disabled && asked.value && typeof asked.value.augmentedPrompt === 'string' ? asked.value.augmentedPrompt.trim() : '';
+  if (context.length === 0) {
+    // A briefing is a steer, not a source: an episode OF a notebook with nothing from
+    // the notebook is the success-with-empty this node used to report.
+    return failEpisode(pod, episodeId, 'podcast_content_empty',
+      'the notebook has no sources to ground the episode on — add a source, then generate again');
+  }
+  return { status: 'success', outputs: { context } };
 }
 
 export async function outline(ctx) {
   ensureCallAI(ctx);
   const pod = ensurePodcasts(ctx);
   const episodeId = strInput(ctx, 'episodeId');
-  const { episode, episodeProfile } = await resolveConfig(ctx, pod, episodeId);
-  if (!episode) return episodeMissing(episodeId);
+  const { episode, episodeProfile, refused } = await resolveConfig(ctx, pod, episodeId);
+  if (!episode) return readRefused(refused, episodeId);
   const context = strInput(ctx, 'context');
   const model = episodeProfile?.outlineModel || undefined;
   const segmentCount = episodeProfile?.segmentCount || 5;
@@ -182,6 +281,8 @@ export async function outline(ctx) {
     return typeof result?.content === 'string' ? result.content.trim() : '';
   };
 
+  const blockedOutline = await stillWritable(pod, episodeId);
+  if (blockedOutline) return blockedOutline;
   let text = await askOutline();
   if (text.length === 0) {
     // PODC-2 (ADR 0603 §3) — ONE bounded, error-FED repair on the authoring path
@@ -208,10 +309,13 @@ export async function outline(ctx) {
     // NOT `success` with `outline: ''`. A silent empty outline used to flow into the
     // transcript node, produce zero turns, and finish the run as `done`.
     return failEpisode(pod, episodeId, 'podcast_outline_empty',
-      `the outline model (${model}) returned no text, twice — the episode has no script to voice`);
+      `${modelLabel(model)} returned no outline text, twice — the episode has no script to voice`);
   }
-  await writeDocument(ctx, episode, `${episode.title} — outline`, 'podcast-outline', text)
-    .then((docId) => docId && pod.recordEpisodeResult({ episodeId, outlineDocRef: docId }));
+  const outlineDocRef = await writeDocument(ctx, episode, `${episode.title} — outline`, 'podcast-outline', text);
+  if (outlineDocRef) {
+    const failed = await recordOrFail(pod, { episodeId, outlineDocRef });
+    if (failed) return failed;
+  }
   return { status: 'success', outputs: { outline: text } };
 }
 
@@ -219,8 +323,8 @@ export async function transcript(ctx) {
   ensureCallAI(ctx);
   const pod = ensurePodcasts(ctx);
   const episodeId = strInput(ctx, 'episodeId');
-  const { episode, episodeProfile, speakerProfile } = await resolveConfig(ctx, pod, episodeId);
-  if (!episode) return episodeMissing(episodeId);
+  const { episode, episodeProfile, speakerProfile, refused } = await resolveConfig(ctx, pod, episodeId);
+  if (!episode) return readRefused(refused, episodeId);
   const outlineText = strInput(ctx, 'outline');
   const speakers = speakerProfile?.speakers ?? [{ name: 'Host', voiceId: '' }];
   const segmentCount = episodeProfile?.segmentCount || 5;
@@ -247,6 +351,8 @@ export async function transcript(ctx) {
     return Array.isArray(result?.data) ? JSON.stringify(result.data) : (typeof result?.content === 'string' ? result.content : '');
   };
 
+  const blockedTranscript = await stillWritable(pod, episodeId);
+  if (blockedTranscript) return blockedTranscript;
   let parsed = parseTurns(await askTranscript(), names);
   if (parsed.turns.length === 0) {
     // PODC-2 (ADR 0603 §3) — ONE bounded, error-FED repair. The retry is told the
@@ -265,12 +371,15 @@ export async function transcript(ctx) {
     // NOT `success` with `turns: []`. That used to write an EMPTY transcript
     // Document (or none at all), synthesize zero clips, and finish the run `done`.
     return failEpisode(pod, episodeId, 'podcast_transcript_unusable',
-      `the transcript model (${model}) produced no usable turns, twice — ${parsed.reason}`);
+      `${modelLabel(model)} produced no usable transcript turns, twice — ${parsed.reason}`);
   }
   // A readable transcript Document (ADR 0053) — owned by the notebook subject.
   const rendered = parsed.turns.map((t) => `**${t.speaker}:** ${t.text}`).join('\n\n');
-  await writeDocument(ctx, episode, `${episode.title} — transcript`, 'podcast-transcript', rendered)
-    .then((docId) => docId && pod.recordEpisodeResult({ episodeId, transcriptDocRef: docId }));
+  const transcriptDocRef = await writeDocument(ctx, episode, `${episode.title} — transcript`, 'podcast-transcript', rendered);
+  if (transcriptDocRef) {
+    const failed = await recordOrFail(pod, { episodeId, transcriptDocRef });
+    if (failed) return failed;
+  }
   return { status: 'success', outputs: { turns: parsed.turns } };
 }
 
@@ -278,8 +387,8 @@ export async function synthesize(ctx) {
   ensureSpeech(ctx);
   const pod = ensurePodcasts(ctx);
   const episodeId = strInput(ctx, 'episodeId');
-  const { episode, episodeProfile, speakerProfile } = await resolveConfig(ctx, pod, episodeId);
-  if (!episode) return episodeMissing(episodeId);
+  const { episode, episodeProfile, speakerProfile, refused } = await resolveConfig(ctx, pod, episodeId);
+  if (!episode) return readRefused(refused, episodeId);
   const i = ctx.inputs ?? {};
   const turns = Array.isArray(i.turns)
     ? i.turns
@@ -295,6 +404,8 @@ export async function synthesize(ctx) {
   const clips = [];
   let voiceless = 0;
   let silent = 0;
+  const blockedSynth = await stillWritable(pod, episodeId);
+  if (blockedSynth) return blockedSynth;
   for (const turn of turns) {
     const text = typeof turn?.text === 'string' ? turn.text.trim() : '';
     if (text.length === 0) continue;
@@ -371,6 +482,10 @@ export async function mix(ctx) {
   // clips. Either way the episode is left exactly as it was and the failure says
   // which clips the store refused.
   const written = await pod.recordEpisodeResult({ episodeId, clips });
+  // ADR 1115 D2 — a refused write (the run's person lost write) fails with its code.
+  if (written && typeof written.refused === 'string') {
+    return { status: 'failed', error: { code: written.refused, message: `the episode store refused this run's write (${clipError(written.refused)})` } };
+  }
   const stored = typeof written?.clipsRecorded === 'number' ? written.clipsRecorded : (written?.recorded ? clips.length : 0);
   if (!written?.recorded || stored !== clips.length) {
     return failEpisode(pod, episodeId, 'podcast_mix_clips_rejected',
@@ -378,10 +493,17 @@ export async function mix(ctx) {
   }
   let audioMediaRef = '';
   if (typeof pod.mixClips === 'function') {
-    const mixed = await pod.mixClips({ clips });
+    // ADR 1115 D2 (architect finding 6) — the surface muxes the episode's STORED clips
+    // (just written above), never a list this node hands it. A `refused` result is a
+    // failure; a bare `url:''` is the codec degrade (keep the playlist).
+    const mixed = await pod.mixClips({ episodeId });
+    if (mixed && typeof mixed.refused === 'string') {
+      return { status: 'failed', error: { code: mixed.refused, message: `the podcasts surface refused this run's mix (${clipError(mixed.refused)})` } };
+    }
     if (mixed && typeof mixed.url === 'string' && mixed.url.length > 0) {
+      const failed = await recordOrFail(pod, { episodeId, audioMediaRef: mixed.url });
+      if (failed) return failed;
       audioMediaRef = mixed.url;
-      await pod.recordEpisodeResult({ episodeId, audioMediaRef });
     }
   }
   // `clipCount` is what the STORE holds, never what this node hoped to write.

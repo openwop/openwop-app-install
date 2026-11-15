@@ -103,6 +103,9 @@ test.describe('Collaborative project (ADR 0054) — end-to-end', () => {
 
   test('Phase 1 — charter: create a project and author its charter', async () => {
     await owner.goto('/projects');
+    // Issue 5921 — the create form opens in a dialog from the header's "New project"
+    // button (the empty state offers the same button, so take the first).
+    await owner.getByRole('button', { name: 'New project' }).first().click();
     // The org picker's label is 'Organization' (`ui:orgPickerLabel`); a bare
     // getByLabel('Workspace') resolved to the mobile nav ("Workspace quick access").
     await owner.getByRole('combobox', { name: 'Organization', exact: true }).selectOption({ label: 'E2E Org' });

@@ -77,7 +77,7 @@ afterEach(() => { registerSubjectAccessResolver('project', async (t, s, c) => re
 
 /** The response fields this file reads — typed, so no read is an untyped `any`. */
 interface ApiBody {
-  orgId?: string; id?: string; documentId?: string; visibility?: string; collectionId?: string;
+  orgId?: string; id?: string; documentId?: string; visibility?: string; collectionId?: string; title?: string;
   user?: { userId: string }; documents?: unknown[]; document?: { title: string };
   dependentsDeleted?: { documents?: number };
 }
@@ -323,13 +323,22 @@ describe('the door CLASS — every by-id door that can EGRESS content asks the s
  * recoverable leg below now reproduces that legacy state explicitly.
  */
 describe('the write doors: the refusal population is exactly "owner is gone", and it must stay recoverable', () => {
-  it('an org WRITER is never refused by visibility — the population is empty for them', async () => {
-    // If this ever goes red, the premise above is falsified and PATCH/DELETE/versions
-    // must be gated: it would mean a caller CAN reach them while the seam denies.
-    const { tenantId, orgId, documentId } = await fixture('private');
-    const writer = await orgEditor(tenantId, orgId);
-    expect((await writer.get(`${DOC(orgId)}/${documentId}`)).status, 'a workspace:write holder reads a private project doc').toBe(200);
-    expect((await writer.post(`${DOC(orgId)}/${documentId}/versions`, { content: 'edit' })).status).toBe(201);
+  it('ADR 1118: a non-member org editor is refused at every write door of a private project doc; an admin and a member are not', async () => {
+    // This leg used to pin "an org writer is never refused by visibility", and said to
+    // gate PATCH/DELETE/versions if it went red. ADR 1118 made it red on purpose, and
+    // the three doors now ask the owning project (`assertOwnerWritable`).
+    const { owner, tenantId, orgId, projectId, documentId } = await fixture('private');
+    const editor = await orgEditor(tenantId, orgId);
+    expect((await editor.get(`${DOC(orgId)}/${documentId}`)).status).toBe(404);
+    expect((await editor.post(`${DOC(orgId)}/${documentId}/versions`, { content: 'edit' })).status).toBe(404);
+    expect((await editor.patch(`${DOC(orgId)}/${documentId}`, { title: 'taken' })).status).toBe(404);
+    expect((await editor.del(`${DOC(orgId)}/${documentId}`)).status).toBe(404);
+    expect((await owner.get(`${DOC(orgId)}/${documentId}`)).body?.title, 'the refused PATCH did not land').toBe(TITLE);
+    // The owner is an org admin: in without membership.
+    expect((await owner.post(`${DOC(orgId)}/${documentId}/versions`, { content: 'by admin' })).status).toBe(201);
+    // Once a member, the editor writes.
+    expect((await owner.post(`${P}/${projectId}/members`, { ref: `user:${editor.userId}`, role: 'contributor' })).status).toBe(201);
+    expect((await editor.post(`${DOC(orgId)}/${documentId}/versions`, { content: 'by member' })).status).toBe(201);
   });
 
   it('ADR 0839 D2 — a project delete now takes the documents it owns (no new strandings)', async () => {

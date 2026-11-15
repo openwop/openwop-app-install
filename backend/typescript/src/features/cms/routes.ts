@@ -90,6 +90,32 @@ async function refusePublishedEditUnderGate(tenantId: string, orgId: string, cur
   }
 }
 
+/** Issue 5937 — a PATCH names only fields the route edits, and at least one of them.
+ *  An unknown field used to be dropped while the row was still written (a new version,
+ *  `updatedAt` and `updatedBy`), so a typo read as a successful, empty edit. */
+/** What `PATCH /pages/:pageId` edits (`expectedVersion` is a precondition, not an edit). */
+const PAGE_PATCH_FIELDS = ['title', 'slug', 'sections', 'tags', 'kind', 'authorId', 'category', 'docsNav', 'siteNav'] as const;
+
+function assertPatchFields(body: Record<string, unknown>, editable: readonly string[], meta: readonly string[] = []): void {
+  for (const k of Object.keys(body)) {
+    if (!editable.includes(k) && !meta.includes(k)) {
+      throw new OpenwopError('validation_error', `Unknown field \`${k}\`. Editable fields: ${editable.join(', ')}.`, 400, { field: k, allowed: [...editable, ...meta] });
+    }
+  }
+  if (!editable.some((k) => body[k] !== undefined)) {
+    throw new OpenwopError('validation_error', `Nothing to change: send at least one of ${editable.join(', ')}.`, 400, { allowed: [...editable] });
+  }
+}
+
+/** A string field the route would otherwise drop when it is not a string. */
+function assertStringFields(body: Record<string, unknown>, fields: readonly string[]): void {
+  for (const k of fields) {
+    if (body[k] !== undefined && typeof body[k] !== 'string') {
+      throw new OpenwopError('validation_error', `\`${k}\` must be a string.`, 400, { field: k });
+    }
+  }
+}
+
 export function registerCmsRoutes(deps: RouteDeps): void {
   const { app } = deps;
   // chat-first-port C1 — the shared decision core needs the storage/hostSuite pair.
@@ -334,6 +360,8 @@ export function registerCmsRoutes(deps: RouteDeps): void {
       // page is caught by the approval's version pin rather than by this refusal.
       const gateRefusal = (current: Page): Promise<void> => refusePublishedEditUnderGate(tenantId, orgId, current);
       const body = (req.body ?? {}) as { title?: unknown; slug?: unknown; sections?: unknown; tags?: unknown; kind?: unknown; authorId?: unknown; category?: unknown; siteNav?: unknown; expectedVersion?: unknown };
+      assertPatchFields(body, PAGE_PATCH_FIELDS, ['expectedVersion']);
+      assertStringFields(body, ['title', 'slug', 'docsNav']);
       // ADR 0592 §1 (CMSL-1) — optional optimistic-concurrency pin. When sent
       // it must be a number; the mismatch 409 itself is thrown by `updatePage`
       // (the service read is the authoritative one).
@@ -933,6 +961,8 @@ export function registerCmsRoutes(deps: RouteDeps): void {
       const { user, orgId, tenantId } = await requireCmsScope(req, 'workspace:write');
       await denyIfTranslator(tenantId, orgId, user.userId); // ADR 0205 D1 — shared content is base content
       const body = (req.body ?? {}) as { name?: unknown; data?: unknown; localizations?: unknown };
+      assertPatchFields(body, ['name', 'data', 'localizations']);
+      assertStringFields(body, ['name']);
       await assertSharedSectionEditable(
         req, tenantId, orgId, req.params.sharedSectionId,
         body.data !== undefined || body.localizations !== undefined,

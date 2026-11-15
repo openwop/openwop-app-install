@@ -9,7 +9,17 @@ import type { CardProps } from '../../registry/types.js';
 afterEach(cleanup);
 
 /** RFC 0209 §C.9–§C.10 renderer behaviour (ADR 0749): the fold, data binding,
- *  the confined actions, and the positive fixture from the corpus. */
+ *  the confined actions, and the positive fixture from the corpus. Since RFC 0255
+ *  §E / ADR 1007 the only action is `resume`, and its value is ADR 1013 D4
+ *  `{ answers: [{ id, answer }] }`: one entry per input REACHABLE from `root`.
+ *  The interrupt bridge reads the form from `data.form` only (ADR 1013 D5).
+ *
+ *  Sabotage-witnessed (wave 108): an upsert that keeps the first copy, an
+ *  unescaped `~1`, a remove that leaves the key, folding before createSurface, a
+ *  walked `__proto__`, an un-gated required check or its missing hint, answering
+ *  an unreachable input or a stringified answer, an un-offset heading, a missing
+ *  cycle guard, an admitted out-of-profile component, and a bridge that keeps the
+ *  questions or drops a surface each turn a named case red. */
 const ctx: CardProps['context'] = { runId: 'run-1', nodeId: 'node-1', tenantId: 'demo' };
 const SID = 'approve-brief';
 const POSITIVE = {
@@ -37,7 +47,7 @@ function folded(p: unknown) {
 }
 
 function renderCard(p: unknown) {
-  const onAction = vi.fn().mockResolvedValue(undefined);
+  const onAction = vi.fn<CardProps['onAction']>().mockResolvedValue(undefined);
   render(<A2uiSurfaceCard payload={p} cardType="ui.a2ui-surface" context={ctx} onAction={onAction} />);
   return onAction;
 }
@@ -51,9 +61,11 @@ describe('the v0.9 fold', () => {
       { version: 'v0.9', updateDataModel: { surfaceId: SID, path: '/a~1b', value: 1 } },
     ] });
     expect(s.renderable).toBe(true);
-    expect((s.components.get('h') as { text: string }).text).toBe('Renamed');
+    const h = s.components.get('h');
+    expect(h?.component === 'Text' ? h.text : undefined).toBe('Renamed');
     expect(s.dataModel).toEqual({ name: '', 'a/b': 1 });
-    expect(getAt(setAt({ x: { y: 1 } }, '/x/y', undefined), '/x')).toEqual({});
+    // toStrictEqual: a remove that left `{ y: undefined }` behind passes toEqual.
+    expect(getAt(setAt({ x: { y: 1 } }, '/x/y', undefined), '/x')).toStrictEqual({});
     // A fold with no createSurface ignores its messages (createSurface itself resets
     // the model, so only a never-created fold can show the guard).
     const orphan = folded({ ...POSITIVE, messages: [{ version: 'v0.9', updateDataModel: { surfaceId: SID, value: { ignored: true } } }] });
@@ -61,18 +73,18 @@ describe('the v0.9 fold', () => {
     expect(orphan.dataModel).toEqual({});
   });
   it('never walks the prototype chain', () => {
-    const r = setAt({}, '/__proto__/polluted', true) as Record<string, unknown>;
+    const r = setAt({}, '/__proto__/polluted', true);
     expect(r).toEqual({});
     // toEqual ignores prototypes: assert the result was not RE-prototyped either.
-    expect(r.polluted).toBeUndefined();
+    expect(Reflect.get(Object(r), 'polluted')).toBeUndefined();
     expect(Object.getPrototypeOf(r)).toBe(Object.prototype);
     expect(setAt({}, '/constructor/prototype/x', 1)).toEqual({});
-    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect(Reflect.get({}, 'polluted')).toBeUndefined();
   });
 });
 
 describe('the v0.9 renderer', () => {
-  it('renders the corpus positive fixture; the required check gates the resume action; the action submits the resolved context', () => {
+  it('renders the corpus positive fixture; the required check gates the resume action; the action answers the input by its id', () => {
     const onAction = renderCard(POSITIVE);
     expect(screen.getByRole('heading', { name: 'Launch brief' })).toBeTruthy();
     const btn = screen.getByRole('button', { name: 'Submit' }) as HTMLButtonElement;
@@ -83,9 +95,16 @@ describe('the v0.9 renderer', () => {
     expect(onAction).toHaveBeenCalledWith('resolve', { answers: [{ id: 'name', answer: 'Orbit' }] });
   });
 
-  it('a failing required check gates resume', () => {
+  it('a failing required check gates resume, and the disabled action says why', () => {
     renderCard(POSITIVE);
-    expect((screen.getByRole('button', { name: 'Submit' }) as HTMLButtonElement).disabled).toBe(true);
+    const btn = screen.getByRole('button', { name: 'Submit' }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    // The gate's reason is the button's accessible description, not a nearby line.
+    const hint = screen.getByText('Fill the required fields to continue.');
+    expect(btn.getAttribute('aria-describedby')).toBe(hint.id);
+    fireEvent.change(screen.getByLabelText(/Product name/), { target: { value: 'Orbit' } });
+    expect(btn.getAttribute('aria-describedby')).toBeNull();
+    expect(screen.queryByText('Fill the required fields to continue.')).toBeNull();
   });
 
   it('a resume action answers each reachable input by its id', () => {
@@ -96,12 +115,17 @@ describe('the v0.9 renderer', () => {
         { id: 'ok', component: 'CheckBox', label: 'Looks good', value: { path: '/ok' } },
         { id: 'go_l', component: 'Text', text: 'Send' },
         { id: 'go', component: 'Button', child: 'go_l', action: { event: { name: 'resume' } } },
+        // An input no `root` path reaches: it renders nowhere, so it must answer nothing.
+        { id: 'ghost', component: 'TextField', label: 'Ghost', value: { path: '/ghost' } },
       ] } },
       { version: 'v0.9', updateDataModel: { surfaceId: SID, path: '/ok', value: false } },
+      { version: 'v0.9', updateDataModel: { surfaceId: SID, path: '/ghost', value: 'unseen' } },
     ] };
     const onAction = renderCard(p);
+    expect(screen.queryByLabelText('Ghost')).toBeNull();
     fireEvent.click(screen.getByLabelText(/Looks good/));
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(onAction).toHaveBeenCalledTimes(1);
     expect(onAction).toHaveBeenCalledWith('resolve', { answers: [{ id: 'ok', answer: true }] });
   });
 

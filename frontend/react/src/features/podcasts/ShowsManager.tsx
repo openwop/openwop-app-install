@@ -23,6 +23,7 @@ import { confirm } from '../../ui/confirm.js';
 import { LinkIcon, PlusIcon, TrashIcon, CopyIcon, ExternalLinkIcon, CheckIcon, PencilIcon } from '../../ui/icons/index.js';
 import { MediaPickerDialog } from '../media/MediaPickerDialog.js';
 import { assetUrl } from './podcastsClient.js';
+import { requestErrorText } from './podcastsErrors.js';
 import {
   listShowsWithCapability, createShow, updateShow, setShowPublished, deleteShow, feedUrl,
   type PodcastShow,
@@ -127,7 +128,7 @@ function EditShowForm({ show, orgId, onSaved, onCancel }: {
       });
       toast.success(t('showUpdated'));
       onSaved();
-    } catch (err) { toast.error(err instanceof Error ? err.message : t('updateFailed')); }
+    } catch (err) { toast.error(requestErrorText((k) => t(k as 'createFailed'), err, 'updateFailed')); }
     finally { setBusy(false); }
   };
 
@@ -199,7 +200,9 @@ export function ShowsManager({ orgId }: { orgId: string }): JSX.Element {
   // never rendered. Defaults TRUE (older wire omits it) — the server stays the
   // authority; this is a courtesy layer, and hiding working actions would be
   // the worse failure.
-  const [canWrite, setCanWrite] = useState(true);
+  // ADR 1115 D10 (`PODUX93R-4`) — unknown until the read answers; it used to default
+  // `true`, so a failed shows read offered the create form to read-only members.
+  const [canWrite, setCanWrite] = useState<boolean | null>(null);
   // PODU-2 (ADR 0603 §5) — this was `NBU-2`'s exact shape. The failure card
   // rendered ABOVE a skeleton that spun forever, because `shows` stayed `null` on
   // the catch; `error` was never cleared; and there was no retry, so the only
@@ -240,19 +243,22 @@ export function ShowsManager({ orgId }: { orgId: string }): JSX.Element {
       toast.success(t('showCreated'));
       load();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('createFailed'));
+      toast.error(requestErrorText((k) => t(k as 'createFailed'), err, 'createFailed'));
     } finally { setBusy(false); }
   }, [orgId, title, author, description, category, ownerEmail, explicit, load, t]);
 
   const onTogglePublish = useCallback(async (show: PodcastShow) => {
+    // ADR 1115 D10 (`PODUX93-5`) — unpublishing pulls a feed directories may already
+    // subscribe to, so it asks first (as delete always did).
+    if (show.published && !(await confirm({ title: t('confirmUnpublishShowTitle', { title: show.title }), body: t('confirmUnpublishShowBody'), confirmLabel: t('unpublish'), danger: true }))) return;
     try { await setShowPublished(show.id, !show.published); load(); }
-    catch (err) { toast.error(err instanceof Error ? err.message : t('publishFailed')); }
+    catch (err) { toast.error(requestErrorText((k) => t(k as 'createFailed'), err, 'publishFailed')); }
   }, [load, t]);
 
   const onDelete = useCallback(async (show: PodcastShow) => {
     if (!(await confirm({ title: t('confirmDeleteShow'), danger: true }))) return;
     try { await deleteShow(show.id); load(); }
-    catch (err) { toast.error(err instanceof Error ? err.message : t('deleteFailed')); }
+    catch (err) { toast.error(requestErrorText((k) => t(k as 'createFailed'), err, 'deleteFailed')); }
   }, [load, t]);
 
   const copyFeed = useCallback(async (show: PodcastShow) => {
@@ -275,7 +281,7 @@ export function ShowsManager({ orgId }: { orgId: string }): JSX.Element {
       {shows === null ? <Skeleton height={40} /> : shows.length === 0 ? (
         // PODU-2 — suppressed while the failure card stands: an unread list is not
         // an empty one, and this is the panel's only other claim about the server.
-        error ? null : <StateCard icon={<LinkIcon size={20} />} title={t('showsTitle')} body={t('noShows')} />
+        error ? null : <StateCard icon={<LinkIcon size={20} />} title={t('showsTitle')} body={canWrite === true ? t('noShows') : t('noShowsReadOnly')} />
       ) : (
         <ul className="nb-list">
           {shows.map((s) => {
@@ -289,7 +295,7 @@ export function ShowsManager({ orgId }: { orgId: string }): JSX.Element {
                       {s.published ? t('showPublished') : t('showDraft')}
                     </span>
                   </span>
-                  {canWrite ? <span className="action-bar">
+                  {canWrite === true ? <span className="action-bar">
                     <Button variant="quiet" size="sm" onClick={() => setEditingId((cur) => (cur === s.id ? null : s.id))} aria-expanded={editingId === s.id}>
                       <PencilIcon size={14} /> {t('editShow')}
                     </Button>
@@ -327,7 +333,7 @@ export function ShowsManager({ orgId }: { orgId: string }): JSX.Element {
       )}
       {/* SP-9 — a read-only member sees the shows, never a create form whose
           submit can only 403. One line says why the controls are absent. */}
-      {canWrite ? <form className="u-grid u-gap-2" onSubmit={(e) => { e.preventDefault(); void submit(); }}>
+      {canWrite === true ? <form className="u-grid u-gap-2" onSubmit={(e) => { e.preventDefault(); void submit(); }}>
         <h3 className="nb-panel__title">{t('createShowHeading')}</h3>
         <TextField label={t('showTitleLabel')} value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t('showTitlePlaceholder')} />
         <TextField label={t('showAuthorLabel')} value={author} onChange={(e) => setAuthor(e.target.value)} placeholder={t('showAuthorPlaceholder')} />

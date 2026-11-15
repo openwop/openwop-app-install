@@ -14,22 +14,39 @@
  *
  * CV-G3: a failed job's reason sat in the same muted grey as its timestamp.
  *
- * /grade-tests w52 — witnessed by sabotage of `CreativeVideoPage.tsx`: the
+ * ADR 1051 (P1): D5 — nothing is sent without the likeness-consent tick, and the
+ * request carries the version of the sentence the host served; D2 — text-to-video
+ * offers only the t2v models, ratios and lengths in the host's table; D11 — a
+ * failure reason is the translated sentence, never the raw code. CV83UX-1/2/6 —
+ * the tick is taken back when the avatar or voice changes, a disabled Generate
+ * says why, and an unconfirmed submit is a warning that clears the text.
+ *
+ * /grade-tests w52 + w109 — witnessed by sabotage of `CreativeVideoPage.tsx`: the
  * `jobsFailed` branch, `orgsFailed={orgsFailed}`, both arms of the CV-G2
- * clear-on-success guard, the danger tone, the real empty state and the
- * job-read retry. Mocks are `mockReset` per case (clearAllMocks kept queued
- * `…Once` values), fixtures are typed against the client's exported types, and
- * the feature-access mock is the shared `makeFeatureAccess` (ADR 0661 shape).
- * CV-G3's class assertion is an honest ceiling: the tone IS the class.
+ * clear-on-success guard, the danger tone, the real empty state, the job-read
+ * and org retries, the consent gate, the consent version, both consent resets,
+ * the options-failed gate (with `!models`, its second guard, in ONE edit), the
+ * t2v endpoint filter, the model default length, the translated reason, the
+ * unconfirmed chip and its clear. Mocks are typed against the client's exports and
+ * `mockReset` per case (clearAllMocks kept queued `…Once` values); a rejected read
+ * is the client's own `VideoApiError`; the feature-access mock is the shared
+ * `makeFeatureAccess` (ADR 0661 shape). CV-G3 asserts the class because the tone
+ * IS the class (`u-text-danger` is the design token for it).
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 import type { GenerateResult, OrgRef, VideoJob, VideoModels } from '../creativeVideoClient.js';
 
+type VideoClient = typeof import('../creativeVideoClient.js');
 const { listOrgs, listVideoJobs, listVideoModels, generateVideo, textToVideo, getVideoJob, useFeatureAccess } = vi.hoisted(() => ({
-  listOrgs: vi.fn(), listVideoJobs: vi.fn(), listVideoModels: vi.fn(), generateVideo: vi.fn(), textToVideo: vi.fn(), getVideoJob: vi.fn(),
-  useFeatureAccess: vi.fn(),
+  listOrgs: vi.fn<VideoClient['listOrgs']>(),
+  listVideoJobs: vi.fn<VideoClient['listVideoJobs']>(),
+  listVideoModels: vi.fn<VideoClient['listVideoModels']>(),
+  generateVideo: vi.fn<VideoClient['generateVideo']>(),
+  textToVideo: vi.fn<VideoClient['textToVideo']>(),
+  getVideoJob: vi.fn<VideoClient['getVideoJob']>(),
+  useFeatureAccess: vi.fn<typeof import('../../../featureToggles/FeatureAccessContext.js')['useFeatureAccess']>(),
 }));
 
 vi.mock('../creativeVideoClient.js', async (orig) => ({
@@ -46,6 +63,7 @@ vi.mock('react-router-dom', async (orig) => ({
 }));
 
 import { CreativeVideoPage } from '../CreativeVideoPage.js';
+import { VideoApiError } from '../creativeVideoClient.js';
 
 const ORG: OrgRef[] = [{ orgId: 'o1', name: 'Acme' }];
 /** The host's table as `GET …/video-models` serves it (ADR 1051 D2/D5). */
@@ -55,6 +73,8 @@ const MODELS: VideoModels = {
   models: [
     { id: 'gen4.5', label: 'Gen-4.5', endpoints: ['t2v', 'i2v'], ratios: { t2v: ['1280:720', '720:1280'] }, duration: { min: 2, max: 10 }, defaultDurationSec: 5 },
     { id: 'veo3.1', label: 'Veo 3.1', endpoints: ['t2v', 'i2v'], ratios: { t2v: ['1280:720', '1080:1920'] }, duration: { oneOf: [4, 6, 8] }, defaultDurationSec: 6 },
+    // Image-to-video only: the t2v form must not offer it (D2).
+    { id: 'img-only', label: 'Image only', endpoints: ['i2v'], ratios: { i2v: ['960:960'] }, duration: { min: 5, max: 5 }, defaultDurationSec: 5 },
   ],
 };
 
@@ -74,7 +94,7 @@ beforeEach(() => {
 
 describe('CV-G1 — a failed read is not an empty result', () => {
   it('a failed organization read does not claim there is no organization', async () => {
-    listOrgs.mockRejectedValue(new Error('503 upstream'));
+    listOrgs.mockRejectedValue(new VideoApiError('listOrgs returned 503', undefined, 503));
     await mount();
     // HG-4: the noun, the copy and the branch order are `ui/OrgSelectionState`'s
     // now, so these are the SHARED strings — a page that re-grew its own would be
@@ -92,7 +112,7 @@ describe('CV-G1 — a failed read is not an empty result', () => {
   });
 
   it('the retry re-runs the organization read', async () => {
-    listOrgs.mockRejectedValueOnce(new Error('503 upstream')).mockResolvedValue(ORG);
+    listOrgs.mockRejectedValueOnce(new VideoApiError('listOrgs returned 503', undefined, 503)).mockResolvedValue(ORG);
     await mount();
     expect(listOrgs).toHaveBeenCalledTimes(1);
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })); });
@@ -112,7 +132,7 @@ describe('CV-G1 — a failed read is not an empty result', () => {
   });
 
   it('a failed job read does not claim there are no videos', async () => {
-    listVideoJobs.mockRejectedValue(new Error('500 boom'));
+    listVideoJobs.mockRejectedValue(new VideoApiError('listVideoJobs returned 500', undefined, 500));
     await mount();
     expect(listVideoJobs).toHaveBeenCalledWith('o1');
     expect(screen.queryByText('No videos yet')).toBeNull();
@@ -128,7 +148,7 @@ describe('CV-G1 — a failed read is not an empty result', () => {
   });
 
   it('retrying a failed job read clears the failed state on success', async () => {
-    listVideoJobs.mockRejectedValueOnce(new Error('500 boom')).mockResolvedValueOnce([]);
+    listVideoJobs.mockRejectedValueOnce(new VideoApiError('listVideoJobs returned 500', undefined, 500)).mockResolvedValueOnce([]);
     await mount();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })); });
     expect(screen.getByText('No videos yet')).toBeTruthy();
@@ -148,7 +168,7 @@ describe('CV-G2 — a failed generation keeps the input', () => {
     typeScript('Our Q3 story, carefully written.');
     fireEvent.change(screen.getByLabelText(/Avatar/), { target: { value: 'av_1' } });
     fireEvent.click(screen.getByLabelText(/consent to use their likeness/));
-    const refused: GenerateResult = { status: 'failed', jobId: 'j1', error: 'over budget' };
+    const refused: GenerateResult = { status: 'failed', jobId: 'j1', error: 'budget_exceeded' };
     generateVideo.mockResolvedValue(refused);
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Generate video' })); });
     expect((screen.getByLabelText(/Script/) as HTMLTextAreaElement).value).toBe('Our Q3 story, carefully written.');
@@ -201,7 +221,7 @@ describe('ADR 1051 D5 — nothing is sent without the consent tick', () => {
   });
 
   it('when the video options cannot be read, the page says so and nothing can be submitted', async () => {
-    listVideoModels.mockRejectedValue(new Error('500'));
+    listVideoModels.mockRejectedValue(new VideoApiError('listVideoModels returned 500', undefined, 500));
     await mount();
     fill();
     fireEvent.click(screen.getByLabelText(/consent to use their likeness/));
@@ -212,11 +232,13 @@ describe('ADR 1051 D5 — nothing is sent without the consent tick', () => {
 
 describe('ADR 1051 D2 — text-to-video offers only what the host lists', () => {
   it('the model, ratio and length come from the table, and the request carries them', async () => {
-    useFeatureAccess.mockReturnValue(makeFeatureAccess());
     await mount();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Text-to-video' })); });
     fireEvent.change(screen.getByLabelText(/Prompt/), { target: { value: 'A lighthouse' } });
-    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'veo3.1' } });
+    const model = screen.getByLabelText('Model') as HTMLSelectElement;
+    // Only the t2v endpoints: the image-only model is in the table but not offered.
+    expect([...model.options].map((o) => o.value)).toEqual(['gen4.5', 'veo3.1']);
+    fireEvent.change(model, { target: { value: 'veo3.1' } });
     const ratio = screen.getByLabelText('Ratio') as HTMLSelectElement;
     expect([...ratio.options].map((o) => o.value)).toEqual(['1280:720', '1080:1920']);
     const length = screen.getByLabelText('Length') as HTMLSelectElement;

@@ -203,8 +203,12 @@ function walk(dir: string, out: string[] = []): string[] {
 }
 describe('ADR 1098 — every product reader is classified', () => {
   // ADR 1110 adds the paged readers; a file reading through them is a reader too.
+  // ADR 1031 P3 — FIRST-PARTY readers only, as in the ADR 0987 admission census:
+  // `src/adopter/` exists only in an adopter's tree, and this table cannot name
+  // its files. An adopter classifies its own product readers.
   const readers = walk(SRC).filter((p) => /\b(listProducts|listProductsPage|getProduct|getProducts|getProductInTenant|iterateCatalog|collectCatalog)\s*\(/.test(readFileSync(p, 'utf8')))
-    .map((p) => relative(SRC, p).split('\\').join('/')).sort();
+    .map((p) => relative(SRC, p).split('\\').join('/'))
+    .filter((r) => !r.startsWith('adopter/')).sort();
   it('finds the readers it expects (the census is not vacuous)', () => {
     expect(readers.length).toBeGreaterThan(15);
   });

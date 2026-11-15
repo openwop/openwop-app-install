@@ -13,8 +13,12 @@
 
 import type { BackendFeature } from '../types.js';
 import { registerPublishingRoutes } from './routes.js';
+import { registerSeoAssetGrantProvider } from './assetGrantProvider.js';
 
 export const publishingFeature: BackendFeature = {
   id: 'publishing',
-  registerRoutes: (deps) => registerPublishingRoutes(deps),
+  registerRoutes: (deps) => {
+    registerPublishingRoutes(deps);
+    registerSeoAssetGrantProvider(); // ADR 1122 P1 — a published page's SEO image is public
+  },
 };

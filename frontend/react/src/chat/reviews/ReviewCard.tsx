@@ -21,6 +21,7 @@ import { useReviewStatusStore } from './reviewStatusStore.js';
 import { CheckIcon, XIcon, ClockIcon, ShieldIcon, BotIcon, UserIcon, AlertIcon, FileTextIcon } from '../../ui/icons/index.js';
 import { formatDate } from '../../i18n/format.js';
 import { useTranslation } from 'react-i18next';
+import { gateActionLabel, gateRejectConfirm, useGateWordingNamespaces } from './gateWording.js';
 import { ReviewRequestError, type ReviewRequest, type ReviewAction } from './reviewClient.js';
 import { AssetPreviewModal } from './AssetPreviewModal.js';
 import { ReviewHandoff } from './ReviewHandoff.js';
@@ -112,6 +113,7 @@ function RunLink({ runId, label }: { runId: string; label: string }): JSX.Elemen
 
 export function ReviewCard({ review, onDecide, onOpenArtifact, compact }: Props): JSX.Element {
   const { t } = useTranslation('chat');
+  useGateWordingNamespaces(review.gateWording); // ADR 1040 D7 F1 — lazy feature catalogs
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -164,12 +166,11 @@ export function ReviewCard({ review, onDecide, onOpenArtifact, compact }: Props)
     // ADR 0778 (`APUX-9`) / ADR 0600 rejection-copy correction — confirm
     // rejection without predicting the interrupt's terminal run outcome.
     // Non-interrupt proposals keep their separate request-closing wording.
-    if (action.action === 'reject' && !(await confirm({
-      title: review.source === 'interrupt' ? t('interrupts:rejectConfirmTitle') : t('reviewRejectConfirmTitle'),
-      body: review.source === 'interrupt' ? t('interrupts:rejectConfirmBody') : t('reviewRejectConfirmBody'),
-      danger: true,
-      confirmLabel: t('interrupts:actionReject'),
-    }))) return;
+    // ADR 1040 D7 F1 — an interrupt gate confirms with the SAME copy the two
+    // inline cards use (its own wording, an expected decline), not a third one.
+    if (action.action === 'reject' && !(await confirm(review.source === 'interrupt'
+      ? gateRejectConfirm(t, review.gateWording, { browserGate: false })
+      : { title: t('reviewRejectConfirmTitle'), body: t('reviewRejectConfirmBody'), danger: true, confirmLabel: t('interrupts:actionReject') }))) return;
     inFlight.current = true;
     setBusy(action.action);
     setError(null);
@@ -413,7 +414,9 @@ export function ReviewCard({ review, onDecide, onOpenArtifact, compact }: Props)
               // through i18n so ×4 locale parity holds on this card).
               const label = review.composedWorkflow
                 ? (a.action === 'approve' ? t('composedApproveRun') : a.action === 'reject' ? t('composedReject') : a.label ?? titleCase(a.action))
-                : a.label ?? titleCase(a.action);
+                : review.source === 'interrupt'
+                  ? gateActionLabel(t, review.gateWording, a.action, a.label ?? titleCase(a.action)) // ADR 1040 D7 F1
+                  : a.label ?? titleCase(a.action);
               return (
                 <button
                   key={a.action}

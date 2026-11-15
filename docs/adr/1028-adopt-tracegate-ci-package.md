@@ -69,6 +69,22 @@ package's own modules at the pinned version.
 | P3 | The same for the backend lane, after its own 20 compared gates. | backend selection | proposed |
 | P4 | Retire `scripts/tracegate.mjs`, the recorder, the i18n tracker and the vendored copies. `tracegate-daemon.sh` keeps its open-PR pre-gating (Gaps), calling the package. | none by itself | proposed |
 
+> **CORRECTED 2026-11-11 (P1 exit) — the first 24 compared gates compared nothing, and
+> don't count.** P1b's `shadow-compare` read the package's `selected.txt`. In shadow
+> the package writes the WHOLE lane there, because shadow runs everything. What it
+> would run is in its `predict.json`, as the files decided `run`. So every row said
+> the package picks all ~1,251 files and is a superset of the fork. That's true and
+> says nothing. MEASURED: the 16:34Z gate after the first recording still read 1,253.
+> The compare now reads `predict.json` and falls back to `selected.txt` only when there
+> are no decisions. Each row records which in a new `basis` column. A log without
+> that column is renamed `compare-<lane>.before-<date>.tsv` and kept as a record,
+> never counted. The P1 exit counts only `basis = predict` rows after a recording.
+> The 2026-11-11 recording still stands, because footprints don't depend on the
+> compare. Witness: `test-tracegate-package-shadow.sh`. Its fake package writes a
+> whole-lane `selected.txt` beside a `predict.json` that skips one file, and the
+> check went red against the old script with the production symptom: package 4 of
+> 4, `superset yes`.
+
 > **CORRECTED 2026-11-03 (before P0) — three changes to the plan, found while building P0.**
 >
 > 1. **P0 installs nothing.** The root `package.json` and `package-lock.json` are global
@@ -128,6 +144,40 @@ package's own modules at the pinned version.
 > >   night, so it waits for the user's call. Until recordings exist, the package
 > >   selects every file, and the comparison shows a superset with no information. The
 > >   P1 exit, 20 compared gates, counts only gates after a recording.
+>
+> > **CORRECTED 2026-11-11 (the user's call: recording on demand, option B) — how a
+> > recording is taken, and why the package's daemon waits.** The architect weighed
+> > three options for getting recordings: the package's nightly daemon (A), on-demand
+> > recordings (B) and folding into the fork's daemon (C). B, with these conditions:
+> > - **It yields to gates.** `record` now runs under a preemptible `daemon` lease on
+> >   the FORK's broker (`scripts/vendor/tracegate-ci/src/broker/main.mjs lease --class
+> >   daemon --tokens 2 --deadline-min 2`), the one gates, trains and deploys register
+> >   `--yield` with, taken the way `scripts/tracegate-daemon.sh` takes its tick's.
+> >   A stopped recording exits 75. With no lease (exit 2), nothing is recorded. The
+> >   broker sees the fork's environment; only the run inside the lease gets the
+> >   package's config and ledger. Witnessed in `test-tracegate-package-shadow.sh`
+> >   (fake broker: the lease's class and env, 75, 2).
+> > - **A clean worktree.** Record in a detached worktree at `origin/main`'s tip, never
+> >   the shared checkout. Re-run `npm ci` there only when a lockfile moves.
+> > - **A window for each one.** Each recording is a full frontend suite (~2.5 min of
+> >   vitest plus recorder overhead), so each takes a window from the release
+> >   manager, with `scripts/preflight-suite.sh --check` clear first.
+> > - **Cadence.** Once after #5691 merged, again at about 48–60 h, and a third time
+> >   only if fewer than 20 rows have counted. Footprints older than 72 h are never
+> >   reused, so each recording covers about three days of gates.
+> > - **What counts toward the P1 exit.** Only `compare-frontend.tsv` rows with status
+> >   `ok` where the package selected fewer than all files. The signal is
+> >   `only_fork > 0`: a file the fork runs and the package would skip, a hole in the
+> >   package's recorder. A superset row says less as its recording ages.
+> > - **Why not A yet.** At 0.10.1 the package's daemon dropped `TRACEGATE_CONFIG` in its
+> >   worktree, and the launchd job carried no environment. A nightly would have used
+> >   one `default` lane and written to `<common>/tracegate`, the fork's live ledger,
+> >   which correction 3 forbids. Its broker is keyed by its own ledger, so it would
+> >   not have yielded to gates. It also targeted local `main`, which drifts. Fixed
+> >   upstream in tracegate-ci #22 (`e5b0719`, not yet released): the config is kept
+> >   in the worktree, `install` carries config, ledger and `TRACEGATE_BROKER_DIR`,
+> >   and `daemon.target` may be `origin/main`. A remains the choice if P3 needs
+> >   steady backend recordings, once a release carries the fix and the pin moves.
 
 ## Implementation record
 
@@ -136,6 +186,7 @@ package's own modules at the pinned version.
 | P0 | f19108d2e (#5539) | `scripts/tracegate-package.sh` and `scripts/tracegate-package.config.json`: the pinned package, read-only. No gate change. |
 | P1a | 3e553e4dc (#5586) | Root devDependency `tracegate-ci@0.10.1`; `scripts/tracegate-package-i18n-extract.mjs` + the frontend `keyedExtract`; the i18n recorder reports keyed reads to the package. Gate: both lanes whole once (lockfile). |
 | P1b | 356e8b92e (#5691) | `ci.sh` calls `tracegate-package.sh shadow-compare` after the fork's frontend selection (never fails, 60 s cap, `compare-frontend.tsv`); `record` on demand; vitest loads the package's recorder under `TRACEGATE_RECORD` alone. Test: `test-tracegate-package-shadow.sh`. |
+| P1b (recording) | this PR | `tracegate-package.sh record` runs under a `daemon` lease on the fork's broker: a gate stops it (exit 75), and no lease means no recording (exit 2). Test: `test-tracegate-package-shadow.sh` (3 checks). |
 
 ## Gaps (what 0.10.0 does not cover)
 

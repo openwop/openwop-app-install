@@ -53,9 +53,14 @@ describe('core.ai.chatCompletion — messages coercion (req.messages-not-iterabl
     expect(calls[0].messages).toEqual([{ role: 'user', content: 'summarize this' }]);
   });
 
-  it('genuinely empty inputs → empty array (no crash, no undefined)', async () => {
+  // CC-CHAIN-6 — this case used to pin `messages: []` reaching the provider, which
+  // Anthropic rejects ("Provider rejected request", invalid_request; measured on
+  // 373d4863a). Genuinely empty inputs with no systemPrompt are now a typed failure
+  // with no provider round-trip (no crash, no undefined — the original intent).
+  it('genuinely empty inputs and no systemPrompt → typed failure, no provider call', async () => {
     const { ctx, calls } = captureCtx({});
-    await chatCompletion(ctx);
-    expect(calls[0].messages).toEqual([]);
+    const out = await chatCompletion(ctx) as { status: string; error?: { code: string } };
+    expect(calls).toEqual([]);
+    expect(out).toMatchObject({ status: 'failed', error: { code: 'invalid_inputs' } });
   });
 });

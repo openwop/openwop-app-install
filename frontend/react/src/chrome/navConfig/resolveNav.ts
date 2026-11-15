@@ -112,7 +112,6 @@ export function resolveNav({ features, tenant = EMPTY_MENU_CONFIG, user = EMPTY_
     // Route tier is an authorization boundary (ADR 0203), not a menu-layout
     // preference. Project that same boundary into every navigation consumer.
     if (!authorityAllows(f, authority)) continue;
-    const alwaysOn = !f.nav.featureId;
     // 1. feature-toggle HARD gate — runs before any override; a `hidden:false`
     //    can never reveal a disabled feature.
     if (f.nav.featureId && !access(f.nav.featureId)) continue;
@@ -122,8 +121,8 @@ export function resolveNav({ features, tenant = EMPTY_MENU_CONFIG, user = EMPTY_
     if (f.nav.hiddenWhenFeature && access(f.nav.hiddenWhenFeature)) continue;
 
     const ov = merged.items[f.path] ?? {};
-    // 2. hide override — never applies to always-on items.
-    if (ov.hidden && !alwaysOn) continue;
+    // 2. hide override — applies to every entry except the ADR 1106 D1 lock set.
+    if (ov.hidden && !f.nav.lockVisible) continue;
 
     // 3. group override — a stale id pointing at a deleted header falls back to
     //    the declared group (the item is never dropped). A built-in group id is

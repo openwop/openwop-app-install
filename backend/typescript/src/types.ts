@@ -439,8 +439,10 @@ export type NotificationStatus = 'unread' | 'read' | 'archived';
  * ADR 1114 (#5868) — how a request (a notification that names an interrupt)
  * ended. Stamped on `metadata.resolution` by the one retire subscriber
  * (`notifications/retireRequests.ts`) when the interrupt resolves or the run ends.
+ * `withdrawn` (#5922): the item was never a request (an idle chat), retired once
+ * by the `retire-conversation-requests` background job.
  */
-export type RequestResolutionState = 'approved' | 'rejected' | 'changes-requested' | 'timed-out' | 'answered' | 'run-ended';
+export type RequestResolutionState = 'approved' | 'rejected' | 'changes-requested' | 'timed-out' | 'answered' | 'run-ended' | 'withdrawn';
 export interface RequestResolution { state: RequestResolutionState; at: string }
 
 export interface NotificationRecord {

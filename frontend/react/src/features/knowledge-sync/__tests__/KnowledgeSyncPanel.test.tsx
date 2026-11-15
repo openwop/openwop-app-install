@@ -9,11 +9,20 @@
  * actively syncing was shown nothing. `null` now means 404 and only 404, so the
  * two are asserted separately below.
  *
- * Sabotage-witnessed (/grade-tests w23, 17 probes): the 404 self-hide, the failed-list
- * and failed-connections arms, the no-connections hint, the collection filter, the
- * create payload + SharePoint provider, the Sync-now sentence, the KSU-1/2/3/4/17 copy
- * and controls, and the single announcing row (LOW 7). Fixtures are typed against the
- * client's own `SyncSource` / `SyncRunResult` / `Connection` — no `as never`.
+ * ADR 1101 (P2) adds: a reader gets no write control (D8), loading access renders
+ * them disabled, a stopped source offers Resume (KSC-6), a cause renders from its
+ * code with the server's English behind Details (D7), a refusal says why (403 →
+ * permission), Remove says what goes with it (D5), a lost creator offers a rebind
+ * to one of MY connections (D5b) and never an org-shared one (D2), and busy is
+ * per row.
+ *
+ * Sabotage-witnessed (/grade-tests w23, 17 probes; re-probed w109 at every case):
+ * the 404 self-hide, the failed-list and failed-connections arms, the
+ * no-connections hint, the collection filter, the exact create payload + reload +
+ * cleared field, the SharePoint provider, the Sync-now sentence (with a media
+ * count distinct from every other count), the KSU-1/2/3/4/17 copy and controls,
+ * the single announcing row (LOW 7), and each ADR 1101 guard above. Fixtures are
+ * typed against the client's own `SyncSource` / `SyncRunResult` / `Connection`.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
@@ -68,7 +77,8 @@ const runResult = (over: Partial<SyncRunResult> = {}): SyncRunResult => ({ inges
 beforeEach(() => {
   mList.mockReset(); mCreate.mockReset(); mSync.mockReset(); mConns.mockReset();
   mMedia.mockReset(); mPaused.mockReset(); mConfirm.mockReset();
-  mToast.success.mockReset(); mToast.error.mockReset(); mToast.warning.mockReset();
+  vi.mocked(deleteSyncSource).mockReset(); vi.mocked(rebindSyncSource).mockReset();
+  mToast.success.mockReset(); mToast.error.mockReset(); mToast.warning.mockReset(); mToast.info.mockReset();
   mConns.mockResolvedValue([conn()]);
   mMedia.mockResolvedValue(source());
   mPaused.mockResolvedValue(source());
@@ -137,9 +147,10 @@ describe('KnowledgeSyncPanel (ADR 0107)', () => {
     fireEvent.change(screen.getByLabelText('Drive account'), { target: { value: 'c1' } });
     fireEvent.change(screen.getByLabelText('Folder'), { target: { value: 'FOLDER42' } });
     fireEvent.click(screen.getByRole('button', { name: /Add sync/ }));
-    await waitFor(() => expect(mCreate).toHaveBeenCalledWith(expect.objectContaining({
-      orgId: 'o1', collectionId: 'col1', connectionId: 'c1', externalFolderId: 'FOLDER42', provider: 'google', cadence: 'daily',
-    })));
+    // The exact body: media is on by default, and no folder name was picked.
+    await waitFor(() => expect(mCreate).toHaveBeenCalledWith({
+      orgId: 'o1', collectionId: 'col1', connectionId: 'c1', externalFolderId: 'FOLDER42', provider: 'google', cadence: 'daily', includeMedia: true,
+    }));
     // …and the user SEES it: the list reloads with the new source and the field clears
     await waitFor(() => expect(screen.getByText('FOLDER42')).toBeTruthy());
     expect((screen.getByLabelText('Folder') as HTMLInputElement).value).toBe('');
@@ -163,7 +174,9 @@ describe('KnowledgeSyncPanel (ADR 0107)', () => {
 
   it('runs "Sync now"', async () => {
     mList.mockResolvedValue([source()]);
-    mSync.mockResolvedValue({ result: runResult(), source: source() });
+    // Every count differs from every other (unchanged 0, failed 0, media 4), so a
+    // count read from the wrong field changes the sentence.
+    mSync.mockResolvedValue({ result: runResult({ skippedMedia: 4 }), source: source() });
     render(<KnowledgeSyncPanel orgId="o1" collectionId="col1" />);
     await waitFor(() => expect(screen.getByText('FOLDER')).toBeTruthy());
     fireEvent.click(screen.getByRole('button', { name: 'Sync now' }));
@@ -173,7 +186,7 @@ describe('KnowledgeSyncPanel (ADR 0107)', () => {
     // ␣media skipped, …") and nothing noticed, because nothing read the copy.
     await waitFor(() => expect(mToast.success).toHaveBeenCalled());
     expect(String(mToast.success.mock.calls[0]![0]))
-      .toBe('Synced: 2 updated, 1 removed, 0 media skipped, 0 failed.');
+      .toBe('Synced: 2 updated, 1 removed, 4 media skipped, 0 failed.');
   });
 });
 
@@ -393,7 +406,10 @@ describe('ADR 1101 — closing-grade witnesses', () => {
     fireEvent.click(syncB!);
     await waitFor(() => expect(mSync).toHaveBeenCalledWith('b'));
     await waitFor(() => expect(mToast.success).toHaveBeenCalled());
-    // B is done; A's pass is still running and still shows as running.
+    // B is done (its button is back to "Sync now") once its busy flag clears; A's
+    // pass is still running and still shows as running. Waiting for exactly ONE
+    // "Sync now" is the settle: a shared flag that B's finish cleared would show two.
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Sync now' })).toHaveLength(1));
     expect(screen.getByRole('button', { name: 'Syncing…' })).toBeTruthy();
     finishA({ result: runResult(), source: source({ id: 'a' }) });
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Syncing…' })).toBeNull());

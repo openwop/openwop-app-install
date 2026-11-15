@@ -37,6 +37,8 @@ import { AlertIcon, BanIcon, CheckIcon, ExternalLinkIcon } from '../ui/icons/ind
 import { announce } from '../ui/announce.js';
 import type { WorkflowRunState } from './types.js';
 import { RunArtifactCards, useRunArtifacts } from './RunArtifactCards.js';
+import { findRunResultRenderer, mayMatchRunResult } from './lib/runResultRenderers.js';
+import { ErrorBoundary } from '../ui/ErrorBoundary.js';
 
 interface Props {
   run: WorkflowRunState;
@@ -63,8 +65,10 @@ export function WorkflowCompletionCard({ run, onPreviewArtifact, onOpenArtifact 
   const { terminals, graphUnavailable } = useTerminalNodes(run);
   const elapsed = useElapsedSince(run.startedAt);
   const canOpenRun = useCanOpenRunDetail();
-  const artifacts = useRunArtifacts(run.runId, run.status === 'completed' && !!onOpenArtifact && run.runUnavailable !== true);
+  // ADR 1040 D7 F2 — a registered result renderer needs the run's artifacts too.
+  const artifacts = useRunArtifacts(run.runId, run.status === 'completed' && (!!onOpenArtifact || mayMatchRunResult(run)) && run.runUnavailable !== true);
   const listed = artifacts.status === 'ready' ? artifacts.items : [];
+  const Result = run.status === 'completed' ? findRunResultRenderer(run, listed)?.Component : undefined;
 
   const isTerminal = run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled';
   if (!isTerminal) return null;
@@ -142,6 +146,15 @@ export function WorkflowCompletionCard({ run, onPreviewArtifact, onOpenArtifact 
           {translate(canOpenRun ? 'outputsNotOnThisDevice' : 'outputsNotOnThisDeviceNoRun')}
         </div>
       )}
+      {/* ADR 1040 D7 F2 — a feature's result card, contained: if it throws, the
+          completion line above and the artifact cards below still render. The
+          artifact cards still list every output (a feature card may show one of
+          them too: intended, the cards are where the Workbench opens them). */}
+      {Result ? (
+        <ErrorBoundary fallback={() => null} label="run-result">
+          <Result run={run} artifacts={listed} />
+        </ErrorBoundary>
+      ) : null}
       {onOpenArtifact ? <RunArtifactCards items={listed} onOpen={onOpenArtifact} /> : null}
       <Actions>
         {terminals.length > 0

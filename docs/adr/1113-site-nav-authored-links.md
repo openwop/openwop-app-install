@@ -80,6 +80,23 @@ the page and built-in entries:
 Like every nav label, links serve in the base language. The public nav list is not localized
 (the gap ADR 1105 D11 records). This ADR does not widen it.
 
+### D5 — `siteNav.ctaHref`, where the page's button goes (amended 2026-11-13)
+
+The header and footer button (ADR 1056, `siteNav.cta`) always linked to the page that set it.
+KickTodo's design labels it "Find your challenge" and sends it to `/discover`, an app route
+with no CMS page. Under D3 a link cannot carry the button, and that stays true: the button is
+still a page-level decision. The page can now say where it goes:
+
+- `ctaHref?: string` on `PageSiteNav`, validated in `cleanSiteNav` with the `featured.href`
+  grammar (`isFragmentHref` or `isInternalHref`, at most 200). Anything else is a
+  `validation_error` 400 with `field: 'siteNav.ctaHref'`. An empty string is absent.
+- It needs `cta`: an href without a label is a 400, as `groupLabel` without `group` is.
+- `usePublicNav` resolves it like a link's href (a fragment lands on the owning page) and uses
+  it as the button's `to`. The button's owner is still chosen by the ADR 1056 rule (first page
+  by group, then order, that sets `cta`). The client re-checks the href and drops an unsafe one,
+  so the button falls back to the page.
+- The public nav read carries it in the row's `nav` with no server change (D2).
+
 ## Consequences
 
 - An adopter can build a full mega menu from content alone, without an edit to `PublicShell.tsx`.
@@ -92,7 +109,8 @@ Like every nav label, links serve in the base language. The public nav list is n
 
 - `backend/typescript/test/adr1113-site-nav-links.test.ts`: the validator (accepts, caps,
   refusals by field, the 12-entry cap, empty as absent) and a PATCH → publish → public nav read
-  round trip.
+  round trip. D5: `ctaHref` kept, refused by field, and refused without `cta`.
 - `frontend/react/src/chrome/__tests__/PublicShell.groupedNav.test.tsx`: two pages fill four
   authored columns in the menu and the footer, a fragment resolves on its page, a duplicate and an
-  unsafe link are dropped, and links alone switch grouped mode.
+  unsafe link are dropped, and links alone switch grouped mode. D5: the header and footer
+  button follow `ctaHref`, a fragment resolves on the page, and an unsafe href keeps the page.

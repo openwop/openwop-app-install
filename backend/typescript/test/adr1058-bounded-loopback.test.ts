@@ -36,6 +36,7 @@ import { registerWorkflow } from '../src/host/workflowsRegistry.js';
 import { validateWorkflowDefinition } from '../src/host/workflowDefinitionValidation.js';
 import { bareRunId } from './support/bareRunId.js';
 import { LOOPBACK_MARKER_WRITE_KEY } from '../src/executor/loopbackWire.js';
+import type { WorkflowDefinition } from '../src/executor/types.js';
 
 let server: http.Server;
 let BASE = '';
@@ -95,6 +96,9 @@ beforeAll(async () => {
     def('wf.adr1058.reinvoke', 'test.adr1058.suspendGate', { on: 'refine', maxIterations: 2 }),
     def('wf.adr1058.no-loop', 'core.approvalGate', null),
   ]) registerWorkflow(validateWorkflowDefinition(raw));
+  // A conformance fixture reaches the executor without the validator, so its
+  // edges keep the wire spelling `id` and carry no `edgeId`.
+  registerWorkflow(def('wf.adr1058.wire-ids', 'core.approvalGate', { on: 'refine', maxIterations: 2, historyInput: 'rounds' }) as WorkflowDefinition);
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => {
@@ -222,6 +226,21 @@ describe('ADR 1058 — a refine re-enters the producer, bounded', () => {
     expect(evs.find((e) => e.type === 'cap.breached')?.payload).toMatchObject({ kind: 'loopback-iterations', limit: 1, observed: 2 });
     expect(evs.find((e) => e.type === 'node.failed' && e.nodeId === 'gate')?.payload?.['error']).toMatchObject({ code: 'loop_limit_exceeded', retryable: false });
     expect(applyRuns.get(bareRunId(runId)) ?? 0).toBe(0);
+  });
+
+  it('a definition whose edges carry only the wire `id` counts rounds and exhausts (no undefined edgeId)', async () => {
+    const runId = await startRun('wf.adr1058.wire-ids');
+    await waitRequests(runId, 1);
+    expect((await decide(runId, REFINE)).status).toBeLessThan(300);
+    await waitRequests(runId, 2);
+    expect((await decide(runId, REFINE)).status).toBeLessThan(300);
+    const evs = await waitRequests(runId, 3);
+    const markers = evs.filter((e) => e.type === 'node.completed' && e.nodeId === 'gate').map((e) => e.payload?.[LOOPBACK_MARKER_WRITE_KEY]);
+    expect(markers).toEqual([
+      { edgeId: 'again', targetNodeId: 'draft', round: 1, rearmed: ['draft', 'gate'] },
+      { edgeId: 'again', targetNodeId: 'draft', round: 2, rearmed: ['draft', 'gate'] },
+    ]);
+    expect(actionsOf(requests(evs)[2]), 'round 2 spent the cap, so refine is withdrawn').not.toContain('refine');
   });
 
   it('a replay fork cut after round 1\'s marked completion resumes with the region re-armed', async () => {

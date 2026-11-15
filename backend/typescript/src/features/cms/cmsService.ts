@@ -39,6 +39,7 @@ import { emitHostEvent } from '../../host/hostEventDispatcher.js';
 // never imports back), the same edge `contentApproval.ts` already uses.
 import { deleteResolvedContentApprovalsForPage, rejectPendingApprovalForPage } from '../../host/approvalService.js';
 import { fireCmsPageLifecycle, type CmsContentCollection } from '../../host/cmsPageLifecycle.js';
+import { publicAssetGrantsActive, schedulePublicAssetResync } from '../../host/assetGrants.js';
 import { subjectKeyForms } from '../../host/subjectErasureRedaction.js';
 import type { SubjectEraseReport } from '../../host/subjectErasure.js';
 import { eraseContentLanguageSettingsSubject } from '../../host/contentLocales.js';
@@ -2035,6 +2036,9 @@ export interface PageSiteNav {
    *  button label (≤ 40) under the brand column. The first page (group, then
    *  order) that sets it wins. */
   cta?: string;
+  /** ADR 1113 D5 — where that button goes: a `#fragment` on this page or a safe
+   *  internal path such as `/discover` (default: the page). Needs `cta`. */
+  ctaHref?: string;
   /** ADR 1056 — also list this page among the grouped footer's bottom-bar
    *  utility links (it stays in its group column too). */
   utility?: boolean;
@@ -2060,7 +2064,7 @@ export interface SiteNavLink { label: string; href: string; group: SiteNavGroup;
 
 export interface SiteNavFeatured { eyebrow?: string; title: string; meta?: string; href?: string }
 
-const SITE_NAV_MAX = { label: 40, description: 90, cta: 40, groupLabel: 40, order: 999, featuredEyebrow: 30, featuredTitle: 60, featuredMeta: 20, featuredHref: 200, links: 12, linkHref: 200 } as const;
+const SITE_NAV_MAX = { label: 40, description: 90, cta: 40, groupLabel: 40, order: 999, featuredEyebrow: 30, featuredTitle: 60, featuredMeta: 20, featuredHref: 200, links: 12, linkHref: 200, ctaHref: 200 } as const;
 
 /** ADR 1062 D2 — validate `siteNav.featured`. A title is required; `href` is a
  *  same-page fragment or a safe internal path, never an external URL (the card
@@ -2177,6 +2181,16 @@ export function cleanSiteNav(raw: unknown): PageSiteNav | undefined {
     if (typeof r.cta !== 'string') throw new OpenwopError('validation_error', '`siteNav.cta` must be a string.', 400, { field: 'siteNav.cta' });
     const cta = optionalCleanContent(r.cta, SITE_NAV_MAX.cta, 'siteNav.cta');
     if (cta) out.cta = cta;
+  }
+  // ADR 1113 D5 — the button's destination, in the `featured.href` grammar. It
+  // only means something with a label, so an href alone is a 400.
+  if (r.ctaHref !== undefined && r.ctaHref !== null && r.ctaHref !== '') {
+    const h = typeof r.ctaHref === 'string' ? r.ctaHref.trim() : '';
+    if (!h || h.length > SITE_NAV_MAX.ctaHref || !(isFragmentHref(h) || isInternalHref(h))) {
+      throw new OpenwopError('validation_error', '`siteNav.ctaHref` must be a `#fragment` or an internal path.', 400, { field: 'siteNav.ctaHref' });
+    }
+    if (!out.cta) throw new OpenwopError('validation_error', '`siteNav.ctaHref` needs `siteNav.cta`: it is where that button goes.', 400, { field: 'siteNav.ctaHref' });
+    out.ctaHref = h;
   }
   if (r.utility !== undefined && r.utility !== null) {
     if (typeof r.utility !== 'boolean') throw new OpenwopError('validation_error', '`siteNav.utility` must be a boolean.', 400, { field: 'siteNav.utility' });
@@ -2432,6 +2446,7 @@ export async function updatePage(
       tenantId: next.tenantId, orgId: next.orgId, pageId: next.pageId, slug: next.slug,
       title: next.title, ...(next.collection ? { collection: next.collection } : {}), event: 'published',
     });
+    schedulePublicAssetResync('cms-page', next.tenantId, next.pageId); // ADR 1122 P1 — live content changed
   }
   await syncPageUsage(next);
   return next;
@@ -2659,6 +2674,7 @@ export async function deletePage(
     tenantId: p.tenantId, orgId: p.orgId, pageId: p.pageId, slug: p.slug,
     title: p.title, ...(p.collection ? { collection: p.collection } : {}), event: 'deleted',
   });
+  schedulePublicAssetResync('cms-page', p.tenantId, p.pageId); // ADR 1122 P1 — a deleted page shows nothing
   try {
     await clearUsageForRef(tenantId, orgId, 'cms-page', pageId);
   } catch (err) {
@@ -2722,6 +2738,12 @@ export function collectMediaTokens(sections: readonly Section[]): string[] {
       const v = typeof nested === 'object' && nested !== null ? (nested as { imageToken?: unknown }).imageToken : undefined;
       if (typeof v === 'string' && v.length > 0) tokens.add(v);
     }
+    // ADR 1122 P1 — the hub's centre picture (`cleanHub`). Missing here, the media
+    // "used by" graph left hub pages out, so deleting that picture broke the page
+    // without a warning.
+    const hub = typeof d.hub === 'object' && d.hub !== null ? (d.hub as { center?: unknown }).center : undefined;
+    const hubToken = typeof hub === 'object' && hub !== null ? (hub as { imageToken?: unknown }).imageToken : undefined;
+    if (typeof hubToken === 'string' && hubToken.length > 0) tokens.add(hubToken);
   };
   for (const s of sections) {
     grab(s.data);
@@ -3199,6 +3221,9 @@ const EVENT_FOR_ACTION: Record<string, string> = {
  * lifecycle payload may carry the locale it describes; a run event log may not.
  */
 function recordCmsAction(action: string, page: Page, actor: string, extra?: Record<string, unknown>): void {
+  // ADR 1122 P1 — every recorded action follows a durable write: a transition, a
+  // restore, a locale flip or a schedule can each change what the page shows publicly.
+  schedulePublicAssetResync('cms-page', page.tenantId, page.pageId);
   const at = nowIso();
   const base = { tenantId: page.tenantId, orgId: page.orgId, pageId: page.pageId, slug: page.slug, status: page.status, version: page.version, actor, at, ...extra };
   try {
@@ -3625,6 +3650,10 @@ export async function updateSharedSection(
 ): Promise<SharedSection | null> {
   const cur = await getSharedSection(tenantId, orgId, sharedSectionId);
   if (!cur) return null;
+  // Issue 5937 — nothing to change writes nothing: no new version, `updatedAt` or
+  // `updatedBy`. The route refuses such a body with a 400; this keeps an
+  // in-process caller from recording an edit that did not happen.
+  if (patch.name === undefined && patch.data === undefined && patch.localizations === undefined) return cur;
   const next: SharedSection = { ...cur, updatedBy, updatedAt: nowIso(), version: cur.version + 1 };
   if (patch.name !== undefined) next.name = cleanString(patch.name, MAX.title, cur.name);
   if (patch.data !== undefined) {
@@ -3657,6 +3686,16 @@ export async function updateSharedSection(
     }
   }
   await sharedSections.put(next);
+  // ADR 1122 P1 — the section reaches every published page that uses it, and none of
+  // them is written. Resync each, off the write path: the page list is read after this
+  // returns, and not at all while grants are off.
+  if ((patch.data !== undefined || patch.localizations !== undefined) && publicAssetGrantsActive()) {
+    setImmediate(() => {
+      listPagesUsingSharedSection(tenantId, orgId, sharedSectionId)
+        .then((refs) => { for (const ref of refs) if (ref.status === 'published') schedulePublicAssetResync('cms-page', tenantId, ref.pageId); })
+        .catch((err: unknown) => log.warn('cms shared-section asset resync failed', { sharedSectionId, error: err instanceof Error ? err.message : String(err) }));
+    });
+  }
   return next;
 }
 
@@ -3700,6 +3739,25 @@ export async function deliverableSectionsForPage(page: Page): Promise<Section[]>
     if (version) out.push(...version.snapshot.sections);
   }
   return out;
+}
+
+/**
+ * ADR 1122 P1 — the asset tokens a page makes public right now: none unless it is
+ * published, else every picture its readers can reach. That is its own sections with
+ * shared sections resolved, a running experiment's variant snapshots, and every
+ * locale overlay. A withheld locale's overlays are included too (they are on the
+ * row); that over-grants their pictures, a recorded residual, never under-grants.
+ */
+export async function publicAssetTokensForPage(tenantId: string, pageId: string): Promise<string[]> {
+  const page = await pages.get(tenantId, pageId);
+  if (!page || page.tenantId !== tenantId || page.status !== 'published') return [];
+  const resolved = await resolveSharedRefs(page);
+  return collectMediaTokens(await deliverableSectionsForPage(resolved));
+}
+
+/** ADR 1122 P1 — a tenant's published pages, for the grant backfill. */
+export async function publishedPageRefs(tenantId: string): Promise<Array<{ orgId: string; pageId: string }>> {
+  return (await pages.listForTenant(tenantId)).filter((p) => p.tenantId === tenantId && p.status === 'published').map((p) => ({ orgId: p.orgId, pageId: p.pageId }));
 }
 
 export async function listPagesUsingSharedSection(tenantId: string, orgId: string, sharedSectionId: string): Promise<Array<{ pageId: string; title: string; slug: string; status: PageStatus; scheduledPublishAt?: string }>> {

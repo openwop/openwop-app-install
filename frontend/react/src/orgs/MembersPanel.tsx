@@ -15,6 +15,7 @@ import { StateCard } from '../ui/StateCard.js';
 import { InvitesSection } from './InvitesSection.js';
 import { UserIcon, ShieldIcon, PencilIcon, TrashIcon } from '../ui/icons/index.js';
 import { NEUTRAL_CHIP } from './orgUi.js';
+import { AddExistingPersonSection, LinkAccountControl } from './AddExistingPersonSection.js';
 
 export interface MembersPanelProps {
   orgId: string;
@@ -33,6 +34,10 @@ export interface MembersPanelProps {
   accessFor: string | null;
   access: EffectiveAccess | null;
   onCreateMember: (e: FormEvent) => void;
+  /** ADR 1123 — refresh after an add-existing or a link. */
+  onMembersChanged: () => Promise<void>;
+  /** ADR 1123 D2 — offers the exact-email lookup. */
+  isSuperadmin: boolean;
   onShowAccess: (m: OrgMember) => void;
   startEdit: (m: OrgMember) => void;
   onDeleteMember: (m: OrgMember) => void;
@@ -48,7 +53,7 @@ export function MembersPanel({
   orgId,
   members, memberName, setMemberName, memberEmail, setMemberEmail, memberRoles, setMemberRoles,
   assignableRoleIds, editingId, setEditingId, draftRoles, setDraftRoles, accessFor, access,
-  onCreateMember, onShowAccess, startEdit, onDeleteMember, onSaveRoles, can, ownerIds, roleLabel, toggleStr,
+  onCreateMember, onMembersChanged, isSuperadmin, onShowAccess, startEdit, onDeleteMember, onSaveRoles, can, ownerIds, roleLabel, toggleStr,
 }: MembersPanelProps): JSX.Element {
   const { t } = useTranslation('orgs');
   // ADR 0815 D2 — an owner row is owner-tier: an admin may manage every member
@@ -70,6 +75,8 @@ export function MembersPanel({
           only when the `orgs` invitation feature is enabled + caller can manage
           members; the direct-add form below stays for service/local accounts. */}
       <InvitesSection orgId={orgId} canManage={can('host:members:manage')} assignableRoleIds={assignableRoleIds} roleLabel={roleLabel} />
+      {/* ADR 1123 — someone who already has an account: bound at once, no email. */}
+      <AddExistingPersonSection orgId={orgId} canManage={can('host:members:manage')} isSuperadmin={isSuperadmin} assignableRoleIds={assignableRoleIds} roleLabel={roleLabel} onChanged={onMembersChanged} />
       <form onSubmit={onCreateMember} className="action-bar u-wrap u-mb-3">
         <input value={memberName} onChange={(e) => setMemberName(e.target.value)} placeholder={t('memberNamePlaceholder')} aria-label={t('memberNameAriaLabel')} />
         <input value={memberEmail} onChange={(e) => setMemberEmail(e.target.value)} placeholder={t('memberEmailPlaceholder')} aria-label={t('memberEmailAriaLabel')} />
@@ -120,6 +127,11 @@ export function MembersPanel({
                 m.roles.map((r) => <span key={r} className={NEUTRAL_CHIP}>{roleLabel(r)}</span>)
               )}
             </div>
+
+            {/* ADR 1123 D4 — a row tied to nobody's sign-in can be linked to an account. */}
+            {!m.subject && canTouch(m) ? (
+              <LinkAccountControl orgId={orgId} memberId={m.memberId} name={m.displayName} isSuperadmin={isSuperadmin} onChanged={onMembersChanged} />
+            ) : null}
 
             {/* inline role editor */}
             {editingId === m.memberId ? (

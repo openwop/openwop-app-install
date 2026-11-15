@@ -202,7 +202,7 @@ describe('documents lanes', () => {
     expect(asA.body.canvases.map((c) => c.canvasId)).toContain(id);
   });
 
-  it('DELETE follows the ONE project policy: a viewer is refused, and workspace:write reaches every project (ADR 0054 D5)', async () => {
+  it('DELETE follows the ONE project policy: a viewer is refused, a non-member editor is hidden, an org admin reaches it (ADR 1118)', async () => {
     const f = await privateProject();
     const id = await f.canvas('canvas.drawing');
     // A viewer outside the project: refused (scope first — never a delete).
@@ -216,13 +216,19 @@ describe('documents lanes', () => {
     expect(refused.body.error).toBe('forbidden_scope');
     expect(refused.body.message).toMatch(/workspace:write/);
     expect(await getCanvasForTenant(f.tenantId, id)).not.toBeNull();
-    // An org EDITOR outside the private project: allowed BY POLICY — `levelFor`
-    // grants write on every project to workspace:write (membership only widens
-    // READ). The shared predicate must not invent a stricter rule than the
-    // editor route; pinned so a future change to that policy is a decision.
+    // An org EDITOR outside the private project. This used to be allowed by policy
+    // (ADR 0054 D5: `workspace:write` reached every project), and the pin below was
+    // put here so changing that would be a decision. ADR 1118 is that decision: a
+    // private project admits only its members and the org's admins, so the editor is
+    // hidden and nothing is deleted.
     const c = await loginTo(f.tenantId, 'editor');
     await createMember({ tenantId: f.tenantId, orgId: f.orgId, subject: c.userId, displayName: 'C', roles: ['editor'] });
-    expect((await c.del(`${D(f.orgId)}/canvases/${encodeURIComponent(id)}`)).status).toBe(204);
+    expect((await c.del(`${D(f.orgId)}/canvases/${encodeURIComponent(id)}`)).status).toBe(404);
+    expect(await getCanvasForTenant(f.tenantId, id)).not.toBeNull();
+    // An org ADMIN outside the project still reaches it (recovery).
+    const a = await loginTo(f.tenantId, 'admin');
+    await createMember({ tenantId: f.tenantId, orgId: f.orgId, subject: a.userId, displayName: 'A', roles: ['admin'] });
+    expect((await a.del(`${D(f.orgId)}/canvases/${encodeURIComponent(id)}`)).status).toBe(204);
     expect(await getCanvasForTenant(f.tenantId, id)).toBeNull();
   });
 });

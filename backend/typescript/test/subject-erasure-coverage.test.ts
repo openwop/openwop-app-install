@@ -133,6 +133,18 @@ type Exemption = { reason: string; tenantTeardownClaim?: true };
  *  HONESTY assertion below requires an actual `tenantId` field to back (a purge keyed by
  *  tenantId can never reach a row that has none). */
 const REVIEWED_EXEMPT = new Map<string, Exemption>([
+  // ADR 1123 D2 — the burned-lookup-token ledger: `{ jti, tenantId, expiresAt }`, a
+  // random token id and its expiry, kept only until the token could no longer
+  // verify (kvAgeOut 1 day). The token names a user; the LEDGER does not, so there
+  // is nothing here to erase. Tenant-indexed (tenantOf), so ADR 0284 teardown reaches it.
+  ['orgs:person-lookup-used', { reason: 'ADR 1123 D2 single-use ledger for superadmin lookup tokens — a random jti, the tenantId and an expiry; no subject, email or actor (the token carries those, the ledger never does)', tenantTeardownClaim: true }],
+  // ADR 1122 D2.2 — public-asset grants: `{ token, tenantId, grantors[] }`, where a
+  // grantor is a public surface id (`cms:page:<id>`). No person, actor or content.
+  // Tenant-indexed (tenantOf), so ADR 0284 teardown reaches it.
+  // ADR 1122 P1 — what each public grantor last made public: `{ grantor, surface, id,
+  // tenantId, tokens[] }`; the id is a page or SEO row id, never a person.
+  ['asset:grantor', { reason: 'ADR 1122 P1 public-asset grantor record — a surface name, a page/SEO row id, the tenantId and the asset tokens it shows; no subject, actor or content', tenantTeardownClaim: true }],
+  ['asset:grant', { reason: 'ADR 1122 D2.2 public-asset grant index — an asset token, its tenantId and the ids of the public surfaces that reference it; no subject, actor or content', tenantTeardownClaim: true }],
   // ADR 0993 D5 — the ONE tenant layer of the RFC 0028 prompt store (moved here
   // from features/proposals, namespace name kept). A row is `{ tenant, template,
   // installedAt }`: an RFC 0028 PromptTemplate the tenant wrote over POST /prompts or

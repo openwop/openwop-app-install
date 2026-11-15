@@ -9,8 +9,8 @@ import { authedHeaders, config, fetchOpts } from '../client/config.js';
 import type { Notification } from './types.js';
 
 /** Mirrors the backend `RequestResolutionState`. */
-export type RequestResolutionState = 'approved' | 'rejected' | 'changes-requested' | 'timed-out' | 'answered' | 'run-ended';
-const RESOLUTION_STATES: ReadonlySet<string> = new Set<RequestResolutionState>(['approved', 'rejected', 'changes-requested', 'timed-out', 'answered', 'run-ended']);
+export type RequestResolutionState = 'approved' | 'rejected' | 'changes-requested' | 'timed-out' | 'answered' | 'run-ended' | 'withdrawn';
+const RESOLUTION_STATES: ReadonlySet<string> = new Set<RequestResolutionState>(['approved', 'rejected', 'changes-requested', 'timed-out', 'answered', 'run-ended', 'withdrawn']);
 
 /** `metadata.resolution`, or undefined while the request is open (or the row
  *  predates the retire step). An unknown state reads as open. */

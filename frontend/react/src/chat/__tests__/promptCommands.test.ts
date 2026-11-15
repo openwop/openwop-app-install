@@ -6,6 +6,12 @@
  * CORRECTED (ADR 0993 D9): this header also claimed "an org switch that keeps the
  * old org's commands" breaks it. No case here asserted that; the switch is now
  * pinned by `promptCommands.adr0993.test.ts`, with insert-not-send and slugs.
+ *
+ * Re-graded /grade-tests wave 108 (TST-CHA-6). What this file owns beside the
+ * adr0993 file: the slug shape and fallback, the INVOKING composer's `ctx.insert`
+ * taking precedence over the live-composer fallback, each command rendering its
+ * own org's entry, and the freshness window (same orgs skip the network, `force`
+ * and a different org set do not). Sabotage-probed in w108 on each of those.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -15,7 +21,9 @@ const { listPrompts, renderPrompt } = vi.hoisted(() => ({
   listPrompts: vi.fn<(orgId: string) => Promise<PromptEntry[]>>(),
   renderPrompt: vi.fn<(orgId: string, entryId: string, variables: Record<string, unknown>) => Promise<string>>(),
 }));
-vi.mock('../../client/promptLibraryClient.js', () => ({ listPrompts, renderPrompt }));
+// Every export the subject imports is mocked (listOrgs is read only by
+// registerWorkspacePromptCommands, which no case here calls).
+vi.mock('../../client/promptLibraryClient.js', () => ({ listPrompts, renderPrompt, listOrgs: vi.fn(async () => []) }));
 
 import { promptSlug, registerPromptCommands, resetPromptCommandsForTest } from '../promptCommands.js';
 import { findCommand, clearCommands, type CommandContext } from '../registry/CommandRegistry.js';
@@ -31,12 +39,17 @@ describe('promptSlug', () => {
 
 describe('registerPromptCommands', () => {
   it('registers a /p-<slug> command per entry; invoking it renders + INSERTS into the invoking composer', async () => {
-    listPrompts.mockResolvedValue([{ entryId: 'e1', name: 'Weekly Digest', promptRef: 'p:1' }]);
+    // Two orgs, one entry each: each command must render ITS OWN org's entry.
+    listPrompts.mockImplementation(async (orgId) => (orgId === 'org-1'
+      ? [{ entryId: 'e1', name: 'Weekly Digest', promptRef: 'p:1' }]
+      : [{ entryId: 'e2', name: 'Daily Standup', promptRef: 'p:2' }]));
     renderPrompt.mockResolvedValue('Summarize this week.');
-    await registerPromptCommands(['org-1']);
+    await registerPromptCommands(['org-1', 'org-2']);
 
     const cmd = findCommand('/p-weekly-digest');
     expect(cmd).not.toBeNull();
+    const other = findCommand('/p-daily-standup');
+    expect(other).not.toBeNull();
 
     const send = vi.fn(async (_text: string): Promise<void> => undefined);
     const insert = vi.fn<(text: string) => void>();
@@ -46,10 +59,14 @@ describe('registerPromptCommands', () => {
     expect(renderPrompt).toHaveBeenCalledWith('org-1', 'e1', {});
     expect(insert).toHaveBeenCalledWith('Summarize this week.');
     expect(send).not.toHaveBeenCalled();
+
+    await other!.reg.handler('', ctx);
+    expect(renderPrompt).toHaveBeenLastCalledWith('org-2', 'e2', {});
+    expect(send).not.toHaveBeenCalled();
   });
 
   it('does not refetch the same orgs inside the window, and a different org set fetches its own', async () => {
-    listPrompts.mockResolvedValue([]);
+    listPrompts.mockImplementation(async (orgId) => (orgId === 'org-2' ? [{ entryId: 'e9', name: 'Org Two Brief', promptRef: 'p:9' }] : []));
     await registerPromptCommands(['org-1']);
     await registerPromptCommands(['org-1']);
     expect(listPrompts).toHaveBeenCalledTimes(1);
@@ -58,5 +75,7 @@ describe('registerPromptCommands', () => {
     await registerPromptCommands(['org-2']);
     expect(listPrompts).toHaveBeenCalledTimes(3);
     expect(listPrompts).toHaveBeenLastCalledWith('org-2');
+    // ...and registers what it read for that org.
+    expect(findCommand('/p-org-two-brief')).not.toBeNull();
   });
 });

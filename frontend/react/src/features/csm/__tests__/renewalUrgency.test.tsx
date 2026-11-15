@@ -11,6 +11,12 @@
  * formatting leg; parsing the date-only key as UTC midnight (`new Date(key)`)
  * reds the timezone leg — the zone is PINNED to a negative offset below, so
  * that leg can fail on a UTC machine too; `days <= 30` → `<= 29` reds the edge.
+ *
+ * Wave 109: the separate "does not shift the day" case asserted exactly what the
+ * first case already asserted (same fixture, same two expectations), so it was
+ * folded into the first case's title. The placeholder case's `—` was also
+ * satisfied by the ARR column (the fixture had no `arr`), so its account now has
+ * an ARR and the row must hold exactly ONE `—`.
  */
 import { describe, it, expect, vi, afterEach, beforeEach, afterAll } from 'vitest';
 import { render, screen, cleanup, within } from '@testing-library/react';
@@ -33,12 +39,12 @@ vi.mock('../csmClient.js', async (importOriginal) => ({
   // `listCompanies` was overridden here once, but csmClient does not export it
   // (it lives in crm/crmOrgClient) — an inert key `check-inert-mocks` holds at zero.
 }));
-// ADR 0882 (CSM2UX-4) — write controls follow `workspace:write`; `writeAccess.value`
-// lets a case render as a Viewer.
-const writeAccess = vi.hoisted(() => ({ value: true }));
+// ADR 0882 (CSM2UX-4) — write controls follow `workspace:write`. Every case here
+// renders as a WRITER (no case flips it; the Viewer arm is driven in
+// `csmRound2.test.tsx`), and the mock keeps the real access hook from fetching.
 vi.mock('../../../lib/writeAccess.js', async (orig) => ({
   ...(await orig<typeof import('../../../lib/writeAccess.js')>()),
-  useScopeWriteAccess: () => writeAccess.value,
+  useScopeWriteAccess: () => true,
 }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
   ...(await orig<typeof import('../../../featureToggles/FeatureAccessContext.js')>()),
@@ -85,7 +91,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('CSM — renewal date is formatted, not raw (CSM-G1)', () => {
-  it('renders a machine-readable <time> rather than the stored string', async () => {
+  it('renders a machine-readable <time> with the LOCAL calendar day, not the stored string (negative-offset zone)', async () => {
     api.listAccounts.mockResolvedValue([acct('Acme', day(200))]);
     const { container } = renderPage();
     await screen.findByText('Acme');
@@ -93,32 +99,25 @@ describe('CSM — renewal date is formatted, not raw (CSM-G1)', () => {
     expect(time).toBeTruthy();
     // The `datetime` keeps the raw key (machines), while the visible text is
     // locale-formatted (people). The two must not be the same thing.
+    // `new Date('2026-07-29')` parses as UTC midnight and renders as the 28th
+    // anywhere west of Greenwich — both this and the day count were off by one
+    // in the first cut of this change. Asserted as the WHOLE formatted date: a
+    // day-number substring collided with the year digits ("27" in 2027).
     expect(time!.getAttribute('datetime')).toBe(day(200));
     expect(time!.textContent).not.toBe(day(200));
     expect(time!.textContent).toBe(formatDate(localDay(day(200))));
   });
 
   it('still shows a placeholder when there is no renewal date', async () => {
-    api.listAccounts.mockResolvedValue([acct('Acme')]);
+    // An ARR, so the renewal cell is the ONLY cell in the row that can show `—`.
+    api.listAccounts.mockResolvedValue([{ ...acct('Acme'), arr: 1000 }]);
     const { container } = renderPage();
     await screen.findByText('Acme');
     // No <time> at all, rather than a formatted empty value.
     expect(container.querySelector('time')).toBeNull();
-    expect(within(rowFor('Acme')).getAllByText('—').length).toBeGreaterThan(0);
+    expect(within(rowFor('Acme')).getAllByText('—')).toHaveLength(1);
   });
 
-  it('does not shift the day in a negative-offset timezone', async () => {
-    // `new Date('2026-07-29')` parses as UTC midnight and renders as the 28th
-    // anywhere west of Greenwich — both this and the day count were off by one
-    // in the first cut of this change. Asserted as the WHOLE formatted date: a
-    // day-number substring collided with the year digits ("27" in 2027).
-    api.listAccounts.mockResolvedValue([acct('Acme', day(200))]);
-    const { container } = renderPage();
-    await screen.findByText('Acme');
-    const time = container.querySelector('time')!;
-    expect(time.textContent).toBe(formatDate(localDay(day(200))));
-    expect(time.getAttribute('datetime')).toBe(day(200));
-  });
 });
 
 describe('CSM — renewal urgency (CSM-G2)', () => {

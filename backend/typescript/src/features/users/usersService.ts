@@ -235,6 +235,28 @@ export async function listUsers(tenantId: string): Promise<User[]> {
   return all.filter((u) => u.tenantId === tenantId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
+/**
+ * ADR 1123 D2 — the ONE account a host superadmin may add by exact email: an
+ * ACTIVE user in a personal (`user:`) home tenant whose email is VOUCHED
+ * (`isEmailVouched`, never a self-asserted address) and equals `email`
+ * case-insensitively, and which is that tenant's canonical row. Null when there
+ * is none, OR more than one (an ambiguous address is refused, not guessed).
+ * A host-wide scan: the lane is superadmin-only and one address at a time.
+ */
+export async function findAddableUserByEmail(email: string): Promise<User | null> {
+  const want = email.trim().toLowerCase();
+  if (!want.includes('@')) return null;
+  const hits = new Map<string, User>();
+  for (const u of await store.list()) {
+    if (u.status !== 'active' || !u.tenantId.startsWith('user:')) continue;
+    if (!isEmailVouched(u) || u.email!.trim().toLowerCase() !== want) continue;
+    const ptr = await canonicalByTenant.get(u.tenantId);
+    if (ptr && ptr.userId !== u.userId) continue; // a folded legacy row, not the person's canonical one
+    hits.set(u.userId, u);
+  }
+  return hits.size === 1 ? [...hits.values()][0]! : null;
+}
+
 export async function getUser(userId: string): Promise<User | null> {
   return store.get(userId);
 }

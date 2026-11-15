@@ -133,6 +133,8 @@ describe('cmsErrorInfo — code-mapped error copy (CMSLU-7)', () => {
     expect(cmsErrorInfo(e)).toEqual({ key: 'errTranslatorScope', options: { locales: 'pt-BR, es' } });
   });
   it('keeps load-bearing raw messages: unmapped codes return null', () => {
+    // Without the `details.gate` stamp a conflict keeps its message; with it, the
+    // approval-gate refusal is rebuilt from details (approvalGateMessage.test.ts).
     expect(cmsErrorInfo(new CmsApiError('Publishing is gated on approval…', 'conflict', 409, {}))).toBeNull();
     expect(cmsErrorInfo(new CmsApiError('sections must be an array', 'validation_error', 400, {}))).toBeNull();
     expect(cmsErrorInfo(new Error('plain'))).toBeNull();

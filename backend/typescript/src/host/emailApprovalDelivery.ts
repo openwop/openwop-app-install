@@ -105,6 +105,9 @@ export interface ApprovalEmailInput {
   /** RFC 0093 capability token — INTERRUPT lane only, passed as an argument,
    *  never read from a persisted record. */
   interruptToken?: string;
+  /** ADR 1120 — an in-app path the Review link opens instead of `/inbox` (a
+   *  signed-in gate's `/inbox?notification=<id>`). Absent ⇒ `/inbox`, as before. */
+  reviewPath?: string;
 }
 
 /** Boot-time storage injection (the setEventLogBackend pattern) so the
@@ -162,7 +165,7 @@ export async function deliverApprovalEmail(storage: Storage, input: ApprovalEmai
       }
     }
 
-    const inboxUrl = `${base}/inbox`;
+    const inboxUrl = `${base}${input.reviewPath && input.reviewPath.startsWith('/inbox') ? input.reviewPath : '/inbox'}`;
     // ADR 0905 D6 — the copy is the registered `approval.notice` kind (4 locales, host
     // default locale); the links are composed here exactly as before.
     let links: { approveUrl: string; rejectUrl: string } | undefined;

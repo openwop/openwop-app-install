@@ -327,6 +327,13 @@ import { featureSubjectErasers } from './featureContributions.js';
  *      job(s), deletes the anniversary subscription(s) (whose id carries the raw
  *      principal) with their delivery rows, and deletes the config row.
  */
+/*
+ *  +1 (2026-11-14, ADR 0464 §9 CHAN-F19 #2):
+ *    + `eraseSuggesterQueueSubject` — `team-ledger:suggester-queue` holds a person's
+ *      chat text until the decision classifier reads it, and had no eraser. A DSAR
+ *      deletes the subject's queued rows (matched on `authorUserId`), so the text
+ *      never reaches the model afterwards. Author-less legacy rows age out (7 days).
+ */
 export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseChannelIngressSubject', // ADR 1042 D8
   'eraseRelayOwnerSubject', // ADR 1042 D8
@@ -451,6 +458,7 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseSubjectWorkflowRevisions',
   'eraseSubjectUserAgentRevisions',
   'eraseSuggestionSubject',
+  'eraseSuggesterQueueSubject', // CHAN-F19 #2 — the decision suggester's queued chat text
   'eraseSyncBindingSubject',
   'eraseTeamLedgerSubject',
   'eraseTeamsDelivery',
@@ -476,6 +484,11 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseMemoryProposals',
   // ADR 1102 D8 — the Insights & Drafting suite config and the job and trigger it arms.
   'eraseInsightsSuiteSubject',
+  // ADR 1115 D8 — `podcasts:show` left RECORDED_DEBT: the owner decision is "scrub the
+  // person, keep the show" (`createdBy` tombstoned; a matching `ownerEmail` and its
+  // `ownerName` removed, so the feed omits `<itunes:owner>`). The public feed and the
+  // bot prerender cache keep the old contact until they expire (stated in source).
+  'erasePodcastsSubject',
 ]);
 
 /** ADR 1031 P2 — the host manifest plus every composed feature's declared

@@ -563,7 +563,10 @@ describe('the org-selection dependency edge', () => {
   it.each(ADOPTERS)('%s no longer writes a failed read as an empty org list', (rel) => {
     const src = code(rel);
     expect(RAW_IDIOM.test(src), `${rel} reintroduced the raw catch-to-empty idiom`).toBe(false);
-    expect(src, `${rel} is not using the shared hook`).toMatch(/useOrgSelection/);
+    // A CALL, not the name: every adopter is found by its import, so the bare
+    // `/useOrgSelection/` this used to be matched the import line and could not fail
+    // (wave 109). Measured 2026-11-13: all 45 adopters call it.
+    expect(src, `${rel} imports the shared hook but never calls it`).toMatch(/\buseOrgSelection(?:<[^>]*>)?\(/);
   });
 
   /**
@@ -624,6 +627,9 @@ describe('the org-selection dependency edge', () => {
     // (w49 probe `ose-retry`). MEASURED 2026-10-15: 38 adopters pass
     // `retry={retryOrgs}` to OrgSelectionState and 3 local-branch adopters wire
     // `onClick={retryOrgs}` (AppBuilderHub, CompatEndpointsCard, SubjectKnowledgePanel).
+    // RE-MEASURED 2026-11-13 (b976b6055, wave 109): 45 adopters; 40 pass
+    // `retry={retryOrgs}` and 6 wire `onClick={retryOrgs}` (the three above plus
+    // ClientRegistrationDialog, CampaignDetailPage, and CmsPage, which has both).
     expect(src, `${rel} destructures retryOrgs but never wires it to a control`)
       .toMatch(/(?:retry|onClick)=\{retryOrgs\}/);
   });
@@ -662,6 +668,8 @@ describe('the org-selection dependency edge', () => {
     // 24 -> 31 with the SENTINEL_ORG_READS migration batch.
     // 31 -> 38 (2026-10-15, w49 /grade-tests): MEASURED 38 adopters render the
     // component. The floor had sat at 31 — seven of silent capacity.
+    // RE-MEASURED 2026-11-13 (wave 109): 40 render it. The two of slack are raised
+    // as a human ask (TST-NZB-2), not changed here.
     expect(delegating.length).toBeGreaterThanOrEqual(38);
   });
 
@@ -726,6 +734,8 @@ describe('the org-selection dependency edge', () => {
     // 32 -> 41 (2026-10-15, w49 /grade-tests): MEASURED 41 adopters. The floor had
     // sat at 32 while the walk found 41, so an adopter dropping the hook import
     // stayed green (probe `ose-floor`) — exactly the slack this comment forbids.
+    // RE-MEASURED 2026-11-13 (wave 109): 45 adopters, so four of slack again; raised as
+    // a human ask (TST-NZB-2), not changed here.
     expect(ADOPTERS.length).toBeGreaterThanOrEqual(41);
   });
 
@@ -737,7 +747,8 @@ describe('the org-selection dependency edge', () => {
    */
   it('the delegation check actually recognises the delegated form', () => {
     const delegating = ADOPTERS.filter((rel) => delegatesOrgStates(code(rel)));
-    // 31 -> 38 (2026-10-15, w49): MEASURED 38 delegating adopters.
+    // 31 -> 38 (2026-10-15, w49): MEASURED 38 delegating adopters. 40 on 2026-11-13
+    // (wave 109; TST-NZB-2).
     expect(delegating.length, 'no file reads as delegating — the shape check drifted').toBeGreaterThanOrEqual(38);
     // …and it is not just answering "true" to everything: a local-branch page
     // does not render the component at all, so it must NOT read as delegating.
@@ -749,6 +760,10 @@ describe('the org-selection dependency edge', () => {
     // There is now exactly ONE non-delegating adopter left, so the next
     // migration would break it with nothing to re-point at. A fixture cannot be
     // invalidated by a future migration, which is the whole point of a control.
+    // CORRECTED 2026-11-13 (wave 109): FIVE adopters do not delegate now
+    // (CompatEndpointsCard, AppBuilderHubPage, ClientRegistrationDialog,
+    // CampaignDetailPage, SubjectKnowledgePanel); the reasoning for a synthetic
+    // control stands.
     const LOCAL_BRANCH_PAGE = `
       export function Page() {
         const { orgs, orgsFailed, retry } = useOrgSelection(listOrgs);

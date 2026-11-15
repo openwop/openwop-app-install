@@ -1,6 +1,11 @@
 # ADR 0679 — Podcast writers, and the nodes a declaration cannot reach
 
 Status: **implemented** (verified 2026-09-17, #3811)
+
+> **Correction pointer (2026-11-13, ADR 1115 D2):** a `:fork` of `podcasts.generate` no longer
+> writes the episode at all. It is not the episode's claimed run, so its first live node refuses
+> with `podcast_run_not_claimed`. The content-derived Document mint below still makes a
+> same-run re-execution (a resume) and a door retry converge.
 Date: 2026-09-14
 Feature loop 2026-09, iteration 29 (Podcasts)
 Gap ids: `PODWF-9` (new), `PODWF-10` (new), `PODWF-11` (new), `GEN-HELD-1` (new, corpus-wide); `PODWF-2`..`-8` all re-verified STILL TRUE

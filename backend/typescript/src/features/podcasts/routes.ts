@@ -29,20 +29,24 @@
  */
 
 import type { Request } from 'express';
+import { randomUUID } from 'node:crypto';
 import { OpenwopError } from '../../types.js';
 import { createLogger } from '../../observability/logger.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { requireFeatureEnabled, requireString, optionalString, tenantOf } from '../featureRoute.js';
-import { resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
+import { requireFeatureEnabled, requireString, optionalString, tenantOf, toggleSubjectOf } from '../featureRoute.js';
+import { type Scope } from '../../host/accessControlService.js';
+import { resolveOne } from '../../host/featureToggles/service.js';
+import { getProject } from '../projects/projectsService.js';
 import { startWorkflowRun } from '../../host/runStarter.js';
-import { getProject, resolveProjectAccess } from '../projects/projectsService.js';
 import { PODCASTS_GENERATE_ID } from './generateWorkflow.js';
+import { episodeAccess, filterReadableEpisodes, generateTargetAccess, orgAllows } from './podcastsAccess.js';
 import { resolveMediaAsset } from '../../host/inMemorySurfaces.js';
 import { estimateAudioDurationSeconds } from './audioDuration.js';
 import {
   createSpeakerProfile, listSpeakerProfiles, getSpeakerProfile, deleteSpeakerProfile,
   createEpisodeProfile, listEpisodeProfiles, getEpisodeProfile, deleteEpisodeProfile,
-  createEpisode, getEpisode, listEpisodes, setEpisodeRun, clearEpisodeError, deleteEpisode, projectStatus,
+  createEpisode, getEpisode, listEpisodes, deleteEpisode, projectStatus,
+  claimEpisodeGeneration, releaseEpisodeGeneration, isLiveRunStatus,
   createShow, listShows, getShow, updateShow, setShowPublished, deleteShow,
   setEpisodePublish,
   type PodcastEpisode,
@@ -55,10 +59,10 @@ const TOGGLE = { toggleId: 'podcasts', label: 'Podcasts' };
 
 const actingUserOf = (req: Request): string | undefined => req.userId ?? req.principal?.principalId;
 
-/** Boolean: does the caller hold `scope` IN `orgId`? */
+/** Boolean: does the caller hold `scope` IN `orgId`? (ADR 1115 D1 — `orgAllows`, the
+ *  one org predicate every podcasts lane uses.) */
 async function hasOrgScope(req: Request, orgId: string, scope: Scope): Promise<boolean> {
-  const access = await resolveEffectiveAccess(tenantOf(req), { subject: actingUserOf(req), orgId });
-  return access.scopes.includes(scope);
+  return orgAllows(tenantOf(req), orgId, actingUserOf(req), scope);
 }
 
 /** Require `scope` in `orgId` (403 when held read but not write; the caller already
@@ -69,32 +73,55 @@ async function requireOrgScope(req: Request, orgId: string, scope: Scope): Promi
   }
 }
 
-/** CPU-2 — an episode is bound to a `notebookId` (a project). A `private` notebook is
- *  read-gated to its MEMBERS (`resolveProjectAccess`), so the org-level read scope is
- *  NOT sufficient: an org-reader who is not a notebook member must not read that
- *  notebook's episodes (the same cross-surface leak the projects gate closes).
+/**
+ * ADR 1115 D1 — resolve an episode for an `:id` door through THE episode rule
+ * (`episodeAccess`): uniform 404 when it is missing, in an org the caller cannot read,
+ * or bound to a private notebook they are not a member of (CPU-2); 403 when a write was
+ * needed and they lack `workspace:write`.
  *
- *  Two causes of `resolveProjectAccess === 'none'` must be distinguished. A notebook
- *  that EXISTS but is private-and-non-member → DENY (the leak we are closing). A notebook
- *  that is MISSING (deleted — project delete does NOT cascade its episodes, so orphaned
- *  episodes persist) has no visibility/members policy left to enforce → fall through to
- *  the org-read scope the caller already passed. Denying the orphan would 404 + hide it
- *  while DELETE stays org-scoped (retry/delete are deliberately untouched — the
- *  orphan-lockout trap), leaving it unreachable. So orphans stay readable.
- *
- *  Reads only. The optional `memo` dedupes per-`notebookId` resolves across a list (many
- *  episodes share one notebook — no N+1); it caches the in-flight Promise so concurrent
- *  reads of the same notebook resolve once. */
-async function notebookReadable(req: Request, notebookId: string, memo?: Map<string, Promise<boolean>>): Promise<boolean> {
-  const cached = memo?.get(notebookId);
-  if (cached) return cached;
-  const p = (async (): Promise<boolean> => {
-    const nb = await getProject(tenantOf(req), notebookId);
-    if (!nb) return true; // orphan — org-read scope already gated it
-    return (await resolveProjectAccess(tenantOf(req), notebookId, actingUserOf(req))) !== 'none';
-  })();
-  memo?.set(notebookId, p);
-  return p;
+ * `PODC93-4` — the read doors already checked the notebook; retry, publish, unpublish
+ * and delete did not, so an org writer who was not a member of a private notebook could
+ * publish its episode to the public web. The old reason for leaving them out (an orphan
+ * lockout) no longer applies: an orphan's notebook check answers `true`.
+ */
+async function requireEpisode(req: Request, need: 'read' | 'write'): Promise<PodcastEpisode> {
+  const episode = await getEpisode(tenantOf(req), req.params.id);
+  const access = episode ? await episodeAccess(tenantOf(req), episode, actingUserOf(req), need) : 'hidden';
+  if (!episode || access === 'hidden') throw new OpenwopError('not_found', 'Episode not found.', 404, { id: req.params.id });
+  if (access === 'forbidden') {
+    throw new OpenwopError('forbidden_scope', 'Missing required scope: workspace:write', 403, { requiredScope: 'workspace:write', orgId: episode.orgId });
+  }
+  return episode;
+}
+
+/**
+ * ADR 1115 D1/D4 — refuse a generation the run could only fail: the target (org write,
+ * a readable project in this org, a provisioned notebook) through `generateTargetAccess`,
+ * and the `notebooks` toggle (a podcasts run grounds on a notebook and fails typed
+ * without one, D4; `dependsOn` is deliberately NOT declared — it is a disable-lock).
+ */
+async function requireGenerateTarget(req: Request, orgId: string, notebookId: string, opts: { existingEpisode?: boolean } = {}): Promise<void> {
+  const target = await generateTargetAccess(tenantOf(req), orgId, notebookId, actingUserOf(req));
+  if ('refused' in target) {
+    if (target.refused === 'forbidden') {
+      throw new OpenwopError('forbidden_scope', 'Missing required scope: workspace:write', 403, { requiredScope: 'workspace:write', orgId });
+    }
+    // On a RETRY the caller already passed `episodeAccess` (they can read the episode,
+    // so its notebook is readable or gone), so `hidden` here can only mean the notebook
+    // was deleted: say so (409), or the Studio's "it may have been deleted, refresh"
+    // loops forever on a button that cannot work (UX regrade `PODUX93R-1`).
+    if (target.refused === 'hidden' && opts.existingEpisode) {
+      throw new OpenwopError('conflict', "This episode's notebook was deleted, so the episode cannot be generated again.", 409, { reason: 'notebook_unavailable', notebookId });
+    }
+    if (target.refused === 'hidden') throw new OpenwopError('not_found', 'Notebook not found.', 404, { notebookId });
+    throw new OpenwopError('conflict', 'This project has no sources yet. Add a source, then generate the episode.', 409, { reason: 'notebook_has_no_sources', notebookId });
+  }
+  // The access resolver (toggle AND plan), the predicate the `produce` tool's
+  // `resolveFeatureToggle` also answers from (`PODCD93-6`).
+  const notebooks = await resolveOne('notebooks', toggleSubjectOf(req));
+  if (!notebooks?.enabled) {
+    throw new OpenwopError('conflict', 'Podcasts are generated from a research notebook, and notebooks are turned off for this workspace.', 409, { reason: 'notebooks_disabled' });
+  }
 }
 
 export function registerPodcastsRoutes(deps: RouteDeps): void {
@@ -105,44 +132,77 @@ export function registerPodcastsRoutes(deps: RouteDeps): void {
   // (no entity yet) the org comes from the body.
   const orgFromQuery = (req: Request): string => requireString(req.query.orgId, 'orgId');
 
-  /** Project an episode + its run-derived status for the wire. */
-  async function projectEpisode(episode: PodcastEpisode): Promise<PodcastEpisode & { status: string }> {
+  /** Project an episode + its run-derived status for the wire. ADR 1115 D10
+   *  (`PODUX93R-1`) — and `notebookMissing` when its notebook was deleted, so the Studio
+   *  does not offer a regeneration the door must refuse. `memo` dedupes a list. */
+  async function projectEpisode(episode: PodcastEpisode, memo?: Map<string, Promise<boolean>>): Promise<PodcastEpisode & { status: string; notebookMissing?: true }> {
     let runStatus: string | undefined;
     if (episode.runId) {
       try { runStatus = (await deps.storage.getRun(episode.runId))?.status; } catch { /* run gone — treat as queued */ }
     }
-    return { ...episode, status: projectStatus(runStatus) };
+    // Code regrade `PODCD93-13` — a run row purged by retention, with the episode's
+    // audio still stored, is a finished episode, not a queued one: otherwise the Studio
+    // offers no working action for it (publish/unpublish render only for `done`).
+    if (runStatus === undefined && episode.audioMediaRef) runStatus = 'completed';
+    let gone = memo?.get(episode.notebookId);
+    if (!gone) { gone = getProject(episode.tenantId, episode.notebookId).then((p) => !p); memo?.set(episode.notebookId, gone); }
+    return { ...episode, status: projectStatus(runStatus), ...((await gone) ? { notebookMissing: true as const } : {}) };
   }
 
-  /** Enqueue the generation run for an episode + stamp its runId. Shared by create + retry. */
-  async function enqueueGeneration(req: Request, episode: PodcastEpisode): Promise<string> {
-    // PODC-3 (ADR 0603 §3) — the episode's `error` is the LAST run's testimony. A
-    // re-run must not carry it forward, or a retry that is merely still running would
-    // render the previous failure's message. Explicit, because `recordEpisodeResult`
-    // merges and never clears (see `clearEpisodeError`).
-    //
-    // `L4` (R1) — and it must happen BEFORE the run is created. `startWorkflowRun`
-    // dispatches via `setImmediate`, so the new run's nodes can already be executing
-    // (and writing their OWN `error` through `failEpisode`) by the time this line is
-    // reached. `clearEpisodeError` is an unguarded read-modify-write, so clearing
-    // afterwards could erase the new run's freshly-written failure and leave a failed
-    // episode reporting nothing at all. Clearing first is strictly ordered against
-    // every write the run can make.
-    await clearEpisodeError(tenantOf(req), episode.id);
-    const runId = await startWorkflowRun(
-      { storage: deps.storage, hostSuite: deps.hostSuite },
-      {
-        tenantId: tenantOf(req),
-        workflowId: PODCASTS_GENERATE_ID,
-        inputs: { episodeId: episode.id },
-        metadata: { podcastEpisode: { episodeId: episode.id, notebookId: episode.notebookId } },
-      },
-    );
-    if (!runId) {
+  /**
+   * Start the generation run for an episode, as the caller. Shared by create + retry.
+   *
+   * ADR 1115 D3 (`PODC93-1`) — the run acts for the person the door just authorized
+   * (`metadata.actingUserId`, plus `personalTenant` for the run's BYOK and tenant gates,
+   * the notebooks `startAsCaller` shape). This used to start the run with NO actor, so
+   * the run read a private notebook as a system run would (nothing), and a paid outline,
+   * transcript and per-turn TTS ran on the briefing alone.
+   *
+   * ADR 1115 D5 (architect finding 2) — the claim is atomic: mint the run id, swap the
+   * episode from the row the caller judged (its `runId` not live) to one naming the new
+   * id, with the last run's `error`/`errorCode` cleared in the same write, and only then
+   * start the run under that id. A lost swap is another retry winning: 409. The clear is
+   * strictly before any write the new run can make, because its id is not dispatched
+   * until the swap has landed (this replaces the old clear-first ordering comment).
+   */
+  async function enqueueGeneration(req: Request, episode: PodcastEpisode): Promise<PodcastEpisode> {
+    const actingUserId = actingUserOf(req);
+    if (!actingUserId) throw new OpenwopError('not_found', 'Episode not found.', 404, { id: episode.id });
+    const runId = randomUUID();
+    const claimed = await claimEpisodeGeneration(tenantOf(req), episode, runId);
+    if (!claimed) {
+      throw new OpenwopError('conflict', 'This episode is already being generated.', 409, { reason: 'generation_in_progress', id: episode.id });
+    }
+    let started: string | null = null;
+    try {
+      started = await startWorkflowRun(
+        { storage: deps.storage, hostSuite: deps.hostSuite },
+        {
+          tenantId: tenantOf(req),
+          workflowId: PODCASTS_GENERATE_ID,
+          runId,
+          inputs: { episodeId: episode.id },
+          metadata: { actingUserId, podcastEpisode: { episodeId: episode.id, notebookId: episode.notebookId } },
+          ...(req.personalTenant ? { personalTenant: req.personalTenant } : {}),
+        },
+      );
+    } finally {
+      if (!started) await releaseEpisodeGeneration(tenantOf(req), claimed, episode).catch(() => undefined);
+    }
+    if (!started) {
       throw new OpenwopError('internal_error', 'Podcast generation workflow is unavailable.', 500, { workflowId: PODCASTS_GENERATE_ID });
     }
-    await setEpisodeRun(tenantOf(req), episode.id, runId);
-    return runId;
+    return claimed;
+  }
+
+  /** ADR 1115 D5 — the episode's run is LIVE (its row exists and is not terminal). An
+   *  absent or unreadable row is not live: reading absence as "queued" would lock the
+   *  episode forever (architect finding 1). */
+  async function liveRunOf(episode: PodcastEpisode): Promise<string | undefined> {
+    if (!episode.runId) return undefined;
+    let status: string | undefined;
+    try { status = (await deps.storage.getRun(episode.runId))?.status; } catch { status = undefined; }
+    return isLiveRunStatus(status) ? episode.runId : undefined;
   }
 
   // ── SpeakerProfile ──────────────────────────────────────────────────────────
@@ -230,26 +290,22 @@ export function registerPodcastsRoutes(deps: RouteDeps): void {
       if (!profile || profile.orgId !== orgId) {
         throw new OpenwopError('validation_error', 'episodeProfileId does not resolve to a profile in this org.', 400, { episodeProfileId });
       }
-      // The notebook (a project Subject) MUST be in THIS org AND readable by the
-      // caller (review fix — cross-org IDOR): without this a workspace:write caller
-      // in org A could generate a podcast grounded on an org-visible notebook in
-      // org B. Uniform 404 on missing / wrong-org / no-access (no existence leak).
-      const nbProject = await getProject(tenantOf(req), notebookId);
-      const nbAccess = nbProject ? await resolveProjectAccess(tenantOf(req), notebookId, actingUserOf(req)) : 'none';
-      if (!nbProject || nbProject.orgId !== orgId || nbAccess === 'none') {
-        throw new OpenwopError('not_found', 'Notebook not found.', 404, { notebookId });
-      }
+      // ADR 1115 D1 — the notebook (a project Subject) MUST be in THIS org, readable by
+      // the caller (the cross-org IDOR fix; uniform 404), and a provisioned notebook.
+      await requireGenerateTarget(req, orgId, notebookId);
       const title = optionalString(body.title) ?? 'Untitled episode';
       const briefing = optionalString(body.briefing);
       const episode = await createEpisode(tenantOf(req), orgId, {
         notebookId, episodeProfileId, title, ...(briefing ? { briefing } : {}),
       });
-      const runId = await enqueueGeneration(req, episode);
-      log.info('podcast_episode_enqueued', { tenantId: tenantOf(req), orgId, id: episode.id, runId });
-      // PODC-3 — `enqueueGeneration` just cleared the stored `error`; the echoed
-      // row must agree with it, or the retry response re-asserts the failure it
-      // just retried.
-      res.status(202).json({ episode: { ...episode, error: undefined, runId, status: 'queued' } });
+      // `PODCD93-5` — a create whose run never starts must not leave an episode that
+      // reads "queued" forever (the `produce` tool already deleted it; now the door too).
+      const claimed = await enqueueGeneration(req, episode).catch(async (err: unknown) => {
+        await deleteEpisode(tenantOf(req), episode.id).catch(() => undefined);
+        throw err;
+      });
+      log.info('podcast_episode_enqueued', { tenantId: tenantOf(req), orgId, id: episode.id, runId: claimed.runId });
+      res.status(202).json({ episode: { ...claimed, status: 'queued' } });
     } catch (err) { next(err); }
   });
 
@@ -258,17 +314,15 @@ export function registerPodcastsRoutes(deps: RouteDeps): void {
       await requireFeatureEnabled(req, TOGGLE.toggleId, TOGGLE.label);
       const orgId = orgFromQuery(req);
       if (!(await hasOrgScope(req, orgId, 'workspace:read'))) throw new OpenwopError('not_found', 'Not found.', 404, {});
-      const list = await listEpisodes(tenantOf(req), orgId);
       // CPU-2 — an org-reader must not see episodes of a private notebook they are not
-      // a member of. Filter the org list by per-notebook read access (memoized — many
-      // episodes share a notebook). Orphaned episodes (notebook deleted) stay listed.
-      const nbMemo = new Map<string, Promise<boolean>>();
-      const visible: typeof list = [];
-      for (const e of list) if (await notebookReadable(req, e.notebookId, nbMemo)) visible.push(e);
+      // a member of. ADR 1115 D1: the SAME filter the `list` chat tool and the run lane
+      // apply (`filterReadableEpisodes`). Orphaned episodes (notebook deleted) stay listed.
+      const visible = await filterReadableEpisodes(tenantOf(req), await listEpisodes(tenantOf(req), orgId), actingUserOf(req));
+      const notebookMemo = new Map<string, Promise<boolean>>();
       // SP-9 — same capability report as /shows: ONE org-level resolve from the
       // predicate every write on this surface enforces.
       res.json({
-        episodes: await Promise.all(visible.map((e) => projectEpisode(e))),
+        episodes: await Promise.all(visible.map((e) => projectEpisode(e, notebookMemo))),
         canWrite: await hasOrgScope(req, orgId, 'workspace:write'),
       });
     } catch (err) { next(err); }
@@ -277,15 +331,7 @@ export function registerPodcastsRoutes(deps: RouteDeps): void {
   app.get(`${BASE}/episodes/:id`, async (req, res, next) => {
     try {
       await requireFeatureEnabled(req, TOGGLE.toggleId, TOGGLE.label);
-      const episode = await getEpisode(tenantOf(req), req.params.id);
-      if (!episode || !(await hasOrgScope(req, episode.orgId, 'workspace:read'))) {
-        throw new OpenwopError('not_found', 'Episode not found.', 404, { id: req.params.id });
-      }
-      // CPU-2 — org read is necessary but not sufficient: a private notebook's episode
-      // is readable only by the notebook's members (uniform 404, no existence leak).
-      if (!(await notebookReadable(req, episode.notebookId))) {
-        throw new OpenwopError('not_found', 'Episode not found.', 404, { id: req.params.id });
-      }
+      const episode = await requireEpisode(req, 'read');
       res.json({ episode: await projectEpisode(episode) });
     } catch (err) { next(err); }
   });
@@ -293,29 +339,33 @@ export function registerPodcastsRoutes(deps: RouteDeps): void {
   app.post(`${BASE}/episodes/:id/retry`, async (req, res, next) => {
     try {
       await requireFeatureEnabled(req, TOGGLE.toggleId, TOGGLE.label);
-      const episode = await getEpisode(tenantOf(req), req.params.id);
-      if (!episode || !(await hasOrgScope(req, episode.orgId, 'workspace:read'))) {
-        throw new OpenwopError('not_found', 'Episode not found.', 404, { id: req.params.id });
+      const episode = await requireEpisode(req, 'write');
+      // ADR 1115 D5 (`PODC93-5`) — say no when the state is wrong. A published episode
+      // would have its PUBLIC audio replaced by the next mix with no publish step; a
+      // live run would race this one on the same row.
+      if (episode.published) {
+        throw new OpenwopError('conflict', 'This episode is published. Unpublish it first; regenerating would replace the public audio.', 409, { reason: 'episode_published', id: episode.id });
       }
-      await requireOrgScope(req, episode.orgId, 'workspace:write');
-      const runId = await enqueueGeneration(req, episode);
-      log.info('podcast_episode_retried', { tenantId: tenantOf(req), id: episode.id, runId });
-      // PODC-3 — `enqueueGeneration` just cleared the stored `error`; the echoed
-      // row must agree with it, or the retry response re-asserts the failure it
-      // just retried.
-      res.status(202).json({ episode: { ...episode, error: undefined, runId, status: 'queued' } });
+      const live = await liveRunOf(episode);
+      if (live) {
+        throw new OpenwopError('conflict', 'This episode is already being generated.', 409, { reason: 'generation_in_progress', id: episode.id, runId: live });
+      }
+      // ADR 1115 D1 — an orphan (notebook deleted) or unprovisioned target is refused
+      // here, never enqueued to fail at `select-content`.
+      await requireGenerateTarget(req, episode.orgId, episode.notebookId, { existingEpisode: true });
+      const claimed = await enqueueGeneration(req, episode);
+      log.info('podcast_episode_retried', { tenantId: tenantOf(req), id: episode.id, runId: claimed.runId });
+      // PODC-3 — the claim cleared the stored `error`/`errorCode`; the echoed row is the
+      // claimed row, so the response never re-asserts the failure it just retried.
+      res.status(202).json({ episode: { ...claimed, status: 'queued' } });
     } catch (err) { next(err); }
   });
 
   app.delete(`${BASE}/episodes/:id`, async (req, res, next) => {
     try {
       await requireFeatureEnabled(req, TOGGLE.toggleId, TOGGLE.label);
-      const episode = await getEpisode(tenantOf(req), req.params.id);
-      if (!episode || !(await hasOrgScope(req, episode.orgId, 'workspace:read'))) {
-        throw new OpenwopError('not_found', 'Episode not found.', 404, { id: req.params.id });
-      }
-      await requireOrgScope(req, episode.orgId, 'workspace:write');
-      res.json(await deleteEpisode(tenantOf(req), req.params.id));
+      const episode = await requireEpisode(req, 'write');
+      res.json(await deleteEpisode(tenantOf(req), episode.id));
     } catch (err) { next(err); }
   });
 
@@ -410,11 +460,14 @@ export function registerPodcastsRoutes(deps: RouteDeps): void {
   app.post(`${BASE}/episodes/:id/publish`, async (req, res, next) => {
     try {
       await requireFeatureEnabled(req, TOGGLE.toggleId, TOGGLE.label);
-      const episode = await getEpisode(tenantOf(req), req.params.id);
-      if (!episode || !(await hasOrgScope(req, episode.orgId, 'workspace:read'))) {
-        throw new OpenwopError('not_found', 'Episode not found.', 404, { id: req.params.id });
+      const episode = await requireEpisode(req, 'write');
+      // ADR 1115 D5 — publish only what the public can play: the episode has audio, and
+      // no run is about to replace it. Readiness is observable state, not "the run said
+      // done" (a purged run, or a seeded episode with audio and no run, stays
+      // publishable — architect finding 1).
+      if (!episode.audioMediaRef || (await liveRunOf(episode))) {
+        throw new OpenwopError('conflict', 'This episode has no finished audio to publish yet.', 409, { reason: 'episode_not_ready', id: episode.id });
       }
-      await requireOrgScope(req, episode.orgId, 'workspace:write');
       const body = (req.body ?? {}) as Record<string, unknown>;
       const showId = optionalString(body.showId) ?? episode.showId;
       if (!showId) {
@@ -463,12 +516,8 @@ export function registerPodcastsRoutes(deps: RouteDeps): void {
   app.post(`${BASE}/episodes/:id/unpublish`, async (req, res, next) => {
     try {
       await requireFeatureEnabled(req, TOGGLE.toggleId, TOGGLE.label);
-      const episode = await getEpisode(tenantOf(req), req.params.id);
-      if (!episode || !(await hasOrgScope(req, episode.orgId, 'workspace:read'))) {
-        throw new OpenwopError('not_found', 'Episode not found.', 404, { id: req.params.id });
-      }
-      await requireOrgScope(req, episode.orgId, 'workspace:write');
-      const updated = await setEpisodePublish(tenantOf(req), req.params.id, { published: false });
+      const episode = await requireEpisode(req, 'write');
+      const updated = await setEpisodePublish(tenantOf(req), episode.id, { published: false });
       log.info('podcast_episode_unpublish', { tenantId: tenantOf(req), id: req.params.id });
       res.json({ episode: updated });
     } catch (err) { next(err); }

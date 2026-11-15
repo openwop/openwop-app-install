@@ -696,6 +696,21 @@ export async function canReadDocument(tenantId: string, doc: Pick<DocumentRecord
   return level === null || levelSatisfies(level, 'read');
 }
 
+/**
+ * ADR 1118 — the write twin of {@link canReadDocument}, for the by-id write doors
+ * (PATCH, DELETE, POST versions). Since a private project admits only its members and
+ * the org's admins, an org editor can be refused by an owning project that still
+ * EXISTS, so these doors must ask. A document whose owning project is GONE stays
+ * writable: that refusal would have no exit (the KBC-4 reasoning, ADR 0608 D4), and
+ * PATCH re-pointing `ownerSubject` and DELETE are how such a row is recovered.
+ */
+export async function canWriteDocument(tenantId: string, doc: Pick<DocumentRecord, 'ownerSubject'>, subject: string | undefined): Promise<boolean> {
+  if (!doc.ownerSubject) return true;
+  const level = await resolveSubjectAccess(tenantId, doc.ownerSubject, subject);
+  if (level === null || levelSatisfies(level, 'write')) return true;
+  return doc.ownerSubject.kind === 'project' && !(await resolveSubjectOrg(tenantId, doc.ownerSubject));
+}
+
 // ─── templates (bind the prompt machinery; own the output contract) ──────────
 
 export async function getTemplate(tenantId: string, orgId: string, templateId: string): Promise<DocumentTemplate | null> {

@@ -15,7 +15,8 @@ import { PromptPickerInput } from '../../prompts/PromptPickerInput.js';
 import { CredentialPickerInput } from './CredentialPickerInput.js';
 import { ProviderPickerInput } from './ProviderPickerInput.js';
 import { ModelPickerInput } from './ModelPickerInput.js';
-import { countNonBlankLines, textareaValue } from './inspectorHelpers.js';
+import { countNonBlankLines, textareaValue, runVariableName } from './inspectorHelpers.js';
+import { bareVariableName } from '../../ui/RunInputsForm.js';
 
 export function ConfigInput({
   nodeId,
@@ -28,7 +29,12 @@ export function ConfigInput({
   field: ConfigField;
   allFields: readonly ConfigField[];
 }) {
+  const { t } = useTranslation('builder');
   const value = config[field.key];
+  // Issue 5897 — a deferred chain copy binds `provider`/`model` to a run variable
+  // (`{type:'variable', variableName}`): the value is chosen when the run starts, so
+  // there is nothing to edit here, and a picker would overwrite the binding.
+  const runBound = runVariableName(value);
   const onChange = (next: unknown) => {
     // Cascade: when this field's value changes, clear every sibling
     // field whose `dependsOn` points back at it (e.g., changing the
@@ -46,7 +52,8 @@ export function ConfigInput({
   // Resolve the dependency-source value for this field (e.g., a
   // model-picker with dependsOn: 'provider' looks up
   // `config.provider`). Undefined when this field has no dependency.
-  const dependsOnValue = field.dependsOn ? (config[field.dependsOn] as string | undefined) : undefined;
+  const dependsOnRaw = field.dependsOn ? config[field.dependsOn] : undefined;
+  const dependsOnValue = typeof dependsOnRaw === 'string' ? dependsOnRaw : undefined;
   // A11Y-3: programmatically associate the visible label with whichever
   // control this field renders (incl. through the picker components).
   const id = useId();
@@ -56,7 +63,9 @@ export function ConfigInput({
         {field.label}
         {field.required && <span className="builder-inspector-required" aria-hidden> *</span>}
       </label>
-      {field.kind === 'checkbox' ? (
+      {runBound !== undefined ? (
+        <output id={id} className="u-text-muted">{t('configSetPerRun', { name: bareVariableName(runBound) })}</output>
+      ) : field.kind === 'checkbox' ? (
         <input
           id={id}
           type="checkbox"

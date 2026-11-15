@@ -376,6 +376,22 @@ is driven by THAT tab's own `useChatSession`, never lifted to the deck.
 > at source preparation; controlled original/fixed causality, statics, full gate,
 > merge, deployment and live no-Send reload qualification remain owed. No new wire
 > shape, backend membership authority, provider/key behavior or RFC is introduced.
+>
+> **CORRECTION 2026-11-14 — CC-CHAT-4, a reopened agent conversation answers as its agent.**
+> "Restore never changes the voice" was never this ADR's wording: it was written into
+> code comments by #5831 (`chatSubmit.ts`, `TabSession.tsx`). The correction above
+> only forbids a late restore from overriding a routing choice already made. MEASURED
+> live twice (DeckTalk, MyndHyve): reopening an agent conversation from the sidebar
+> listed the agent but left the voice EMPTY, so the next turn carried no `to:` and the
+> plain Assistant answered "I have no tools". Now an EMPTY voice is filled, on reopen
+> of a 1:1 conversation, with the restored member that answered the latest assistant
+> turn (`restoreLineup(…, preferredCurrent)` in the deck; `setLineup(…, {continueLastAgent})`
+> in the single panel). A voice already chosen is never replaced; a non-member or
+> removed agent is ignored; channel, group and board conversations are unchanged.
+> Selecting adds only the turn's `to:`. The server's run-start grant still decides
+> what the agent may do, and replay/fork read the addressee recorded on each turn.
+> No wire change and no RFC. Test: `activeAgents/__tests__/useActiveAgents.restoreLineup.test.tsx`
+> (CC-CHAT-4 cases).
 
 | Gap | Closed by | How |
 |---|---|---|

@@ -47,12 +47,12 @@ vi.mock('../csmClient.js', async (orig) => ({
   ...(await orig<typeof import('../csmClient.js')>()),
   ...api,
 }));
-// ADR 0882 (CSM2UX-4) — write controls follow `workspace:write`; `writeAccess.value`
-// lets a case render as a Viewer.
-const writeAccess = vi.hoisted(() => ({ value: true }));
+// ADR 0882 (CSM2UX-4) — write controls follow `workspace:write`. Every case here
+// renders as a WRITER (no case flips it; the Viewer arm is driven in
+// `csmRound2.test.tsx`), and the mock keeps the real access hook from fetching.
 vi.mock('../../../lib/writeAccess.js', async (orig) => ({
   ...(await orig<typeof import('../../../lib/writeAccess.js')>()),
-  useScopeWriteAccess: () => writeAccess.value,
+  useScopeWriteAccess: () => true,
 }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
   ...(await orig<typeof import('../../../featureToggles/FeatureAccessContext.js')>()),
@@ -80,9 +80,9 @@ const ACCOUNT: Account = {
 const openLinkEditor = async (): Promise<void> => {
   // Matched on aria-label OR text, and on "link" broadly: the trigger's label is
   // `linkCompany` for an UNLINKED account and `editLink` for a linked one, so
-  // matching only "Edit link" silently found nothing on a fresh fixture.
-  // whose label rides on `aria-label` ("Edit CRM company link for X"), so a
-  // textContent match finds nothing and looks like a missing fixture.
+  // matching only "Edit link" silently found nothing on a fresh fixture; and a
+  // linked row's label rides on `aria-label` ("Edit CRM company link for X"),
+  // so a textContent-only match finds nothing and looks like a missing fixture.
   const btn = screen.queryAllByRole('button')
     .find((b) => /link/i.test(`${b.getAttribute('aria-label') ?? ''} ${b.textContent ?? ''}`));
   if (!btn) throw new Error('link editor trigger not rendered — fixture too thin');

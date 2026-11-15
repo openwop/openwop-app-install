@@ -12,7 +12,7 @@
 | Declared (`dependsOn`) | 17 | real hard deps, disable-lock active |
 | Undeclared → always-on target | 119 | correctly undeclared — an always-on dep can never lock (ADR 0439) |
 | **[1] Primitive** (undeclared → toggleable) | **0** | misfiled cross-cutting infra → **extract to a `host/` seam** |
-| **[2] Soft-read** (undeclared → toggleable) | **105** | domain read, target vacuous-when-off → **leave documented** (no lock) |
+| **[2] Soft-read** (undeclared → toggleable) | **106** | domain read, target vacuous-when-off → **leave documented** (no lock) |
 | **[3] Hard-dep** (undeclared → toggleable) | **0** | target refuses when off → **declare `dependsOn`** |
 
 The goal (ADR 0446) is **not** "drive the total to zero." It is: extract the **[1]**
@@ -124,6 +124,7 @@ _None._
 | `campaign-intel` | `funnels` | static | funnelsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `commerce` | `funnels` | static | funnelsService, offerDecisions | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `commerce-connect` | `marketplace` | static | listingPricingHook, listingService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
+| `podcasts` | `notebooks` | static | notebooksService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `projects` | `notebooks` | static | notebooksService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `comments` | `priority-matrix` | static | priorityMatrixService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `crm` | `priority-matrix` | static | scoring, types | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |

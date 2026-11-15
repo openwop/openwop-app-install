@@ -90,6 +90,8 @@ export interface ReviewRequest {
    *  `expectedContentHash`. Lockstep with the backend `host/reviewProjection.ts` block. */
   assistantAction?: { actionId: string; kind: string; contentHash: string; payload: Record<string, unknown> };
   emailSend?: NonNullable<PendingApproval['emailSend']>;
+  /** ADR 1040 D7 F1 — an approval gate's own wording (validated server-side). */
+  gateWording?: { actionLabels?: Record<string, string>; promptKey?: string; declineExpected?: boolean };
   /** ADR 0778 D10 correction — what an open interrupt's answer form needs, so a
    *  typed (`requiresValue`) review is answered on the card. A closed allowlist
    *  per kind (lockstep with backend `interruptAnswerForm`); absent for a kind

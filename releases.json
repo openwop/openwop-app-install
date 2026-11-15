@@ -1,6 +1,6 @@
 {
-  "_comment": "ADR 0052 \u00a7D2/\u00a7D7 \u2014 machine-readable release manifest and the single source of truth for REQUIRED UPGRADE STOPS. /cut-app-release PREPENDS each immutable vX.Y.Z release into `releases` (newest first) and sets `latest`. An upgrade tool reads `releases` to compute which required stops sit between a customer's current version and the target. `latest` names the newest stable (the moving alias the /install/ download points at). `requiredStop` (land on this version before going past it) and `rollingSafe` (the previous binary may keep running against this version's schema; false \u21d2 stop every old instance first, even when skipping past it) are separate constraints (ADR 0052 \u00a7D2a); `node scripts/upgrade-plan.mjs <from> [<to>]` computes the plan. The per-entry field shape is documented in `_releaseShape` \u2014 that is a SCHEMA EXAMPLE, never a real release; do not parse it as one.",
-  "latest": "0.13.0",
+  "_comment": "ADR 0052 §D2/§D7 — machine-readable release manifest and the single source of truth for REQUIRED UPGRADE STOPS. /cut-app-release PREPENDS each immutable vX.Y.Z release into `releases` (newest first) and sets `latest`. An upgrade tool reads `releases` to compute which required stops sit between a customer's current version and the target. `latest` names the newest stable (the moving alias the /install/ download points at). `requiredStop` (land on this version before going past it) and `rollingSafe` (the previous binary may keep running against this version's schema; false ⇒ stop every old instance first, even when skipping past it) are separate constraints (ADR 0052 §D2a); `node scripts/upgrade-plan.mjs <from> [<to>]` computes the plan. The per-entry field shape is documented in `_releaseShape` — that is a SCHEMA EXAMPLE, never a real release; do not parse it as one.",
+  "latest": "0.14.0",
   "_releaseShape": {
     "version": "X.Y.Z",
     "date": "YYYY-MM-DD",
@@ -17,6 +17,21 @@
     "notes": "CHANGELOG.md#xyz"
   },
   "releases": [
+    {
+      "version": "0.14.0",
+      "date": "2026-11-15",
+      "requiredStop": false,
+      "requiredStopReason": null,
+      "rollingSafe": true,
+      "rollingUnsafeReason": null,
+      "schemaVersion": {
+        "sqlite": 53,
+        "postgres": 51
+      },
+      "appMigrationVersion": 26,
+      "breakingConfig": [],
+      "notes": "CHANGELOG.md#0140--2026-11-15"
+    },
     {
       "version": "0.13.0",
       "date": "2026-11-11",
@@ -217,7 +232,7 @@
         "OpenWOP v1 removed: /v1/* answers 410 (public read twins 308), discovery advertises only 2.0; OPENWOP_V1_RETIRED no longer exists (ADR 0812)",
         "Chain packs must pin every node reference exactly (typeId@x.y.z) or they are refused at load (ADR 0766)",
         "Registry packs must be signed for the v2 tree (ed25519-canonical-json) with engines admitting <3.0.0",
-        "OPENWOP_TRUSTED_PROXY_CIDRS (new) \u2014 set it when a public-address proxy other than Google's front end fronts the backend (ADR 0851)",
+        "OPENWOP_TRUSTED_PROXY_CIDRS (new) — set it when a public-address proxy other than Google's front end fronts the backend (ADR 0851)",
         "Scale-out hosts withhold memory-backed storage families; select OPENWOP_SURFACE_* shared backends (ADR 0867)"
       ],
       "notes": "CHANGELOG.md#030--2026-10-09"
@@ -228,16 +243,16 @@
       "requiredStop": false,
       "requiredStopReason": null,
       "rollingSafe": false,
-      "rollingUnsafeReason": "Postgres migration 37 / SQLite 39 rename invocation_log.provider_key to invocation_id; a 0.1.0 process sharing the upgraded database fails on that table. Recorded 2026-10-24 (ADR 0052 \u00a7D2a): the 0.2.0 release notes said this, but the manifest had no field for it.",
+      "rollingUnsafeReason": "Postgres migration 37 / SQLite 39 rename invocation_log.provider_key to invocation_id; a 0.1.0 process sharing the upgraded database fails on that table. Recorded 2026-10-24 (ADR 0052 §D2a): the 0.2.0 release notes said this, but the manifest had no field for it.",
       "schemaVersion": {
         "sqlite": 48,
         "postgres": 46
       },
       "appMigrationVersion": 21,
       "breakingConfig": [
-        "Webhook: pre-spec `openwop-signature: t=\u2026,v1=\u2026` and `openwop-subscription-id` headers removed \u2014 verify with the OpenWOP-* / X-openwop-* family",
+        "Webhook: pre-spec `openwop-signature: t=…,v1=…` and `openwop-subscription-id` headers removed — verify with the OpenWOP-* / X-openwop-* family",
         "OPENWOP_RATELIMIT_IP_REQS_PER_MIN is now the WRITE budget; reads use OPENWOP_RATELIMIT_IP_READ_REQS_PER_MIN (ADR 0640)",
-        "OPENWOP_INTERRUPT_TOKEN_SECRET (new) \u2014 set it; the fallback is not a secret",
+        "OPENWOP_INTERRUPT_TOKEN_SECRET (new) — set it; the fallback is not a secret",
         "Not rolling-safe: stop the 0.1.0 binary before starting 0.2.0 (invocation_log column rename)"
       ],
       "notes": "CHANGELOG.md#020--2026-09-27"

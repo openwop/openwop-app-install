@@ -1418,6 +1418,13 @@ export interface Storage {
     interruptId?: string;
     resolution: RequestResolution;
   }): Promise<number>;
+  /**
+   * #5922 — host-wide: stamp `resolution` on every open request row whose
+   * `metadata.kind` is `kind` (same row rules as `resolveRequestNotifications`).
+   * Used once, by the `retire-conversation-requests` background job. Optional so
+   * a storage without it leaves the job pending. Idempotent.
+   */
+  resolveRequestNotificationsOfKind?(kind: string, resolution: RequestResolution): Promise<number>;
   deleteNotification(notificationId: string): Promise<boolean>;
   /** Drop every notification owned by a tenant (used by account-delete). */
   deleteAllTenantNotifications(tenantId: string): Promise<number>;

@@ -44,6 +44,7 @@ import { createMember } from '../src/host/accessControlService.js';
 import { listJobsForSubject, scheduleSubject } from '../src/host/schedulingService.js';
 import { getConversationMeta, ensureConversationMeta, subjectConversationId } from '../src/host/conversationStore.js';
 import { projectSubject } from '../src/features/projects/projectsService.js';
+import { listChain } from '../src/host/auditChainService.js';
 import { MAX_MULTI_PARTY_PARTICIPANTS } from '../src/host/multiPartyConversation.js';
 
 let BASE: string;
@@ -528,7 +529,7 @@ describe('projects — membership + visibility (ADR 0054 Phase 2)', () => {
     expect((await owner.get<MembersBody>(`${P}/${id}/members`)).body.members.length).toBe(0);
   });
 
-  it('a PRIVATE project is read-gated to members + org writers across ALL surfaces (board/memory/knowledge/schedules)', async () => {
+  it('a PRIVATE project is read-gated to members + org admins across ALL surfaces (board/memory/knowledge/schedules)', async () => {
     const tenantId = `org:pcv-${Date.now()}-${n++}`;
     const owner = client();
     await owner.post<LoginBody>('/host/openwop-app/test/login', { email: uniqEmail('pcv-owner'), tenantId });
@@ -556,7 +557,7 @@ describe('projects — membership + visibility (ADR 0054 Phase 2)', () => {
     expect((await viewer.get<ProjectList>(P)).body.projects.some((p: { id: string }) => p.id === id)).toBe(false);
     expect((await viewer.get<BoardsBody>(B)).body.boards.some((b: { id: string }) => b.id === boardId)).toBe(false);
 
-    // The owner (org WRITER) still sees + acts on it (write never needs membership).
+    // The owner (an org ADMIN, ADR 1118) still sees + acts on it without membership.
     expect((await owner.get<ProjectBody>(`${P}/${id}`)).status).toBe(200);
     expect((await owner.get<BoardBody>(`${B}/${boardId}`)).status).toBe(200);
 
@@ -569,6 +570,89 @@ describe('projects — membership + visibility (ADR 0054 Phase 2)', () => {
     // Still no write (membership never grants authority).
     expect((await viewer.patch<ProjectBody>(`${P}/${id}`, { name: 'Renamed' })).status).toBe(403);
     expect((await owner.get<ProjectBody>(`${P}/${id}`)).body.name, 'the refused write must not land').toBe('Secret');
+  });
+
+  it('#5906: every membership and visibility change is a security entry on the audit chain, with ids only', async () => {
+    const tenantId = `org:paud-${Date.now()}-${n++}`;
+    const owner = client();
+    const ownerEmail = uniqEmail('paud-owner');
+    const ownerId = (await owner.post<LoginBody>('/host/openwop-app/test/login', { email: ownerEmail, tenantId })).body.user.userId;
+    const orgId = (await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'AuditCo' })).body.orgId;
+    const id = (await owner.post<ProjectBody>(P, { orgId, name: 'Audited' })).body.id;
+    const mate = client();
+    const mateEmail = uniqEmail('paud-mate');
+    const mateId = (await mate.post<LoginBody>('/host/openwop-app/test/login', { email: mateEmail, tenantId })).body.user.userId;
+    await createMember({ tenantId, orgId, subject: mateId, displayName: 'Mate', roles: ['viewer'] });
+    const ref = `user:${mateId}`;
+    const kinds = async (): Promise<{ kind: string; payload: Record<string, unknown> }[]> =>
+      (await listChain(tenantId)).filter((e) => e.kind.startsWith('security.project.') && e.payload.projectId === id);
+
+    expect((await owner.post<MembersBody>(`${P}/${id}/members`, { ref, role: 'contributor' })).status).toBe(201);
+    expect((await owner.post<MembersBody>(`${P}/${id}/members`, { ref, role: 'contributor' })).status, 'a no-op re-add').toBe(201);
+    expect((await owner.post<MembersBody>(`${P}/${id}/members`, { ref, role: 'lead' })).status).toBe(201);
+    expect((await owner.patch<ProjectBody>(`${P}/${id}/visibility`, { visibility: 'private' })).status).toBe(200);
+    expect((await owner.patch<ProjectBody>(`${P}/${id}/visibility`, { visibility: 'private' })).status, 'a no-op flip').toBe(200);
+    expect((await owner.del(`${P}/${id}/members/${encodeURIComponent(ref)}`)).status).toBe(204);
+    expect((await owner.del(`${P}/${id}/members/${encodeURIComponent(ref)}`)).status, 'removing a non-member').toBe(204);
+
+    const entries = await kinds();
+    expect(entries.map((e) => e.kind)).toEqual([
+      'security.project.member-added',
+      'security.project.member-role-changed',
+      'security.project.visibility-changed',
+      'security.project.member-removed',
+    ]);
+    expect(entries[0]!.payload).toMatchObject({ projectId: id, orgId, ref, role: 'contributor', actor: ownerId });
+    expect(entries[1]!.payload).toMatchObject({ role: 'lead', previousRole: 'contributor' });
+    expect(entries[2]!.payload).toMatchObject({ from: 'org', to: 'private', addedLeadMember: `user:${ownerId}`, actor: ownerId });
+    expect(entries[3]!.payload).toMatchObject({ ref, role: 'lead', actor: ownerId });
+    // The chain is DSAR-exempt and cannot be redacted: ids only, never an email.
+    const raw = JSON.stringify(entries);
+    expect(raw).not.toContain(ownerEmail);
+    expect(raw).not.toContain(mateEmail);
+  });
+
+  it('ADR 1118: a non-member org EDITOR is out of a private project for read AND write; a member editor and a non-member admin are in', async () => {
+    const tenantId = `org:pcv1118-${Date.now()}-${n++}`;
+    const owner = client();
+    await owner.post<LoginBody>('/host/openwop-app/test/login', { email: uniqEmail('p18-owner'), tenantId });
+    const orgId = (await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'PrivCo' })).body.orgId;
+    const proj = (await owner.post<ProjectBody>(P, { orgId, name: 'Secret' })).body;
+    const id = proj.id; const boardId = proj.boardId;
+    const person = async (who: string, roles: string[]): Promise<{ c: Client; userId: string }> => {
+      const c = client();
+      const userId = (await c.post<LoginBody>('/host/openwop-app/test/login', { email: uniqEmail(who), tenantId })).body.user.userId;
+      await createMember({ tenantId, orgId, subject: userId, displayName: who, roles });
+      return { c, userId };
+    };
+    const editor = await person('p18-editor', ['editor']);
+    const admin = await person('p18-admin', ['admin']);
+
+    // CONTROL — while org-visible, the editor reads and writes it.
+    expect((await editor.c.get<ProjectBody>(`${P}/${id}`)).status).toBe(200);
+    expect((await editor.c.patch<ProjectBody>(`${P}/${id}`, { name: 'Edited' })).status).toBe(200);
+
+    expect((await owner.patch<ProjectBody>(`${P}/${id}/visibility`, { visibility: 'private' })).body.visibility).toBe('private');
+
+    // The non-member editor: hidden (404) on read AND write, and dropped from the list.
+    expect((await editor.c.get<ProjectBody>(`${P}/${id}`)).status).toBe(404);
+    expect((await editor.c.get<BoardBody>(`${B}/${boardId}`)).status).toBe(404);
+    expect((await editor.c.get<KnowledgeBody>(`${P}/${id}/knowledge`)).status).toBe(404);
+    expect((await editor.c.patch<ProjectBody>(`${P}/${id}`, { name: 'Taken' })).status).toBe(404);
+    expect((await editor.c.del(`${P}/${id}`)).status).toBe(404);
+    expect((await editor.c.get<ProjectList>(P)).body.projects.some((p: { id: string }) => p.id === id)).toBe(false);
+    expect((await owner.get<ProjectBody>(`${P}/${id}`)).body.name, 'the refused write must not land').toBe('Edited');
+
+    // A non-member ADMIN still reads and writes it (recovery; members are theirs to manage).
+    expect((await admin.c.get<ProjectBody>(`${P}/${id}`)).status).toBe(200);
+    expect((await admin.c.patch<ProjectBody>(`${P}/${id}`, { name: 'By admin' })).status).toBe(200);
+
+    // Once a member, the editor reads and writes it again: membership admits, `workspace:write` authorises.
+    expect((await owner.post<MembersBody>(`${P}/${id}/members`, { ref: `user:${editor.userId}`, role: 'contributor' })).status).toBe(201);
+    expect((await editor.c.get<ProjectBody>(`${P}/${id}`)).status).toBe(200);
+    const r = await editor.c.get<ProjectBody>(`${P}/${id}`);
+    expect(r.body.canWrite).toBe(true);
+    expect((await editor.c.patch<ProjectBody>(`${P}/${id}`, { name: 'By member' })).status).toBe(200);
   });
 });
 

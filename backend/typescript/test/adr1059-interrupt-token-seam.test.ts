@@ -33,6 +33,7 @@ import { ensureNodesRegistered } from '../src/bootstrap/nodes.js';
 import { executeRun } from '../src/executor/executor.js';
 import { registerWorkflow as registerHostWorkflow } from '../src/host/workflowsRegistry.js';
 import { __awaitRunResumeChainForTests, resolveAndResume } from '../src/routes/interrupts.js';
+import { toWireRunId } from '../src/host/v2Ids.js';
 import { INTERRUPT_TOKEN_SEAM_PATH, readInterruptTokenForCaller, registerInterruptTokenSeam } from '../src/routes/interruptTokenSeam.js';
 import { RESOLVED_VIA_FLAG } from '../src/host/interruptResolvedVia.js';
 import { requestSubjectV2 } from '../src/host/runOwner.js';
@@ -119,6 +120,17 @@ describe('ADR 1059 P2 — readInterruptToken behaviour', () => {
     const out = await readInterruptTokenForCaller(storage, sessionReq('u-ana'), { runId: run.runId, nodeId: 'gate' });
     expect(out).toEqual({ token: open!.token });
     expect((await storage.getInterrupt(open!.interruptId))?.resolvedAt).toBeFalsy();
+  });
+
+  it('#5918: accepts the tenant-bound v2 wire runId the suite gets from POST /runs, and refuses another tenant\'s', async () => {
+    const run = await suspendedRun();
+    const [open] = await storage.listOpenInterrupts(run.runId);
+    const wire = toWireRunId(run.runId, TENANT);
+    expect(wire, 'non-vacuity: the wire id is tenant-bound').toContain('/');
+    expect(await readInterruptTokenForCaller(storage, sessionReq('u-ana'), { runId: wire, nodeId: 'gate' })).toEqual({ token: open!.token });
+    const foreign = toWireRunId(run.runId, 't-1059-other');
+    const code = await readInterruptTokenForCaller(storage, sessionReq('u-ana'), { runId: foreign, nodeId: 'gate' }).then(() => 'ok', (e: { code?: string }) => e.code);
+    expect(code).toBe('run_not_found');
   });
 
   it('bind for a session person: resolving with the members records boundTo = the caller\'s owner Subject', async () => {

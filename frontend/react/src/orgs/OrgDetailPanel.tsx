@@ -62,6 +62,9 @@ export interface OrgDetailPanelProps {
   accessFor: string | null;
   access: EffectiveAccess | null;
   onCreateMember: (e: FormEvent) => void;
+  /** ADR 1123 — refresh after an add-existing or a link. */
+  onMembersChanged: () => Promise<void>;
+  isSuperadmin: boolean;
   onShowAccess: (m: OrgMember) => void;
   startEdit: (m: OrgMember) => void;
   onDeleteMember: (m: OrgMember) => void;
@@ -127,6 +130,8 @@ export function OrgDetailPanel(props: OrgDetailPanelProps): JSX.Element {
     accessFor,
     access,
     onCreateMember,
+    onMembersChanged,
+    isSuperadmin,
     onShowAccess,
     startEdit,
     onDeleteMember,
@@ -234,6 +239,8 @@ export function OrgDetailPanel(props: OrgDetailPanelProps): JSX.Element {
             accessFor={accessFor}
             access={access}
             onCreateMember={onCreateMember}
+            onMembersChanged={onMembersChanged}
+            isSuperadmin={isSuperadmin}
             onShowAccess={onShowAccess}
             startEdit={startEdit}
             onDeleteMember={onDeleteMember}

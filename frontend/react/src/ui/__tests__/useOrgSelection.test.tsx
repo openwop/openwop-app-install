@@ -1,22 +1,38 @@
 /**
- * The three states of the org read, asserted on the hook itself so the 17 pages
- * that consume it inherit the guarantee instead of each re-deriving it.
+ * HG-4 / ADR 0336 — the three states of the org read, asserted on the hook
+ * itself so the 17 pages that consume it inherit the guarantee instead of each
+ * re-deriving it: a failed read is never `[]`, retry re-reads, a still-valid
+ * selection survives a re-read.
+ *
+ * ADR 0336 (scoped reads, `options.scopeKey`): a result is shown only when the
+ * request that produced it still owns the current scope. What turns it red:
+ * the `then`/`catch` `isCurrent()` checks (each alone; the `cancelled` flag and
+ * the request sequence are a DOUBLE GUARD for a StrictMode or scope-change
+ * cleanup, so the break-both probe empties `isCurrent`); retry not invalidating
+ * the in-flight read or not masking the accepted owner; the scoped failure
+ * keeping the previous catalog; the membership mask on `orgId`; the owner memo
+ * not keyed on `scopeKey`; and the three-argument form adopting the mask.
+ * Equivalent by construction (no probe): `enabled &&` in `accepted` (the owner
+ * memo already changes with `enabled`) and `!orgsFailed &&` in the `orgId`
+ * mask (a scoped failure nulls `orgs`, so membership already fails).
  */
 import { describe, it, expect, vi } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { useOrgSelection } from '../useOrgSelection.js';
 import { StrictMode } from 'react';
 
-const A = { orgId: 'o1', name: 'Acme' };
-const B = { orgId: 'o2', name: 'Beta' };
-const C = { orgId: 'o3', name: 'Gamma' };
+interface Org { orgId: string; name: string }
+type ListOrgs = () => Promise<Org[]>;
+const A: Org = { orgId: 'o1', name: 'Acme' };
+const B: Org = { orgId: 'o2', name: 'Beta' };
+const C: Org = { orgId: 'o3', name: 'Gamma' };
 
 describe('useOrgSelection', () => {
   it('a failed read is NOT an empty list', async () => {
     // The whole point: `orgs` must not become `[]`, because every caller renders
     // `[]` as "no workspaces — create one to …", an instruction a failed read has
     // not earned.
-    const listOrgs = vi.fn().mockRejectedValue(new Error('503'));
+    const listOrgs = vi.fn<ListOrgs>().mockRejectedValue(new Error('503'));
     const { result } = renderHook(() => useOrgSelection(listOrgs));
     await waitFor(() => expect(result.current.orgsFailed).toBe(true));
     expect(result.current.orgs).toBeNull();
@@ -24,14 +40,14 @@ describe('useOrgSelection', () => {
   });
 
   it('a genuinely empty tenant reads as empty, not failed', async () => {
-    const listOrgs = vi.fn().mockResolvedValue([]);
+    const listOrgs = vi.fn<ListOrgs>().mockResolvedValue([]);
     const { result } = renderHook(() => useOrgSelection(listOrgs));
     await waitFor(() => expect(result.current.orgs).toEqual([]));
     expect(result.current.orgsFailed).toBe(false);
   });
 
   it('selects the first org on a successful read', async () => {
-    const listOrgs = vi.fn().mockResolvedValue([A, B]);
+    const listOrgs = vi.fn<ListOrgs>().mockResolvedValue([A, B]);
     const { result } = renderHook(() => useOrgSelection(listOrgs));
     await waitFor(() => expect(result.current.orgId).toBe('o1'));
     expect(result.current.orgsFailed).toBe(false);
@@ -41,7 +57,7 @@ describe('useOrgSelection', () => {
     // The hook's effect is the ONLY place the read happens, so a retry that does
     // not re-trigger it would clear the error and leave every dependent fetch
     // still ungated — the permanent skeleton, restored by the recovery path.
-    const listOrgs = vi.fn()
+    const listOrgs = vi.fn<ListOrgs>()
       .mockRejectedValueOnce(new Error('503'))
       .mockResolvedValue([A]);
     const { result } = renderHook(() => useOrgSelection(listOrgs));
@@ -53,7 +69,7 @@ describe('useOrgSelection', () => {
   });
 
   it('keeps a still-valid selection across a re-read, and drops a stale one', async () => {
-    const listOrgs = vi.fn().mockResolvedValue([A, B]);
+    const listOrgs = vi.fn<ListOrgs>().mockResolvedValue([A, B]);
     const { result } = renderHook(() => useOrgSelection(listOrgs));
     await waitFor(() => expect(result.current.orgId).toBe('o1'));
     act(() => result.current.setOrgId('o2'));
@@ -61,8 +77,8 @@ describe('useOrgSelection', () => {
     // passed the moment the read was ISSUED, before it resolved, so 'o2' was the
     // hand-set value and a hook that always took the first org stayed green (w49
     // probe `uos-keep`). The re-read must LAND before 'kept' means anything.
-    let release!: (v: Array<typeof A>) => void;
-    listOrgs.mockImplementationOnce(() => new Promise<Array<typeof A>>((r) => { release = r; }));
+    let release!: (v: Org[]) => void;
+    listOrgs.mockImplementationOnce(() => new Promise<Org[]>((r) => { release = r; }));
     act(() => result.current.retry());
     await waitFor(() => expect(listOrgs).toHaveBeenCalledTimes(2));
     // A DIFFERENT list ([A, B, C]) so `orgs` can only equal it once the re-read lands.
@@ -76,7 +92,7 @@ describe('useOrgSelection', () => {
 
   it('defers the read until enabled', async () => {
     // Feature-gated pages must not fetch before the toggle resolves.
-    const listOrgs = vi.fn().mockResolvedValue([A]);
+    const listOrgs = vi.fn<ListOrgs>().mockResolvedValue([A]);
     const { result, rerender } = renderHook(({ on }: { on: boolean }) => useOrgSelection(listOrgs, on), {
       initialProps: { on: false },
     });
@@ -89,16 +105,16 @@ describe('useOrgSelection', () => {
 
 
 function heldOrgs() {
-  let resolve: (value: Array<typeof A>) => void = () => { throw new Error('promise not initialized'); };
+  let resolve: (value: Org[]) => void = () => { throw new Error('promise not initialized'); };
   let reject: (error: Error) => void = () => { throw new Error('promise not initialized'); };
-  const promise = new Promise<Array<typeof A>>((yes, no) => { resolve = yes; reject = no; });
+  const promise = new Promise<Org[]>((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
 
 describe('useOrgSelection optional scope ownership', () => {
   it('masks an initial choice until membership confirms it and returns the actual catalog reference', async () => {
     const pending = heldOrgs();
-    const list = vi.fn(() => pending.promise);
+    const list = vi.fn<ListOrgs>(() => pending.promise);
     const { result } = renderHook(() => useOrgSelection(list, true, 'o2', { scopeKey: 0 }));
     expect(result.current.orgs).toBeNull();
     expect(result.current.orgId).toBe('');
@@ -113,8 +129,8 @@ describe('useOrgSelection optional scope ownership', () => {
   it('masks a changed scope on its first render before the deferred read settles', async () => {
     const pending = heldOrgs();
     const actual = [A];
-    const list = vi.fn<() => Promise<Array<typeof A>>>().mockResolvedValueOnce(actual).mockImplementationOnce(() => pending.promise);
-    const rendered: Array<{ key: string; orgs: readonly typeof A[] | null; id: string; failed: boolean }> = [];
+    const list = vi.fn<ListOrgs>().mockResolvedValueOnce(actual).mockImplementationOnce(() => pending.promise);
+    const rendered: Array<{ key: string; orgs: readonly Org[] | null; id: string; failed: boolean }> = [];
     const { result, rerender } = renderHook(({ key }: { key: string }) => {
       const selection = useOrgSelection(list, true, '', { scopeKey: key });
       rendered.push({ key, orgs: selection.orgs, id: selection.orgId, failed: selection.orgsFailed });
@@ -131,7 +147,7 @@ describe('useOrgSelection optional scope ownership', () => {
 
   it('rejects late first-A and B reads after a committed A-B-A scope sequence', async () => {
     const first = heldOrgs(); const middle = heldOrgs(); const latest = heldOrgs();
-    const list = vi.fn().mockImplementationOnce(() => first.promise).mockImplementationOnce(() => middle.promise).mockImplementationOnce(() => latest.promise);
+    const list = vi.fn<ListOrgs>().mockImplementationOnce(() => first.promise).mockImplementationOnce(() => middle.promise).mockImplementationOnce(() => latest.promise);
     const { result, rerender } = renderHook(({ key }: { key: string }) => useOrgSelection(list, true, '', { scopeKey: key }), { initialProps: { key: 'A' } });
     rerender({ key: 'B' }); rerender({ key: 'A' });
     await act(async () => { latest.resolve([C]); await latest.promise; });
@@ -144,7 +160,7 @@ describe('useOrgSelection optional scope ownership', () => {
 
   it('ignores an old-scope failure after a newer scope succeeds', async () => {
     const old = heldOrgs();
-    const list = vi.fn().mockImplementationOnce(() => old.promise).mockResolvedValueOnce([B]);
+    const list = vi.fn<ListOrgs>().mockImplementationOnce(() => old.promise).mockResolvedValueOnce([B]);
     const { result, rerender } = renderHook(({ key }: { key: number }) => useOrgSelection(list, true, '', { scopeKey: key }), { initialProps: { key: 0 } });
     rerender({ key: 1 });
     await waitFor(() => expect(result.current.orgId).toBe('o2'));
@@ -154,7 +170,7 @@ describe('useOrgSelection optional scope ownership', () => {
 
   it('invalidates a prior retry before its same-batch settlement can change the selected org', async () => {
     const old = heldOrgs(); const latest = heldOrgs();
-    const list = vi.fn().mockResolvedValueOnce([A, B]).mockImplementationOnce(() => old.promise).mockImplementationOnce(() => latest.promise);
+    const list = vi.fn<ListOrgs>().mockResolvedValueOnce([A, B]).mockImplementationOnce(() => old.promise).mockImplementationOnce(() => latest.promise);
     const { result } = renderHook(() => useOrgSelection(list, true, '', { scopeKey: 0 }));
     await waitFor(() => expect(result.current.orgId).toBe('o1'));
     act(() => result.current.retry());
@@ -167,8 +183,9 @@ describe('useOrgSelection optional scope ownership', () => {
   });
 
   it('distinguishes a current failed read, pending retry and genuinely empty success', async () => {
-    const retry = heldOrgs();
-    const list = vi.fn().mockRejectedValueOnce(new Error('current')).mockImplementationOnce(() => retry.promise);
+    const retry = heldOrgs(); const again = heldOrgs();
+    const list = vi.fn<ListOrgs>().mockRejectedValueOnce(new Error('current')).mockImplementationOnce(() => retry.promise)
+      .mockImplementationOnce(() => again.promise);
     const { result } = renderHook(() => useOrgSelection(list, true, 'o1', { scopeKey: 0 }));
     await waitFor(() => expect(result.current.orgsFailed).toBe(true));
     expect(result.current.orgs).toBeNull(); expect(result.current.orgId).toBe('');
@@ -176,11 +193,17 @@ describe('useOrgSelection optional scope ownership', () => {
     expect(result.current.orgsFailed).toBe(false); expect(result.current.orgs).toBeNull(); expect(result.current.orgId).toBe('');
     await act(async () => { retry.resolve([]); await retry.promise; });
     expect(result.current.orgs).toEqual([]); expect(result.current.orgsFailed).toBe(false); expect(result.current.orgId).toBe('');
+    // A LATER failure is a failure, not the earlier success: the accepted `[]`
+    // must not survive beside `orgsFailed` (a page would render "none" + failed).
+    act(() => result.current.retry());
+    await act(async () => { again.reject(new Error('later')); await again.promise.catch(() => undefined); });
+    expect(result.current.orgsFailed).toBe(true); expect(result.current.orgs).toBeNull(); expect(result.current.orgId).toBe('');
+    expect(list).toHaveBeenCalledTimes(3);
   });
 
   it('confirms the latest explicitly selected member when a current retry returns it', async () => {
     const pending = heldOrgs();
-    const list = vi.fn().mockResolvedValueOnce([A, B]).mockImplementationOnce(() => pending.promise);
+    const list = vi.fn<ListOrgs>().mockResolvedValueOnce([A, B]).mockImplementationOnce(() => pending.promise);
     const { result } = renderHook(() => useOrgSelection(list, true, '', { scopeKey: 0 }));
     await waitFor(() => expect(result.current.orgId).toBe('o1'));
     act(() => { result.current.retry(); result.current.setOrgId('o2'); });
@@ -191,7 +214,7 @@ describe('useOrgSelection optional scope ownership', () => {
 
   it('does not expose a previously accepted catalog across disable and re-enable', async () => {
     const next = heldOrgs();
-    const list = vi.fn().mockResolvedValueOnce([A]).mockImplementationOnce(() => next.promise);
+    const list = vi.fn<ListOrgs>().mockResolvedValueOnce([A]).mockImplementationOnce(() => next.promise);
     const { result, rerender } = renderHook(({ on }: { on: boolean }) => useOrgSelection(list, on, '', { scopeKey: 0 }), { initialProps: { on: true } });
     await waitFor(() => expect(result.current.orgId).toBe('o1'));
     rerender({ on: false }); expect(result.current.orgs).toBeNull(); expect(result.current.orgId).toBe('');
@@ -201,7 +224,7 @@ describe('useOrgSelection optional scope ownership', () => {
   });
 
   it('does not refetch when only the inline options object or unrelated render changes', async () => {
-    const list = vi.fn().mockResolvedValue([A]);
+    const list = vi.fn<ListOrgs>().mockResolvedValue([A]);
     const { result, rerender } = renderHook(({ key, unrelated }: { key: number; unrelated: number }) => {
       void unrelated;
       return useOrgSelection(list, true, '', { scopeKey: key });
@@ -213,7 +236,7 @@ describe('useOrgSelection optional scope ownership', () => {
 
   it('rejects the first StrictMode setup result after the rearmed read succeeds', async () => {
     const first = heldOrgs(); const second = heldOrgs();
-    const list = vi.fn().mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise);
+    const list = vi.fn<ListOrgs>().mockImplementationOnce(() => first.promise).mockImplementationOnce(() => second.promise);
     const { result } = renderHook(() => useOrgSelection(list, true, '', { scopeKey: 0 }), { wrapper: StrictMode });
     expect(list).toHaveBeenCalledTimes(2);
     await act(async () => { second.resolve([B]); await second.promise; });
@@ -223,7 +246,7 @@ describe('useOrgSelection optional scope ownership', () => {
 
   it('preserves three-argument initial and retry display semantics', async () => {
     const initial = heldOrgs(); const retry = heldOrgs();
-    const list = vi.fn().mockImplementationOnce(() => initial.promise).mockImplementationOnce(() => retry.promise);
+    const list = vi.fn<ListOrgs>().mockImplementationOnce(() => initial.promise).mockImplementationOnce(() => retry.promise);
     const { result } = renderHook(() => useOrgSelection(list, true, 'o2'));
     expect(result.current.orgId).toBe('o2');
     const actual = [A, B];

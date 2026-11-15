@@ -27,8 +27,9 @@ export interface EpisodeProfile {
   id: string;
   orgId: string;
   name: string;
-  outlineModel: string;
-  transcriptModel: string;
+  /** ADR 1115 D9 — absent = the host picks the run's default model (ADR 0903). */
+  outlineModel?: string;
+  transcriptModel?: string;
   segmentCount: number;
   languageCode?: string;
   defaultBriefing?: string;
@@ -61,6 +62,12 @@ export interface PodcastEpisode {
   clips: EpisodeClip[];
   briefing?: string;
   error?: string;
+  /** ADR 1115 D6 — the typed failure code of the run that wrote `error`
+   *  (`podcast_*`), so the Studio can explain it in the reader's language. */
+  errorCode?: string;
+  /** ADR 1115 — the episode's notebook was deleted: it can be played, published or
+   *  deleted, never generated again (the door answers 409 `notebook_unavailable`). */
+  notebookMissing?: boolean;
   status: EpisodeStatus;
   // ── ADR 0390 public-distribution fields ──
   showId?: string;
@@ -132,14 +139,25 @@ export function assetUrl(url: string): string {
 const base = `${config.baseUrl}/host/openwop-app/podcasts`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
+/** ADR 1115 D10 — what a refused door said, for the page to put into words: the HTTP
+ *  status, and the typed `details.reason` of a 409 (`episode_published`,
+ *  `generation_in_progress`, `episode_not_ready`, `notebooks_disabled`,
+ *  `notebook_has_no_sources`). */
+export interface PodcastsRequestError extends Error { status?: number; reason?: string }
+
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
   if (!res.ok) {
     let detail = '';
-    try { detail = ((await res.json()) as { message?: string })?.message ?? ''; } catch { /* non-JSON */ }
+    let reason: string | undefined;
+    try {
+      const body = (await res.json()) as { message?: string; details?: { reason?: unknown } };
+      detail = body?.message ?? '';
+      if (typeof body?.details?.reason === 'string') reason = body.details.reason;
+    } catch { /* non-JSON */ }
     // R2 SP-10 — carry the status so a page can tell "not published" (404)
     // from "our server hiccuped" (anything else) instead of claiming a
     // publish-state fact over a transport failure.
-    throw Object.assign(new Error(detail || `${ctx} returned ${res.status}`), { status: res.status });
+    throw Object.assign(new Error(detail || `${ctx} returned ${res.status}`), { status: res.status, ...(reason ? { reason } : {}) });
   }
   return (await res.json()) as T;
 }

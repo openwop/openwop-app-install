@@ -17,6 +17,10 @@ import { assertResumeSchemaDeclaration } from '../host/resumeSchemaValidation.js
 
 let backend: Storage | null = null;
 
+
+/** Interrupt kinds that never notify: nobody is being asked anything (#5922). */
+export const NEVER_NOTIFY_KINDS: ReadonlySet<InterruptRecord['kind']> = new Set<InterruptRecord['kind']>(['timer', 'tour-step', 'walkthrough-step', 'conversation']);
+
 export function setSuspendBackend(storage: Storage): void {
   backend = storage;
 }
@@ -114,7 +118,10 @@ export function getSuspendManager() {
       // is deliberately silent (never a bell for a scheduled wait).
       // tour-step: the player resolves within milliseconds (or the user is
       // ALREADY looking at the spotlighted step) — a notification is noise.
-      if (record.kind !== 'timer' && record.kind !== 'tour-step' && record.kind !== 'walkthrough-step') void emitInterruptNotification(b, record);
+      // conversation (#5922): a chat between turns is waiting for the next
+      // message, its resting state, not a request. Filed as one it became an
+      // "Input needed" item per open chat that nothing ever retires.
+      if (!NEVER_NOTIFY_KINDS.has(record.kind)) void emitInterruptNotification(b, record);
       return record;
     },
     async resolve(interruptId: string, value: unknown): Promise<void> {

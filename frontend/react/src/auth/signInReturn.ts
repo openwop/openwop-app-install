@@ -24,7 +24,10 @@ const RETURN_TTL_MS = 30 * 60 * 1000;
 export const STORE_URL = '/marketplace/bundles';
 /** ADR 1097 — the public trial entry (`/start-trial?plan=<tier>|bundle=<id>`). */
 export const START_TRIAL_PATH = '/start-trial';
-const RETURN_PATHS: ReadonlySet<string> = new Set([STORE_URL, START_TRIAL_PATH]);
+/** ADR 1120 — the inbox, so an emailed Review link (`/inbox?notification=<id>`)
+ *  opens its request after sign-in. */
+export const INBOX_PATH = '/inbox';
+const RETURN_PATHS: ReadonlySet<string> = new Set([STORE_URL, START_TRIAL_PATH, INBOX_PATH]);
 
 /** `url` as an in-app path (pathname + search) when it is same-origin and its
  *  pathname is an allowed return; otherwise null. */

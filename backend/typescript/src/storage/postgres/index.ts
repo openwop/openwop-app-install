@@ -2973,6 +2973,23 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       return res.rowCount ?? 0;
     },
 
+    async resolveRequestNotificationsOfKind(kind, resolution) {
+      // #5922 — the ADR 1114 stamp above, host-wide, chosen by the interrupt kind
+      // the emitter wrote into `metadata.kind`.
+      const res = await pool.query(
+        `UPDATE notifications
+            SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb,
+                read_at = CASE WHEN status = 'unread' THEN COALESCE(read_at, $3::timestamptz) ELSE read_at END,
+                status = CASE WHEN status = 'unread' THEN 'read' ELSE status END
+          WHERE interrupt_id IS NOT NULL
+            AND metadata->>'kind' = $1
+            AND status <> 'archived'
+            AND metadata->'resolution' IS NULL`,
+        [kind, JSON.stringify({ resolution }), resolution.at],
+      );
+      return res.rowCount ?? 0;
+    },
+
     async markAllNotificationsRead(tenantId, now, recipientUserId, recipientRoles) {
       // ADR 0050 — scoped to the rows this user can see (their addressed rows +
       // true broadcasts + role rows they hold, Phase 3), never another member's

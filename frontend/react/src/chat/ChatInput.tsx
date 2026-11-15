@@ -29,7 +29,7 @@ import { toRunInputs } from '../ui/RunInputsForm.js';
 import { refreshWorkflowMentionCache } from './lib/workflowMentions.js';
 import { voicePhaseKey } from './lib/voicePhaseWords.js';
 import { voiceCtxBlockLabels } from './voiceCtxLabels.js';
-import { forgetSubmittingComposer, markSubmittingComposer, subscribeLiveComposer, takeStagedComposerDraft } from './composerSeed.js';
+import { forgetSubmittingComposer, markSubmittingComposer, registerComposerText, subscribeLiveComposer, takeStagedComposerDraft } from './composerSeed.js';
 import { AgentMentionAutocomplete } from './AgentMentionAutocomplete.js';
 import type { AgentMentionEntry } from './lib/agentMentions.js';
 import { BoardMentionAutocomplete } from './BoardMentionAutocomplete.js';
@@ -207,7 +207,11 @@ export function ChatInput({
   // from the persisted draft on first mount (no flash) so a refresh/crash restores
   // in-progress text. The effects below keep it in sync as the user types and
   // re-load it when `draftKey` changes (conversation switch).
-  const [text, setText] = useState(() => takeStagedComposerDraft() ?? (draftKey ? readDraft(draftKey) : ''));
+  const [text, setText] = useState(() => takeStagedComposerDraft(draftKey) ?? (draftKey ? readDraft(draftKey) : ''));
+  // CC-UX-2 — expose the live text by key, so a tab re-key carries it to the new key.
+  const liveTextRef = useRef(text);
+  liveTextRef.current = text;
+  useEffect(() => (draftKey ? registerComposerText(draftKey, () => liveTextRef.current) : undefined), [draftKey]);
   // ADR 0768 B2 — a picked `/workflow`'s typed inputs, staged for the dispatch on send.
   const [slashInputs, setSlashInputs] = useState<SlashInputsState | null>(null);
   const [pendingAudio, setPendingAudio] = useState<PendingAudio | null>(null);
@@ -256,7 +260,7 @@ export function ChatInput({
     lastDraftKey.current = draftKey;
     // A staged draft (5b) wins over the switched-in conversation's persisted
     // draft — the deep-link that staged it is the reason for this switch.
-    setText(takeStagedComposerDraft() ?? (draftKey ? readDraft(draftKey) : ''));
+    setText(takeStagedComposerDraft(draftKey) ?? (draftKey ? readDraft(draftKey) : ''));
   }, [draftKey]);
 
   // ADR 0565 — live-seed lane: the selection-rewrite affordance seeds THIS

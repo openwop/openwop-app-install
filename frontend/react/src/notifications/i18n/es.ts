@@ -325,4 +325,7 @@ export const messages = {
   approvalsWarehouseLoadAsk_one: "Cargar {{count}} fila de clientes en {{dataset}}.{{table}}",
   approvalsWarehouseLoadAsk_other: "Cargar {{count}} filas de clientes en {{dataset}}.{{table}}",
   toastApprovedWarehouseLoad: "Aprobado. Vuelve a ejecutar la sincronización para cargar estas filas.",
+  // ADR 1120 — a deep link opened while signed out.
+  deepLinkSignInBody: "Inicia sesión para revisar esta solicitud.",
+  deepLinkSignInCta: "Iniciar sesión",
 } as const;

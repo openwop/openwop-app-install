@@ -74,3 +74,11 @@ export const CONDITION_OPS: { value: EdgeCondition['op']; labelKey: string; need
   { value: 'exists', labelKey: 'condOpExists', needsValue: false },
   { value: 'contains', labelKey: 'condOpContains', needsValue: true },
 ];
+
+/** The run variable a config value is bound to, when it is `{type:'variable', variableName}`.
+ *  Exported so the inspector can withhold edits that would overwrite the binding. */
+export function runVariableName(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const ref = value as { type?: unknown; variableName?: unknown };
+  return ref.type === 'variable' && typeof ref.variableName === 'string' ? ref.variableName : undefined;
+}

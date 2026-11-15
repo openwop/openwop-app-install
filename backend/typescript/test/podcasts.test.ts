@@ -15,7 +15,7 @@
  * Sabotage witnesses (w21 g2): `projectStatus` drops the `waiting-`/`cancelled`
  * arms; `normalizeSpeakers` bounds off by one; `createEpisodeProfile` drops
  * `cast.orgId !== orgId`; POST /episodes drops `nbProject.orgId !== orgId`;
- * `enqueueGeneration` drops `setEpisodeRun`; the speaker-profile list / DELETE
+ * `enqueueGeneration` drops the runId claim (`claimEpisodeGeneration`, ADR 1115 D5); the speaker-profile list / DELETE
  * drop their `workspace:read` gate; `notebookReadable` returns true / denies
  * orphans; the list or GET skips `notebookReadable`; a route skips
  * `requireFeatureEnabled`.
@@ -179,7 +179,7 @@ describe('podcasts — profiles + generation', () => {
     expect(runId).toBeTruthy();
 
     // The 202 body ECHOES runId/status, so it cannot witness the enqueue. Read the
-    // STORED row back: the runId must have been persisted (`setEpisodeRun`), and the
+    // STORED row back: the runId must have been persisted (the ADR 1115 claim), and the
     // status is PROJECTED from the real run (not pinned — the run races this read).
     const got = await c.get<EpisodeBody>(`${P}/episodes/${ep.body.episode.id}`);
     expect(got.status).toBe(200);

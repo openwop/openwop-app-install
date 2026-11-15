@@ -1,0 +1,6 @@
+# Known-BLOCKED requirements at TARGET MAJOR 2 — the second half of
+# scripts/check-conformance-major2.sh (#5916). One RFC 0148 requirementId per line,
+# `# reason` after. A `blocked` row means the scenario could not run (the host did
+# not answer, a run never settled, a seam was missing), and vitest still prints ✓.
+# An unlisted blocked row FAILS the gate; a listed id that is no longer blocked
+# ALSO fails (delete it). Keep each entry dated, with the condition that retires it.

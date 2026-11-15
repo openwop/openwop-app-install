@@ -10,6 +10,7 @@ import { confirm } from '../ui/confirm.js';
 import { GateEvidence, isBrowserActionGate } from '../chat/reviews/GateEvidence.js';
 import { requestWords } from './requestWords.js';
 import { approvalResumeValue } from './approvalResumeValue.js';
+import { gateActionLabel, gatePrompt, gateRejectConfirm, useGateWordingNamespaces } from '../chat/reviews/gateWording.js';
 
 interface Props {
   runId: string;
@@ -48,15 +49,17 @@ export function ApprovalCard({ runId, nodeId, data, onResolved }: Props) {
   // second call is dropped before it reaches the network.
   const inFlight = useRef(false);
 
-  const prompt = ((data as { prompt?: string })?.prompt) ?? t('approvalDefaultPrompt');
+  // ADR 1040 D7 F1 — the gate's own wording (shared with the chat card).
+  useGateWordingNamespaces(data);
+  const prompt = gatePrompt(t, data, ((data as { prompt?: string })?.prompt) ?? t('approvalDefaultPrompt'));
   // ADR 1109 D1 — the gate's own heading, now that `core.chat.approvalGate` forwards it.
   const words = requestWords(data);
   // ADR 0778 (`APUX-7`) — a gate may declare verbs beyond the five this card
   // knows (`accept`, …). They used to be cast into the known set and rendered
   // `t(undefined)`: a button with no accessible name (WCAG 4.1.2).
   const allowedActions = ((data as { actions?: readonly string[] })?.actions ?? APPROVAL_ACTIONS) as readonly string[];
-  const actionLabel = (action: string): string =>
-    action in ACTION_LABEL_KEYS ? t(ACTION_LABEL_KEYS[action as ApprovalAction]) : action.charAt(0).toUpperCase() + action.slice(1).replace(/[-_]/g, ' ');
+  const actionLabel = (action: string): string => gateActionLabel(t, data, action,
+    action in ACTION_LABEL_KEYS ? t(ACTION_LABEL_KEYS[action as ApprovalAction]) : action.charAt(0).toUpperCase() + action.slice(1).replace(/[-_]/g, ' '));
 
   // ADR 0074 — reflect a decision made on another surface/client live: the
   // shared store learns of it via the broadcast signal (matched by run+node),
@@ -76,13 +79,8 @@ export function ApprovalCard({ runId, nodeId, data, onResolved }: Props) {
     // approved:false into a normal branch; a native gate's failure can also be
     // handled by RFC 0223 routing. Keep confirmation and its payload unchanged.
     // Browser-action rejection retains its specific session-ending copy.
-    const browserGate = isBrowserActionGate(data);
-    if (action === 'reject' && !(await confirm({
-      title: t(browserGate ? 'cuRejectConfirmTitle' : 'rejectConfirmTitle'),
-      body: t(browserGate ? 'cuRejectConfirmBody' : 'rejectConfirmBody'),
-      danger: true,
-      confirmLabel: t('actionReject'),
-    }))) return;
+    // ADR 1040 D7 F1 — the same confirm copy as the chat card (expected decline).
+    if (action === 'reject' && !(await confirm(gateRejectConfirm(t, data, { browserGate: isBrowserActionGate(data) })))) return;
     inFlight.current = true;
     setSubmitting(true);
     setError(null);

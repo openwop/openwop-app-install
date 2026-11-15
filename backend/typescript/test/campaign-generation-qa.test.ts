@@ -12,7 +12,15 @@
  *  - A/B pair shape is validated when pairing metadata is present (QA-CODE-4);
  *  - the prompt solicits every PLATFORM_LIMITS platform incl. TikTok (QA-CODE-6);
  *  - strict grounding floors kb.rag at STRICT_MIN_SCORE (KB-CODE-2 mirror);
- *  - managed creative-brief creation is idempotent + counts failures (CB-CODE-5);
+ *  - ADR 1020 D14: `generate` creates NO managed creative briefs; the
+ *    after-approval `create-creative-briefs` node is idempotent, counts a partial
+ *    failure, fails typed when nothing landed, and refuses a non-creative_briefs
+ *    draft (CB-CODE-5);
+ *  - ADR 1020 D13 (CS70WF-23): drafts are checked closed-world with ONE
+ *    error-fed repair (an empty list, a wrong type, an identity field), messages
+ *    in plain words; harmless nulls and stray citations cost no repair; the
+ *    platform-limit regeneration must pass the same check or the validated
+ *    draft is kept and truncated (grade-code H1);
  *  - iteration ops (unknown op fails; a valid op transforms the prompt);
  *  - persona lens + competitor block reach the prompt;
  *  - QA v2 findings (near-dups, readability) ride the quality report; the
@@ -25,15 +33,17 @@
  * system prompt interpolates every PLATFORM_LIMITS key); the failable part is
  * the hand-written 'TikTok' platform list.
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   PLATFORM_LIMITS, AD_FIELD_SCHEMA_MAX, validateAdVariants, validateSocialPosts, truncateAt,
   findNearDuplicates, readabilityBand, findUnsupportedClaims, verifyClaims,
 } from '../../../packs/feature.campaign-channels.nodes/platformLimits.mjs';
 import { nodes as channelNodes, CHANNEL_SPEC } from '../../../packs/feature.campaign-channels.nodes/index.mjs';
 
-// ADR 1020 D3 — `enabledChannels` lists every channel: generate now SKIPS a channel
-// the brief does not enable, and these cases exercise each channel's generation.
+// ADR 1020 D3 — `enabledChannels` lists every channel. A chain that sets
+// `config.skipDisabledChannel` skips a channel the brief does not enable; these
+// cases pass no config (so nothing is skipped), and the full list keeps them
+// valid if that default ever flips.
 // FU-CODE-1 — the fields the REAL assembleContext projection carries (pinned by
 // the projection-contract test in campaign-brief-kb-integration.test.ts). The
 // mock REJECTS anything else, so a test can never go green on a field the real
@@ -101,6 +111,7 @@ describe('limits table + validators', () => {
 });
 
 describe('generate node enforcement', () => {
+  afterEach(() => { vi.useRealTimers(); });
   const mkCallAI = (first: Record<string, unknown>, second?: Record<string, unknown>) => {
     let calls = 0;
     const fn = async (): Promise<{ data: Record<string, unknown> }> => {
@@ -147,6 +158,9 @@ describe('generate node enforcement', () => {
   });
 
   it('QA v2: near-dups + readability of THIS draft ride the report', async () => {
+    // The scored JSON includes `generatedAt`; freeze only Date (restored in afterEach).
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-01-15T12:00:00.000Z'));
     const draft = {
       platformSets: [{ platform: 'google', variants: [
         { headline: 'We are 40% faster', description: 'pick faster with robots' },
@@ -158,8 +172,11 @@ describe('generate node enforcement', () => {
     });
     const report = out.outputs!.qualityReport as { issues: Array<{ dimension: string; pairs?: unknown }>; readability: { band: string; score: number } };
     expect(report.issues.find((i) => i.dimension === 'variety')?.pairs).toEqual([{ a: 0, b: 1, similarity: expect.any(Number) }]);
-    // The band OF THIS DRAFT (ad_variants score the whole draft JSON), not just "some band".
-    expect(report.readability).toEqual(readabilityBand(JSON.stringify(out.outputs!.draft)));
+    // The band OF THIS DRAFT: ad_variants score the whole draft JSON, which carries
+    // `generatedAt` (frozen above). Worked by hand, never by readabilityBand: 2
+    // sentence marks ('!' and the timestamp's '.'), 37 words, 65 vowel-group
+    // syllables → 206.835 − 1.015·18.5 − 84.6·65/37 = 39.44 → 39, 'technical' (< 45).
+    expect(report.readability).toEqual({ band: 'technical', score: 39 });
   });
 
   it('QA-CODE-2: a [src_N] in ONE field does not suppress uncited claims in ANOTHER', async () => {
@@ -175,7 +192,8 @@ describe('generate node enforcement', () => {
     const report = out.outputs!.qualityReport as { issues: Array<{ dimension: string; description: string; claims?: string[] }> };
     const claim = report.issues.find((i) => i.dimension === 'factCheck' && Array.isArray(i.claims));
     expect(claim).toBeTruthy();
-    expect(claim!.claims!.some((c) => c.includes('40% faster'))).toBe(true);
+    // Exactly the uncited claim: the cited one in the other field is not listed.
+    expect(claim!.claims).toEqual(['We are 40% faster']);
   });
 
   it('QA-CODE-1: duplicate same-platform sets — truncation hits the finding\'s OWN set, not the first match', async () => {
@@ -290,13 +308,27 @@ describe('generate node enforcement', () => {
     });
     // Grade-ux H1 — creating NOTHING after the approval is a failure, not a quiet "completed".
     expect(bad).toMatchObject({ status: 'failed', error: { code: 'creative_briefs_not_created' } });
-    // A partial success says what landed, and where.
+    // A full success says what landed, and where.
     expect(out.outputs!.summary).toBe('2 creative briefs are on the Creative Briefs page.');
 
-    // A draft that is not an approved creative_briefs draft is refused, typed.
+    // A PARTIAL failure succeeds, counts the one that failed, and says so.
+    const partial = await channelNodes['feature.campaign-channels.nodes.create-creative-briefs']({
+      features: { 'campaign-brief': briefFeature(), 'creative-briefs': { list: async () => ({ briefs: existing }), create: async () => { throw new Error('boom'); } } },
+      inputs: { briefId: 'b1', draft },
+    });
+    expect(partial).toMatchObject({ status: 'success' });
+    expect(partial.outputs).toEqual({
+      summary: '1 creative brief is on the Creative Briefs page (1 could not be added).',
+      createdBriefIds: ['cb-existing'],
+      briefCreateErrors: 1,
+    });
+
+    // A draft that is not an approved creative_briefs draft is refused, typed. It is
+    // valid except for its channel (it still carries `briefs`), so only the channel
+    // check can refuse it.
     const wrong = await channelNodes['feature.campaign-channels.nodes.create-creative-briefs']({
       features: { 'campaign-brief': briefFeature(), 'creative-briefs': cbSurface },
-      inputs: { briefId: 'b1', draft: { channel: 'social_posts', posts: [] } },
+      inputs: { briefId: 'b1', draft: { ...draft, channel: 'social_posts' } },
     });
     expect(wrong).toMatchObject({ status: 'failed', error: { code: 'validation_error' } });
   });
@@ -311,11 +343,14 @@ describe('generate node enforcement', () => {
     expect(ok.status).toBe('success');
     expect(calls).toBe(1);
     expect((ok.outputs?.draft as { citations?: unknown }).citations).toEqual([{ marker: '[src_1]' }]);
+    let pageCalls = 0;
     const emptyPage = await channelNodes['feature.campaign-channels.nodes.generate']({
       features: { 'campaign-brief': briefFeature() },
-      callAI: async () => ({ data: { title: 'T', sections: [] } }), inputs: { briefId: 'b1', channel: 'landing_page' },
+      callAI: async () => { pageCalls += 1; return { data: { title: 'T', sections: [] } }; }, inputs: { briefId: 'b1', channel: 'landing_page' },
     });
+    expect(pageCalls).toBe(2); // the empty page cost its one repair
     expect(emptyPage).toMatchObject({ status: 'failed', error: { code: 'generation_invalid' } });
+    expect(emptyPage.error?.message).toContain('sections is empty');
   });
 
   it('grade-code H1: the platform-limit regeneration must also pass the closed-world check, or the validated draft is kept and truncated', async () => {
@@ -332,8 +367,12 @@ describe('generate node enforcement', () => {
       inputs: { briefId: 'b1', channel: 'ad_variants' },
     });
     expect(out.status).toBe('success');
-    const sets = (out.outputs?.draft as { platformSets: unknown[] }).platformSets;
-    expect(sets).toHaveLength(1); // the empty regeneration did NOT replace the validated draft
+    expect(n).toBe(2); // the one limit regeneration was asked for
+    const draft = out.outputs?.draft as { platformSets: Array<{ variants: Array<{ headline: string; description: string }> }>; truncated?: unknown };
+    expect(draft.platformSets).toHaveLength(1); // the empty regeneration did NOT replace the validated draft
+    // ...and the kept draft was TRUNCATED and flagged (no space in 200 'H's, so a hard cut at 30).
+    expect(draft.platformSets[0]!.variants[0]).toMatchObject({ headline: 'H'.repeat(30), description: 'D' });
+    expect(draft.truncated).toEqual([{ platform: 'google', index: 0, field: 'headline' }]);
   });
 
   it('ADR 1020 D13 (CS70WF-23): an empty or off-schema draft is repaired once, then a typed generation_invalid; identity cannot be overwritten', async () => {
@@ -352,6 +391,7 @@ describe('generate node enforcement', () => {
       features: { 'campaign-brief': briefFeature() },
       callAI: async () => ({ data: { emails: [{ position: 1, subjectLines: 'x', body: 'B' }] } }), inputs: { briefId: 'b1', channel: 'email_sequence' },
     });
+    expect(unreadable).toMatchObject({ status: 'failed', error: { code: 'generation_invalid' } });
     expect(unreadable.error?.message).toContain('email 1: subject lines must be a list');
 
     const wrongType = await channelNodes['feature.campaign-channels.nodes.generate']({
@@ -360,7 +400,20 @@ describe('generate node enforcement', () => {
     });
     expect(wrongType).toMatchObject({ status: 'failed', error: { code: 'generation_invalid' } });
 
-    // A repaired reply passes; the model can never rename the channel or brief.
+    // The model can never rename the brief: a reply carrying an identity field is
+    // off-schema (closed world), so it is repaired once and then refused, typed.
+    // DOUBLE GUARD: `generate` also sets `channel`/`briefId` AFTER spreading the
+    // model's data, so moving that spread is an equivalent mutant while the
+    // closed-world check stands (grade-code TST-NZA-2).
+    const renamed = await channelNodes['feature.campaign-channels.nodes.generate']({
+      features: { 'campaign-brief': briefFeature() },
+      callAI: async () => ({ data: { briefId: 'b-evil', emails: [{ position: 1, subjectLines: ['S'], body: 'B' }] } }),
+      inputs: { briefId: 'b1', channel: 'email_sequence' },
+    });
+    expect(renamed).toMatchObject({ status: 'failed', error: { code: 'generation_invalid' } });
+    expect(renamed.error?.message).toContain('brief id is not a field of this channel');
+
+    // A repaired reply passes, and carries the run's channel and brief.
     let n = 0;
     const repaired = await channelNodes['feature.campaign-channels.nodes.generate']({
       features: { 'campaign-brief': briefFeature() },

@@ -58,6 +58,7 @@ const GATED = 'operator-gated surface this probe does not enable: confirm its pr
 const A2A_GAP = 'ADR 0858 P4 behaviour gap: the P1 blockers are fixed (refreshedAt + ratchet, negotiation.decided, legacy profile filtered, major-2 version rules) and the record is built (`v2A2aRecord`), but projecting it fails `v2-a2a-operation-map` (10 legs) and `v2-a2a-push-delivery` (4 legs) on the A2A 1.0 server; flip `V2_PROJECT_A2A` (host/a2aProfile.ts) once they pass — a deliberate, announced change: it also moves the inbound card/codec to 1.0 for live third-party 0.3 clients';
 const MCP_GAP = 'ADR 0858 P4 behaviour gap: the P1 blockers are fixed and the record is built (`v2McpRecord`), but `v2-minimum-version-refused` (mcp) records blocked — the floor 2025-06-18 is the lowest revision the suite can offer — and the mount fails `v2-mcp-mount-map` (5 legs) and `v2-mcp-tasks`; flip `V2_PROJECT_MCP` once they pass';
 const UNDISPOSITIONED = 'ADR 0858 P1 follow-up: not yet dispositioned (is it served? are its required facets honoured?)';
+const NOT_ADOPTED_0262 = 'RFC 0262 (suite 2.47.0): the optional `telemetry` family (OTLP export). Not adopted by this host, so nothing is projected; adopting it is a separate decision with its own witness';
 const WORKSPACE_GAP = 'ADR 0858 P4 (re-measured 2026-10-10): host-services.md §workspace MUST emit `workspace.updated` on each write or delete, and nothing in src/ emits it; projecting the record would be a false claim';
 
 /**
@@ -90,6 +91,7 @@ const KNOWN_UNEMITTED_FAMILIES: Readonly<Record<string, string>> = {
   searchIndex: UNDISPOSITIONED,
   production: UNDISPOSITIONED,
   auditLogIntegrity: UNDISPOSITIONED,
+  telemetry: NOT_ADOPTED_0262,
 };
 
 /** The family seats the v2 schema declares: root records requiring the §3 envelope. */

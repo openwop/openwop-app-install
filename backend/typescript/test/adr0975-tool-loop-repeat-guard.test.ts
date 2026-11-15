@@ -21,6 +21,9 @@
  * (the tool runs five times); `lastRanCall` is never cleared by another tool; a
  * failure is remembered; the exhaustion branch is removed (the loop returns an
  * empty success); the exhaustion branch treats a preamble as an answer.
+ *
+ * CC-AGENT-3 cases (below): red when the read-set check is removed (the
+ * alternating pair runs every round) or never cleared by a write.
  */
 import { describe, expect, it, vi } from 'vitest';
 import { runChatToolLoop, repeatedCallNote, TOOL_ROUNDS_EXHAUSTED, type CompiledTool } from '../src/host/agentDispatch.js';
@@ -90,5 +93,48 @@ describe('ADR 0975 D6 — the repeat guard', () => {
     const res = await runChatToolLoop(opts(2), { callAIWithTools, executeTool: async () => ({ content: 'ok' }) });
     expect(res.finalText).toBe('Looking…');
     expect(res.error).toMatchObject({ code: TOOL_ROUNDS_EXHAUSTED });
+  });
+});
+
+// CC-AGENT-3 (prod f1b882654, 2026-11-13) — the Brief Strategist alternated two
+// READ tools with identical arguments for all five rounds (get-brief, validate,
+// get-brief, …). Each call differed from the one before it, so the last-call
+// guard never fired and the turn ended tool_rounds_exhausted.
+describe('CC-AGENT-3 — a repeat of ANY read since the last write is answered, not re-run', () => {
+  const effects: Record<string, 'read' | 'write'> = { 'get-brief': 'read', validate: 'read', 'generate-kernel': 'write' };
+  const toolEffect = (n: string) => effects[n];
+  const optsE = (maxRounds: number) => ({ ...opts(maxRounds), tools: [tool('get-brief'), tool('validate'), tool('generate-kernel')], toolEffect });
+  const ran = (fn: ReturnType<typeof vi.fn>) => fn.mock.calls.map((c) => (c[0] as { name: string }).name);
+
+  it('two alternating reads run once each; the repeats get the note and the turn can answer', async () => {
+    const m = scripted([{ call: 'get-brief', input: { briefId: 'b1' } }, { call: 'validate', input: { briefId: 'b1' } }, { call: 'get-brief', input: { briefId: 'b1' } }, { call: 'validate', input: { briefId: 'b1' } }, { text: 'Valid; ready to generate.' }]);
+    const executeTool = vi.fn().mockResolvedValue({ content: '{"valid":true}' });
+    const res = await runChatToolLoop(optsE(6), { callAIWithTools: m.callAIWithTools, executeTool });
+    expect(ran(executeTool)).toEqual(['get-brief', 'validate']);
+    expect(lastUser(m.seen[3]!)).toBe(repeatedCallNote('get-brief'));
+    expect(lastUser(m.seen[4]!)).toBe(repeatedCallNote('validate'));
+    expect(res.finalText).toBe('Valid; ready to generate.');
+    expect(res.error).toBeUndefined();
+  });
+
+  it('a write in between clears it: the same read after the write runs again', async () => {
+    const m = scripted([{ call: 'get-brief', input: { briefId: 'b1' } }, { call: 'validate', input: { briefId: 'b1' } }, { call: 'generate-kernel', input: { briefId: 'b1' } }, { call: 'get-brief', input: { briefId: 'b1' } }, { text: 'Started.' }]);
+    const executeTool = vi.fn().mockResolvedValue({ content: 'ok' });
+    await runChatToolLoop(optsE(6), { callAIWithTools: m.callAIWithTools, executeTool });
+    expect(ran(executeTool)).toEqual(['get-brief', 'validate', 'generate-kernel', 'get-brief']);
+  });
+
+  it('a read with different arguments still runs', async () => {
+    const m = scripted([{ call: 'get-brief', input: { briefId: 'b1' } }, { call: 'validate', input: { briefId: 'b1' } }, { call: 'get-brief', input: { briefId: 'b2' } }, { text: 'Done.' }]);
+    const executeTool = vi.fn().mockResolvedValue({ content: 'ok' });
+    await runChatToolLoop(optsE(6), { callAIWithTools: m.callAIWithTools, executeTool });
+    expect(ran(executeTool)).toEqual(['get-brief', 'validate', 'get-brief']);
+  });
+
+  it('a tool with no known effect (MCP, unregistered) keeps the last-call rule only', async () => {
+    const m = scripted([{ call: 'candidates' }, { call: 'factory.run' }, { call: 'candidates' }, { text: 'ok' }]);
+    const executeTool = vi.fn().mockResolvedValue({ content: 'ok' });
+    await runChatToolLoop({ ...opts(6), toolEffect: () => undefined }, { callAIWithTools: m.callAIWithTools, executeTool });
+    expect(ran(executeTool)).toEqual(['candidates', 'factory.run', 'candidates']);
   });
 });

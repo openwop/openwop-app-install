@@ -137,6 +137,12 @@ interface ProjectMember {
 
 ### D5 — Visibility & the `subjectAccess` seam (the read-privacy decision)
 
+> **AMENDED 2026-11-13 by ADR 1118.** "A private project stays read-gated to its members
+> plus org writers" no longer holds. A `private` project now admits only its people-members
+> and the org's admins/owners (`host:members:manage`), for read and write. A non-member
+> editor is refused. Membership still never grants write. The reasoning below is kept as
+> the record of the original decision.
+
 **Decision (2026-06-16, `/architect`): projects support member-scoped visibility, done additively.
 The reframe that makes this clean: visibility ≠ authority.**
 

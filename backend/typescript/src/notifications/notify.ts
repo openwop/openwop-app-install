@@ -24,6 +24,7 @@ import { runNoticeAudience } from './runNoticeAudience.js';
 import { sanitizeFreeText } from '../byok/textRedaction.js';
 import { getNotificationEmitter } from './emitter.js';
 import { deliverApprovalEmail } from '../host/emailApprovalDelivery.js';
+import { gateRequiresSession } from '../host/approvalGateDecide.js';
 import { gateApproverRefs, resolveNotificationRecipients } from '../host/approverResolution.js';
 import { resolveTenantWorkflow } from '../host/resolveLaunchDefinition.js';
 
@@ -185,13 +186,19 @@ export async function emitInterruptNotification(
         // ADR 0478 §2 — decide-by-email for ADDRESSED approval gates: the
         // RFC 0093 token rides as an ARGUMENT (never persisted into the
         // record — inbox reads must not hand out decide capability).
+        // ADR 1120 — a signed-in gate's email carries NO token (not even an inspect
+        // one: the gate data may hold private text), only a Review link that opens
+        // this person's row after sign-in.
+        const signedInOnly = gateRequiresSession(interrupt.data);
         void deliverApprovalEmail(storage, {
           tenantId: run.tenantId,
           recipientUserId,
           notificationId: rec.notificationId,
           title: base.title,
           message: base.message,
-          interruptToken: interrupt.token,
+          ...(signedInOnly
+            ? { reviewPath: `/inbox?notification=${encodeURIComponent(rec.notificationId)}` }
+            : { interruptToken: interrupt.token }),
         });
       }
     } else {

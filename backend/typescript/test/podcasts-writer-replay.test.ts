@@ -103,6 +103,8 @@ describe('ADR 0679 D2b — the Document mint is content-derived, not runId-deriv
             getEpisodeProfile: async () => ({ profile: { speakerProfileId: 'sp1' } }),
             getSpeakerProfile: async () => ({ profile: { speakers: [] } }),
             recordEpisodeResult: async () => ({ found: true, recorded: true }),
+            // ADR 1115 D2 — the nodes ask before each paid step; this fixture's run may write.
+            checkWrite: async () => ({ ok: true }),
           },
           documents: {
             createDocument: async (a: { documentId?: string; ownerSubject?: unknown }) => {

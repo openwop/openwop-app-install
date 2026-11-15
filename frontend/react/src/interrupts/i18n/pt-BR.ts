@@ -23,6 +23,10 @@ export const messages = {
   rejectConfirmBody: 'O que acontece a seguir depende do fluxo de trabalho; a rejeição pode encerrar a execução. O trabalho já realizado não é desfeito.',
   cuRejectConfirmTitle: 'Rejeitar esta ação e encerrar a sessão de navegador?',
   cuRejectConfirmBody: 'O agente de navegador não realizará esta ação e a sessão termina aqui. O que ele já fez no site não é desfeito.',
+  // ADR 1040 D7 F1 — a gate that marks reject as an expected decline.
+  declineConfirmTitle: 'Recusar isto?',
+  declineConfirmBody: 'Isto diz não a este pedido e encerra esta etapa. Nada dele é aplicado, e a resposta não pode ser alterada depois.',
+  declineConfirmLabel: 'Recusar',
   actionRequestChanges: 'Solicitar alterações',
   actionRefine: 'Refinar',
   actionDefer: 'Adiar',

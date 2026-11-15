@@ -22,7 +22,7 @@ function feat(
   path: string,
   tier: FeatureTier,
   group: string,
-  opts: { label?: string; order?: number; featureId?: string; superadminOnly?: boolean; requiredScope?: string } = {},
+  opts: { label?: string; order?: number; featureId?: string; superadminOnly?: boolean; requiredScope?: string; lockVisible?: boolean } = {},
 ): FeatureRoute {
   return {
     path,
@@ -35,6 +35,7 @@ function feat(
       ...(opts.featureId !== undefined ? { featureId: opts.featureId } : {}),
       ...(opts.superadminOnly !== undefined ? { superadminOnly: opts.superadminOnly } : {}),
       ...(opts.requiredScope ? { requiredScope: opts.requiredScope } : {}),
+      ...(opts.lockVisible ? { lockVisible: true } : {}),
     },
   };
 }
@@ -126,11 +127,20 @@ describe('resolveNav — visibility overrides', () => {
     expect(r.workspace.flatMap((g) => g.items.map((i) => i.to))).toEqual(['/b']);
   });
 
-  it('IGNORES hidden on an always-on (no featureId) item', () => {
-    const features = [feat('/chat', 'workspace', 'Workspace')];
+  it('hides an item with no featureId (ADR 1106 D1)', () => {
+    const features = [feat('/chat', 'workspace', 'Workspace'), feat('/b', 'workspace', 'Workspace')];
     const user = cfg({ items: { '/chat': { hidden: true } } });
     const r = resolveNav({ features, user, access: allow });
-    expect(r.workspace.flatMap((g) => g.items.map((i) => i.to))).toEqual(['/chat']);
+    expect(r.workspace.flatMap((g) => g.items.map((i) => i.to))).toEqual(['/b']);
+  });
+
+  it('IGNORES hidden on a locked entry, in either layer, but still moves it', () => {
+    const features = [feat('/settings', 'workspace', 'Workspace', { lockVisible: true }), feat('/b', 'workspace', 'Workspace')];
+    const tenant = cfg({ items: { '/settings': { hidden: true } } });
+    const user = cfg({ items: { '/settings': { hidden: true, group: 'Platform' } } });
+    const r = resolveNav({ features, tenant, user, access: allow });
+    const settings = r.workspace.find((g) => g.items.some((i) => i.to === '/settings'));
+    expect(settings?.id).toBe('Platform');
   });
 });
 

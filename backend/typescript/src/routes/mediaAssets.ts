@@ -29,6 +29,7 @@ import { DurableCollection } from '../host/hostExtPersistence.js';
 import { createLogger } from '../observability/logger.js';
 import { ASSET_SERVE_PATH } from '../host/assetServePath.js';
 import { assetServeHeaders } from '../host/assetServeHeaders.js';
+import { assetAccessMode, assetCacheControl, assetReadConsumer, decideAssetRead } from '../host/assetAccess.js';
 
 const log = createLogger('routes.mediaAssets');
 
@@ -102,16 +103,30 @@ async function chargeUploadQuota(tenantId: string, bytes: number): Promise<strin
 
 export function registerMediaAssetRoutes(app: Express): void {
   // Serve — always on. The token is the capability.
+  // ADR 1122 — the token identifies the asset; `decideAssetRead` decides who may
+  // read it. A refusal under `enforce` is the SAME 404 an unknown token gets (same
+  // status, body and no-store), and a miss runs the decision too, so the two take
+  // the same kind of work (D3).
   app.get('/host/openwop-app/assets/:token', async (req, res) => {
     const token = req.params.token ?? '';
+    const mode = assetAccessMode();
     const entry = await resolveMediaAsset(token);
-    if (!entry) {
+    const decision = mode === 'off' ? null : await decideAssetRead(req, token, entry?.tenantId ?? '');
+    const refused = decision !== null && !decision.allowed;
+    if (entry && refused && mode === 'report') {
+      log.info('asset_access_would_deny', { tenantId: entry.tenantId, ...assetReadConsumer(req) });
+    }
+    if (!entry || (refused && mode === 'enforce')) {
+      res.setHeader('Cache-Control', 'no-store');
       res.status(404).json({ error: 'not_found', message: 'asset not found or expired' });
       return;
     }
     res.status(200);
     for (const [k, v] of Object.entries(assetServeHeaders(entry.contentType))) res.setHeader(k, v);
-    res.setHeader('Cache-Control', 'private, max-age=300');
+    // D4 — a shared cache must never hold bytes a revocation should stop: only a
+    // public-grant read is shareable, and briefly. The rest is per-browser, by cookie.
+    res.setHeader('Cache-Control', decision ? assetCacheControl(decision) : 'private, max-age=300');
+    res.vary('Cookie');
     res.send(Buffer.from(entry.contentBase64, 'base64'));
   });
 

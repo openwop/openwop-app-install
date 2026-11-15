@@ -15,10 +15,18 @@ import i18n from '../../../i18n/index.js';
  * a `role=status` named "Speaking". Every assertion is scoped to a row, so a
  * speaking state that lands on the wrong agent goes red (sabotage
  * `isSpeaking={row.agentId === currentAgentId}`, w44 cl-speak-row).
+ *
+ * ADR 0140 G2 (second describe) — the strip chip keeps the human/alias name
+ * primary and adds the row's role as visible text AND as the accessible
+ * description of both controls, while switch/remove still route by `agentId`.
+ * What turns it red: dropping either control's `aria-describedby`; routing by
+ * `slug`; a shared (non-`useId`) context id; showing context for the synthetic
+ * default assistant, an empty persona, or one equal to the name; making the
+ * default assistant removable.
  */
 
 const LINEUP: ActiveAgentRow[] = [
-  { agentId: 'assistant', persona: 'Default', slug: 'assistant', modelClass: 'balanced', addedAt: '' },
+  { agentId: DEFAULT_ASSISTANT_ID, persona: 'Default', slug: 'assistant', modelClass: 'balanced', addedAt: '' },
   { agentId: 'ada', persona: 'Finance lens', slug: 'ada', modelClass: 'balanced', addedAt: '2026-01-01' },
   { agentId: 'rex', persona: 'Pipeline lens', slug: 'rex', modelClass: 'balanced', addedAt: '2026-01-01' },
 ];
@@ -27,7 +35,7 @@ function renderLineup(over: Partial<Parameters<typeof ConversationLineup>[0]> = 
   render(
     <ConversationLineup
       lineup={LINEUP}
-      currentAgentId="assistant"
+      currentAgentId={DEFAULT_ASSISTANT_ID}
       thinkingAgentId={null}
       onSwitchAgent={vi.fn()}
       onRemoveAgent={vi.fn()}

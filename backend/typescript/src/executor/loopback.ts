@@ -175,7 +175,11 @@ export function planLoopbacks(definition: WorkflowDefinition): LoopbackPlan {
       if (other !== undefined) throw invalid(`Loopback edges '${other}' and '${edgeId}' have regions sharing '${id}' (RFC 0258 §B.4).`, { edgeId, reason: 'loopback_overlap' });
       claimed.set(id, edgeId);
     }
-    plan.set(gate, { edge, gateNodeId: gate, targetNodeId: target, nodes: order.filter((id) => region.has(id)) });
+    // The region carries the edge under the host spelling. A definition that
+    // skipped `validateWorkflowDefinition` (a conformance fixture) still spells
+    // it `id`, and every marker, round count and history read keys on
+    // `region.edge.edgeId`: left undefined, no round was ever counted.
+    plan.set(gate, { edge: { ...edge, edgeId }, gateNodeId: gate, targetNodeId: target, nodes: order.filter((id) => region.has(id)) });
   }
   return plan;
 }

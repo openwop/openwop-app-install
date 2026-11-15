@@ -1,5 +1,5 @@
 /**
- * UX_UPGRADE-runs P2 — a failed post-event refresh must not read as a fresh view.
+ * UX_UPGRADE-runs P2 / ADR 0600 §1 — a failed post-event refresh must not read as a fresh view.
  *
  * On terminal/transition SSE events the page refetches the snapshot and (on
  * terminal) backfills the event log via REST. Both catches were silent
@@ -12,19 +12,25 @@
  * Each refetch is failed ON ITS OWN (w49): the first version failed both at
  * once, so either catch could be made silent again and the other still raised
  * the warning. What turns it red: the snapshot refetch's catch silent; the log
- * backfill's catch silent; Retry that clears the flag without re-reading; a
- * successful refresh that raises the warning.
+ * backfill's catch silent; Retry that clears the flag without re-reading (or
+ * before the re-reads land); a successful refresh that raises the warning; one
+ * resource's success clearing the OTHER resource's flag (RUN-REFRESH-CLEAR-1
+ * both ways); an older request's success or failure overriding the latest
+ * (the per-resource request counters); a closed stream's callback still
+ * refreshing (`live`); and a same-sequence SSE replay issuing a second refresh.
  */
 import { StrictMode } from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
-import type { RunEventDoc, RunSnapshot } from '@openwop/openwop';
+import type { PollEventsResponse, RunEventDoc, RunSnapshot } from '@openwop/openwop';
+import type * as RunsClient from '../../client/runsClient.js';
+import type * as StreamsClient from '../../client/streamsClient.js';
 
 const api = vi.hoisted(() => ({
-  getRun: vi.fn(),
-  pollEvents: vi.fn(),
-  subscribeToRun: vi.fn(),
+  getRun: vi.fn<typeof RunsClient.getRun>(),
+  pollEvents: vi.fn<typeof RunsClient.pollEvents>(),
+  subscribeToRun: vi.fn<typeof StreamsClient.subscribeToRun>(),
 }));
 vi.mock('../../client/runsClient.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
@@ -57,6 +63,11 @@ const SNAPSHOT: RunSnapshot = {
   eventLogSchemaVersion: 3,
 };
 const COMPLETED: RunSnapshot = { ...SNAPSHOT, status: 'completed' };
+/** A production-shaped event-log page (`PollEventsResponse`), not `{ events }` alone. */
+const logPage = (events: RunEventDoc[] = [], status: RunSnapshot['status'] = 'running'): PollEventsResponse => ({
+  runId: 'r1', events, lastSequence: events.length ? Math.max(...events.map((e) => e.sequence)) : -1,
+  status, isTerminal: status === 'completed',
+});
 
 function view(strict = false): void {
   const page = <MemoryRouter initialEntries={['/runs/r1']}>
@@ -74,11 +85,15 @@ const sse = (type: string, sequence: number): RunEventDoc => ({
 const badge = (status: string) => screen.findByText(status, { selector: '.status-badge' });
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  // mockReset, not clearAllMocks: a queued `…Once` value left by one case must
+  // never answer the next case's request (w44).
+  api.getRun.mockReset();
+  api.pollEvents.mockReset();
+  api.subscribeToRun.mockReset();
   sseHandler = null;
   api.getRun.mockResolvedValue(SNAPSHOT);
-  api.pollEvents.mockResolvedValue({ events: [] });
-  api.subscribeToRun.mockImplementation((_id: string, opts: { onEvent: OnEvent }) => {
+  api.pollEvents.mockResolvedValue(logPage());
+  api.subscribeToRun.mockImplementation((_id, opts) => {
     sseHandler = opts.onEvent;
     return { close: () => {} };
   });
@@ -93,9 +108,7 @@ async function eventArrivesWith(type: string, fail: { getRun?: boolean; pollEven
   if (fail.getRun) api.getRun.mockRejectedValue(new Error('boom'));
   else api.getRun.mockResolvedValue(COMPLETED);
   if (fail.pollEvents) api.pollEvents.mockRejectedValue(new Error('boom'));
-  await act(async () => {
-    sseHandler?.(sse(type, 1));
-  });
+  await deliver(type, 1);
 }
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: Error) => void } {
@@ -132,12 +145,12 @@ describe('run detail — post-event refresh honesty (UX_UPGRADE-runs P2)', () =>
   it('RUN-REFRESH-CLEAR-1: a snapshot refetch that lands AFTER a failed backfill keeps the warning', async () => {
     view();
     await badge('running');
-    let landSnapshot: (s: RunSnapshot) => void = () => {};
-    api.getRun.mockImplementation(() => new Promise<RunSnapshot>((r) => { landSnapshot = r; }));
+    const snapshot = deferred<RunSnapshot>();
+    api.getRun.mockImplementation(() => snapshot.promise);
     api.pollEvents.mockRejectedValue(new Error('boom'));
-    await act(async () => { sseHandler?.(sse('run.completed', 1)); });
+    await deliver('run.completed', 1);
     await screen.findByText(/may be out of date/i);
-    await act(async () => { landSnapshot(COMPLETED); });
+    await act(async () => { snapshot.resolve(COMPLETED); });
     await badge('completed');
     expect(screen.queryByText(/may be out of date/i)).not.toBeNull();
   });
@@ -148,7 +161,7 @@ describe('run detail — post-event refresh honesty (UX_UPGRADE-runs P2)', () =>
     const getRunCalls = api.getRun.mock.calls.length;
     const pollCalls = api.pollEvents.mock.calls.length;
     api.getRun.mockResolvedValue(COMPLETED);
-    api.pollEvents.mockResolvedValue({ events: [] });
+    api.pollEvents.mockResolvedValue(logPage([], 'completed'));
     fireEvent.click(screen.getByRole('button', { name: /retry/i }));
     // It RE-READ (both reads), and the re-read landed on screen…
     await badge('completed');
@@ -170,12 +183,13 @@ describe('run detail — post-event refresh honesty (UX_UPGRADE-runs P2)', () =>
   it('a successful late log read cannot erase a snapshot failure', async () => {
     view();
     await badge('running');
-    const log = deferred<{ events: RunEventDoc[] }>();
+    const log = deferred<PollEventsResponse>();
     api.getRun.mockRejectedValue(new Error('snapshot unavailable'));
     api.pollEvents.mockImplementation(() => log.promise);
     await deliver('run.completed', 1);
     await screen.findByText(/may be out of date/i);
-    await act(async () => log.resolve({ events: [] }));
+    expect(api.pollEvents).toHaveBeenCalledTimes(2); // the initial load + the backfill this case holds
+    await act(async () => log.resolve(logPage([], 'completed')));
     expect(screen.queryByText(/may be out of date/i)).not.toBeNull();
   });
 
@@ -183,17 +197,17 @@ describe('run detail — post-event refresh honesty (UX_UPGRADE-runs P2)', () =>
     await eventArrivesWith('run.completed', { getRun: true, pollEvents: true });
     await screen.findByText(/may be out of date/i);
     const snapshot = deferred<RunSnapshot>();
-    const log = deferred<{ events: RunEventDoc[] }>();
+    const log = deferred<PollEventsResponse>();
     api.getRun.mockImplementation(() => snapshot.promise);
     api.pollEvents.mockImplementation(() => log.promise);
     fireEvent.click(screen.getByRole('button', { name: /retry/i }));
     expect(screen.queryByText(/may be out of date/i)).not.toBeNull();
     await act(async () => {
-      if (first === 'snapshot') snapshot.resolve(COMPLETED); else log.resolve({ events: [] });
+      if (first === 'snapshot') snapshot.resolve(COMPLETED); else log.resolve(logPage([], 'completed'));
     });
     expect(screen.queryByText(/may be out of date/i)).not.toBeNull();
     await act(async () => {
-      if (first === 'snapshot') log.resolve({ events: [] }); else snapshot.resolve(COMPLETED);
+      if (first === 'snapshot') log.resolve(logPage([], 'completed')); else snapshot.resolve(COMPLETED);
     });
     await badge('completed');
     await waitFor(() => expect(screen.queryByText(/may be out of date/i)).toBeNull());
@@ -203,7 +217,7 @@ describe('run detail — post-event refresh honesty (UX_UPGRADE-runs P2)', () =>
     view();
     await badge('running');
     const snapshot = deferred<RunSnapshot>();
-    const log = deferred<{ events: RunEventDoc[] }>();
+    const log = deferred<PollEventsResponse>();
     if (resource === 'snapshot') {
       api.getRun.mockImplementationOnce(() => snapshot.promise).mockRejectedValueOnce(new Error('new snapshot failure'));
     } else {
@@ -215,7 +229,7 @@ describe('run detail — post-event refresh honesty (UX_UPGRADE-runs P2)', () =>
     await deliver(event, 2);
     await screen.findByText(/may be out of date/i);
     await act(async () => {
-      if (resource === 'snapshot') snapshot.resolve(COMPLETED); else log.resolve({ events: [] });
+      if (resource === 'snapshot') snapshot.resolve(COMPLETED); else log.resolve(logPage([], 'completed'));
     });
     expect(screen.queryByText(/may be out of date/i)).not.toBeNull();
     if (resource === 'snapshot') expect(screen.queryByText('completed', { selector: '.status-badge' })).toBeNull();
@@ -225,12 +239,12 @@ describe('run detail — post-event refresh honesty (UX_UPGRADE-runs P2)', () =>
     view();
     await badge('running');
     const snapshot = deferred<RunSnapshot>();
-    const log = deferred<{ events: RunEventDoc[] }>();
+    const log = deferred<PollEventsResponse>();
     if (resource === 'snapshot') {
       api.getRun.mockImplementationOnce(() => snapshot.promise).mockResolvedValueOnce(COMPLETED);
     } else {
       api.getRun.mockResolvedValue(COMPLETED);
-      api.pollEvents.mockImplementationOnce(() => log.promise).mockResolvedValueOnce({ events: [] });
+      api.pollEvents.mockImplementationOnce(() => log.promise).mockResolvedValueOnce(logPage([], 'completed'));
     }
     const event = resource === 'snapshot' ? 'node.suspended' : 'run.completed';
     await deliver(event, 1);
@@ -264,7 +278,7 @@ describe('run detail — post-event refresh honesty (UX_UPGRADE-runs P2)', () =>
     view(true);
     await badge('running');
     const snapshot = deferred<RunSnapshot>();
-    const log = deferred<{ events: RunEventDoc[] }>();
+    const log = deferred<PollEventsResponse>();
     api.getRun.mockImplementation(() => snapshot.promise);
     api.pollEvents.mockImplementation(() => log.promise);
     const snapshots = api.getRun.mock.calls.length;
@@ -277,7 +291,7 @@ describe('run detail — post-event refresh honesty (UX_UPGRADE-runs P2)', () =>
     });
     expect(api.getRun).toHaveBeenCalledTimes(snapshots + 1);
     expect(api.pollEvents).toHaveBeenCalledTimes(logs + 1);
-    await act(async () => { snapshot.resolve(COMPLETED); log.resolve({ events: [sse('run.completed', 1)] }); });
+    await act(async () => { snapshot.resolve(COMPLETED); log.resolve(logPage([sse('run.completed', 1)], 'completed')); });
     await badge('completed');
   });
 

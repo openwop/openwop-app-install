@@ -22,7 +22,7 @@ import {
   listDocuments, getDocument, getDocumentByIdForTenant, createDocument, updateDocument, deleteDocument,
   listVersions, getVersion, addVersion,
   listTemplates, getTemplate, createTemplate, updateTemplate, deleteTemplate, assemble,
-  instantiateSeedTemplate, renderDocument, RENDER_FORMATS, materializeCanvasToDocument, canReadDocument,
+  instantiateSeedTemplate, renderDocument, RENDER_FORMATS, materializeCanvasToDocument, canReadDocument, canWriteDocument,
   type DocStatus, type Provenance, type RenderFormat,
 } from './documentsService.js';
 import { listSeedTemplates } from './seedTemplates.js';
@@ -203,6 +203,13 @@ export function registerDocumentsRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
+  // CORRECTED 2026-11-13 (ADR 1118): premise 1 below is now FALSE, as its own last
+  // line said to watch for. A private project admits only its members and the org's
+  // admins, so an org editor CAN be refused by an owning project that still exists.
+  // All three doors now call `assertOwnerWritable`. It keeps premise 2's exit: a
+  // document whose project is GONE stays writable, so it can still be re-pointed and
+  // deleted. The original reasoning follows, as the record.
+  //
   // ADR 0643 / `KBC-4` — the three WRITE by-id doors (this PATCH, the DELETE
   // below, and `POST .../versions`) deliberately do NOT call `assertOwnerReadable`.
   // Recorded as a decision because an adversarial review asked for it:
@@ -244,6 +251,7 @@ export function registerDocumentsRoutes(deps: RouteDeps): void {
       const { user, orgId, tenantId } = promotesToShareable
         ? await authorizeOrgScope(req, FEATURE, 'host:members:manage')
         : await authz(req, 'workspace:write');
+      await assertOwnerWritable(tenantId, orgId, user.userId, req.params.documentId);
       // ADR 0350 Phase 3 — a promotedCanvasId MUST reference a real canvas the
       // caller's tenant owns (getCanvasForTenant is tenant-scoped → null when
       // absent or cross-tenant), so the stored one-way link can never dangle or
@@ -269,7 +277,8 @@ export function registerDocumentsRoutes(deps: RouteDeps): void {
 
   app.delete(`${ORG}/documents/:documentId`, async (req, res, next) => {
     try {
-      const { orgId, tenantId } = await authz(req, 'workspace:write');
+      const { user, orgId, tenantId } = await authz(req, 'workspace:write');
+      await assertOwnerWritable(tenantId, orgId, user.userId, req.params.documentId);
       const ok = await deleteDocument(tenantId, orgId, req.params.documentId);
       if (!ok) throw notFound(req.params.documentId);
       res.status(204).end();
@@ -290,6 +299,7 @@ export function registerDocumentsRoutes(deps: RouteDeps): void {
   app.post(`${ORG}/documents/:documentId/versions`, async (req, res, next) => {
     try {
       const { user, orgId, tenantId } = await authz(req, 'workspace:write');
+      await assertOwnerWritable(tenantId, orgId, user.userId, req.params.documentId);
       const body = (req.body ?? {}) as Record<string, unknown>;
       const version = await addVersion(tenantId, orgId, req.params.documentId, {
         content: body.content,
@@ -508,6 +518,13 @@ function notFound(documentId: string): OpenwopError {
  *  subject. A `null` result ⇒ NOT membership-scoped (no `user`-kind resolver;
  *  org-owned docs carry no ownerSubject) ⇒ the org gate stands. Otherwise require
  *  READ, and refuse as a uniform 404 (no existence leak — the KB door's posture). */
+/** ADR 1118 — the by-id write doors ask the owning project too (see
+ *  `canWriteDocument`). A missing document is left to the handler's own 404. */
+async function assertOwnerWritable(tenantId: string, orgId: string, caller: string, documentId: string): Promise<void> {
+  const doc = await getDocument(tenantId, orgId, documentId);
+  if (doc && !(await canWriteDocument(tenantId, { ...(doc.ownerSubject ? { ownerSubject: doc.ownerSubject } : {}) }, caller))) throw notFound(documentId);
+}
+
 async function assertOwnerReadable(
   tenantId: string,
   ownerSubject: Subject | undefined,

@@ -59,6 +59,7 @@ import type { ConversationParticipant, ConversationType } from '../../client/cha
 import { messageText, type ChatMessage } from '../types.js';
 import { useRecordDecision } from '../decisions/useRecordDecision.js';
 import { useClarificationAnswer } from '../hooks/useClarificationAnswer.js';
+import { chatDraftKey } from '../composerSeed.js';
 
 // ADR 0117 Phase 3 — the read-only side-by-side compare view; lazy (zero entry-budget),
 // mirrors ChatSidebar.
@@ -229,11 +230,15 @@ function TabSessionImpl({
     if (!participants || participants.length === 0 || agentsLoading || agentsError || isHydrating || session.id !== sessionId) return;
     if (lineupDerivedRef.current === sessionId) return;
     lineupDerivedRef.current = sessionId;
+    // CC-CHAT-4 — reopen continues with the agent that last answered (a 1:1 agent
+    // chat), never in a channel, group or board chat, and never over a made choice.
+    const lastAgent = isMultiParty || boardId ? undefined
+      : [...session.messages].reverse().find((m) => m.role === 'assistant' && typeof m.agentId === 'string' && m.agentId)?.agentId;
     restoreLineup(sessionId, participantsToLineup(participants, (agentId) => {
       const e = agentEntries.find((x) => x.agentId === agentId);
       return e ? { persona: e.displayName, slug: e.slug, modelClass: e.modelClass } : null;
-    }));
-  }, [participants, sessionId, session.id, isHydrating, agentEntries, agentsLoading, agentsError, restoreLineup]);
+    }), lastAgent);
+  }, [participants, sessionId, session.id, isHydrating, agentEntries, agentsLoading, agentsError, restoreLineup, isMultiParty, boardId, session.messages]);
 
   // Surface streaming transitions to the deck (eviction protection). Fires only on
   // change (effect dep), and the deck's handler no-ops on an unchanged value.
@@ -396,8 +401,8 @@ function TabSessionImpl({
       // reconstructible server-side (ADR 0140 G2), mirroring ChatSidebar.
       onAgentActivated: (agentId) => onAddParticipant?.(sessionId, `agent:${agentId}`),
       // CC-CHAT-4 — a deep-link-scoped agent becomes a member on its first turn, so a
-      // reopened conversation lists it again as a member — not selected (ADR 0140:
-      // restore never changes the voice). Skip when already a member: no write per turn.
+      // reopened conversation lists it again and (ADR 0140 correction 2026-11-14)
+      // continues with it when it answered last. Skip when already a member.
       onAgentRouted: (agentId) => {
         if (!(participants ?? []).some((p) => p.subjectRef === `agent:${agentId}`)) onAddParticipant?.(sessionId, `agent:${agentId}`);
       },
@@ -519,7 +524,7 @@ function TabSessionImpl({
         messages={session.messages}
         tenantId={tenantId}
         {...(onOpenArtifact ? { onOpenArtifact } : {})}
-        draftKey={`openwop-app.chat.draft:${tenantId}:${sessionId}`}
+        draftKey={chatDraftKey(tenantId, sessionId)}
         // Parity with the standalone (ChatSidebar) — an agent-scoped tab voices live
         // replies in THAT agent's per-agent voice (ADR 0138), not the host default.
         voiceConversationId={sessionId}

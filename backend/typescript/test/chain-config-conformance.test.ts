@@ -454,8 +454,12 @@ describe('core.flow.if nodes branch for real', () => {
  * host-owned in-app notification node, not per-chain bindings.
  */
 const REQUIRED_INPUT_CEILING = 7;
-/** See the GRD-5 docblock in the describe block below (measured on the EXPANDED blank copy). */
-const UNFILLABLE_INPUT_CEILING = 5;
+/**
+ * See the GRD-5 docblock in the describe block below (measured on the EXPANDED blank copy).
+ * Was 5; the CC-CHAIN-3/6 pack fixes made two more required inputs fillable
+ * (re-measured 2026-11-13, train 449).
+ */
+const UNFILLABLE_INPUT_CEILING = 3;
 
 describe('required INPUTS conformance (the unratcheted half)', () => {
   const requiredInputsFor = (() => {

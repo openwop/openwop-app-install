@@ -423,6 +423,7 @@ export const messages = {
   eachLineMustMatch: '(each line MUST match: {{pattern}})',
   stringListPlaceholder: 'One per line',
   stringListOverLimit: 'Only the first {{count}} entries are kept (host limit).',
+  configSetPerRun: 'Set when the run starts ({{name}})',
   pickProviderFirst: 'Pick a provider first…',
   noModelsForProvider: 'No models declared for {{provider}}',
   customModelIdPlaceholder: 'custom model id',

@@ -4,11 +4,23 @@
  *
  * Witnessed red before the change: `getVisitorKey()` minted and stored `owp:vk` on
  * every call, before any consent check, and no banner existed.
+ *
+ * Also: grade-code M4 (a refused token is discarded and re-minted, once per tab) and
+ * ADR 0951 P2 review #7 (a `consent_write_contended` 409 is resent exactly once,
+ * with the same body; any other 409 is not).
+ *
+ * Sabotage-witnessed (wave 108): keeping a key under `denied`, keeping the legacy
+ * key, minting under `unknown`, one key for every org, a withdrawal without its
+ * token, a failed refusal not remembered (or a failed grant remembered), retrying
+ * no 409 / every 409 / more than once, a repair that is not once per tab, keeping a
+ * refused token, unequal Accept/Reject, focus taken on load, Esc not returning
+ * focus, a failed save closing the region, the footer gated on the posture alone,
+ * and a slot that is never removed each turn a named case red.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react';
 import {
-  __resetVisitorConsentForTests, consentTokenFor, decisionFor, getVisitorKey, loadPosture, recordChoice, repairConsentTokenFrom,
+  __resetVisitorConsentForTests, consentTokenFor, decisionFor, getVisitorKey, loadPosture, recordChoice, repairConsentTokenFrom, storedChoice,
 } from '../visitorConsent.js';
 import { VisitorConsentBanner } from '../VisitorConsentBanner.js';
 import { messages as en } from '../i18n/en.js';
@@ -56,8 +68,8 @@ describe('the visitor key (D5)', () => {
 
     await recordChoice(ORG, false); // withdrawal, through the same lane, with the same token
     expect(localStorage.getItem(`owp:vk:${ORG}`)).toBeNull();
-    const last = calls.filter((c) => c.init?.method === 'POST').at(-1)!;
-    expect(JSON.parse(String(last.init!.body))).toEqual({ categories: { analytics: false }, subjectToken: 'tok-1' });
+    const last = calls.filter((c) => c.init?.method === 'POST').at(-1);
+    expect(JSON.parse(String(last?.init?.body))).toEqual({ categories: { analytics: false }, subjectToken: 'tok-1' });
   });
 
   it('opt-out regime: the key is written unless the visitor opted out; one org never touches another', async () => {
@@ -101,6 +113,10 @@ describe('the visitor key (D5)', () => {
     await loadPosture(ORG);
     await expect(recordChoice(ORG, true)).rejects.toThrow();
     expect(decisionFor(ORG)).toBe('denied');
+    // "Not remembered" means no stored choice at all: under opt-in a remembered
+    // refusal would also read 'denied', so the decision alone cannot show it.
+    expect(storedChoice(ORG)).toBeNull();
+    expect(localStorage.getItem('owp:consent')).toBeNull();
   });
 });
 
@@ -119,7 +135,23 @@ describe('token repair (grade-code M4)', () => {
     await loadPosture(ORG);
     await recordChoice(ORG, true, { replay: false });
     expect(posts).toBe(2);
+    // The resend is the SAME choice, and its token is the one kept.
+    const bodies = calls.filter((c) => c.init?.method === 'POST').map((c) => JSON.parse(String(c.init?.body)) as unknown);
+    expect(bodies).toEqual([
+      { categories: { analytics: true, 'analytics.replay': false } },
+      { categories: { analytics: true, 'analytics.replay': false } },
+    ]);
     expect(decisionFor(ORG)).toBe('allowed');
+    expect(consentTokenFor(ORG)).toBe('tok-1');
+    // Once: a save contended twice is not resent a third time.
+    posts = 0;
+    stubFetch((url, init) => {
+      if (init?.method !== 'POST') return posture('opt-in')(url, init);
+      posts += 1;
+      return { status: 409, body: { error: 'conflict', message: 'Consent changed concurrently.', details: { reason: 'consent_write_contended' } } };
+    });
+    await expect(recordChoice(ORG, true, { replay: false })).rejects.toThrow('409');
+    expect(posts).toBe(2);
     posts = 0;
     stubFetch((url, init) => {
       if (init?.method !== 'POST') return posture('opt-in')(url, init);
@@ -183,6 +215,9 @@ describe('the banner (D6)', () => {
     fireEvent.click(reject);
     await waitFor(() => expect(screen.queryByRole('region', { name: en.consentTitle })).toBeNull());
     expect(decisionFor(ORG)).toBe('denied');
+    // "Records" is the POST on the consent lane, not just the closed region.
+    const posts = calls.filter((c) => c.init?.method === 'POST').map((c) => JSON.parse(String(c.init?.body)) as unknown);
+    expect(posts).toEqual([{ categories: { analytics: false } }]);
     expect(screen.getByRole('button', { name: en.consentFooterLink })).toBeTruthy();
   });
 
@@ -220,6 +255,9 @@ describe('the banner (D6)', () => {
     fireEvent.click(screen.getByRole('button', { name: en.consentFooterLink }));
     fireEvent.click(await screen.findByRole('button', { name: en.consentReject }));
     await waitFor(() => expect(decisionFor(ORG)).toBe('denied'));
+    // The withdrawal reached the lane under the stored identity.
+    const posts = calls.filter((c) => c.init?.method === 'POST').map((c) => JSON.parse(String(c.init?.body)) as unknown);
+    expect(posts).toEqual([{ categories: { analytics: false }, subjectToken: 'tok-9' }]);
   });
 
   it("the footer control lives in PublicShell's footer, in a container the lazy chunk creates and removes", async () => {

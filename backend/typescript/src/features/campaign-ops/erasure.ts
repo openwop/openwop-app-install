@@ -1,6 +1,7 @@
 /**
  * Campaign ops subject erasure (ADR 0464 store ledger). Client accounts,
- * assets, agent bindings (ADR 0943), report definitions and reports (ADR 0957) are the agency's configuration for a
+ * assets, agent bindings (ADR 0943), report definitions and reports (ADR 0957), and change
+ * requests (ADR 0923; their text and answer values, CHAN-F19 #3) are the agency's configuration for a
  * client, so they are never deleted on a person's erasure. What goes is the
  * person in them: `createdBy` (a binding's `updatedBy`) becomes the erased-user
  * tombstone. Tenant-scoped only: a principal id is not
@@ -16,6 +17,7 @@ import { eraseAgentBindingEditors } from './agentBindingService.js';
 import { eraseReportActors } from './reports/reportService.js';
 import { eraseClientNoteProposalDeciders } from './clientMemory.js';
 import { eraseClientContextSourceEditors } from './clientContext.js';
+import { eraseRequestActors } from './requestService.js';
 import { purgeCollaboratorsForOrg, registerCollaboratorEraseHook, registerCollaboratorPurgeHook, type ExternalCollaborator } from '../../host/externalCollaborators.js';
 import { purgeLinksForResource } from '../sharing/sharingService.js';
 import { eraseIntakesOfCollaborator, purgeIntakesForOrg } from './collaboration/intake.js';
@@ -34,7 +36,8 @@ export async function eraseCampaignOpsSubject(tenantId: string, subjectKey: stri
     + (await eraseAgentBindingEditors(tenantId, forms, ERASED_USER_REF))
     + (await eraseReportActors(tenantId, forms, ERASED_USER_REF))
     + (await eraseClientNoteProposalDeciders(tenantId, forms, ERASED_USER_REF))
-    + (await eraseClientContextSourceEditors(tenantId, forms, ERASED_USER_REF));
+    + (await eraseClientContextSourceEditors(tenantId, forms, ERASED_USER_REF))
+    + (await eraseRequestActors(tenantId, forms, ERASED_USER_REF)); // CHAN-F19 #3 — change requests
   return { rowsTouched };
 }
 

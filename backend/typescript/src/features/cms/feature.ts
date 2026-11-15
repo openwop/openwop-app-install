@@ -25,6 +25,7 @@ import { startCmsPublishSweep } from './publishSweep.js';
 import { registerIntegrityGauge } from '../../host/integrityGauges.js';
 import { cmsIntegrityGauge } from './integrityGauge.js';
 import { registerCmsPlaybookContent } from './playbookContent.js';
+import { registerCmsAssetGrantProvider } from './assetGrantProvider.js';
 
 export const cmsFeature: BackendFeature = {
   id: 'cms',
@@ -76,6 +77,7 @@ export const cmsFeature: BackendFeature = {
     startCmsPublishSweep();
     // ADR 1104 — PROBE-1038-1…3 as a daily read-only gauge.
     registerIntegrityGauge('cms', cmsIntegrityGauge);
+    registerCmsAssetGrantProvider(); // ADR 1122 P1 — published pages grant their pictures
     // ADR 0066 — register the content-publish decision handler on the core
     // approvals hook (the inbox claim/reject path dispatches here for
     // `kind:'content-publish'` rows). Direction: feature → core only.

@@ -335,6 +335,17 @@ host-only render seam proceeds.
   Component })`, rendered under `WorkflowRunBubble`; no match keeps today's
   one-liner. A renderer reads outputs only through the authorized run-read path
   the side panel uses.
+
+  > **Correction during the PR D rebase (2026-11-12):** ADR 1031 P2's
+  > `FrontendFeature.lazyExtensions` (read through `features/featureExtensions.ts`)
+  > postdates D7. `registerRunResultRenderer` is kept as accepted, but it is an
+  > imperative registry the completion card reads at render time. A renderer
+  > registered from a lazy extension chunk could land after a card has already
+  > evaluated `mayMatchRunResult` and be missed. Registering eagerly avoids that
+  > but costs entry-chunk bytes. Moving to a `runResultRenderers` lazy-extension
+  > field is a follow-up decision, not done in PR D. PR D itself registers no
+  > renderer: the registry module rides with `WorkflowCompletionCard`, and
+  > consumers register.
 - **F3 — per-call display summary on receipt chips (PR E).** A tool may return an
   optional `display.summary`: plain text, host length cap, never args or results,
   sanitized (no markup). It must NOT ride the RFC 0064 tool-return event (this

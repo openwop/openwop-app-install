@@ -823,10 +823,35 @@ LOG
 # repo's list, so it passed only while that list happened to be empty — the first
 # admitted entry (ADR 0749) turned it red as a STALE entry absent from the log.
 : > "$M2T/known-red.txt"
-m2() { OPENWOP_M2_KNOWN_RED="$M2T/known-red.txt" OPENWOP_M2_LOG="$M2T/$1" bash "$ROOT/scripts/check-conformance-major2.sh" >/dev/null 2>&1; echo $?; }
+: > "$M2T/known-blocked.txt"
+printf '%s\n' '{"requirementId":"openwop.it.v2-alpha.a","disposition":"executed-pass","assertionCount":2}' > "$M2T/pass.jsonl"
+m2() { OPENWOP_M2_KNOWN_RED="$M2T/known-red.txt" OPENWOP_M2_KNOWN_BLOCKED="$M2T/known-blocked.txt" OPENWOP_M2_LEDGER="$M2T/${2:-pass.jsonl}" OPENWOP_M2_LOG="$M2T/$1" bash "$ROOT/scripts/check-conformance-major2.sh" >/dev/null 2>&1; echo $?; }
 check "$(m2 killed.log)" "1" "major-2 ratchet FAILS a watchdog-killed partial run (it used to print ✓ and exit 0)"
 check "$(m2 green.log)" "0" "  ...and still PASSES a complete green run (the refusal is not a blanket fail)"
 check "$(m2 red.log)" "1" "  ...and still FAILS a complete run with an unlisted red"
+
+# ── #5916 — a BLOCKED row is not a pass (the openwop#2093 class) ──
+# The dead-host shape: the lane's backend died partway, so every later gated
+# scenario soft-skipped. vitest prints ✓ for each file and a clean summary, and
+# only the ledger knows. This leg used to PASS.
+cat > "$M2T/deadhost.log" <<'LOG'
+ ✓ src/scenarios/v2-alpha.test.ts (2 tests) 10ms
+ ✓ src/scenarios/v2-beta.test.ts (3 tests | 3 skipped) 1ms
+ ✓ src/scenarios/v2-gamma.test.ts (4 tests | 4 skipped) 1ms
+ Test Files  3 passed (3)
+LOG
+{ printf '%s\n' '{"requirementId":"openwop.it.v2-alpha.a","disposition":"executed-pass","assertionCount":2}'
+  printf '%s\n' '{"requirementId":"openwop.it.v2-beta.b","disposition":"blocked","detail":"v2 discovery unreachable"}'
+  printf '%s\n' '{"requirementId":"openwop.it.v2-gamma.c","disposition":"blocked","detail":"v2 discovery unreachable"}'; } > "$M2T/deadhost.jsonl"
+check "$(m2 deadhost.log deadhost.jsonl)" "1" "major-2 ratchet FAILS when the host died mid-run (all ✓, ledger blocked; it used to pass)"
+printf '%s\n' 'openwop.it.v2-beta.b  # admitted' 'openwop.it.v2-gamma.c  # admitted' > "$M2T/known-blocked.txt"
+check "$(m2 deadhost.log deadhost.jsonl)" "0" "  ...and PASSES when exactly those blocked rows are admitted"
+printf '%s\n' 'openwop.it.v2-beta.b  # admitted' 'openwop.it.v2-gamma.c  # admitted' 'openwop.it.v2-delta.d  # no longer blocked' > "$M2T/known-blocked.txt"
+check "$(m2 deadhost.log deadhost.jsonl)" "1" "  ...and FAILS on a STALE admitted-blocked entry"
+: > "$M2T/known-blocked.txt"
+check "$(m2 green.log missing.jsonl)" "1" "  ...and FAILS when the ledger is missing (cannot tell blocked from pass)"
+: > "$M2T/empty.jsonl"
+check "$(m2 green.log empty.jsonl)" "1" "  ...and FAILS when the ledger is empty"
 rm -rf "$M2T"
 
 echo "== check-audit: one exception must not waive a package's OTHER advisories =="

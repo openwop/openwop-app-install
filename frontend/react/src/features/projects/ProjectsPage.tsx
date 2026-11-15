@@ -1,7 +1,9 @@
 /**
  * Projects page (ADR 0046) — the `kind:'project'` Subject surface. Lists the
- * workspace's projects (the ones the caller can read) + a create form; each card
- * links to the project detail (board + memory). Uses the shared `ui/` primitives.
+ * workspace's projects (the ones the caller can read); each card links to the
+ * project detail (board + memory). Creating one opens a dialog from the header's
+ * "New project" button (issue 5921: the form used to sit above the list on every visit).
+ * Uses the shared `ui/` primitives.
  */
 
 import { Button } from '../../ui/Button.js';
@@ -11,6 +13,8 @@ import { PageHeader } from '../../ui/PageHeader.js';
 import { Notice } from '../../ui/Notice.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { TextField, SelectField } from '../../ui/Field.js';
+import { CreateDialog } from '../../ui/CreateDialog.js';
+import { announce } from '../../ui/announce.js';
 import { ViewToggle, useViewMode } from '../../ui/ViewToggle.js';
 import { FolderIcon, PlusIcon } from '../../ui/icons/index.js';
 import { getEffectiveAccess } from '../../client/accessClient.js';
@@ -29,7 +33,7 @@ export function ProjectsPage(): JSX.Element {
    *  none). #2596's correction: the right resolution depends on what the EMPTY
    *  state says, and this one instructs. */
   const [loadFailed, setLoadFailed] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
   const [name, setName] = useState('');
   // ADR 0063 — only offer "Create project" to a caller who can actually write
   // somewhere in this workspace (createProject needs `workspace:write` in the
@@ -91,18 +95,22 @@ export function ProjectsPage(): JSX.Element {
 
   const effectiveOrg = orgId;
 
-  const onCreate = async (e: React.FormEvent): Promise<void> => {
-    e.preventDefault();
-    if (!effectiveOrg || !name.trim() || busy) return;
-    setBusy(true); setError(null);
-    try { await createProject(effectiveOrg, name.trim()); setName(''); await refresh(); }
-    catch (er) { setError(`${t('createProjectError')} ${loadErrorMessage(t, er)}`); }
-    finally { setBusy(false); }
+  const onCreate = async (): Promise<void> => {
+    const created = name.trim();
+    try { await createProject(effectiveOrg, created); }
+    // The client's message is `createProject failed (403)`: classify it and show the
+    // localized reason, as the page did before the dialog (UX_UPGRADE-projects R2).
+    catch (err) { throw new Error(`${t('createProjectError')} ${loadErrorMessage(t, err)}`); }
+    setName('');
+    announce(t('projectCreated', { name: created }));
+    await refresh();
   };
+  const openCreate = (): void => { setError(null); setCreateOpen(true); };
+  const newProjectButton = <Button variant="primary" size="sm" onClick={openCreate}><PlusIcon size={13} /> {t('newProject')}</Button>;
 
   return (
     <div data-walkthrough="projects.page">
-      <PageHeader eyebrow={t('listEyebrow')} title={t('listTitle')} lede={t('listLede')} />
+      <PageHeader eyebrow={t('listEyebrow')} title={t('listTitle')} lede={t('listLede')} actions={canCreate ? newProjectButton : undefined} />
       {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}
 
       {/* PRJ2-M4 — the access read failed, so we cannot say whether this person
@@ -112,8 +120,16 @@ export function ProjectsPage(): JSX.Element {
         <Notice variant="warning" announce={t('accessCheckFailed')}>{t('accessCheckFailed')}</Notice>
       ) : null}
 
-      {canCreate ? (
-        <form className="surface-card surface-form u-mb-4" onSubmit={(e) => void onCreate(e)}>
+      {createOpen ? (
+        <CreateDialog
+          title={t('newProject')}
+          submitLabel={<><PlusIcon size={14} /> {t('createProject')}</>}
+          canSubmit={!!effectiveOrg && !!name.trim()}
+          ready={!orgsFailed && (orgs?.length ?? 0) > 0}
+          onSubmit={onCreate}
+          onClose={() => setCreateOpen(false)}
+          errorFallback={t('createProjectError')}
+        >
           {/* Failed → empty → loading, in that order, owned by the shared
               component. Its children render ONLY once the read succeeded with
               at least one workspace — so a failed read can no longer present a
@@ -130,9 +146,8 @@ export function ProjectsPage(): JSX.Element {
               {(orgs ?? []).map((o) => <option key={o.orgId} value={o.orgId}>{o.name}</option>)}
             </SelectField>
             <TextField label={t('newProjectNameLabel')} value={name} onChange={(e) => setName(e.target.value)} placeholder={t('newProjectNamePlaceholder')} />
-            <Button variant="primary" type="submit" disabled={!effectiveOrg || !name.trim() || busy}><PlusIcon size={14} /> {t('createProject')}</Button>
           </OrgSelectionState>
-        </form>
+        </CreateDialog>
       ) : null}
 
       {projects === null && loadFailed ? (
@@ -144,7 +159,7 @@ export function ProjectsPage(): JSX.Element {
       ) : projects === null ? (
         <StateCard icon={<FolderIcon size={20} />} title={t('loadingProjects')} loading />
       ) : projects.length === 0 ? (
-        <StateCard icon={<FolderIcon size={20} />} title={t('noProjectsTitle')} body={t('noProjectsBody')} />
+        <StateCard icon={<FolderIcon size={20} />} title={t('noProjectsTitle')} body={t('noProjectsBody')} action={canCreate ? newProjectButton : undefined} />
       ) : (
         <>
           <div className="filterbar" role="group" aria-label={t('filterGroup')}>

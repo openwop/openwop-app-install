@@ -4,8 +4,16 @@
  * subdomain entry admits its siblings or apex, or if an empty/absent/unparseable
  * input is allowed (default-deny).
  *
- * Double guard (recorded): `allowedDomains.length === 0` is backed by `.some([])`
- * being false, so removing that early return alone changes no outcome.
+ * ADR 1018 D5 adds the entry grammar (`normalizeAllowedDomain`), applied at match time
+ * too: a bare label, wildcard, port, credentials or empty label admits nothing.
+ *
+ * Double guards (recorded; each has a one-edit break-both probe, w108 TST-CHW-21):
+ * `allowedDomains.length === 0` is backed by `.some([])` being false, and the `*`
+ * refusal is backed by the LABEL grammar, so removing either alone changes no outcome.
+ * Equivalent by the WHATWG URL parser, not probed: the explicit trim/lowercase in
+ * `hostOf` and `normalizeAllowedDomain` (`URL.hostname` is already lowercased and the
+ * parser strips surrounding spaces), so the case-insensitivity cases assert the
+ * outcome, whichever of the two produces it.
  */
 import { describe, it, expect } from 'vitest';
 import { originAllowed, hostOf, normalizeAllowedDomain } from '../src/features/chat-widget/originAllowlist.js';

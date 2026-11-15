@@ -20,6 +20,8 @@
  * ADR 1113: dropping `readLinks`, not expanding links into entries, skipping
  * the duplicate check, resolving a fragment off the owning page, or leaving
  * links out of the grouped-mode switch each reds an authored-links case.
+ * ADR 1113 D5: ignoring `ctaHref`, resolving its fragment off the page, or
+ * accepting an off-site one reds the button-destination case.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -165,6 +167,29 @@ describe('PublicShell grouped site navigation (ADR 1049)', () => {
     const panel = await renderWith([{ slug: 'features', title: 'Features', nav: { links: [{ label: 'Discover', href: '/discover', group: 'audience' }] } }], []);
     expect(await within(panel).findByRole('link', { name: /^Discover/ })).toBeTruthy();
     expect(panel.classList.contains('public-menu__panel--mega')).toBe(true);
+  });
+
+  it('sends the header and footer button to `siteNav.ctaHref` (ADR 1113 D5)', async () => {
+    const withHref = (ctaHref: string): unknown[] => [
+      { slug: 'features', title: 'Features', nav: { group: 'product', order: 10, cta: 'Find your challenge', ctaHref } },
+    ];
+    const buttons = (): string[] => ['.public-shell-cta', '.app-footer__cta']
+      .map((sel) => document.querySelector(sel)?.getAttribute('href') ?? 'missing');
+
+    const panel = await renderWith(withHref('/discover'), []);
+    expect(await within(panel).findByRole('link', { name: /^Features/ })).toBeTruthy();
+    expect(buttons()).toEqual(['/discover', '/discover']);
+    expect(document.querySelector('.app-footer__cta')?.textContent).toBe('Find your challenge');
+    cleanup();
+
+    // A fragment lands on the owning page.
+    await within(await renderWith(withHref('#start'), [])).findByRole('link', { name: /^Features/ });
+    expect(buttons()).toEqual(['/p/features#start', '/p/features#start']);
+    cleanup();
+
+    // An unsafe destination is dropped and the button keeps the page (control).
+    await within(await renderWith(withHref('https://evil.example'), [])).findByRole('link', { name: /^Features/ });
+    expect(buttons()).toEqual(['/p/features', '/p/features']);
   });
 
   it('renders the footer as one column per group, Legal last with the privacy link', async () => {

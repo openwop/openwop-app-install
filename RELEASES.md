@@ -48,6 +48,22 @@ upgrade is neither: list it in `breakingConfig`.
 
 ## Version log
 
+### v0.14.0 — 2026-11-15
+
+- **Required stop:** no. **Rolling-safe:** yes.
+- **Schema:** sqlite 53 / postgres 51 (one index on `notifications`) · **App migrations:** 26 (unchanged).
+- New settings: `OPENWOP_COMMERCE_MAX_PRODUCTS_PER_ORG` (default 5000),
+  `OPENWOP_COMMERCE_INDEX_SWEEP_MS` (default 60000) and the optional one-shot
+  `OPENWOP_CMS_OVERLAY_REALIGN`, `OPENWOP_ASSET_ACCESS` (default off); two default-off flags. No setting changes meaning.
+- A client's runs are read only by that client's people (ADR 1121).
+- Private projects admit only members and the org's admins; four Gemini models
+  leave the catalog; `registerCollaborationOrgGate` is renamed.
+- Open chats no longer file Inbox requests; a one-time background job retires
+  the ones already sent.
+- Adds readable Inbox requests that close with their step, feature wording on
+  approval cards, hideable menu entries and paged product and order reads.
+- [CHANGELOG §0.14.0](./CHANGELOG.md#0140--2026-11-15)
+
 ### v0.13.0 — 2026-11-11
 
 - **Required stop:** no. **Rolling-safe:** yes.

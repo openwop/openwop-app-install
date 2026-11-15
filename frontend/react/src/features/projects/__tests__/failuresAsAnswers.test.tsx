@@ -37,6 +37,7 @@ const getEffectiveAccess = vi.fn();
 const getProject = vi.fn();
 const deleteProject = vi.fn();
 const updateCharter = vi.fn();
+const createProject = vi.fn();
 
 vi.mock('../../../workflows/workflowsClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
@@ -50,6 +51,7 @@ vi.mock('../projectsClient.js', async (orig) => ({
   getProject: (id: string) => getProject(id),
   deleteProject: (id: string) => deleteProject(id),
   updateCharter: (id: string, c: unknown) => updateCharter(id, c),
+  createProject: (orgId: string, name: string) => createProject(orgId, name),
   updateWorkflows: vi.fn(async () => ({})),
   getDeletePreview: vi.fn(async () => ({ canvases: 0, documents: 0, entities: 0, priorityLists: 0, teamLedger: 0 })),
 }));
@@ -76,7 +78,8 @@ const PROJECT: Project = {
 const settle = async (): Promise<void> => { await act(async () => { await new Promise((r) => setTimeout(r, 0)); }); };
 
 beforeEach(() => {
-  for (const m of [listWorkflowSummaries, listProjects, listOrgs, getEffectiveAccess, getProject, deleteProject, updateCharter]) m.mockReset();
+  for (const m of [listWorkflowSummaries, listProjects, listOrgs, getEffectiveAccess, getProject, deleteProject, updateCharter, createProject]) m.mockReset();
+  createProject.mockResolvedValue(PROJECT);
   listWorkflowSummaries.mockResolvedValue([{ workflowId: 'wf-mine', name: 'My real workflow' }]);
   listProjects.mockResolvedValue([]);
   listOrgs.mockResolvedValue([{ orgId: 'org-1', name: 'Acme' }]);
@@ -86,6 +89,53 @@ beforeEach(() => {
   updateCharter.mockResolvedValue(PROJECT);
 });
 afterEach(cleanup);
+
+describe('issue 5921 — creating a project opens a dialog from the header', () => {
+  const view = async (): Promise<void> => {
+    render(<MemoryRouter><ProjectsPage /></MemoryRouter>);
+    await settle();
+  };
+  const openDialog = async (): Promise<void> => {
+    fireEvent.click((await screen.findAllByRole('button', { name: /new project/i }))[0]!);
+  };
+
+  it('keeps the list free of the form: the page shows no name field until the dialog opens', async () => {
+    await view();
+    expect(screen.queryByLabelText(/new project name/i)).toBeNull();
+    await openDialog();
+    expect(screen.getByRole('dialog', { name: /new project/i })).toBeTruthy();
+    expect(screen.getByLabelText(/new project name/i)).toBeTruthy();
+  });
+
+  it('an empty list offers the same button', async () => {
+    await view();
+    expect(screen.getAllByRole('button', { name: /new project/i })).toHaveLength(2);
+    expect(screen.queryByText(/create one above/i)).toBeNull();
+  });
+
+  it('creates in the chosen org, closes, and refreshes the list', async () => {
+    await view();
+    await openDialog();
+    fireEvent.change(screen.getByLabelText(/new project name/i), { target: { value: '  Launch Q3 ' } });
+    listProjects.mockResolvedValue([PROJECT]);
+    fireEvent.click(screen.getByRole('button', { name: /create project/i }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(createProject).toHaveBeenCalledWith('org-1', 'Launch Q3');
+    expect(await screen.findByText('Atlas')).toBeTruthy();
+  });
+
+  it('a failed create keeps the dialog open with the localized reason inside, never the client message', async () => {
+    createProject.mockRejectedValue(Object.assign(new Error('createProject failed (403)'), { status: 403 }));
+    await view();
+    await openDialog();
+    fireEvent.change(screen.getByLabelText(/new project name/i), { target: { value: 'Atlas' } });
+    fireEvent.click(screen.getByRole('button', { name: /create project/i }));
+    const dialog = screen.getByRole('dialog', { name: /new project/i });
+    await waitFor(() => expect(dialog.textContent).toContain('Failed to create the project.'));
+    expect(dialog.textContent).toContain("You don't have permission to do that here.");
+    expect(dialog.textContent).not.toContain('createProject failed');
+  });
+});
 
 describe('PRJ2-M2 — the assign picker stopped claiming to be complete', () => {
   const view = async (): Promise<void> => {
@@ -149,6 +199,8 @@ describe('PRJ2-M4 — the two reads that gate project creation', () => {
   it('a failed org read is not an empty workspace list — and replaces the picker, not decorates it', async () => {
     listOrgs.mockRejectedValue(new Error('boom'));
     await view();
+    // issue 5921 — the create form now opens in a dialog from the header button.
+    fireEvent.click((await screen.findAllByRole('button', { name: /new project/i }))[0]!); // the header's; the empty state offers the same
     // The shared `OrgSelectionState` (this page migrated to it — see the
     // org-selection ratchet). Its failed branch names the consequence…
     expect(await screen.findByText(/workspace list/i)).toBeTruthy();
@@ -165,12 +217,15 @@ describe('PRJ2-M4 — the two reads that gate project creation', () => {
     getEffectiveAccess.mockRejectedValue(new Error('boom'));
     await view();
     expect(await screen.findByText(/could not check your permissions/i)).toBeTruthy();
-    // Still fail-closed — the disclosure replaces the form, it does not restore it.
+    // Still fail-closed — the disclosure replaces the form, it does not restore it:
+    // no button opens it (issue 5921) and no create button exists.
+    expect(screen.queryByRole('button', { name: /new project/i })).toBeNull();
     expect(screen.queryByRole('button', { name: /create project/i })).toBeNull();
   });
 
   it('says neither thing when both reads succeed (the negative control)', async () => {
     await view();
+    fireEvent.click((await screen.findAllByRole('button', { name: /new project/i }))[0]!); // the header's; the empty state offers the same
     await waitFor(() => expect(screen.getByRole('button', { name: /create project/i })).toBeTruthy());
     // PRJC-8 — this used to assert absence of /Your workspaces could not be
     // loaded/, a sentence NO branch renders (the real failure copy is

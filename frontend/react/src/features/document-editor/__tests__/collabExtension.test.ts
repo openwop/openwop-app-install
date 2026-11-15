@@ -10,6 +10,12 @@
  * Sabotage (wave 14): drop `ySyncPlugin(...)` → both cases red; bind a different
  * fragment name → case 2 red; drop `yUndoPlugin()` → case 1 red.
  *
+ * The fragment key is asserted as the LITERAL `'doc'`, not through the exported
+ * `COLLAB_FRAGMENT`: the backend snapshot reads `ydoc.getXmlFragment('doc')`
+ * (`backend/typescript/src/features/document-editor/pmFromY.ts`), so renaming the
+ * constant would split every client from the stored document while a test that
+ * compares the constant with itself stayed green (wave 109).
+ *
  * Was BLOCKED-ON-PRODUCT (wave 14) as `it.fails`; FIXED in `documentSchema.ts`,
  * which now passes `{ undoRedo: false }`. What it pinned: the collab path builds its
  * extensions with `documentExtensions({ history: false })`
@@ -25,7 +31,10 @@ import * as Y from 'yjs';
 import { Awareness } from 'y-protocols/awareness';
 import { ySyncPluginKey, yUndoPluginKey } from 'y-prosemirror';
 import { undo as coreUndo } from '@tiptap/pm/history';
-import { collabExtension, COLLAB_FRAGMENT } from '../collabExtension.js';
+import { collabExtension } from '../collabExtension.js';
+
+/** The shared root every client AND the backend snapshot (`pmFromY.ts`) agree on. */
+const SHARED_FRAGMENT = 'doc';
 import { documentExtensions } from '../documentSchema.js';
 
 function mount(ydoc: Y.Doc): Editor {
@@ -38,11 +47,11 @@ function mount(ydoc: Y.Doc): Editor {
 }
 
 describe('collabExtension', () => {
-  it('installs the y-sync plugin (per-user history, not prosemirror-history)', () => {
+  it('installs the y-sync plugin on the shared fragment and the per-user y-undo plugin', () => {
     const ydoc = new Y.Doc();
     const editor = mount(ydoc);
     try {
-      expect(ySyncPluginKey.getState(editor.state)?.type).toBe(ydoc.getXmlFragment(COLLAB_FRAGMENT));
+      expect(ySyncPluginKey.getState(editor.state)?.type).toBe(ydoc.getXmlFragment(SHARED_FRAGMENT));
       // Per-user undo: the y-undo plugin owns an UndoManager over the shared type.
       expect(yUndoPluginKey.getState(editor.state)?.undoManager).toBeInstanceOf(Y.UndoManager);
     } finally { editor.destroy(); }
@@ -53,12 +62,22 @@ describe('collabExtension', () => {
     const editor = mount(ydoc);
     try {
       editor.commands.insertContent('hello crdt');
-      expect(ydoc.getXmlFragment(COLLAB_FRAGMENT).toString()).toContain('hello crdt');
+      expect(ydoc.getXmlFragment(SHARED_FRAGMENT).toString()).toContain('hello crdt');
     } finally { editor.destroy(); }
   });
 
   // The ADR 0335 witness — see header. Built exactly as the collab path builds it.
   it('the collab extension set carries NO core undo/redo next to yUndoPlugin (ADR 0335)', () => {
+    // CONTROL: the solo set DOES carry core undo under the name `undoRedo`, and a
+    // local edit IS undoable by it — so the two absences asserted below are of a
+    // plugin that exists, not of a name or command that could never match.
+    const solo = new Editor({ element: document.createElement('div'), extensions: documentExtensions() });
+    try {
+      expect(solo.extensionManager.extensions.map((e) => e.name)).toContain('undoRedo');
+      solo.commands.insertContent('solo');
+      expect(coreUndo(solo.state)).toBe(true);
+    } finally { solo.destroy(); }
+
     const ydoc = new Y.Doc();
     const editor = new Editor({
       element: document.createElement('div'),

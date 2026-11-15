@@ -18,6 +18,7 @@
  * @see docs/adr/0236-cms-page-experiments.md
  */
 
+import { schedulePublicAssetResync } from '../../host/assetGrants.js';
 import { randomUUID } from 'node:crypto';
 import { DurableCollection, hostExtStorage } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
@@ -247,6 +248,9 @@ function nowIso(): string {
  *  it describes; `payload.tenantId` is required (the tenant-scoped governance
  *  read withholds rows without it, fail-closed). */
 function recordExperimentAction(action: string, exp: PageExperiment, actor: string, extra?: Record<string, unknown>): void {
+  // ADR 1122 P1 — a running experiment serves its variants' snapshots publicly, so
+  // starting or stopping one changes the page's public pictures.
+  if (action === 'start' || action === 'stop' || action === 'promote') schedulePublicAssetResync('cms-page', exp.tenantId, exp.pageId);
   const at = nowIso();
   const payload = {
     tenantId: exp.tenantId,

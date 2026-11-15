@@ -116,8 +116,12 @@ const conformanceFixtures = new Map<string, WorkflowDefinition>();
         // on, the graph is admitted exactly as a registered one would be.
         const normalizedEdges = Array.isArray(parsed.edges)
           ? parsed.edges.map((e, i) => {
-            const edgeRef = `${id}#${e.edgeId ?? (e as { id?: string }).id ?? i}`;
-            const withCondition = e.condition ? { ...e, condition: normalizeEdgeCondition(e.condition, edgeRef) } : e;
+            const edgeId = e.edgeId ?? (e as { id?: string }).id;
+            const edgeRef = `${id}#${edgeId ?? i}`;
+            // The host spelling, as for `nodeId` above: the wire `id` is what a
+            // fixture carries, and executor seams read `edgeId`.
+            const named = edgeId !== undefined ? { ...e, edgeId } : e;
+            const withCondition = named.condition ? { ...named, condition: normalizeEdgeCondition(named.condition, edgeRef) } : named;
             return e.loopback !== undefined ? { ...withCondition, loopback: normalizeEdgeLoopback(e.loopback, e, edgeRef) } : withCondition;
           })
           : parsed.edges;

@@ -82,6 +82,8 @@ export function OrgsPage(): JSX.Element {
           accessFor={c.accessFor}
           access={c.access}
           onCreateMember={c.onCreateMember}
+          onMembersChanged={c.onMembersChanged}
+          isSuperadmin={c.isSuperadmin}
           onShowAccess={c.onShowAccess}
           startEdit={c.startEdit}
           onDeleteMember={c.onDeleteMember}

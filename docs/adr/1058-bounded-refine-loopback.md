@@ -1,6 +1,6 @@
 # ADR 1058 — Bounded refine loopback (RFC 0258 host implementation)
 
-Status: Accepted. PR-A implemented (default OFF); PR-B open. RFC 0258 is `Active`
+Status: Accepted. PR-A and PR-B implemented (default OFF); the fixture edge-id fix (2026-11-13) is open. RFC 0258 is `Active`
 (suite 2.46.44, vendored). The graph behaviour and the `loopback` advert both sit
 behind `OPENWOP_BOUNDED_LOOPBACK`, default OFF; turning it on in production is a
 separate step, measured first.
@@ -183,3 +183,23 @@ so a rename in review is a single edit.
 - **Fixtures.** `conformance-loopback-refine` and `-fail` load through `normalizeEdgeLoopback`. With the flag off, that call throws, so the fixtures are skipped and not advertised. `fixtureGraphRefused` also runs `planLoopbacks`.
 - **Dependent on vendoring.** The marker flip is honest on a major-2 read only once the 2.46.44 schemas are vendored (`sync-schemas`, `sync-fixtures`, conformance pin `^2.46.44`). Those land in this PR, together with the edits above.
 - **Before a certified cut.** The deploy must run with `OPENWOP_BOUNDED_LOOPBACK=true`. Otherwise nothing is advertised and every `0258.*` leg reads `inapplicable`.
+
+> **CORRECTED 2026-11-13: the fixtures loaded, but they could not pass.** The
+> "Fixtures" bullet above is true as far as it goes. The pre-check before the
+> production flag flip ran the 0258 rows as a major-2 lane against the serving
+> image (`ac1d25799`, revision 01219-hlh, flag on). Five of the 7 rows failed and
+> one was `blocked`. The served marker had no `edgeId`, round 2 never came, the
+> cap was never spent, and history stayed empty.
+>
+> **Cause.** The fixture loader in `host/index.ts` maps a node's `id` to
+> `nodeId` but never mapped an edge's `id` to `edgeId`. `planLoopbacks` computed
+> the id in either spelling for its own messages, then stored the raw edge. Every
+> marker, round count and history read keys on `region.edge.edgeId`, so for a
+> fixture all of them keyed on `undefined`. The host tests stayed green because
+> they register through `validateWorkflowDefinition`, which does the mapping.
+>
+> **Fix.** `planLoopbacks` stores the edge under its host spelling, and the
+> fixture loader names `edgeId` the same way it names `nodeId`. Two tests red
+> without the fix: one registers a definition that skips the validator, and one
+> plans one. The production flip waits for a re-run of the pre-check on an image
+> that carries this fix.

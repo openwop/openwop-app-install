@@ -74,7 +74,7 @@ describe('the capability gate refuses by the ACTIVE provider (input built as the
 });
 
 describe('the EXECUTOR actually feeds the node config to the gate', () => {
-  it('reads nodeRef.config.provider/model at the gate call site', async () => {
+  it('reads the node\'s provider/model (resolved per run) at the gate call site', async () => {
     // Without this the suite above is VACUOUS in the REV-VIS-1 way: `gateInputFor`
     // re-implements the executor's expression, so every assertion would still pass
     // against an executor that kept using only the host default. A full executor
@@ -85,11 +85,17 @@ describe('the EXECUTOR actually feeds the node config to the gate', () => {
     // The WHOLE ternary, both branches — the node pin when it is a non-empty
     // string, the host default otherwise. (`[\s\S]{0,200}` matched a swapped
     // true branch too: probe w72g4-mcg-exec-host-only stayed green.)
+    // Issue #5897: the gate reads the node's config RESOLVED from the run's
+    // variables (a deferred copy binds provider/model per run), which must itself
+    // be built from `nodeRef.config`.
+    expect(src, 'nodeConfig is the node\'s own config, resolved per run').toMatch(
+      /const nodeConfig = resolveNodeConfig\(nodeRef\.config, snapshotRunVariables\(run\.runId\)\);/,
+    );
     expect(src, 'the gate input must derive activeProvider from the NODE').toMatch(
-      /activeProvider: typeof nodeRef\.config\?\.provider === 'string' && nodeRef\.config\.provider\s*\?\s*nodeRef\.config\.provider\s*:\s*gateConfig\.defaultProvider,/,
+      /activeProvider: typeof nodeConfig\.provider === 'string' && nodeConfig\.provider\s*\?\s*nodeConfig\.provider\s*:\s*gateConfig\.defaultProvider,/,
     );
     expect(src, 'and activeModel likewise').toMatch(
-      /activeModel: typeof nodeRef\.config\?\.model === 'string' && nodeRef\.config\.model\s*\?\s*nodeRef\.config\.model\s*:\s*gateConfig\.defaultModel,/,
+      /activeModel: typeof nodeConfig\.model === 'string' && nodeConfig\.model\s*\?\s*nodeConfig\.model\s*:\s*gateConfig\.defaultModel,/,
     );
   });
 });

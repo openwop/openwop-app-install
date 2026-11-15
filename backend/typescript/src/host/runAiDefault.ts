@@ -40,7 +40,8 @@
  */
 import { getChatByokConfig } from './chatByokConfig.js';
 import { registerRunStartContributor, type RunStartContext } from './runStartContext.js';
-import { getDefaultModel, getProviderConfig, listManagedProviderIds, listSelectableProviderIds } from '../providers/catalog.js';
+import { getDefaultModel, getProviderConfig, listManagedProviderIds, listProviders, listSelectableProviderIds } from '../providers/catalog.js';
+import { OpenwopError } from '../types.js';
 import { isManagedRef, refNamedProvider } from '../aiProviders/credentialRefLadder.js';
 import { listSecretRefs } from '../byok/secretResolver.js';
 import { getManagedProviderStatuses } from '../providers/managedProvider.js';
@@ -201,14 +202,48 @@ export function withRunAiDefault<T extends { provider?: string; model?: string; 
     return { ...req, model };
   }
   if (!def) return req;
+  const wanted = typeof req.model === 'string' && req.model.length > 0 ? req.model : undefined;
+  // A model chosen without a provider (a deferred copy's run input, ADR 1117) runs
+  // on the provider that offers it: the default's when that provider lists it or
+  // the catalog does not know the model, else the one provider that does. That
+  // provider never takes the default's key (#5764). Replacing the choice with the
+  // default's model was the silent substitution of DAC-2.
+  const owner = wanted ? modelOwner(wanted, def.provider) : undefined;
+  if (owner && owner !== def.provider) {
+    if (typeof req.credentialRef === 'string' && req.credentialRef.length > 0) return req;
+    return { ...req, provider: owner, model: wanted };
+  }
   if (def.credentialRef) {
     // A default that carries a ref (the managed sentinel, or since #5764 the
     // workspace binding's key) fills provider, model AND that ref together. A call
     // that already carries its own key keeps it and is left as it was: a provider
     // is never paired with another default's key.
     if (typeof req.credentialRef === 'string' && req.credentialRef.length > 0) return req;
-    return { ...req, provider: def.provider, model: def.model, credentialRef: def.credentialRef };
+    // The managed tier serves only the models it lists, so a model id the catalog
+    // does not know (an older pack naming one with no provider) runs on the tier's
+    // own model, as before. A listed model is honoured; another provider's model
+    // already moved the call above.
+    const keep = wanted !== undefined && (def.source !== 'managed' || lists(def.provider, wanted));
+    return { ...req, provider: def.provider, model: keep ? wanted : def.model, credentialRef: def.credentialRef };
   }
-  const model = typeof req.model === 'string' && req.model.length > 0 ? req.model : def.model;
-  return { ...req, provider: def.provider, model };
+  return { ...req, provider: def.provider, model: wanted ?? def.model };
+}
+
+/**
+ * The provider a model runs on when the call names none: `fallback` when it lists
+ * the model or no catalog provider does (an id the catalog does not know passes
+ * through, and the provider accepts or rejects it), else the single provider that
+ * lists it. A model listed by several providers, none of them `fallback`, cannot be
+ * placed without a guess, so it is refused.
+ */
+function modelOwner(model: string, fallback: string): string {
+  const owners = listProviders().filter((p) => lists(p.id, model)).map((p) => p.id);
+  if (owners.length === 0 || owners.includes(fallback)) return fallback;
+  if (owners.length === 1) return owners[0]!;
+  throw new OpenwopError('validation_error', `Model '${model}' is offered by more than one provider (${owners.join(', ')}). Choose the provider too.`, 400, { code: 'model_provider_ambiguous', model, providers: owners });
+}
+
+/** Whether the catalog lists `model` for `provider`. */
+function lists(provider: string, model: string): boolean {
+  return getProviderConfig(provider)?.models.some((m) => m.id === model) ?? false;
 }

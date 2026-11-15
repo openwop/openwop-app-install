@@ -22,11 +22,68 @@ export function stageComposerDraft(text: string): void {
   pending = text || null;
 }
 
-/** Consume the staged draft (returns it once, then clears it). */
-export function takeStagedComposerDraft(): string | null {
+/**
+ * Consume the staged draft (returns it once, then clears it). A composer passes its
+ * `draftKey`: a draft staged FOR that key (below) wins over the untargeted stage.
+ */
+export function takeStagedComposerDraft(draftKey?: string): string | null {
+  if (draftKey !== undefined) {
+    const mine = targeted.get(draftKey);
+    if (mine !== undefined) { targeted.delete(draftKey); return mine; }
+  }
   const t = pending;
   pending = null;
   return t;
+}
+
+/**
+ * CC-UX-2 — the multi-tab deck mounts EVERY tab, so "the next composer to mount"
+ * is whichever tab renders first, not the tab a `/?agent=` deep link opens. And
+ * that fresh tab has no backend row, so its first history read 404s and the
+ * recovery re-keys (remounts) it, re-seeding its composer from an empty draft.
+ * Either step lost the staged text. The deck therefore:
+ *  1. CLAIMS the stage while it renders, before any tab's composer mounts;
+ *  2. once it has minted the tab id, stages the claim FOR that tab's draft key;
+ *  3. on a re-key, carries the old composer's LIVE text to the new key.
+ */
+let claimed: string | null = null;
+const targeted = new Map<string, string>();
+
+/** Move the untargeted stage into the claim slot (idempotent across re-renders) and return it. */
+export function claimStagedComposerDraft(): string | null {
+  if (pending !== null) { claimed = pending; pending = null; }
+  return claimed;
+}
+
+/** Hand back the claim (returns it once, then clears it). */
+export function releaseClaimedComposerDraft(): string | null {
+  const t = claimed;
+  claimed = null;
+  return t;
+}
+
+/** Stage a draft for the ONE composer whose `draftKey` this is. */
+export function stageComposerDraftFor(draftKey: string, text: string): void {
+  if (text) targeted.set(draftKey, text);
+  else targeted.delete(draftKey);
+}
+
+/** The key a chat composer persists its draft under: one spelling for every chat shell. */
+export function chatDraftKey(scope: string, sessionId: string): string {
+  return `openwop-app.chat.draft:${scope}:${sessionId}`;
+}
+
+const liveText = new Map<string, () => string>();
+
+/** A mounted composer exposes its current text by draft key. Returns unsubscribe. */
+export function registerComposerText(draftKey: string, read: () => string): () => void {
+  liveText.set(draftKey, read);
+  return () => { if (liveText.get(draftKey) === read) liveText.delete(draftKey); };
+}
+
+/** The current text of the composer mounted under `draftKey` ('' when none is). */
+export function readComposerText(draftKey: string): string {
+  return liveText.get(draftKey)?.() ?? '';
 }
 
 /**

@@ -120,6 +120,17 @@ describe('approval notice delivery through tenant SMTP', () => {
     expect(capture.messages[0]?.text).not.toContain('never-expose-this-token');
   });
 
+  it('ADR 1120: a signed-in gate is mailed a Review link to the person\'s own row, and no token at all', async () => {
+    const { userId } = await recipient('signed-in-reviewer');
+    await deliverApprovalEmail(storage, { ...input(userId, 'signed-in-notice'), reviewPath: '/inbox?notification=signed-in-notice' });
+    expect(capture.messages).toHaveLength(1);
+    expect(links(capture.messages[0]!)).toEqual([new URL('https://notices.example/inbox?notification=signed-in-notice')]);
+    expect(capture.messages[0]?.text).not.toContain('interrupt-action');
+    // A reviewPath outside the inbox is ignored, not followed.
+    await deliverApprovalEmail(storage, { ...input(userId, 'signed-in-notice-2'), reviewPath: 'https://evil.example/inbox' });
+    expect(links(capture.messages[1]!)).toEqual([new URL('https://notices.example/inbox')]);
+  });
+
   it('approval-store notices are link-out only even for a current opted-in member', async () => {
     const { userId } = await recipient('reviewer');
     await deliverApprovalEmail(storage, input(userId, 'review-notice'));

@@ -1,14 +1,14 @@
 {
   "callSites": {
-    "literalNoSpread": 281,
+    "literalNoSpread": 280,
     "spread": 99,
-    "nonLiteral": 18
+    "nonLiteral": 19
   },
   "methods": {
-    "readable": 360,
+    "readable": 362,
     "opaque": 16
   },
-  "assertedPairs": 269,
+  "assertedPairs": 268,
   "opaqueMethods": [
     "accessibility.checkContent",
     "bi.runMetric",
@@ -121,6 +121,7 @@
     "feature.orgs.nodes/index.mjs:70 spread → orgs.invite",
     "feature.orgs.nodes/index.mjs:76 spread → orgs.listInvitations",
     "feature.orgs.nodes/index.mjs:83 spread → orgs.revokeInvitation",
+    "feature.podcasts.nodes/index.mjs:139 nonLiteral → podcasts.recordEpisodeResult",
     "feature.priority-matrix.nodes/index.mjs:134 spread → priority-matrix.updateIntake",
     "feature.priority-matrix.nodes/index.mjs:144 spread → priority-matrix.addEvidence",
     "feature.priority-matrix.nodes/index.mjs:39 spread → priority-matrix.submitIdea",

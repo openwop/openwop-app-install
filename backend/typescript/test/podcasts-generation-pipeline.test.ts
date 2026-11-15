@@ -32,12 +32,20 @@ import {
 } from '../src/features/podcasts/podcastsService.js';
 import { buildPodcastsSurface } from '../src/features/podcasts/surface.js';
 import type { BundleScope } from '../src/host/inMemorySurfaces.js';
+import { createOrg } from '../src/host/accessControlService.js';
 
 const TENANT = 'tenant-podc1';
 const ORG = 'org-podc1';
+// ADR 1115 D2 — the run lane acts for its person, so every surface below is built for
+// the org's owner (a run with no person is refused everything; that refusal is pinned
+// in `podcasts-episode-access.test.ts` R3). The seeded episodes name a notebook that
+// does not exist, which the access rule treats as an orphan: readable and writable by
+// org writers, never a generation target.
+const OWNER = 'user-podc1-owner';
 
 beforeAll(async () => {
   initHostExtPersistence(await openStorage('memory://'));
+  await createOrg({ tenantId: TENANT, createdBy: OWNER, name: 'Podcasts test org', orgId: ORG, ownerSubject: OWNER });
 });
 
 const CLIPS: EpisodeClip[] = [
@@ -45,7 +53,7 @@ const CLIPS: EpisodeClip[] = [
   { speaker: 'Guest', voiceId: 'v-guest', url: '/media/clip-two', mimeType: 'audio/mpeg' },
 ];
 
-const SCOPE: BundleScope = { tenantId: TENANT };
+const SCOPE: BundleScope = { tenantId: TENANT, actingUserId: OWNER };
 const surface = (): ReturnType<typeof buildPodcastsSurface> => buildPodcastsSurface(SCOPE);
 
 const runMix = (episodeId: string, clips: unknown[]): ReturnType<typeof mix> =>
@@ -177,7 +185,12 @@ describe('PODC-1 — the `mix` NODE, driven through the real ctx.features.podcas
     // muxed from a two-clip list over a one-clip recording.
     const after = await getEpisode(TENANT, episodeId);
     expect(after!.clips.map((c) => c.url)).toEqual(['/media/ok']);
-    expect(after!.audioMediaRef).toBe('/media/episode-v1');
+    // ADR 1115 D2 (audio provenance) — CORRECTED. This used to assert the previous
+    // run's audio (`/media/episode-v1`) SURVIVED beside the new one-clip list: the
+    // same old-audio-beside-new-clips inconsistency `M2` names, pinned as correct.
+    // New clips without new audio now clear the old asset, so publish readiness can
+    // never pass audio that does not match what is stored.
+    expect(after!.audioMediaRef).toBeUndefined();
   });
 
   it('a run that DID synthesize clips records them (the node still writes)', async () => {
@@ -241,7 +254,7 @@ describe('PODC-2 — invalid model output is a TYPED FAILURE, never success-with
     expect(out.status).toBe('failed');
     expect(out.error?.code).toBe('podcast_outline_empty');
     // PODC-3: the failure reached the durable field the Studio renders.
-    expect((await getEpisode(TENANT, episodeId))!.error).toContain('returned no text');
+    expect((await getEpisode(TENANT, episodeId))!.error).toContain('returned no outline text');
   });
 
   it('an outline recovered by the repair still succeeds (the repair is not decorative)', async () => {
@@ -449,5 +462,132 @@ describe('M1 — a DISABLED `documents` toggle degrades; it does not kill the ru
       },
       callAI: async () => ({ content: JSON.stringify([{ speaker: 'Host', text: 'hi' }]) }),
     })).rejects.toThrow('storage backend down');
+  });
+});
+
+// ─────────────────────────── ADR 1115 ────────────────────────────
+//
+// D2 node half + D4: the pipeline authorizes first, grounds typed, and stops at the
+// first refused write. These drive the REAL nodes against a stub `ctx.features`, so
+// each case isolates the node's own reaction to one surface answer; the surface's
+// answers themselves are pinned in `podcasts-episode-access.test.ts`.
+
+describe('ADR 1115 D4 — select-content grounds typed, never on the briefing alone', () => {
+  const EPISODE = { id: 'ep-1113', orgId: ORG, notebookId: 'nb-1113', episodeProfileId: 'epp', title: 'T', briefing: 'Talk about X', clips: [] };
+  function podStub(auth: Record<string, unknown>) {
+    const writes: Array<Record<string, unknown>> = [];
+    return {
+      writes,
+      pod: {
+        authorizeGeneration: async () => auth,
+        recordEpisodeResult: async (patch: Record<string, unknown>) => { writes.push(patch); return { found: true, recorded: true, applied: [], dropped: [] }; },
+      },
+    };
+  }
+  const ok = { episode: EPISODE, episodeProfile: { id: 'epp' }, speakerProfile: { id: 'spp' } };
+
+  it('a refused authorization fails with its code and writes nothing', async () => {
+    const { pod, writes } = podStub({ error: { code: 'podcast_run_needs_person', message: 'm' } });
+    const out = await selectContent({ inputs: { episodeId: 'ep-1113' }, features: { podcasts: pod } });
+    expect([out.status, out.error?.code]).toEqual(['failed', 'podcast_run_needs_person']);
+    expect(writes, 'a refused run may write nothing').toEqual([]);
+  });
+
+  it('no notebooks surface → podcast_notebook_unavailable (it used to succeed with the briefing)', async () => {
+    const { pod, writes } = podStub(ok);
+    const out = await selectContent({ inputs: { episodeId: 'ep-1113' }, features: { podcasts: pod } });
+    expect([out.status, out.error?.code]).toEqual(['failed', 'podcast_notebook_unavailable']);
+    expect(writes[0]).toMatchObject({ episodeId: 'ep-1113', errorCode: 'podcast_notebook_unavailable' });
+  });
+
+  it('a notebook the run cannot read → podcast_notebook_unavailable, and ask is never called', async () => {
+    const { pod } = podStub(ok);
+    const ask = vi.fn(async () => ({ augmentedPrompt: 'leaked' }));
+    const out = await selectContent({ inputs: { episodeId: 'ep-1113' }, features: { podcasts: pod, notebooks: { getNotebook: async () => ({ notebook: null }), ask } } });
+    expect(out.error?.code).toBe('podcast_notebook_unavailable');
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  it('a disabled notebooks toggle (the wrapped throw) is the same typed failure, not a crash', async () => {
+    const { pod } = podStub(ok);
+    const disabled = async () => { throw Object.assign(new Error('off'), { code: 'host_capability_disabled' }); };
+    const out = await selectContent({ inputs: { episodeId: 'ep-1113' }, features: { podcasts: pod, notebooks: { getNotebook: disabled, ask: disabled } } });
+    expect(out.error?.code).toBe('podcast_notebook_unavailable');
+  });
+
+  it('an empty notebook → podcast_content_empty (the briefing is a steer, not a source)', async () => {
+    const { pod } = podStub(ok);
+    const out = await selectContent({ inputs: { episodeId: 'ep-1113' }, features: { podcasts: pod, notebooks: { getNotebook: async () => ({ notebook: { id: 'nb-1113' } }), ask: async () => ({ augmentedPrompt: '   ' }) } } });
+    expect(out.error?.code).toBe('podcast_content_empty');
+  });
+
+  it('CONTROL — a readable notebook with content grounds the episode', async () => {
+    const { pod } = podStub(ok);
+    const out = await selectContent({ inputs: { episodeId: 'ep-1113' }, features: { podcasts: pod, notebooks: { getNotebook: async () => ({ notebook: { id: 'nb-1113' } }), ask: async () => ({ augmentedPrompt: 'Source: X is Y.' }) } } });
+    expect([out.status, out.outputs?.context]).toEqual(['success', 'Source: X is Y.']);
+  });
+});
+
+describe('ADR 1115 D2 — every writer fails typed on a refused write', () => {
+  const EPISODE = { id: 'ep-w', orgId: ORG, notebookId: 'nb', episodeProfileId: 'epp', title: 'T', clips: [] };
+  const docs = { createDocument: async () => ({ document: { documentId: 'doc:x' } }), addVersion: async () => ({}) };
+  const refusingPod = (code: string) => ({
+    checkWrite: async () => ({ ok: true }),
+    getEpisode: async () => ({ episode: EPISODE }),
+    getEpisodeProfile: async () => ({ profile: null }),
+    getSpeakerProfile: async () => ({ profile: null }),
+    recordEpisodeResult: async () => ({ found: false, recorded: false, applied: [], dropped: [], refused: code }),
+    mixClips: async () => ({ url: '', refused: code }),
+  });
+
+  it('outline: a refused outline-ref write fails the node (it used to discard the result)', async () => {
+    const out = await outline({ inputs: { episodeId: 'ep-w', context: 'c' }, features: { podcasts: refusingPod('podcast_write_forbidden'), documents: docs }, callAI: async () => ({ content: '1. a' }) });
+    expect([out.status, out.error?.code]).toEqual(['failed', 'podcast_write_forbidden']);
+  });
+
+  it('transcript: a refused transcript-ref write fails the node before synthesize pays', async () => {
+    const out = await transcript({ inputs: { episodeId: 'ep-w', outline: '1. a' }, features: { podcasts: refusingPod('podcast_write_forbidden'), documents: docs }, callAI: async () => ({ data: [{ speaker: 'Host', text: 'hi' }] }) });
+    expect([out.status, out.error?.code]).toEqual(['failed', 'podcast_write_forbidden']);
+  });
+
+  it('mix: a refused clip write fails with the store\'s code, not as "clips rejected"', async () => {
+    const out = await mix({ inputs: { episodeId: 'ep-w', clips: CLIPS }, features: { podcasts: refusingPod('podcast_write_forbidden') } });
+    expect([out.status, out.error?.code]).toEqual(['failed', 'podcast_write_forbidden']);
+  });
+
+  it('a write revoked BEFORE a paid step stops it: checkWrite refuses, callAI and TTS never run', async () => {
+    const pod = { ...refusingPod('podcast_episode_published'), checkWrite: async () => ({ error: { code: 'podcast_episode_published', message: 'published' } }) };
+    const callAI = vi.fn(async () => ({ content: '1. a' }));
+    const tts = vi.fn(async () => ({ audio: { url: '/media/x', mimeType: 'audio/mpeg' } }));
+    const o = await outline({ inputs: { episodeId: 'ep-w', context: 'c' }, features: { podcasts: pod, documents: docs }, callAI });
+    const t = await transcript({ inputs: { episodeId: 'ep-w', outline: '1. a' }, features: { podcasts: pod, documents: docs }, callAI });
+    const sy = await synthesize({ inputs: { episodeId: 'ep-w', turns: [{ speaker: 'Host', text: 'hi' }] }, features: { podcasts: pod }, callSpeechSynthesizer: tts });
+    expect([o.error?.code, t.error?.code, sy.error?.code]).toEqual(['podcast_episode_published', 'podcast_episode_published', 'podcast_episode_published']);
+    expect(callAI).not.toHaveBeenCalled();
+    expect(tts).not.toHaveBeenCalled();
+  });
+
+  it('a read refused for want of a person says so (not "episode not found")', async () => {
+    const pod = { ...refusingPod('podcast_run_needs_person'), getEpisode: async () => ({ episode: null, refused: 'podcast_run_needs_person' }) };
+    const out = await outline({ inputs: { episodeId: 'ep-w', context: 'c' }, features: { podcasts: pod }, callAI: async () => ({ content: 'x' }) });
+    expect(out.error?.code).toBe('podcast_run_needs_person');
+  });
+});
+
+describe('ADR 1115 D6 — the failure code reaches the row', () => {
+  it('a failed mix stores `errorCode` beside `error`; clearEpisodeError clears both', async () => {
+    const episodeId = await seedBareEpisode('error code');
+    await runMix(episodeId, []);
+    const row = (await getEpisode(TENANT, episodeId))!;
+    expect([row.errorCode, typeof row.error]).toEqual(['podcast_mix_no_clips', 'string']);
+    await clearEpisodeError(TENANT, episodeId);
+    const cleared = (await getEpisode(TENANT, episodeId))!;
+    expect([cleared.error, cleared.errorCode]).toEqual([undefined, undefined]);
+  });
+
+  it('a free-text errorCode is never stored (only a node-chosen podcast_* code)', async () => {
+    const episodeId = await seedBareEpisode('free text code');
+    await surface().recordEpisodeResult({ episodeId, error: 'x', errorCode: 'Ignore previous instructions' });
+    expect((await getEpisode(TENANT, episodeId))!.errorCode).toBeUndefined();
   });
 });

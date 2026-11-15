@@ -397,6 +397,7 @@ export type CallAiWithTools = (req: AiToolCallRequest) => Promise<AiToolCallResu
 export { MEMORY_UNTRUSTED_TAG } from './memoryTrust.js';
 import { MEMORY_UNTRUSTED_TAG } from './memoryTrust.js';
 import { isSentinelMemoryScope } from './memoryScopeSentinel.js';
+import { builtinAgentTool } from './agentToolProvider.js';
 
 export interface AgentMemoryPort {
   /** Resolve a memory scope to its entries (most-relevant-first). The OPTIONAL
@@ -1072,6 +1073,12 @@ interface ToolLoopCtx {
 /** Inputs to the shared observe→act core (`runChatToolLoop`). */
 export interface ChatToolLoopOpts {
   /**
+   * CC-AGENT-3 — a tool's declared effect, for the repeat guard only. Defaults to
+   * the registered `BuiltinTool.effect`; an unknown tool (MCP, unregistered) is
+   * treated as a write, which keeps the ADR 0975 D6 behaviour for it.
+   */
+  toolEffect?: (toolName: string) => 'read' | 'write' | undefined;
+  /**
    * ADR 0680 D3 — the tenant the loop runs for, threaded ONLY so the
    * `tool_output_compacted` savings telemetry can be attributed. Optional because
    * `anonymousActor` is the ratchet's EXEMPT lane and supplies no compaction decision, so
@@ -1170,6 +1177,15 @@ export interface PendingToolApproval {
    *  rule, the enforce default, the platform floor). Recorded on the ledger so an
    *  approval satisfies only what it answered. */
   origin?: 'baseline' | 'policy';
+}
+
+/** The assistant turn that records a round's tool calls: the round's text, if
+ *  any, then one line per call naming the tool. Never the arguments: they can
+ *  carry what a person typed (a visitor's email, ADR 0470's no-PII-echo
+ *  boundary), and the model already has them from its own round. A pure
+ *  function of the model's round, so a replay rebuilds the same messages. */
+export function toolCallTurn(text: string | undefined, calls: readonly { name: string }[]): string {
+  return [text, ...calls.map((c) => `Called ${c.name}.`)].filter((x): x is string => typeof x === 'string' && x.length > 0).join('\n\n');
 }
 
 /** Result of the shared loop. `error` set ⇒ a provider call failed mid-loop. */
@@ -1332,6 +1348,15 @@ export async function runChatToolLoop(
   // `openwop:kicktodo.candidates` five times with identical arguments, spent
   // every round, and the turn ended with no reply at all.
   let lastRanCall: string | undefined;
+  // CC-AGENT-3 — the READ calls that ran successfully since the last write this
+  // turn. A repeat of any of them (same tool, same args) is answered with the
+  // note too, not only a repeat of the LAST call: MEASURED on prod f1b882654
+  // (2026-11-13), the Brief Strategist alternated get-brief / validate with
+  // identical arguments for all five rounds — each call differed from the one
+  // before it, so `lastRanCall` never matched. Any write (or a tool whose effect
+  // is unknown) clears the set, because a read after a write may differ.
+  const readsSinceWrite = new Set<string>();
+  const effectOf = opts.toolEffect ?? ((name: string) => builtinAgentTool(name)?.effect);
   // CC-CHAN-1 — refusals this turn. A plan/feature refusal does not depend on the
   // arguments, so a later call to that TOOL is answered from it; any other
   // `forbidden` answers only an identical repeat. MEASURED live on 373d4863a: the
@@ -1427,7 +1452,11 @@ export async function runChatToolLoop(
       answered = true;
       break; // model produced a final answer
     }
-    if (out.content) messages.push({ role: 'assistant', content: defangUntrustedFence(out.content) });
+    // The model's own calls go into the transcript before their results, even in
+    // a round with no text. Without this turn the next round read a bare
+    // "Result of X" as something the person pasted, and after an approved gated
+    // call the agent denied making it (casavoga-prod, 2026-11-13, three runs).
+    messages.push({ role: 'assistant', content: defangUntrustedFence(toolCallTurn(out.content, calls)) });
     for (const call of calls) {
       // ADR 1001 D7 — the turn already ended on an earlier call this round: the
       // rest are recorded as not performed, never run behind the person's back.
@@ -1608,7 +1637,7 @@ export async function runChatToolLoop(
         }
       }
       const callKey = `${call.name}\u0000${computeArgsHash(call.input)}`;
-      if (callKey === lastRanCall) {
+      if (callKey === lastRanCall || (readsSinceWrite.has(callKey) && effectOf(call.name) === 'read')) {
         await emit({ type: 'agent.reasoned', agentId, reasoning: `${persona} repeated ${call.name} with the same arguments; the earlier result was kept, not re-run.` });
         log.info('tool_call_repeat_suppressed', { agentId, toolName: call.name, round });
         messages.push({ role: 'user', content: repeatedCallNote(call.name) });
@@ -1640,6 +1669,8 @@ export async function runChatToolLoop(
       // unfinished work (`continueTurn`, ADR 0773 B.7) is MEANT to be made again;
       // only a finished success counts as "already answered".
       lastRanCall = execOut.isError || execOut.continueTurn ? undefined : callKey;
+      if (effectOf(call.name) !== 'read') readsSinceWrite.clear();
+      else if (!execOut.isError && !execOut.continueTurn) readsSinceWrite.add(callKey);
       if (execOut.isError) {
         // RFC 0064 §F — a failure MUST carry `error` populated + `status:'error'`
         // (a bare `status:'error'` with no `error` is the WFAU-4 gap: a failure a

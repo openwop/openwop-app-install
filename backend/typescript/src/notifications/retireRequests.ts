@@ -68,6 +68,16 @@ export async function retireRequestsFor(storage: Storage, event: EventRecord): P
   }
 }
 
+/**
+ * #5922 — retire the "Input needed" items idle chats left before the suspend
+ * manager stopped filing them. `null` when the storage cannot do it (the job
+ * stays pending).
+ */
+export async function retireConversationRequests(storage: Storage, now: () => Date = () => new Date()): Promise<number | null> {
+  if (!storage.resolveRequestNotificationsOfKind) return null;
+  return await storage.resolveRequestNotificationsOfKind('conversation', { state: 'withdrawn', at: now().toISOString() });
+}
+
 let installed = false;
 
 /** Subscribe once at boot. A second call is a no-op. */

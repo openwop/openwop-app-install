@@ -82,3 +82,48 @@ describe('initial lineup restoration state ownership', () => {
     expect(h.result.current.agents.currentAgentId).toBe(DEFAULT_ASSISTANT_ID);
   });
 });
+
+// CC-CHAT-4 (prod, twice: DeckTalk + MyndHyve) — reopening an agent conversation from
+// the sidebar listed the agent but the plain Assistant answered ("I have no tools").
+// ADR 0140 correction 2026-11-14: restore fills an EMPTY voice with the agent that
+// answered last, and never replaces a voice already chosen.
+describe('CC-CHAT-4 — reopen continues with the agent that answered last', () => {
+  const answeredBy = (agentId: string): ChatSession => ({
+    ...fresh('a'),
+    messages: [
+      { id: 'u1', role: 'user', content: 'Generate the kernel' },
+      { id: 'a1', role: 'assistant', content: 'Started the kernel run.', agentId },
+    ] as ChatSession['messages'],
+  });
+  function useReopened(agentId: string) {
+    const [session, setSession] = useState(() => answeredBy(agentId));
+    return { session, setSession, agents: useActiveAgents(session, setSession) };
+  }
+
+  it('restoreLineup selects the restored member that answered last when no voice is chosen', () => {
+    const h = renderHook(() => useReopened(DIRECTOR.agentId));
+    act(() => h.result.current.agents.restoreLineup('a', [DIRECTOR], DIRECTOR.agentId));
+    expect(h.result.current.agents.currentAgentId).toBe(DIRECTOR.agentId);
+  });
+
+  it('restoreLineup never replaces a voice already chosen', () => {
+    const h = renderHook(() => useReopened(DIRECTOR.agentId));
+    act(() => h.result.current.agents.activateAgent(NORA));
+    act(() => h.result.current.agents.restoreLineup('a', [DIRECTOR], DIRECTOR.agentId));
+    expect(h.result.current.agents.currentAgentId).toBe(NORA.agentId);
+  });
+
+  it('restoreLineup ignores a preferred agent that is not a restored member', () => {
+    const h = renderHook(() => useReopened('qa.removed'));
+    act(() => h.result.current.agents.restoreLineup('a', [DIRECTOR], 'qa.removed'));
+    expect(h.result.current.agents.currentAgentId).toBe(DEFAULT_ASSISTANT_ID);
+  });
+
+  it('setLineup with continueLastAgent selects the member that answered the loaded turn', () => {
+    const h = renderHook(() => useReopened(DIRECTOR.agentId));
+    act(() => h.result.current.agents.setLineup([DIRECTOR], { continueLastAgent: true }));
+    expect(h.result.current.agents.currentAgentId).toBe(DIRECTOR.agentId);
+    act(() => h.result.current.agents.setLineup([DIRECTOR]));
+    expect(h.result.current.agents.currentAgentId).toBe(DEFAULT_ASSISTANT_ID);
+  });
+});

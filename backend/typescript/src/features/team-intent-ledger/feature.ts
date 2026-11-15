@@ -40,7 +40,7 @@ import { enqueueDriftCheck, startDriftWorker } from './driftCheck.js';
 import { registerDocumentVersionObserver } from '../../host/documentVersionObservers.js';
 import { notesDecisionSource } from './notesSource.js';
 import { registerHumanChatMessageObserver } from '../../host/humanChatMessageObservers.js';
-import { enqueueForSuggester, startDecisionSuggester } from './decisionSuggester.js';
+import { enqueueForSuggester, registerSuggesterQueueErasure, startDecisionSuggester } from './decisionSuggester.js';
 import { maybeResync } from './resync.js';
 import { registerConversationScopeContributor } from '../../host/conversationScopeContributors.js';
 import { teamLedgerMissionInheritance, teamLedgerScopeContributor } from './toolPolicy.js';
@@ -95,6 +95,7 @@ export const teamIntentLedgerFeature: BackendFeature = {
     });
     // ADR 0853 D1 — decision suggestions: erasure and the delete cascade.
     registerSuggestionErasure();
+    registerSuggesterQueueErasure(); // CHAN-F19 — a person's queued chat text
     registerSubjectDependent('project', 'teamLedgerSuggestions', {
       count: (tenantId, subject) => countSuggestionsForProject(tenantId, subject.id),
       purge: (tenantId, subject) => deleteSuggestionsForProject(tenantId, subject.id),

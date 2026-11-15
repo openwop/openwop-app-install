@@ -10,6 +10,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { declarePiiFields } from '../../host/dataClassification.js';
 import { cleanString } from '../../host/boundedStrings.js';
 import { OpenwopError } from '../../types.js';
 import { assertCampaignRef } from '../../host/campaignRefs.js';
@@ -28,6 +29,8 @@ const requests = new DurableCollection<StoredRequest>(
   undefined,
   (r) => r.tenantId,
 );
+/** CHAN-F19 (ADR 0464 §9) — who made, answered and overrode a request. `eraseRequestActors` tombstones them. */
+declarePiiFields('campaign-ops:request', ['createdBy', 'answers', 'duplicateOverride'], { maskGloballyByFieldName: false });
 
 export const MAX_REQUEST_TEXT = 2000;
 export const MAX_ASSETS_PER_REQUEST = 10;
@@ -240,5 +243,36 @@ export async function markProposed(tenantId: string, orgId: string, requestId: s
 export async function purgeRequestsForOrg(tenantId: string, orgId: string): Promise<number> {
   let n = 0;
   for (const r of await listRequests(tenantId, orgId)) if (await requests.delete(`${tenantId}::${orgId}::${r.requestId}`)) n++;
+  return n;
+}
+
+/**
+ * CHAN-F19 (ADR 0464 §9) — a person's identity on change requests: the creator, each answer's
+ * author, and a duplicate override's author with the reason they wrote. Each becomes the
+ * tombstone, and the reason is blanked. The request text, its history and the answer VALUES
+ * stay: they are the client's change instruction, the agency's record (like asset content).
+ * A CAS per row, never through the content writers, so no version bump and no re-interpretation.
+ */
+export async function eraseRequestActors(tenantId: string, forms: ReadonlySet<string>, tombstone: string): Promise<number> {
+  const names = (r: StoredRequest): boolean => forms.has(r.createdBy)
+    || r.answers.some((a) => forms.has(a.answeredBy))
+    || (r.duplicateOverride !== undefined && forms.has(r.duplicateOverride.by));
+  let n = 0;
+  for (const r of await requests.listForTenantIndexed(tenantId)) {
+    if (r.tenantId !== tenantId) continue;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const current = await getRequest(tenantId, r.orgId, r.requestId);
+      if (!current || !names(current)) break;
+      const o = current.duplicateOverride;
+      const next: StoredRequest = {
+        ...current,
+        createdBy: forms.has(current.createdBy) ? tombstone : current.createdBy,
+        answers: current.answers.map((a) => (forms.has(a.answeredBy) ? { ...a, answeredBy: tombstone } : a)),
+        ...(o ? { duplicateOverride: forms.has(o.by) ? { reason: '', by: tombstone, at: o.at } : o } : {}),
+      };
+      if (await requests.compareAndSwap(current, next)) { n++; break; }
+      if (attempt === 5) throw new Error('Change request actor erasure could not be confirmed.');
+    }
+  }
   return n;
 }

@@ -50,13 +50,14 @@ export interface UseActiveAgentsResult {
   activateAgent: (entry: AgentMentionEntry) => string;
   /** Replace the lineup wholesale from a conversation's stored participants
    *  (ADR 0043 — derive on open so the lineup survives a cross-device reload).
-   *  Resets the routing voice to the default assistant; membership is the
-   *  server's, the routing choice is the user's. */
-  setLineup: (rows: readonly ActiveAgentRow[]) => void;
+   *  Resets the routing voice to the default assistant, unless
+   *  `continueLastAgent` (CC-CHAT-4) selects the member that answered last. */
+  setLineup: (rows: readonly ActiveAgentRow[], opts?: { continueLastAgent?: boolean }) => void;
   /** Initial participant hydration for THIS session only. Merges membership without
    *  stealing the current voice/local additions or resurrecting a local removal.
-   *  Unlike setLineup, this is not a wholesale conversation selection. */
-  restoreLineup: (sessionId: string, rows: readonly ActiveAgentRow[]) => void;
+   *  Unlike setLineup, this is not a wholesale conversation selection.
+   *  `preferredCurrent` (CC-CHAT-4) fills an EMPTY voice only, never a made choice. */
+  restoreLineup: (sessionId: string, rows: readonly ActiveAgentRow[], preferredCurrent?: string) => void;
   /** Used by the panel's row-click. */
   switchTo: (agentId: string) => void;
   /** Used by the panel's `×` button. */
@@ -121,14 +122,28 @@ export function useActiveAgents(
     return resolvedAgentId;
   }, [setSession, session.id]);
 
-  const setLineup = useCallback((rows: readonly ActiveAgentRow[]): void => {
-    setSession((s) => ({
-      ...s,
-      activeAgents: { lineup: canonicalRows(rows), currentAgentId: null },
-    }));
+  /** `opts.continueLastAgent` (CC-CHAT-4, ADR 0140 correction 2026-11-14) selects the
+   *  member that answered the loaded conversation's latest assistant turn, instead of
+   *  starting on the default Assistant. A 1:1 reopen only; the caller decides. */
+  const setLineup = useCallback((rows: readonly ActiveAgentRow[], opts?: { continueLastAgent?: boolean }): void => {
+    setSession((s) => {
+      const lineup = canonicalRows(rows);
+      let currentAgentId: string | null = null;
+      if (opts?.continueLastAgent) {
+        const last = [...s.messages].reverse().find((m) => m.role === 'assistant' && typeof m.agentId === 'string' && m.agentId)?.agentId;
+        const id = last ? canonicalAgentId(last) : null;
+        if (id && id !== DEFAULT_ASSISTANT_ID && lineup.some((r) => r.agentId === id)) currentAgentId = id;
+      }
+      return { ...s, activeAgents: { lineup, currentAgentId } };
+    });
   }, [setSession]);
 
-  const restoreLineup = useCallback((expectedSessionId: string, rows: readonly ActiveAgentRow[]): void => {
+  /**
+   * CC-CHAT-4 (ADR 0140 correction 2026-11-14) — `preferredCurrent` fills an EMPTY
+   * routing choice on reopen with the agent that last answered, when it is a restored
+   * member. It never replaces a choice already made (the late-restore guarantee).
+   */
+  const restoreLineup = useCallback((expectedSessionId: string, rows: readonly ActiveAgentRow[], preferredCurrent?: string): void => {
     // Snapshot event-owned intent before the pure updater; no ref/storage writes
     // inside an updater React may replay. Late work cannot hydrate another tab.
     const removed = removedBeforeRestore.current.sessionId === expectedSessionId
@@ -143,11 +158,12 @@ export function useActiveAgents(
         seen.add(r.agentId);
         return true;
       });
-      if (additions.length === 0) return s;
-      return { ...s, activeAgents: {
-        lineup: [...existing, ...additions],
-        currentAgentId: s.activeAgents?.currentAgentId ?? null,
-      } };
+      const lineup = additions.length > 0 ? [...existing, ...additions] : existing;
+      const current = s.activeAgents?.currentAgentId ?? null;
+      const preferred = preferredCurrent ? canonicalAgentId(preferredCurrent) : null;
+      const nextCurrent = current ?? (preferred && preferred !== DEFAULT_ASSISTANT_ID && lineup.some((r) => r.agentId === preferred) ? preferred : null);
+      if (additions.length === 0 && nextCurrent === current) return s;
+      return { ...s, activeAgents: { lineup, currentAgentId: nextCurrent } };
     });
   }, [setSession]);
 

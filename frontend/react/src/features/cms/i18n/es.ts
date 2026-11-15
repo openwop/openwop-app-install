@@ -466,6 +466,11 @@ export const messages = {
   errAiTooLarge: "Esta sección es demasiado grande para traducirla o reescribirla automáticamente. Reparte sus decisiones en secciones más pequeñas.",
   errAiTimeout: "Esto tardó más que el límite de tiempo. Inténtalo de nuevo o reparte sus decisiones en secciones más pequeñas.",
   errSelfApproval: 'Tú enviaste esta página, así que debe aprobarla otra persona aprobadora de esta organización.',
+  errGateLive: "Los cambios aquí necesitan aprobación porque esto está publicado en {{pages}}. Una persona administradora debe despublicarlo primero y luego enviarlo a revisión.",
+  errGateReview: "Esto está en revisión en {{pages}}. Una persona revisora debe aprobarlo o rechazarlo antes de poder cambiarlo.",
+  errGateLiveAndReview: "Esto está publicado en {{live}} y en revisión en {{reviewing}}. Una persona administradora debe despublicar las páginas publicadas, y una revisora debe decidir sobre las demás, antes de poder cambiarlo.",
+  errGatePageLive: "Esta página necesita aprobación para cambiar. Despublícala, edítala y luego envíala a revisión.",
+  errGateApproval: "Publicar en este espacio de trabajo necesita aprobación. Envía la página a revisión y apruébala desde la bandeja de aprobaciones.",
   errTranslatorScope: 'Tu acceso de traducción cubre solo: {{locales}}.',
   translateInvalid: 'La traducción automática devolvió un resultado inutilizable — edita la traducción manualmente.',
   // ADR 0592 §9 — divulgación de traducción automática degradada + validación de permisos.

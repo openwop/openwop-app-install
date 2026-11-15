@@ -11,6 +11,7 @@
  * Each substitute is pluggable — see src/host/index.ts and src/storage/.
  */
 
+import { startAssetGrantReconciler } from './host/assetGrants.js';
 import { startAgentRegistryEvictionListener } from './host/agentRegistryEviction.js';
 import express, { type Express } from 'express';
 import { createTracer, shutdownTracer } from './observability/tracer.js';
@@ -1004,6 +1005,10 @@ async function main(): Promise<void> {
   const retentionSweepDaemon = (process.env.OPENWOP_RETENTION_SWEEP_ENABLED === 'true' || process.env.OPENWOP_RETENTION_SWEEP_DRY_RUN === 'true' || defaultRetentionDays() > 0 || idempotencyTtlDays() > 0)
     ? startRetentionSweepDaemon({ storage })
     : null;
+  // ADR 1122 P1 — keeps public-asset grants in step with what public surfaces show.
+  // A two-minute tick under a lease, one bounded slice each; it does nothing while
+  // OPENWOP_ASSET_ACCESS is off.
+  const assetGrantReconciler = startAssetGrantReconciler();
   // ADR 0107 Phase 3b / WF-KB-3 / KSWF-1 — a SyncSource's cadence fires as a
   // per-source scheduler job running the `knowledge-sync.run` workflow (the
   // gmailSync twin), on the ONE host scheduler. The bespoke `knowledgeSyncDaemon`
@@ -1096,6 +1101,7 @@ async function main(): Promise<void> {
       heartbeatDaemon.stop();
       connectionsRefreshDaemon.stop();
       retentionSweepDaemon?.stop();
+      assetGrantReconciler.stop();
       timerSweepDaemon.stop();
       segmentEntryDaemon.stop();
       workGraphDaemon?.stop();

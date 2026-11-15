@@ -105,4 +105,10 @@ export const messages = {
   videoAccess: 'Accessibilité',
   videoAccessBody: 'Sous-titres sur chaque film, générés à partir des mots prononcés. Contraste du texte d’au moins 4,5:1. Aucun clignotement, et aucun sens porté par la couleur ou le son seuls.',
   videoTokens: 'Jetons publiés pour le moteur de rendu des films :',
+  dialogs: 'Boîtes de dialogue',
+  dialogOpen: 'Nouvel élément',
+  dialogTitle: 'Nouvel élément',
+  dialogSubmit: 'Créer l’élément',
+  dialogField: 'Nom',
+  dialogError: 'Cet exemple ne crée jamais rien.',
 } as const;

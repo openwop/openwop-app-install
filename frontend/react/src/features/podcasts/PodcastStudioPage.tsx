@@ -32,6 +32,7 @@ import {
   listShows, listEpisodesWithCapability, setEpisodePublished,
   type Org, type Speaker, type SpeakerProfile, type EpisodeProfile, type PodcastEpisode, type EpisodeStatus, type PodcastShow,
 } from './podcastsClient.js';
+import { FAILURE_CODES, requestErrorText, type ErrorFallbackKey } from './podcastsErrors.js';
 import { Notice } from '../../ui/Notice.js';
 import { Link } from 'react-router-dom';
 import { announce } from '../../ui/announce.js';
@@ -70,6 +71,16 @@ function EpisodePlayer({ episode }: { episode: PodcastEpisode }): JSX.Element {
   const { t } = useTranslation('podcasts');
   const [idx, setIdx] = useState(0);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  // ADR 1115 D10 (`PODUX93-3`) — "back-to-back" was not true: advancing changed `src`
+  // and nothing called `play()`, so the listener pressed play after every turn. Once
+  // the listener has started playback, each advance continues it. A new clip list (a
+  // regeneration) starts over at turn 1, so `idx` can never point past the end.
+  const playing = useRef(false);
+  const clipsKey = episode.clips.map((c) => c.url).join('|');
+  useEffect(() => { setIdx(0); playing.current = false; }, [episode.id, clipsKey]);
+  useEffect(() => {
+    if (playing.current) audioRef.current?.play().catch(() => undefined);
+  }, [idx]);
 
   // Single muxed file — one native player, no stitching.
   if (episode.audioMediaRef) {
@@ -88,10 +99,11 @@ function EpisodePlayer({ episode }: { episode: PodcastEpisode }): JSX.Element {
         controls
         src={current ? assetUrl(current.url) : undefined}
         aria-label={t('episodeAudioLabel', { title: episode.title })}
-        onEnded={() => { if (idx < clips.length - 1) setIdx(idx + 1); }}
+        onPlay={() => { playing.current = true; }}
+        onEnded={() => { if (idx < clips.length - 1) setIdx(idx + 1); else playing.current = false; }}
       />
       <div className="action-bar">
-        <Button variant="quiet" onClick={() => { setIdx(0); window.setTimeout(() => audioRef.current?.play().catch(() => undefined), 0); }}>
+        <Button variant="quiet" onClick={() => { playing.current = true; setIdx(0); window.setTimeout(() => audioRef.current?.play().catch(() => undefined), 0); }}>
           <PlayIcon size={14} /> {t('playFromStart')}
         </Button>
       </div>
@@ -123,8 +135,16 @@ function Studio({ fixedOrgId, fixedNotebookId }: { fixedOrgId?: string; fixedNot
   // R2 SP-5 — per-read failure flags. The old shape was ONE last-write-wins
   // raw `e.message` StateCard while every list's skeleton spun forever under
   // it; a failed read now names its own section and offers retry.
-  // SP-9 — defaults TRUE (older wire); the server stays the authority.
-  const [canWrite, setCanWrite] = useState(true);
+  // SP-9 — the server stays the authority. ADR 1115 D10 (`PODUX93-6`): capability
+  // starts UNKNOWN (`null`) and write controls stay hidden until a read answers; it
+  // used to default `true`, so a failed episodes read offered every write to a
+  // read-only member, each one a 403.
+  const [canWrite, setCanWrite] = useState<boolean | null>(null);
+  const writable = canWrite === true;
+  /** ADR 1115 D10 (`PODUX93-10`) — a refusal in the reader's language; only an
+   *  unmapped failure (a validation message) keeps the server's own text. */
+  const errorText = useCallback((err: unknown, fallback: ErrorFallbackKey): string =>
+    requestErrorText((k) => t(k as 'createFailed'), err, fallback), [t]);
   const [speakerProfilesFailed, setSpeakerProfilesFailed] = useState(false);
   const [episodeProfilesFailed, setEpisodeProfilesFailed] = useState(false);
   const [episodesFailed, setEpisodesFailed] = useState(false);
@@ -134,6 +154,11 @@ function Studio({ fixedOrgId, fixedNotebookId }: { fixedOrgId?: string; fixedNot
   // administrator disabled notebooks to go and create one is an instruction they
   // cannot perform: there is no surface to perform it on.
   const [notebooksUnavailable, setNotebooksUnavailable] = useState(false);
+  // ADR 1115 D4 — a podcasts run grounds on a notebook. The standalone Studio learns
+  // "notebooks is off" from its notebooks read; the project-embedded panel never makes
+  // that read, so it asks the feature resolver.
+  const notebooksAccess = useFeatureAccess('notebooks');
+  const notebooksOff = embedded ? (!notebooksAccess.loading && !notebooksAccess.enabled) : notebooksUnavailable;
 
   const [speakerProfiles, setSpeakerProfiles] = useState<SpeakerProfile[] | null>(null);
   const [episodeProfiles, setEpisodeProfiles] = useState<EpisodeProfile[] | null>(null);
@@ -276,6 +301,27 @@ function Studio({ fixedOrgId, fixedNotebookId }: { fixedOrgId?: string; fixedNot
    */
   const pendingKey = pendingIdsOf(episodes).slice().sort().join('|');
 
+  // ADR 1115 D10 (`PODUX93-7`) — a generation that finishes while the person waits is
+  // SAID, not only re-coloured: compare each episode's status with the last one seen,
+  // and announce a pending → done / failed transition. The first read seeds the map
+  // (nothing is announced for episodes that were already settled on arrival).
+  const lastStatus = useRef<Map<string, EpisodeStatus> | null>(null);
+  useEffect(() => {
+    if (!episodes) return;
+    // The embedded panel speaks only for its own project's episodes (`PODUX93R-9`).
+    const mine = embedded ? episodes.filter((e) => e.notebookId === fixedNotebookId) : episodes;
+    const prev = lastStatus.current;
+    const next = new Map(mine.map((e) => [e.id, e.status] as const));
+    lastStatus.current = next;
+    if (!prev) return;
+    for (const e of mine) {
+      const was = prev.get(e.id);
+      if (!was || was === e.status || (was !== 'queued' && was !== 'running' && was !== 'awaiting-approval')) continue;
+      if (e.status === 'done') announce(t('episodeReadyAnnounce', { title: e.title }));
+      else if (e.status === 'failed') announce(t('episodeFailedAnnounce', { title: e.title }));
+    }
+  }, [episodes, embedded, fixedNotebookId, t]);
+
   useEffect(() => {
     if (!pendingKey || !orgId) return;
     if (pollGaveUp) return; // already given up on this cohort; "Check again" is the way back
@@ -309,7 +355,13 @@ function Studio({ fixedOrgId, fixedNotebookId }: { fixedOrgId?: string; fixedNot
       const stillPending = new Set(pendingIdsOf(fresh));
       if (!pollGaveUp.episodeIds.some((eid) => stillPending.has(eid))) {
         setPollGaveUp(null);
-        announce(t('pollRecheckLanded'));
+        // An episode that LANDED is announced by name by the transition effect; saying
+        // "finished" as well would queue two messages for one event (`PODUX93R-3`).
+        // Only a cohort that settled by vanishing (deleted) gets the generic line.
+        // Over the same episodes the transition effect speaks for (`PODUX93R-14`).
+        const spoken = embedded ? fresh.filter((e) => e.notebookId === fixedNotebookId) : fresh;
+        const landedByName = spoken.some((e) => pollGaveUp.episodeIds.includes(e.id) && (e.status === 'done' || e.status === 'failed'));
+        if (!landedByName) announce(t('pollRecheckLanded'));
         return;
       }
       // Still working. Keep the card — but CHANGE it, so the click is observable.
@@ -324,7 +376,7 @@ function Studio({ fixedOrgId, fixedNotebookId }: { fixedOrgId?: string; fixedNot
     } finally {
       setRecheckBusy(false);
     }
-  }, [orgId, pollGaveUp, pendingIdsOf, t]);
+  }, [orgId, pollGaveUp, pendingIdsOf, embedded, fixedNotebookId, t]);
 
   const submitSpeakerProfile = useCallback(async () => {
     if (!orgId || !spName.trim()) return;
@@ -338,9 +390,9 @@ function Studio({ fixedOrgId, fixedNotebookId }: { fixedOrgId?: string; fixedNot
       toast.success(t('speakerProfileCreated'));
       loadAll();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('createFailed'));
+      toast.error(errorText(err, 'createFailed'));
     } finally { setSpBusy(false); }
-  }, [orgId, spName, spProvider, spSpeakers, loadAll, t]);
+  }, [orgId, spName, spProvider, spSpeakers, loadAll, t, errorText]);
 
   const submitEpisodeProfile = useCallback(async () => {
     if (!orgId || !epName.trim() || !epSpeakerProfileId) return;
@@ -356,9 +408,9 @@ function Studio({ fixedOrgId, fixedNotebookId }: { fixedOrgId?: string; fixedNot
       toast.success(t('episodeProfileCreated'));
       loadAll();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('createFailed'));
+      toast.error(errorText(err, 'createFailed'));
     } finally { setEpBusy(false); }
-  }, [orgId, epName, epSpeakerProfileId, epSegments, epBriefing, loadAll, t]);
+  }, [orgId, epName, epSpeakerProfileId, epSegments, epBriefing, loadAll, t, errorText]);
 
   const submitGenerate = useCallback(async () => {
     if (!orgId || !genNotebookId || !genProfileId) return;
@@ -373,32 +425,36 @@ function Studio({ fixedOrgId, fixedNotebookId }: { fixedOrgId?: string; fixedNot
       toast.success(t('episodeEnqueued'));
       loadAll();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('generateFailed'));
+      toast.error(errorText(err, 'generateFailed'));
     } finally { setGenBusy(false); }
-  }, [orgId, genNotebookId, genProfileId, genTitle, genBriefing, loadAll, t]);
+  }, [orgId, genNotebookId, genProfileId, genTitle, genBriefing, loadAll, t, errorText]);
 
-  const onRetry = useCallback(async (id: string) => {
-    try { await retryEpisode(id); toast.success(t('episodeEnqueued')); loadAll(); }
-    catch (err) { toast.error(err instanceof Error ? err.message : t('generateFailed')); }
-  }, [loadAll, t]);
+  /** Retry a FAILED episode, or regenerate a DONE one. ADR 1115 D10 (`PODUX93-4`) — a
+   *  regeneration replaces the episode's audio and transcript, so it asks first; it
+   *  used to be an unconfirmed "Retry" on every Ready episode. */
+  const onRetry = useCallback(async (episode: PodcastEpisode) => {
+    if (episode.status === 'done' && !(await confirm({ title: t('confirmRegenerateTitle', { title: episode.title }), body: t('confirmRegenerateBody'), confirmLabel: t('regenerate'), danger: true }))) return;
+    try { await retryEpisode(episode.id); toast.success(t('episodeEnqueued')); loadAll(); }
+    catch (err) { toast.error(errorText(err, 'generateFailed')); }
+  }, [loadAll, t, errorText]);
 
   const onDeleteSpeakerProfile = useCallback(async (id: string) => {
     if (!(await confirm({ title: t('confirmDeleteSpeakerProfile'), danger: true }))) return;
     try { await deleteSpeakerProfile(id); loadAll(); }
-    catch (err) { toast.error(err instanceof Error ? err.message : t('deleteFailed')); }
-  }, [loadAll, t]);
+    catch (err) { toast.error(errorText(err, 'deleteFailed')); }
+  }, [loadAll, t, errorText]);
 
   const onDeleteEpisodeProfile = useCallback(async (id: string) => {
     if (!(await confirm({ title: t('confirmDeleteEpisodeProfile'), danger: true }))) return;
     try { await deleteEpisodeProfile(id); loadAll(); }
-    catch (err) { toast.error(err instanceof Error ? err.message : t('deleteFailed')); }
-  }, [loadAll, t]);
+    catch (err) { toast.error(errorText(err, 'deleteFailed')); }
+  }, [loadAll, t, errorText]);
 
   const onDeleteEpisode = useCallback(async (id: string) => {
     if (!(await confirm({ title: t('confirmDeleteEpisode'), danger: true }))) return;
     try { await deleteEpisode(id); loadAll(); }
-    catch (err) { toast.error(err instanceof Error ? err.message : t('deleteFailed')); }
-  }, [loadAll, t]);
+    catch (err) { toast.error(errorText(err, 'deleteFailed')); }
+  }, [loadAll, t, errorText]);
 
   const onPublishEpisode = useCallback(async (episode: PodcastEpisode, showId: string) => {
     if (!showId) { toast.error(t('selectShowFirst')); return; }
@@ -416,13 +472,15 @@ function Studio({ fixedOrgId, fixedNotebookId }: { fixedOrgId?: string; fixedNot
       });
       toast.success(t('episodePublished'));
       loadAll();
-    } catch (err) { toast.error(err instanceof Error ? err.message : t('publishFailed')); }
-  }, [loadAll, t, publishDescByEpisode, publishExplicitByEpisode]);
+    } catch (err) { toast.error(errorText(err, 'publishFailed')); }
+  }, [loadAll, t, errorText, publishDescByEpisode, publishExplicitByEpisode]);
 
-  const onUnpublishEpisode = useCallback(async (id: string) => {
-    try { await setEpisodePublished(id, false); loadAll(); }
-    catch (err) { toast.error(err instanceof Error ? err.message : t('publishFailed')); }
-  }, [loadAll, t]);
+  /** ADR 1115 D10 (`PODUX93-5`) — taking an episode out of the public feed asks first. */
+  const onUnpublishEpisode = useCallback(async (episode: PodcastEpisode) => {
+    if (!(await confirm({ title: t('confirmUnpublishEpisodeTitle', { title: episode.title }), body: t('confirmUnpublishEpisodeBody'), confirmLabel: t('unpublish'), danger: true }))) return;
+    try { await setEpisodePublished(episode.id, false); toast.success(t('episodeUnpublished')); loadAll(); }
+    catch (err) { toast.error(errorText(err, 'publishFailed')); }
+  }, [loadAll, t, errorText]);
 
   const setSpeakerField = (i: number, field: keyof Speaker, value: string) =>
     setSpSpeakers((prev) => prev.map((s, idx) => (idx === i ? { ...s, [field]: value } : s)));
@@ -457,7 +515,7 @@ function Studio({ fixedOrgId, fixedNotebookId }: { fixedOrgId?: string; fixedNot
       {/* SP-9 — one disclosure for the whole studio; every action below hides
           on the capability the episodes read reported (same predicate the
           server's writes enforce; the 403 stays the authority). */}
-      {!canWrite ? <Notice variant="info">{t('readOnlyMember')}</Notice> : null}
+      {canWrite === false ? <Notice variant="info">{t('readOnlyMember')}</Notice> : null}
 
       {/* Speaker profiles (the cast) */}
       <div className="surface-card u-p-4 u-grid u-gap-3">
@@ -471,18 +529,18 @@ function Studio({ fixedOrgId, fixedNotebookId }: { fixedOrgId?: string; fixedNot
             action={<Button variant="secondary" onClick={loadAll}>{t('common:retry')}</Button>}
           />
         ) : speakerProfiles === null ? <Skeleton height={40} /> : speakerProfiles.length === 0 ? (
-          <StateCard icon={<MicIcon size={20} />} title={t('speakerProfilesTitle')} body={t('noSpeakerProfiles')} />
+          <StateCard icon={<MicIcon size={20} />} title={t('speakerProfilesTitle')} body={writable ? t('noSpeakerProfiles') : t('noSpeakerProfilesReadOnly')} />
         ) : (
           <ul className="nb-list">
             {speakerProfiles.map((p) => (
               <li key={p.id} className="nb-list__item">
                 <span><strong>{p.name}</strong> · {p.speakers.map((s) => s.name).join(', ')} <span className="chip chip--muted">{p.provider}</span></span>
-                {canWrite ? <Button variant="quiet" onClick={() => void onDeleteSpeakerProfile(p.id)} aria-label={t('common:delete')}><TrashIcon size={14} /></Button> : null}
+                {writable ? <Button variant="quiet" onClick={() => void onDeleteSpeakerProfile(p.id)} aria-label={t('common:delete')}><TrashIcon size={14} /></Button> : null}
               </li>
             ))}
           </ul>
         )}
-        {canWrite ? <form className="u-grid u-gap-2" onSubmit={(e) => { e.preventDefault(); void submitSpeakerProfile(); }}>
+        {writable ? <form className="u-grid u-gap-2" onSubmit={(e) => { e.preventDefault(); void submitSpeakerProfile(); }}>
           <TextField label={t('speakerProfileNameLabel')} value={spName} onChange={(e) => setSpName(e.target.value)} placeholder={t('speakerProfileNamePlaceholder')} />
           <SelectField label={t('providerLabel')} value={spProvider} onChange={(e) => setSpProvider(e.target.value)}>
             <option value="minimax">MiniMax (managed)</option>
@@ -523,18 +581,18 @@ function Studio({ fixedOrgId, fixedNotebookId }: { fixedOrgId?: string; fixedNot
             action={<Button variant="secondary" onClick={loadAll}>{t('common:retry')}</Button>}
           />
         ) : episodeProfiles === null ? <Skeleton height={40} /> : episodeProfiles.length === 0 ? (
-          <StateCard icon={<SparklesIcon size={20} />} title={t('episodeProfilesTitle')} body={t('noEpisodeProfiles')} />
+          <StateCard icon={<SparklesIcon size={20} />} title={t('episodeProfilesTitle')} body={writable ? t('noEpisodeProfiles') : t('noEpisodeProfilesReadOnly')} />
         ) : (
           <ul className="nb-list">
             {episodeProfiles.map((p) => (
               <li key={p.id} className="nb-list__item">
                 <span><strong>{p.name}</strong> · {t('segmentsN', { count: p.segmentCount })}</span>
-                {canWrite ? <Button variant="quiet" onClick={() => void onDeleteEpisodeProfile(p.id)} aria-label={t('common:delete')}><TrashIcon size={14} /></Button> : null}
+                {writable ? <Button variant="quiet" onClick={() => void onDeleteEpisodeProfile(p.id)} aria-label={t('common:delete')}><TrashIcon size={14} /></Button> : null}
               </li>
             ))}
           </ul>
         )}
-        {canWrite ? <form className="u-grid u-gap-2" onSubmit={(e) => { e.preventDefault(); void submitEpisodeProfile(); }}>
+        {writable ? <form className="u-grid u-gap-2" onSubmit={(e) => { e.preventDefault(); void submitEpisodeProfile(); }}>
           <TextField label={t('episodeProfileNameLabel')} value={epName} onChange={(e) => setEpName(e.target.value)} placeholder={t('episodeProfileNamePlaceholder')} />
           <SelectField label={t('castLabel')} value={epSpeakerProfileId} onChange={(e) => setEpSpeakerProfileId(e.target.value)}>
             <option value="">{t('selectCast')}</option>
@@ -562,13 +620,15 @@ function Studio({ fixedOrgId, fixedNotebookId }: { fixedOrgId?: string; fixedNot
         ) : null}
         {/* `PODU-8` — three states, three cards. The middle one used to wear the
             bottom one's copy. */}
-        {!embedded && !notebooksFailed && notebooksUnavailable ? (
+        {/* ADR 1115 D4 — the embedded panel too: with notebooks off the door refuses
+            every generation (409 `notebooks_disabled`), so the form is not offered. */}
+        {!notebooksFailed && notebooksOff ? (
           <StateCard icon={<PlayIcon size={20} />} title={t('notebooksOffTitle')} body={t('notebooksOffBody')} />
         ) : null}
-        {!embedded && !notebooksFailed && !notebooksUnavailable && notebooks.length === 0 ? (
+        {!embedded && !notebooksFailed && !notebooksOff && notebooks.length === 0 ? (
           <StateCard icon={<PlayIcon size={20} />} title={t('generateTitle')} body={t('noNotebooks')} />
         ) : null}
-        {canWrite ? <form className="u-grid u-gap-2" onSubmit={(e) => { e.preventDefault(); void submitGenerate(); }}>
+        {writable && !notebooksOff ? <form className="u-grid u-gap-2" onSubmit={(e) => { e.preventDefault(); void submitGenerate(); }}>
           {embedded ? null : (
             <SelectField label={t('notebookLabel')} value={genNotebookId} onChange={(e) => setGenNotebookId(e.target.value)}>
               <option value="">{t('selectNotebook')}</option>
@@ -642,7 +702,7 @@ function Studio({ fixedOrgId, fixedNotebookId }: { fixedOrgId?: string; fixedNot
               action={<Button variant="secondary" onClick={() => setEpisodeQuery('')}>{t('clearSearch')}</Button>}
             />
           ) : (
-            <StateCard icon={<MicIcon size={20} />} title={t('noEpisodesTitle')} body={t('noEpisodesBody')} />
+            <StateCard icon={<MicIcon size={20} />} title={t('noEpisodesTitle')} body={writable ? t('noEpisodesBody') : t('noEpisodesBodyReadOnly')} />
           )
         ) : (
           <ul className="nb-list">
@@ -653,7 +713,22 @@ function Studio({ fixedOrgId, fixedNotebookId }: { fixedOrgId?: string; fixedNot
                   <span className="u-text-sm muted">{formatRelativeTime(e.createdAt)}</span>
                 </div>
                 {e.status === 'done' && (e.audioMediaRef || e.clips.length > 0) ? <EpisodePlayer episode={e} /> : null}
-                {e.status === 'failed' ? <p className="u-text-sm u-text-danger">{e.error || t('episodeFailed')}</p> : null}
+                {/* ADR 1115 D10 (`PODUX93-2`) — what failed, in the reader's language, from
+                    the run's typed code; the run's own English stays one click away. */}
+                {/* Plain text, deliberately NOT a live region: a page with N failed rows
+                    must not mount N alerts, and the running → failed transition is
+                    already announced once (UX regrade `PODUX93R-2`). */}
+                {e.status === 'failed' ? (
+                  <div className="u-grid u-gap-1">
+                    <p className="u-text-sm u-text-danger">{e.errorCode && FAILURE_CODES.has(e.errorCode) ? t(`failure_${e.errorCode}` as 'failure_podcast_content_empty') : t('episodeFailed')}</p>
+                    {e.error ? (
+                      <details className="u-text-sm">
+                        <summary>{t('failureDetails')}</summary>
+                        <p className="muted">{e.error}</p>
+                      </details>
+                    ) : null}
+                  </div>
+                ) : null}
                 {/* PODU-4 (ADR 0603 §5) — `runId` was on the type and rendered
                     NOWHERE, so the one artifact that can say what a run is doing
                     (or why it stopped) was unreachable from the surface that owns
@@ -664,13 +739,26 @@ function Studio({ fixedOrgId, fixedNotebookId }: { fixedOrgId?: string; fixedNot
                   <Link to={`/runs/${encodeURIComponent(e.runId)}`} className="u-text-sm">{t('viewRun')}</Link>
                 ) : null}
                 {/* Distribution (ADR 0390): publish a finished episode onto a show. */}
+                {/* ADR 1115 D5/D10 (`PODUX93-5`) — a published chip on a DRAFT show is a
+                    warning (nobody can hear it yet), and only an episode with audio can
+                    be published (the door answers 409 `episode_not_ready` otherwise). */}
                 {e.status === 'done' ? (
                   e.published ? (
                     <div className="action-bar">
-                      <span className="chip chip--success">{t('episodePublishedChip')}</span>
-                      {canWrite ? <Button variant="quiet" size="sm" onClick={() => void onUnpublishEpisode(e.id)}>{t('unpublish')}</Button> : null}
+                      {(() => {
+                        // With the shows read failed, the show's state is unknown: no
+                        // colour claim either way (UX regrade `PODUX93R-8`).
+                        if (showsFailed) return <span className="chip chip--muted">{t('episodePublishedChip')}</span>;
+                        const bound = shows.find((sh) => sh.id === e.showId);
+                        return bound && !bound.published
+                          ? <span className="chip chip--warning">{t('episodePublishedDraftShowChip')}</span>
+                          : <span className="chip chip--success">{t('episodePublishedChip')}</span>;
+                      })()}
+                      {writable ? <Button variant="quiet" size="sm" onClick={() => void onUnpublishEpisode(e)}>{t('unpublish')}</Button> : null}
                     </div>
-                  ) : !canWrite ? null : showsFailed ? (
+                  ) : !writable ? null : !e.audioMediaRef ? (
+                    <p className="u-text-sm muted">{t('publishNeedsAudio')}</p>
+                  ) : showsFailed ? (
                     <p className="u-text-sm muted">{t('showsFailed')}</p>
                   ) : shows.length === 0 ? (
                     <p className="u-text-sm muted">{t('createShowToPublish')}</p>
@@ -714,9 +802,18 @@ function Studio({ fixedOrgId, fixedNotebookId }: { fixedOrgId?: string; fixedNot
                     </div>
                   )
                 ) : null}
-                {canWrite ? <div className="action-bar">
-                  {e.status === 'failed' || e.status === 'done' ? (
-                    <Button variant="quiet" onClick={() => void onRetry(e.id)}><RotateCwIcon size={14} /> {t('retry')}</Button>
+                {/* ADR 1115 D5/D10 (`PODUX93-4`) — Retry for a failure; Regenerate (asks
+                    first) for a done episode; neither for a published one, whose public
+                    audio a regeneration would replace (the door answers 409). */}
+                {writable ? <div className="action-bar">
+                  {(e.status === 'failed' || e.status === 'done') && e.notebookMissing ? (
+                    <span className="u-text-sm muted">{t('notebookGoneNoRegenerate')}</span>
+                  ) : e.status === 'failed' ? (
+                    <Button variant="quiet" onClick={() => void onRetry(e)}><RotateCwIcon size={14} /> {t('retry')}</Button>
+                  ) : e.status === 'done' && !e.published ? (
+                    <Button variant="quiet" onClick={() => void onRetry(e)}><RotateCwIcon size={14} /> {t('regenerate')}</Button>
+                  ) : e.status === 'done' ? (
+                    <span className="u-text-sm muted">{t('unpublishToRegenerate')}</span>
                   ) : null}
                   <Button variant="quiet" onClick={() => void onDeleteEpisode(e.id)}><TrashIcon size={14} /> {t('common:delete')}</Button>
                 </div> : null}

@@ -28,6 +28,8 @@ import { DurableCollection } from '../host/hostExtPersistence.js';
 import { invokeWithConnectionPrompt, resolveCapabilityWithPrompt } from '../host/connectionInterrupt.js';
 import { priorSend, recordSend } from '../host/emailSentLedger.js';
 import { refuseUnknownRejectionPolicy } from '../host/reviewDecisionLedger.js';
+import { isWordingFailure, readApprovalGateWording } from '../host/approvalGateWording.js';
+import { readApprovalGateDecide, isDecideFailure } from '../host/approvalGateDecide.js';
 
 const hostLog = createLogger('bootstrap.nodes');
 import { composeAgentSystemPrompt } from '../host/agentPromptScaffold.js';
@@ -1100,6 +1102,10 @@ const approvalGateNode: NodeModule = {
       optionLabels?: unknown;
       timeoutMs?: unknown;
       timeoutSec?: unknown;
+      actionLabels?: unknown;
+      promptKey?: unknown;
+      declineExpected?: unknown;
+      decide?: unknown;
     };
     // Surface upstream node outputs to the approver. When two or more
     // input ports carry string content (the Triple-AI fan-in shape:
@@ -1136,6 +1142,13 @@ const approvalGateNode: NodeModule = {
     // rule; hand-copying it is how the two readers drifted in the first place.
     const badPolicy = refuseUnknownRejectionPolicy('core.approvalGate', cfg.rejectionPolicy);
     if (badPolicy) return badPolicy;
+    const actions = Array.isArray(cfg.actions) ? cfg.actions : ['approve', 'reject'];
+    // ADR 1040 D7 F1 — a feature's wording for the card, refused where malformed.
+    const wording = readApprovalGateWording('core.approvalGate', cfg, actions);
+    if (isWordingFailure(wording)) return wording;
+    // ADR 1120 — decided only by a signed-in person (absent for the default 'link').
+    const decide = readApprovalGateDecide('core.approvalGate', cfg);
+    if (isDecideFailure(decide)) return decide;
     const inputs = (ctx.inputs && typeof ctx.inputs === 'object' && !Array.isArray(ctx.inputs))
       ? (ctx.inputs as Record<string, unknown>)
       : {};
@@ -1168,7 +1181,9 @@ const approvalGateNode: NodeModule = {
         // immediate-resume path.
         data: {
           prompt: typeof cfg.prompt === 'string' ? cfg.prompt : (typeof cfg.title === 'string' ? cfg.title : 'Please approve to continue.'),
-          actions: Array.isArray(cfg.actions) ? cfg.actions : ['approve', 'reject'],
+          actions,
+          ...wording,
+          ...decide,
           ...(showOptions ? { options } : {}),
           ...(typeof cfg.requiredApprovals === 'number' ? { requiredApprovals: cfg.requiredApprovals } : {}),
           ...(typeof cfg.rejectionPolicy === 'string' ? { rejectionPolicy: cfg.rejectionPolicy } : {}),
@@ -1253,6 +1268,13 @@ const interruptNode: NodeModule = {
     // completely rather than for one value of a discriminator.
     const badPolicy = refuseUnknownRejectionPolicy('core.interrupt', data?.rejectionPolicy);
     if (badPolicy) return badPolicy;
+    // ADR 1040 D7 F1 (grade-code M1) — the same second-writer rule for the
+    // approval card's wording: one validator, so the pack lane cannot carry
+    // free text, an unlisted verb, or a non-boolean decline flag either.
+    if (data && (data.actionLabels !== undefined || data.promptKey !== undefined || data.declineExpected !== undefined)) {
+      const wording = readApprovalGateWording('core.interrupt', data, Array.isArray(data.actions) ? data.actions : ['approve', 'reject', 'request-changes', 'defer', 'escalate']); // the card's default set
+      if (isWordingFailure(wording)) return wording;
+    }
     return {
       status: 'suspended',
       interrupt: { kind: coerceKind(ctx.config?.kind), data: ctx.config?.data ?? {} },

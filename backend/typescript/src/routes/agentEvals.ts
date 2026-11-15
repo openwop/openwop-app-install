@@ -27,6 +27,7 @@ import { resolveAgentForTenant } from '../host/agentVisibility.js';
 import { agentStorageId } from '../executor/agentIdAliases.js';
 import { storedRunId } from '../host/evals/runIds.js';
 import { requireAgentEvalsEnabled } from '../host/evals/access.js';
+import { filterClientReadableRuns, runClientReader } from '../host/runClientAccess.js';
 
 async function requireTenantRead(req: Request): Promise<string> {
   const tenantId = tenantOf(req);
@@ -182,6 +183,8 @@ export function registerAgentEvalRoutes(app: Express, deps: { storage: Storage }
       const fromId = storedRunId(body.fromRunId, tenantId);
       const run = fromId ? await deps.storage.getRun(fromId) : null;
       if (!run || run.tenantId !== tenantId) throw new OpenwopError('not_found', 'Run not found.', 404, { field: 'fromRunId', reason: 'missing_run' });
+      // ADR 1121 — promoting copies the run's captured calls, so it needs the run's client.
+      if (!(await (await runClientReader(req, tenantId))(run))) throw new OpenwopError('not_found', 'Run not found.', 404, { field: 'fromRunId', reason: 'missing_run' });
       // Review H3 — `wrapId` picks ONE turn/node of a multi-turn run; default is every call in order.
       const boundary = await listRunBoundary(tenantId, run.runId, typeof body.wrapId === 'string' ? { wrapId: body.wrapId } : {});
       if (boundary.length === 0) throw new OpenwopError('validation_error', 'That run has no captured tool calls (turn on capture for the agent, then run it again).', 400, { field: 'fromRunId', reason: 'nothing_captured' });
@@ -234,7 +237,7 @@ export function registerAgentEvalRoutes(app: Express, deps: { storage: Storage }
       // suite of the tenant), each paged by the SAME cursor, merged, then cut to `limit`.
       const refs = (await listResolvableSuites(tenantId, agentId)).map((r) => suiteRef(r.suite));
       const runs = (await Promise.all(refs.map((ref) => deps.storage.listRuns({ tenantId, workflowId: evalWorkflowId(ref), limit: limitRaw + 1, ...(before ? { before } : {}) })))).flat();
-      const matching = runs
+      const matching = (await filterClientReadableRuns(req, runs)) // ADR 1121
         .filter((r) => r.tenantId === tenantId && isAgentEvalRun(r))
         // EVAL-6 — both ADR 0763 spellings of one agent are one history.
         .filter((r) => !agentId || agentStorageId((r.metadata?.eval as AgentEvalMeta).agentId) === agentStorageId(agentId))
@@ -263,7 +266,7 @@ export function registerAgentEvalRoutes(app: Express, deps: { storage: Storage }
       const tenantId = await requireTenantRead(req);
       const id = storedRunId(req.params.runId ?? '', tenantId);
       const run = id ? await deps.storage.getRun(id) : null;
-      if (!run || run.tenantId !== tenantId || !isAgentEvalRun(run)) throw new OpenwopError('not_found', 'Eval run not found.', 404, {});
+      if (!run || run.tenantId !== tenantId || !isAgentEvalRun(run) || !(await (await runClientReader(req, tenantId))(run))) throw new OpenwopError('not_found', 'Eval run not found.', 404, {}); // ADR 1121
       const m = run.metadata.eval as AgentEvalMeta;
       res.json({ runId: run.runId, status: run.status, suiteRef: m.suiteRef, agentId: m.agentId, progress: m.progress ?? {}, summary: run.metadata.evalSummary ?? null, regressionReason: regressionReasonOf(m), error: run.error ?? null });
     } catch (err) { next(err); }

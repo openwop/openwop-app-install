@@ -39,4 +39,9 @@ describe('nav group hygiene (#5786 §5)', () => {
     // order would land below Settings again.
     expect(ws?.items.filter((i) => i.order === undefined).map((i) => navLabel(i))).toEqual([]);
   });
+
+  it('the lock set is exactly Settings and Menu settings (ADR 1106 D1, Q1)', () => {
+    const locked = FEATURES.filter((f) => f.nav?.lockVisible).map((f) => f.path).sort();
+    expect(locked).toEqual(['/menu-settings', '/settings']);
+  });
 });

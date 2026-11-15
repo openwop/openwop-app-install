@@ -22,6 +22,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
+import { chatDraftKey, claimStagedComposerDraft, readComposerText, releaseClaimedComposerDraft, stageComposerDraft, stageComposerDraftFor } from '../composerSeed.js';
 import { useTabDeck } from './useTabDeck.js';
 import { useTabBadges } from './useTabBadges.js';
 import { useDeckShortcuts } from './useDeckShortcuts.js';
@@ -436,8 +437,13 @@ function TabChatDeckInner({ config, byokStored, onReconfigureBYOK, persistSubjec
     busyRef.current.delete(oldId);
     setAgentScopes((prev) => moveKey(prev, oldId, newId));
     setLaunchContexts((prev) => moveKey(prev, oldId, newId));
+    // CC-UX-2 — the re-key REMOUNTS the tab (key={sessionId}), and its composer
+    // re-seeds from the new key's (empty) draft. Carry what it holds right now
+    // (a deep-link draft, or text typed before the debounced save) to the new key.
+    const live = readComposerText(chatDraftKey(draftScope, oldId));
+    if (live) stageComposerDraftFor(chatDraftKey(draftScope, newId), live);
     rekeyTab(oldId, newId);
-  }, [rekeyTab, reapIfAbandoned]);
+  }, [rekeyTab, reapIfAbandoned, draftScope]);
 
   // The chat surface always has an active conversation (mirrors ChatSidebar): open
   // one tab on first mount when the working set is empty.
@@ -645,6 +651,12 @@ function TabChatDeckInner({ config, byokStored, onReconfigureBYOK, persistSubjec
   // dedupes so a deep-link onto a restored deck focuses, never duplicates). One-shot +
   // clears the param so reload/back doesn't re-trigger.
   const [searchParams, setSearchParams] = useSearchParams();
+  // CC-UX-2 — claim a staged composer draft NOW, while the deck renders and before
+  // any tab's composer mounts: every tab is mounted, so the previously active tab
+  // would otherwise consume a draft meant for the tab the `?agent=` link opens.
+  // Idempotent across re-renders; the `?agent=` effect below hands it to that tab.
+  const didAgentLinkRef = useRef(false);
+  if (!didAgentLinkRef.current && searchParams.get('agent') !== null) claimStagedComposerDraft();
   const didDeepLinkRef = useRef(false);
   useEffect(() => {
     if (didDeepLinkRef.current) return;
@@ -665,7 +677,6 @@ function TabChatDeckInner({ config, byokStored, onReconfigureBYOK, persistSubjec
   // A fresh tab would be a different conversation, so whatever the agent does for "this
   // conversation" (e.g. drafting its mission contract) would land on the wrong one.
   // One-shot + clears the param.
-  const didAgentLinkRef = useRef(false);
   useEffect(() => {
     if (didAgentLinkRef.current) return;
     const wantedAgent = searchParams.get('agent');
@@ -674,11 +685,17 @@ function TabChatDeckInner({ config, byokStored, onReconfigureBYOK, persistSubjec
     const wantedConversation = searchParams.get('conversation');
     const id = wantedConversation ?? crypto.randomUUID();
     // A refused fresh tab (ADR 0978 D2) records no scope for an id that never opens.
-    if (wantedConversation || openTab(id)) setAgentScopes((prev) => ({ ...prev, [id]: wantedAgent }));
+    const draft = releaseClaimedComposerDraft();
+    if (wantedConversation || openTab(id)) {
+      setAgentScopes((prev) => ({ ...prev, [id]: wantedAgent }));
+      if (draft) stageComposerDraftFor(chatDraftKey(draftScope, id), draft);
+    } else if (draft) {
+      stageComposerDraft(draft); // refused tab: leave it for the next composer, as before
+    }
     const next = new URLSearchParams(searchParams);
     next.delete('agent');
     setSearchParams(next, { replace: true });
-  }, [searchParams, openTab, setSearchParams]);
+  }, [searchParams, openTab, setSearchParams, draftScope]);
 
   // ADR 0785 D5 — deep-link `?newTab=<kind>&tabContext=<text>` → open a NEW tab of a
   // registered kind, handing it the context once (e.g. the ⌘K "Open in Claude Code"

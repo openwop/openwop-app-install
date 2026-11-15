@@ -18,7 +18,9 @@
  * - Transactional mail is never paused: the breaker protects marketing reputation, and receipts
  *   and invitations must keep flowing.
  */
+import { createHash } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { registerKvAgeOut } from '../../host/kvAgeOut.js';
 import { listMembers } from '../../host/accessControlService.js';
 import { getNotificationEmitter } from '../../notifications/emitter.js';
 import { createLogger } from '../../observability/logger.js';
@@ -26,6 +28,7 @@ import { createLogger } from '../../observability/logger.js';
 const log = createLogger('features.crm.sender-health');
 
 interface DayCounts { key: string; tenantId: string; orgId: string; day: string; sent: number; hardBounces: number; complaints: number }
+/** `key` = `${tenantId}::${orgId}::${day}::${reason}::h:<sha256(address)>` (legacy rows: the raw address). */
 interface Seen { key: string; tenantId: string; at: string }
 export interface SenderState {
   key: string; tenantId: string; orgId: string;
@@ -40,6 +43,16 @@ export interface SenderState {
 
 const days = new DurableCollection<DayCounts>('crm:sender-health-day', (d) => d.key, undefined, (d) => d.tenantId);
 const seen = new DurableCollection<Seen>('crm:sender-health-seen', (s) => s.key, undefined, (s) => s.tenantId);
+/**
+ * CHAN-F19 (ADR 0464 §9) — the dedup row exists only to count a redelivered bounce once on
+ * the same UTC day, so it is bounded: rows age out after SEEN_TTL_DAYS (a day of dedup plus
+ * a day of slack). The sweep selects by prefix and ages by `at`, which every row has carried
+ * since the store was created (90a29103c), so rows written under the LEGACY raw-address key
+ * age out on this lane too — no migration. The crm eraser deletes a subject's rows in both
+ * key shapes (`eraseSenderHealthSeen`); the TTL is the backstop.
+ */
+export const SEEN_TTL_DAYS = 2;
+registerKvAgeOut({ id: 'crm:sender-health-seen', prefix: 'hostext:crm:sender-health-seen:', ttlDays: SEEN_TTL_DAYS, timestampField: 'at', acceptIndexed: true });
 const states = new DurableCollection<SenderState>('crm:sender-state', (s) => s.key, undefined, (s) => s.tenantId);
 
 const dayOf = (at: Date): string => at.toISOString().slice(0, 10);
@@ -90,9 +103,50 @@ export async function windowCounts(tenantId: string, orgId: string, now: Date = 
 export async function recordBounceSignal(tenantId: string, orgId: string, reason: 'bounced' | 'complaint', address: string, at: Date = new Date()): Promise<boolean> {
   if (!orgId || !address) return false;
   const day = dayOf(at);
-  if (!(await seen.putIfAbsent({ key: `${tenantId}::${orgId}::${day}::${reason}::${address.toLowerCase()}`, tenantId, at: at.toISOString() }))) return false;
+  const addr = normalizeSeenAddress(address);
+  const prefix = `${tenantId}::${orgId}::${day}::${reason}::`;
+  // TRANSITION (CHAN-F19): a bounce seen just before the deploy sits under the legacy
+  // raw-address key; a same-day redelivery after it must still count once. Read-only.
+  // REMOVE once SEEN_TTL_DAYS have passed after the deploy that shipped the hashed key:
+  // the age-out lane has then deleted every legacy row, so this read can only miss.
+  if (await seen.get(`${prefix}${address.toLowerCase()}`)) return false; // the legacy key, spelled as it was written
+  if (!(await seen.putIfAbsent({ key: `${prefix}${seenAddressHash(addr)}`, tenantId, at: at.toISOString() }))) return false;
   await bump(tenantId, orgId, at, reason === 'complaint' ? 'complaints' : 'hardBounces', 1);
   return evaluateBreaker(tenantId, orgId, at);
+}
+
+/** The address as the dedup key compares it (the crm identifier normalization for email). */
+function normalizeSeenAddress(address: string): string {
+  return address.trim().toLowerCase();
+}
+
+/** The address segment of a dedup key: a hash, so the key never holds the raw address. */
+function seenAddressHash(normalized: string): string {
+  return `h:${createHash('sha256').update(normalized).digest('hex')}`;
+}
+
+/**
+ * CHAN-F19 — delete this tenant's dedup rows for the given addresses, in BOTH key shapes:
+ * the hashed segment and the legacy raw address (rows written before the hash shipped,
+ * until the age-out lane removes them). Called by the crm subject eraser. Idempotent.
+ * Returns the number of rows deleted.
+ */
+export async function eraseSenderHealthSeen(tenantId: string, addresses: Iterable<string>): Promise<number> {
+  if (!tenantId) return 0;
+  const suffixes: string[] = [];
+  for (const a of addresses) {
+    const n = normalizeSeenAddress(a);
+    if (!n) continue;
+    suffixes.push(`::${seenAddressHash(n)}`, `::${n}`);
+  }
+  if (suffixes.length === 0) return 0;
+  let deleted = 0;
+  for (const row of await seen.listForTenantIndexed(tenantId)) {
+    if (row.tenantId !== tenantId) continue;
+    if (!suffixes.some((s) => row.key.endsWith(s))) continue;
+    if (await seen.delete(row.key)) deleted += 1;
+  }
+  return deleted;
 }
 
 async function evaluateBreaker(tenantId: string, orgId: string, now: Date): Promise<boolean> {

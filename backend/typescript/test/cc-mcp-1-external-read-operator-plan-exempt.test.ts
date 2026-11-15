@@ -23,6 +23,11 @@
  *
  * Sabotage witness: revert either resolve in `bindExternal` to
  * `{ tenantId: scope.tenantId }` → the operator case goes red with `not_found`.
+ *
+ * Residue (prod f1b882654, 2026-11-13 12:41Z): `mcp.performance` on a real client
+ * campaign FAILED `source_feature_unavailable` — `mcpCampaignPerformance` checked
+ * `campaign-connectors` without the subject. Drop `tenantToggleSubject(scope)` there
+ * → the performance case goes red with that code.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -31,7 +36,8 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createMember, createOrg, createWorkspace } from '../src/host/accessControlService.js';
 import { upsertFromPrincipal } from '../src/features/users/usersService.js';
 import { createClient } from '../src/features/campaign-ops/clientService.js';
-import { mcpListCampaigns } from '../src/features/campaign-ops/externalRead.js';
+import { mcpCampaignPerformance, mcpListCampaigns } from '../src/features/campaign-ops/externalRead.js';
+import { __putCampaignRow } from '../src/features/campaign-orchestration/campaignService.js';
 import type { BundleScope } from '../src/host/inMemorySurfaces.js';
 
 const OPERATOR_PERSONAL = 'user:ccmcp1-operator';
@@ -40,6 +46,7 @@ let TENANT: string;
 let OP_USER: string;
 let CU_USER: string;
 let CLIENT: string;
+const CAMPAIGN = 'cmp_ccmcp1';
 const saved: Record<string, string | undefined> = {};
 const ENV = {
   OPENWOP_STORAGE_DSN: 'memory://',
@@ -61,7 +68,7 @@ const toggle = async (id: string, on: boolean) => {
 beforeAll(async () => {
   for (const [k, v] of Object.entries(ENV)) { saved[k] = process.env[k]; process.env[k] = v; }
   await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  for (const id of ['campaign-ops', 'campaign-orchestration', 'billing']) await toggle(id, true);
+  for (const id of ['campaign-ops', 'campaign-orchestration', 'campaign-connectors', 'billing']) await toggle(id, true);
   TENANT = (await createWorkspace({ name: 'Free Agency', ownerSubject: 'oidc:ccmcp1-owner' })).tenantId;
   OP_USER = (await upsertFromPrincipal({ tenantId: TENANT, principalId: 'oidc:ccmcp1-operator', source: 'oidc' })).userId;
   CU_USER = (await upsertFromPrincipal({ tenantId: TENANT, principalId: 'oidc:ccmcp1-customer', source: 'oidc' })).userId;
@@ -69,6 +76,11 @@ beforeAll(async () => {
   CLIENT = (await createOrg({ tenantId: TENANT, createdBy: 'seed', name: 'CC-MCP-1 Client' })).orgId;
   for (const u of [OP_USER, CU_USER]) await createMember({ tenantId: TENANT, orgId: CLIENT, subject: u, displayName: u, roles: ['editor'] });
   await createClient({ tenantId: TENANT, name: 'CC-MCP-1 Client', orgId: CLIENT, createdBy: OP_USER });
+  await __putCampaignRow({
+    id: CAMPAIGN, tenantId: TENANT, orgId: CLIENT, briefId: 'brief-ccmcp1', name: 'CC-MCP-1 Campaign', objective: 'Read by an outside agent',
+    personaIds: [], channels: ['email_sequence'], status: 'draft', createdBy: OP_USER,
+    createdAt: '2026-11-13T00:00:00.000Z', updatedAt: '2026-11-13T00:00:00.000Z',
+  });
 });
 afterAll(() => {
   for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
@@ -77,13 +89,23 @@ afterAll(() => {
 describe('CC-MCP-1 — outside-agent read door, operator plan exemption', () => {
   it('the operator reads the client in a free-plan workspace', async () => {
     const out = await mcpListCampaigns(operator(), CLIENT);
-    expect(out).toMatchObject({ campaigns: [] });
+    expect(out).toMatchObject({ clientId: CLIENT, campaigns: [expect.objectContaining({ campaignId: CAMPAIGN })] });
   });
   it('control: a customer in the same free workspace is still the not-found', async () => {
     await expect(mcpListCampaigns(customer(), CLIENT)).rejects.toMatchObject({ code: 'not_found', message: 'Client not found.' });
   });
   it('control: an actorless scope is the honest no_acting_user refusal', async () => {
     await expect(mcpListCampaigns(actorless(), CLIENT)).rejects.toMatchObject({ code: 'forbidden_scope', details: { reason: 'no_acting_user' } });
+  });
+  it('the operator reads campaign performance (the campaign-connectors source check honours the exemption)', async () => {
+    const out = await mcpCampaignPerformance(operator(), CLIENT, CAMPAIGN);
+    expect(out).toEqual({ clientId: CLIENT, campaignId: CAMPAIGN, from: null, to: null, totals: [] });
+  });
+  it('control: campaign-connectors switched OFF still refuses performance for the operator', async () => {
+    await toggle('campaign-connectors', false);
+    try {
+      await expect(mcpCampaignPerformance(operator(), CLIENT, CAMPAIGN)).rejects.toMatchObject({ code: 'forbidden_scope', details: { reason: 'source_feature_unavailable' } });
+    } finally { await toggle('campaign-connectors', true); }
   });
   it('control: campaign-orchestration switched OFF is still the not-found for the operator', async () => {
     await toggle('campaign-orchestration', false);

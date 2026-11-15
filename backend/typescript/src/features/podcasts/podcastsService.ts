@@ -40,6 +40,8 @@ import { cleanContent, optionalCleanContent, optionalCleanString } from '../../h
 // `getPublicEpisodeTranscript`).
 import { listVersions as listDocumentVersions, getDocument as getDocumentRecord } from '../documents/documentsService.js';
 import { resolveToggle } from '../../host/featureToggles/service.js';
+import { registerSubjectEraser, type SubjectEraseReport } from '../../host/subjectErasure.js';
+import { subjectKeyForms } from '../../host/subjectErasureRedaction.js';
 
 /** One cast member — an opaque host-resolved `voiceId` (RFC 0105 does NOT enumerate
  *  voices) + persona text injected into the transcript prompt. */
@@ -70,8 +72,10 @@ export interface EpisodeProfile {
   tenantId: string;
   orgId: string;
   name: string;
-  outlineModel: string;
-  transcriptModel: string;
+  /** ADR 1115 D9 — absent = the host fills provider + model from the run's choice
+   *  (ADR 0903). Rows stored before D9 keep the value they were created with. */
+  outlineModel?: string;
+  transcriptModel?: string;
   segmentCount: number;
   languageCode?: string;
   defaultBriefing?: string;
@@ -116,6 +120,10 @@ export interface PodcastEpisode {
   clips: EpisodeClip[];
   briefing?: string;
   error?: string;
+  /** ADR 1115 D6 — the typed failure code of the run that wrote `error` (a
+   *  node-chosen `podcast_*` code, never free text), so the Studio can say what
+   *  happened in the reader's language. Cleared with `error`. */
+  errorCode?: string;
   // ── ADR 0390 public-distribution fields (additive) ──
   showId?: string;
   slug?: string;
@@ -271,8 +279,11 @@ export async function createEpisodeProfile(
     tenantId,
     orgId,
     name: reqStr(input.name, 'name'),
-    outlineModel: typeof input.outlineModel === 'string' && input.outlineModel.trim() ? input.outlineModel.trim() : 'claude-sonnet-4-6',
-    transcriptModel: typeof input.transcriptModel === 'string' && input.transcriptModel.trim() ? input.transcriptModel.trim() : 'claude-sonnet-4-6',
+    // ADR 1115 D9 (`PODC93-9`) — no hard-coded vendor model. This used to default both
+    // to 'claude-sonnet-4-6', which made the pack's "with none, the host fills"
+    // branch (ADR 0903) unreachable.
+    ...(typeof input.outlineModel === 'string' && input.outlineModel.trim() ? { outlineModel: input.outlineModel.trim() } : {}),
+    ...(typeof input.transcriptModel === 'string' && input.transcriptModel.trim() ? { transcriptModel: input.transcriptModel.trim() } : {}),
     segmentCount: clampInt(input.segmentCount, MIN_SEGMENTS, MAX_SEGMENTS, 5),
     ...(typeof input.languageCode === 'string' && input.languageCode.trim() ? { languageCode: input.languageCode.trim() } : {}),
     ...(typeof input.defaultBriefing === 'string' && input.defaultBriefing.trim() ? { defaultBriefing: input.defaultBriefing.trim() } : {}),
@@ -333,14 +344,6 @@ export async function listEpisodes(tenantId: string, orgId: string): Promise<Pod
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
 }
 
-/** Attach the enqueued run id to the episode (called by the create route right
- *  after `startWorkflowRun`). */
-export async function setEpisodeRun(tenantId: string, id: string, runId: string): Promise<void> {
-  const e = await episodes.get(`${tenantId}:${id}`);
-  if (!e) return;
-  await episodes.put({ ...e, runId, updatedAt: now() });
-}
-
 /** Write-back from the generation run's nodes (via the ctx.podcasts WRITE surface):
  *  record the outline/transcript Document refs + the ordered synthesized clips as
  *  they are produced. Merges (never clears) so each node can append its own result.
@@ -374,7 +377,7 @@ export async function setEpisodeRun(tenantId: string, id: string, runId: string)
  *  `applied`/`dropped` name the fields, and `clipsRecorded` is the length actually
  *  stored — never the length requested. A caller that asked for something and did
  *  not get it can now see that it did not get it. */
-export type EpisodeResultField = 'outlineDocRef' | 'transcriptDocRef' | 'clips' | 'audioMediaRef' | 'error';
+export type EpisodeResultField = 'outlineDocRef' | 'transcriptDocRef' | 'clips' | 'audioMediaRef' | 'error' | 'errorCode';
 
 export type EpisodeResultWrite = {
   /** The episode row exists. `false` = there was nothing to write to (deleted
@@ -389,12 +392,15 @@ export type EpisodeResultWrite = {
   dropped: EpisodeResultField[];
   /** The number of clips actually stored — present only when `clips` was applied. */
   clipsRecorded?: number;
+  /** ADR 1115 D2 — set by the run-lane surface (never by this service) when the run's
+   *  person may not write this episode; nothing was read or written. */
+  refused?: string;
 };
 
 export async function recordEpisodeResult(
   tenantId: string,
   id: string,
-  patch: { outlineDocRef?: string; transcriptDocRef?: string; clips?: EpisodeClip[]; audioMediaRef?: string; error?: string },
+  patch: { outlineDocRef?: string; transcriptDocRef?: string; clips?: EpisodeClip[]; audioMediaRef?: string; error?: string; errorCode?: string },
 ): Promise<EpisodeResultWrite> {
   const e = await episodes.get(`${tenantId}:${id}`);
   if (!e) return { found: false, recorded: false, applied: [], dropped: [] };
@@ -408,6 +414,7 @@ export async function recordEpisodeResult(
     { field: 'clips', requested: patch.clips !== undefined, keep: Boolean(patch.clips && patch.clips.length > 0) },
     { field: 'audioMediaRef', requested: patch.audioMediaRef !== undefined, keep: Boolean(patch.audioMediaRef) },
     { field: 'error', requested: patch.error !== undefined, keep: Boolean(patch.error) },
+    { field: 'errorCode', requested: patch.errorCode !== undefined, keep: Boolean(patch.errorCode) },
   ];
   const applied = asked.filter((a) => a.keep).map((a) => a.field);
   const dropped = asked.filter((a) => a.requested && !a.keep).map((a) => a.field);
@@ -424,12 +431,22 @@ export async function recordEpisodeResult(
     ...(patch.clips && patch.clips.length > 0 ? { clips: patch.clips } : {}),
     ...(patch.audioMediaRef ? { audioMediaRef: patch.audioMediaRef } : {}),
     ...(patch.error ? { error: patch.error } : {}),
+    ...(patch.errorCode ? { errorCode: patch.errorCode } : {}),
     updatedAt: now(),
   };
   // R2 review note — a REPLACED audio must not keep the old measurement: a
   // stale duration is a confidently wrong public claim. It re-measures on the
   // next publish flip.
   if (patch.audioMediaRef && patch.audioMediaRef !== e.audioMediaRef) delete next.durationSeconds;
+  // ADR 1115 D2 (audio provenance, architect finding 6) — new clips WITHOUT new audio
+  // in the same patch mean the previous run's mix no longer matches what is stored. The
+  // `mix` node writes clips, then the muxed audio; a mux that degrades (mixed codecs)
+  // never writes audio, and the old asset used to survive beside the new transcript,
+  // where publish readiness (D5) would have passed it. Clear it; the next mux restores.
+  if (patch.clips && patch.clips.length > 0 && !patch.audioMediaRef && e.audioMediaRef) {
+    delete next.audioMediaRef;
+    delete next.durationSeconds;
+  }
   await episodes.put(next);
   return {
     found: true,
@@ -454,11 +471,64 @@ export async function recordEpisodeResult(
 export async function clearEpisodeError(tenantId: string, id: string): Promise<{ cleared: boolean }> {
   const e = await episodes.get(`${tenantId}:${id}`);
   if (!e) return { cleared: false };
-  if (e.error === undefined) return { cleared: false };
+  // ADR 1115 D6 — the code is cleared with the message; a lone code is still testimony.
+  if (e.error === undefined && e.errorCode === undefined) return { cleared: false };
   const next = { ...e, updatedAt: now() };
   delete next.error;
+  delete next.errorCode;
   await episodes.put(next);
   return { cleared: true };
+}
+
+/**
+ * ADR 1115 D5 — claim the episode for a NEW generation run, atomically. The door mints
+ * the run id, then swaps the episode from the row it read (whose `runId` it judged not
+ * live) to one naming the new id, with the last run's `error`/`errorCode` cleared in the
+ * SAME write. Losing the swap means another retry (or a write) got there first, and the
+ * caller answers `generation_in_progress`. Only the winner starts the run, with this id.
+ *
+ * This replaces the separate `clearEpisodeError` call on the generate path: the clear is
+ * now strictly before any write the new run can make (its id is not dispatched until
+ * the swap lands), which is what the `L4` ordering comment used to arrange by hand.
+ */
+export async function claimEpisodeGeneration(
+  tenantId: string,
+  read: PodcastEpisode,
+  newRunId: string,
+): Promise<PodcastEpisode | null> {
+  // A row from another tenant is never claimed: the caller lost nothing to retry.
+  if (read.tenantId !== tenantId) return null;
+  const next: PodcastEpisode = { ...read, runId: newRunId, updatedAt: now() };
+  delete next.error;
+  delete next.errorCode;
+  return (await episodes.compareAndSwap(read, next)) ? next : null;
+}
+
+/** ADR 1115 D5 — the start failed after a won claim: point the episode back at the run
+ *  it named before, best-effort. If this swap loses too, the episode names a run that
+ *  does not exist, which is not live, so a retry stays possible. */
+export async function releaseEpisodeGeneration(
+  tenantId: string,
+  claimed: PodcastEpisode,
+  original: PodcastEpisode,
+): Promise<void> {
+  if (claimed.tenantId !== tenantId) return;
+  // `PODCD93-4` — the claim cleared the last run's testimony; a start that never
+  // happened must give it back, or a refused retry turns "failed: <why>" into "failed".
+  const back: PodcastEpisode = { ...claimed, updatedAt: now() };
+  if (original.runId) back.runId = original.runId; else delete back.runId;
+  if (original.error !== undefined) back.error = original.error;
+  if (original.errorCode !== undefined) back.errorCode = original.errorCode;
+  await episodes.compareAndSwap(claimed, back);
+}
+
+/** ADR 1115 D5 — a run is LIVE when its row exists and is not terminal. An absent row
+ *  (purged, never dispatched) is NOT live — `projectStatus` maps absence to `queued`
+ *  for display, which must never be read as "a run is in progress" (architect finding
+ *  1: that read would lock an episode forever). */
+export function isLiveRunStatus(status: string | undefined): boolean {
+  if (status === undefined) return false;
+  return status !== 'completed' && status !== 'failed' && status !== 'cancelled';
 }
 
 export async function deleteEpisode(tenantId: string, id: string): Promise<{ deleted: boolean }> {
@@ -640,6 +710,62 @@ export async function deleteShow(tenantId: string, id: string): Promise<{ delete
   await shows.delete(`${tenantId}:${id}`);
   return { deleted: true };
 }
+
+// ── Subject erasure — ADR 1115 D8 ─────────────────────────────────────────────
+
+/** The `createdBy` tombstone (the scheduled-chats spelling). */
+const ERASED_SUBJECT = 'erased:subject';
+
+/**
+ * ADR 1115 D8 (`PODC93-10`) — the owner decision `subject-erasure-feature-stores.test.ts`
+ * recorded as debt: **scrub the person, keep the show.** A show is an org's public
+ * channel; one person who once created it, or whose address is its feed contact, asking
+ * to be forgotten must not take the channel down.
+ *
+ * - `createdBy` naming the subject (any `subjectKeyForms` form) → the tombstone. The
+ *   literal `'unknown'` (a show created with no actor) is no one's and is left.
+ * - an EMAIL key (`includes('@')`, the `crm/erasure.ts` convention; the seam expands a
+ *   userId erasure one hop to the user's address) equal case-insensitively to
+ *   `ownerEmail` → `ownerEmail` AND `ownerName` removed. The feed then omits
+ *   `<itunes:owner>` (`podcastFeed.ts`) until the operator enters a new contact.
+ *
+ * Residual, stated rather than hidden: the public feed (`max-age=600`) and the bot
+ * prerender cache keep the old contact until they expire. Episodes and profiles carry no
+ * person field. CAS per row, so a concurrent operator edit is never overwritten; a lost
+ * swap is re-read once. Idempotent; a bounded tenant-prefixed scan.
+ */
+export async function erasePodcastsSubject(tenantId: string, subjectKey: string): Promise<SubjectEraseReport> {
+  let rowsTouched = 0;
+  if (!tenantId || !subjectKey) return { rowsTouched }; // fail-closed — never a tenant-wide sweep
+  const { forms } = subjectKeyForms(subjectKey);
+  const email = subjectKey.includes('@') ? subjectKey.trim().toLowerCase() : null;
+  const scrub = (row: PodcastShow): PodcastShow | null => {
+    const byCreator = forms.has(row.createdBy);
+    const byOwner = email !== null && typeof row.ownerEmail === 'string' && row.ownerEmail.trim().toLowerCase() === email;
+    if (!byCreator && !byOwner) return null;
+    const next: PodcastShow = { ...row, updatedAt: now() };
+    if (byCreator) next.createdBy = ERASED_SUBJECT;
+    if (byOwner) { delete next.ownerEmail; delete next.ownerName; }
+    return next;
+  };
+  for (const row of await shows.listByPrefix(`${tenantId}:`)) {
+    if (row.tenantId !== tenantId) continue; // defensive: a foreign-tenant prefix collision
+    let current: PodcastShow | null = row;
+    let settled = false;
+    for (let attempt = 0; attempt < 3 && current; attempt++) {
+      const next = scrub(current);
+      if (!next) { settled = true; break; }
+      if (await shows.compareAndSwap(current, next)) { rowsTouched += 1; settled = true; break; }
+      current = (await shows.get(`${tenantId}:${row.id}`)) ?? null;
+      if (!current) settled = true; // deleted under us: nothing left to scrub
+    }
+    // `PODCD93-8` — never report a clean erasure over a row it could not scrub: the
+    // DSAR fan-out counts a throw as a failure, which is the honest answer.
+    if (!settled) throw new Error(`podcasts erasure lost the write race on show ${row.id} three times`);
+  }
+  return { rowsTouched };
+}
+registerSubjectEraser(erasePodcastsSubject);
 
 // ── Episode publish/assign — ADR 0390 ─────────────────────────────────────────
 

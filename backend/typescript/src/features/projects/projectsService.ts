@@ -31,6 +31,7 @@ import { PREAUTHORIZED_CALLER } from '../../host/subjectAccess.js'; // KBC-1 (AD
 import { listJobsForSubject, deleteJob } from '../../host/schedulingService.js';
 import { clearMemoryScope } from '../../host/inMemorySurfaces.js';
 import { resolveEffectiveAccess, type EffectiveAccess } from '../../host/accessControlService.js';
+import { appendAudit } from '../../host/auditChainService.js';
 import { getRosterEntry } from '../../host/rosterService.js';
 import { parseTurnPolicy, type TurnPolicy } from '../../host/turnPolicy.js';
 import type { AccessLevel } from '../../host/subjectAccess.js';
@@ -429,6 +430,23 @@ export async function updateProject(
 
 const userMemberRef = (userId: string): string => `user:${userId}`;
 
+/** ADR 1118 — the org scope that reaches a private project without membership: the
+ *  org's admins and owners, who manage its members and must be able to recover it. */
+export const PRIVATE_PROJECT_ADMIN_SCOPE = 'host:members:manage' as const;
+
+/** #5906 — who may see a private project is decided by its members and its
+ *  visibility (ADR 1118), so every change to either is a `security.*` entry on the
+ *  tenant's tamper-evident audit chain (ADR 0389 P2), with the acting subject and
+ *  ids only, never content. Written AFTER the change lands. A failed append is
+ *  logged and does not undo an access change that already happened. */
+async function auditProjectAccess(tenantId: string, kind: string, payload: Record<string, unknown>): Promise<void> {
+  try {
+    await appendAudit(tenantId, kind, payload);
+  } catch (err) {
+    log.warn('project_access_audit_failed', { tenantId, kind, projectId: payload.projectId, error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
 /** The ONE visibility ≠ authority rule (ADR 0054 D5), factored so the per-id
  *  door (`resolveProjectAccess`) and the list scan (`listVisibleProjects`)
  *  apply the IDENTICAL rule to an already-resolved org access — never a second
@@ -444,18 +462,28 @@ function levelFor(p: Project, access: EffectiveAccess, callerSubject: string | u
   // so every path through this rule — the per-id door, the list scan, the context block —
   // fails closed. (KBC-1's `subjectReadAllowed` states the same rule for the KB lane.)
   if (callerSubject === undefined) return 'none';
-  if (access.scopes.includes('workspace:write')) return 'write';
   const visibility = p.visibility ?? 'org';
-  if (visibility === 'org' && access.scopes.includes('workspace:read')) return 'read';
-  if (visibility === 'private' && callerSubject && (p.members ?? []).some((m) => m.ref === userMemberRef(callerSubject))) return 'read';
+  if (visibility === 'private') {
+    // ADR 1118 — a private project admits its people-members and the org's admins
+    // (`host:members:manage`: admin, owner) and no one else. An org editor who is not a
+    // member used to read AND write it through `workspace:write`. Membership still
+    // never grants write: a member writes only with `workspace:write` in the org.
+    const member = (p.members ?? []).some((m) => m.ref === userMemberRef(callerSubject));
+    if (!member && !access.scopes.includes(PRIVATE_PROJECT_ADMIN_SCOPE)) return 'none';
+    return access.scopes.includes('workspace:write') ? 'write' : 'read';
+  }
+  if (access.scopes.includes('workspace:write')) return 'write';
+  if (access.scopes.includes('workspace:read')) return 'read';
   return 'none';
 }
 
 /** The caller's access LEVEL for a project (ADR 0054 D5 — the ONE place the
  *  visibility ≠ authority rule lives; the `subjectAccess` seam wraps this for
  *  kanban). WRITE ⟺ `workspace:write` in the project's org (membership NEVER
- *  grants write). READ = write OR (`org`-visible && org-read) OR (`private` &&
- *  the caller is a people-member). Fail-closed: unknown project ⇒ `'none'`. */
+ *  grants write). On an `org`-visible project: WRITE ⟺ `workspace:write`, READ ⟺
+ *  `workspace:read`. On a `private` one (ADR 1118) only a people-member or an org
+ *  admin gets in, reading, or writing with `workspace:write`. Fail-closed: unknown
+ *  project ⇒ `'none'`. */
 export async function resolveProjectAccess(tenantId: string, projectId: string, callerSubject: string | undefined): Promise<AccessLevel> {
   const p = await getProject(tenantId, projectId);
   if (!p) return 'none';
@@ -497,7 +525,7 @@ export async function listVisibleProjects(
 /** Add (or re-role) a member. Validates the ref: a `user:` ref MUST be an org
  *  member of the project's org (can't add a stranger); an `agent:` ref MUST be a
  *  tenant roster entry. Caller authority is enforced at the route (write). */
-export async function addProjectMember(tenantId: string, projectId: string, ref: unknown, role: unknown): Promise<Project> {
+export async function addProjectMember(tenantId: string, projectId: string, ref: unknown, role: unknown, actor?: string): Promise<Project> {
   const current = await getProject(tenantId, projectId);
   if (!current) throw new OpenwopError('not_found', 'Project not found.', 404, { id: projectId });
   const r = cleanString(ref, 200);
@@ -513,23 +541,37 @@ export async function addProjectMember(tenantId: string, projectId: string, ref:
     if (!entry) throw new OpenwopError('validation_error', 'That agent is not in this workspace’s roster.', 400, { ref: r });
   }
   // ADR 0839 D4 — the read-modify-write is a CAS: two concurrent adds both land.
-  return (await mutateProject(tenantId, projectId, async (row) => {
+  const { before, after } = await mutateProject(tenantId, projectId, async (row) => {
     const members = (row.members ?? []).filter((x) => x.ref !== r);
     if (members.length >= MAX_MEMBERS) throw new OpenwopError('validation_error', `This project already has the maximum ${MAX_MEMBERS} members.`, 400, { cap: MAX_MEMBERS });
     members.push({ ref: r, role: projectRole, addedAt: nowIso() });
     return { ...row, members, updatedAt: nowIso() };
-  })).after;
+  });
+  const prior = (before.members ?? []).find((x) => x.ref === r);
+  if (!prior || prior.role !== projectRole) {
+    await auditProjectAccess(tenantId, prior ? 'security.project.member-role-changed' : 'security.project.member-added', {
+      projectId, orgId: after.orgId, ref: r, role: projectRole, ...(prior ? { previousRole: prior.role } : {}), ...(actor ? { actor } : {}),
+    });
+  }
+  return after;
 }
 
 /** Remove a member (descriptive only — never revokes org authority). */
-export async function removeProjectMember(tenantId: string, projectId: string, ref: string): Promise<Project> {
-  return (await mutateProject(tenantId, projectId, async (current) => {
+export async function removeProjectMember(tenantId: string, projectId: string, ref: string, actor?: string): Promise<Project> {
+  const { before, after } = await mutateProject(tenantId, projectId, async (current) => {
     const next: Project = { ...current, members: (current.members ?? []).filter((m) => m.ref !== ref), updatedAt: nowIso() };
     // ADR 0054 D6 — keep `moderatorRosterId ∈ members`: removing the moderator agent
     // clears the now-stale chair (else it would point outside the room).
     if (current.moderatorRosterId && ref === `agent:${current.moderatorRosterId}`) delete next.moderatorRosterId;
     return next;
-  })).after;
+  });
+  const prior = (before.members ?? []).find((x) => x.ref === ref);
+  if (prior) {
+    await auditProjectAccess(tenantId, 'security.project.member-removed', {
+      projectId, orgId: after.orgId, ref, role: prior.role, ...(actor ? { actor } : {}),
+    });
+  }
+  return after;
 }
 
 /** ADR 0852 — set or clear a project's facet (a campaign's project loses
@@ -546,7 +588,11 @@ export async function setProjectFacet(tenantId: string, projectId: string, facet
 }
 
 /** Set the project's read-visibility (ADR 0054 D5). */
-export async function setProjectVisibility(tenantId: string, projectId: string, visibility: unknown): Promise<Project> {
+/** `actor` is the person flipping it. ADR 1118: making a project private adds them as a
+ *  `lead` member when they are not one already, or an editor would lock themselves out
+ *  of the project they just made private (a private project admits only members and
+ *  admins). Explicit, so the Members tab shows who holds the way in. */
+export async function setProjectVisibility(tenantId: string, projectId: string, visibility: unknown, actor?: string): Promise<Project> {
   if (visibility !== 'org' && visibility !== 'private') {
     throw new OpenwopError('validation_error', '`visibility` must be `org` or `private`.', 400, { field: 'visibility' });
   }
@@ -557,7 +603,17 @@ export async function setProjectVisibility(tenantId: string, projectId: string, 
     if (visibility === 'private' && row.facet === 'campaign') {
       throw new OpenwopError('conflict', "A campaign's project stays visible to the workspace while the campaign exists.", 409, { field: 'visibility', facet: 'campaign' });
     }
-    return { ...row, visibility, updatedAt: nowIso() };
+    const members = row.members ?? [];
+    const keep = visibility === 'private' && actor !== undefined && !members.some((m) => m.ref === userMemberRef(actor));
+    if (keep && members.length >= MAX_MEMBERS) {
+      throw new OpenwopError('validation_error', `Making this project private would add you as its ${MAX_MEMBERS + 1}th member. Remove a member first.`, 400, { cap: MAX_MEMBERS });
+    }
+    return {
+      ...row,
+      visibility,
+      ...(keep ? { members: [...members, { ref: userMemberRef(actor), role: 'lead' as const, addedAt: nowIso() }] } : {}),
+      updatedAt: nowIso(),
+    };
   });
   // ADR 0608 D5 (`CPC-3`) — the carve-out that keeps a `private` project's KB out
   // of an advisory board was applied at SHARE TIME ONLY. Nothing re-ran it, so
@@ -570,6 +626,11 @@ export async function setProjectVisibility(tenantId: string, projectId: string, 
   // visibility flip must land even if a board is unreachable.
   if ((before.visibility ?? 'org') !== visibility) {
     await notifyShareableKbSourceChanged(tenantId, before.orgId, 'project');
+    const addedLead = (next.members ?? []).length > (before.members ?? []).length && actor !== undefined ? userMemberRef(actor) : undefined;
+    await auditProjectAccess(tenantId, 'security.project.visibility-changed', {
+      projectId, orgId: before.orgId, from: before.visibility ?? 'org', to: visibility,
+      ...(addedLead ? { addedLeadMember: addedLead } : {}), ...(actor ? { actor } : {}),
+    });
   }
   return next;
 }

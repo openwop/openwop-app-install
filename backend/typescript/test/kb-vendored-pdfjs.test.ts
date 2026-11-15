@@ -1,5 +1,5 @@
 /**
- * H61 — the KB must not parse uploads with the pdf.js that unpdf VENDORS.
+ * H61 (#3335) — the KB must not parse uploads with the pdf.js that unpdf VENDORS.
  *
  * `npm audit` reads the dependency graph. `unpdf` does not declare a dependency
  * on `pdfjs-dist`; it BUNDLES pdf.js into `dist/pdfjs.mjs` (unpdf 1.6.2 →
@@ -15,11 +15,14 @@
  *
  *   - the pdf.js unpdf RESOLVES through `loadUnpdf()` is outside the range
  *     (behavioural: it reads the loaded module's `version`, not a manifest);
- *   - no source file imports `unpdf` except `loadUnpdf()` (a second entry point
- *     that ran first would load the vendored copy);
- *   - while the vendored bundle is still vulnerable, the closed exception stays
+ *   - no source file names the `unpdf` specifier except `loadUnpdf()` (a second
+ *     entry point that ran first would load the vendored copy) — any quoted form,
+ *     a side-effect import and a subpath included;
+ *   - while the vendored bundle is still vulnerable (asserted: it reds the day
+ *     unpdf ships a fixed one, so H61 is re-assessed), the closed exception stays
  *     deleted (a stale exception is what `check-audit.mjs` exists to prevent);
- *   - `isEvalSupported: false` stays on the app's getDocumentProxy call.
+ *   - `isEvalSupported: false` stays on EVERY KB getDocumentProxy call, and the
+ *     PDF lane takes its pdf.js from `loadUnpdf()`.
  *
  * SABOTAGE-WITNESSED (2026-10-10): dropping the `definePDFJSModule` line reds
  * the resolved-version case (it reads 5.6.205).
@@ -98,15 +101,26 @@ describe('H61 — the KB does not parse with the pdf.js unpdf vendors', () => {
   }, 60_000);
 
   it('no source file imports unpdf except loadUnpdf()', () => {
-    const hits = execFileSync('git', ['grep', '-nE', "(from|import\\() *'unpdf'", '--', 'src'], { cwd: BACKEND, encoding: 'utf8' })
+    // Every quoted `unpdf` specifier, subpaths included: `from 'unpdf'`, `import('unpdf')`,
+    // a bare side-effect `import 'unpdf'`, `require("unpdf")`, `'unpdf/…'`. Backtick
+    // prose in comments is not a specifier and does not match.
+    const SPECIFIER = /['"]unpdf(\/[^'"]*)?['"]/;
+    const hits = execFileSync('git', ['grep', '-nE', `['"]unpdf(/[^'"]*)?['"]`, '--', 'src'], { cwd: BACKEND, encoding: 'utf8' })
       .split('\n').filter(Boolean)
       // `typeof import('unpdf')` is a type and loads nothing; every other form does.
-      .filter((h) => h.replace(/typeof import\('unpdf'\)/g, '').includes("'unpdf'"));
+      .filter((h) => SPECIFIER.test(h.replace(/typeof import\('unpdf'\)/g, '')));
     expect(hits).toHaveLength(1);
     expect(hits[0]).toMatch(/^src\/features\/kb\/kbService\.ts:\d+:\s+const unpdf = await import\('unpdf'\);/);
   });
 
   it('while the vendored bundle is vulnerable, its closed exception stays deleted', () => {
+    // The "while" is asserted, not assumed: the day unpdf bundles a fixed pdf.js this
+    // reds, so H61 is re-assessed (the definePDFJSModule seam may then be retired)
+    // instead of this file pinning a premise that stopped being true.
+    expect(
+      cmp(bundled, FIXED_AT) < 0,
+      `unpdf now bundles pdf.js ${bundled.join('.')} (>= ${FIXED_AT.join('.')}). Re-assess H61 and re-title this case.`,
+    ).toBe(true);
     const entry = exceptions.find((e) => e.package === VENDORED_KEY);
     expect(
       entry,

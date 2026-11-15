@@ -110,7 +110,7 @@ export function MenuSettingsPage(): JSX.Element {
         label: navLabel(f.nav, tn),
         declaredTier: f.tier,
         declaredGroup: f.nav.group,
-        alwaysOn: !f.nav.featureId,
+        alwaysOn: f.nav.lockVisible === true,
         ...(f.nav.featureId ? { featureId: f.nav.featureId } : {}),
       });
     }

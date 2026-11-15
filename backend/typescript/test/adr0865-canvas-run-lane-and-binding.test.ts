@@ -56,7 +56,7 @@ afterAll(() => { __resetCanvasLifecycleHooks(); });
  *  owner kind (a `user` owner has no access resolver here; the org gate decides). */
 async function privateCanvas(state: Record<string, unknown>): Promise<{ canvasId: string }> {
   const project = await createProject(WS, WS, { name: `private-${Math.random()}` }, OTHER);
-  await setProjectVisibility(WS, project.id, 'private');
+  await setProjectVisibility(WS, project.id, 'private', OTHER); // OTHER becomes its lead member (ADR 1118)
   return createCanvasForTenant(WS, { canvasTypeId: 'doc', initialState: state, ownerSubject: { kind: 'project', id: project.id } });
 }
 
@@ -71,9 +71,8 @@ describe('ADR 0865 B17 — the run-lane canvas gate (ctx.canvas)', () => {
   });
 
   it('25: a private project\'s canvas answers a non-member reader the SAME canvas_not_found as a missing id', async () => {
-    // ADR 0054 D5: write authority is `workspace:write` and project visibility
-    // never removes it, so the reader a private project hides from is a Viewer
-    // who is not a project member, and a run with no person at all.
+    // ADR 1118: a private project hides from every non-member who is not an org
+    // admin: here a Viewer, and a run with no person at all.
     const priv = await privateCanvas({ secret: 1 });
     const org = await createCanvasForTenant(WS, { canvasTypeId: 'doc', initialState: { open: 1 } });
     const asViewer = canvasOf({ tenantId: WS, actingUserId: VIEWER });
@@ -81,7 +80,7 @@ describe('ADR 0865 B17 — the run-lane canvas gate (ctx.canvas)', () => {
     expect(await codeOf(asViewer.read(priv.canvasId))).toBe('canvas_not_found');
     expect(await codeOf(asViewer.read('canvas-does-not-exist'))).toBe('canvas_not_found');
     expect(await codeOf(canvasOf({ tenantId: WS, runId: 'run-system' }).read(priv.canvasId))).toBe('canvas_not_found');
-    // ...while the project's own writers read it.
+    // ...while its member (OTHER, who made it private) reads it.
     expect((await canvasOf({ tenantId: WS, actingUserId: OTHER }).read(priv.canvasId)).state).toEqual({ secret: 1 });
   });
 

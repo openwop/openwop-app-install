@@ -7,10 +7,13 @@
  * Breaks if the envelope is returned un-unwrapped, a `null` config stops reading
  * as "none set yet", `canManage` defaults to true when the server omits it (the
  * page would offer writes the server refuses), or the client goes back to an
- * `/orgs/:orgId/` path.
+ * `/orgs/:orgId/` path (or any other path than the exact workspace URL).
+ * Re-graded /grade-tests wave 108 (TST-ARA-8): probes on the path, the unwrap,
+ * the null read and the `canManage` default.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { getRouterConfig, type StoredRouterConfig } from '../modelRouterClient.js';
+import { config as clientConfig } from '../../../client/config.js';
 
 const jsonResponse = (body: unknown): Response =>
   new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -19,11 +22,13 @@ afterEach(() => { vi.unstubAllGlobals(); });
 
 describe('getRouterConfig', () => {
   it('returns stored:null when no config exists yet, at the workspace path', async () => {
-    const fetchMock = vi.fn(async () => jsonResponse({ config: null, canManage: true }));
+    const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse({ config: null, canManage: true }));
     vi.stubGlobal('fetch', fetchMock);
     expect(await getRouterConfig()).toEqual({ stored: null, canManage: true });
-    const url = String((fetchMock.mock.calls[0] as unknown[])[0]);
-    expect(url).toMatch(/\/host\/openwop-app\/model-router\/config$/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Exact URL (a suffix match passes a path with an extra segment in front).
+    const url = String(fetchMock.mock.calls[0]?.[0]);
+    expect(url).toBe(`${clientConfig.baseUrl}/host/openwop-app/model-router/config`);
     expect(url).not.toContain('/orgs/');
   });
 

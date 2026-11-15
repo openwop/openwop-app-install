@@ -126,8 +126,22 @@ function normalizeFinishReason(raw) {
 
 export async function chatCompletion(ctx) {
   ensureCallAI(ctx);
-  const { provider, model, systemPrompt, temperature, maxTokens, stopSequences } = ctx.config;
-  const messages = toMessages(ctx.inputs);
+  const { provider, model, temperature, maxTokens, stopSequences } = ctx.config;
+  let { systemPrompt } = ctx.config;
+  let messages = toMessages(ctx.inputs);
+  // CC-CHAIN-6 — a SOURCE node whose only data is a `{{params.*}}` frozen into its
+  // systemPrompt (19 shipped chains) has no user turn when run with empty inputs,
+  // and providers that require one (Anthropic) reject the request. The system
+  // prompt already carries the whole task and data, so it becomes the single user
+  // turn — nothing is invented. With neither, fail typed without a provider call.
+  if (messages.length === 0) {
+    if (typeof systemPrompt === 'string' && systemPrompt.trim()) {
+      messages = [{ role: 'user', content: systemPrompt }];
+      systemPrompt = undefined;
+    } else {
+      return { status: 'failed', error: { code: 'invalid_inputs', message: 'chatCompletion needs a message or a systemPrompt; this node received neither.' } };
+    }
+  }
 
   const result = await ctx.callAI({
     provider,

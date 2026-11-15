@@ -247,7 +247,7 @@ describe('ADR 0944 D5 — the client context block', () => {
     const reader = (await upsertFromPrincipal({ tenantId: TENANT, principalId: `oidc:private-source-${randomBytes(4).toString('hex')}`, source: 'oidc' })).userId;
     await createMember({ tenantId: TENANT, orgId: orgA, subject: reader, displayName: 'Project reader', roles: ['viewer'] });
     const project = await createProject(TENANT, orgA, { name: 'Private client evidence' }, person);
-    await setProjectVisibility(TENANT, project.id, 'private');
+    await setProjectVisibility(TENANT, project.id, 'private', person); // person stays in as lead (ADR 1118)
     await addProjectMember(TENANT, project.id, `user:${reader}`, 'contributor');
     const source = await createCollection(TENANT, orgA, person, { name: 'PRIVATE-CLIENT-SOURCE' }, { boundSubject: projectSubject(project.id) });
     try {

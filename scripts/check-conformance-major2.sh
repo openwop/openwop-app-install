@@ -15,12 +15,18 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # logs must be judged against a list they control, not whatever the live list holds.
 LIST="${OPENWOP_M2_KNOWN_RED:-$ROOT/scripts/conformance-v2-known-red.txt}"
 LOG="${OPENWOP_M2_LOG:-}"
+# #5916 — the RFC 0148 §A requirement ledger (JSONL, one disposition per row). The
+# suite writes it to OPENWOP_LEDGER_PATH. OPENWOP_M2_LEDGER is the test seam that
+# pairs a synthetic ledger with a synthetic log.
+LEDGER="${OPENWOP_M2_LEDGER:-}"
+BLOCKED_LIST="${OPENWOP_M2_KNOWN_BLOCKED:-$ROOT/scripts/conformance-v2-known-blocked.txt}"
 RUN_RC=""
 if [ -z "$LOG" ]; then
   LOG="$(mktemp "${TMPDIR:-/tmp}/owp-m2-lane.XXXXXX")"
-  ( cd "$ROOT/backend/typescript" && OPENWOP_TARGET_MAJOR=2 npm run test:conformance ) > "$LOG" 2>&1
+  LEDGER="$LOG.ledger.jsonl"
+  ( cd "$ROOT/backend/typescript" && OPENWOP_LEDGER_PATH="$LEDGER" OPENWOP_TARGET_MAJOR=2 npm run test:conformance ) > "$LOG" 2>&1
   RUN_RC=$?
-  echo "  lane log: $LOG (suite exit $RUN_RC)"
+  echo "  lane log: $LOG (suite exit $RUN_RC) · ledger: $LEDGER"
 fi
 strip() { sed 's/\x1b\[[0-9;]*m//g' "$LOG"; }
 PASS=$(strip | grep -acE '✓ src/scenarios/v2-[^ ]+\.test\.ts')
@@ -63,5 +69,25 @@ if [ -n "$(printf '%s\n' "$SOFTSKIP" | grep .)" ]; then
 fi
 if [ -n "$UNEXPECTED" ]; then echo "  ✗ UNLISTED red at major 2 (a new wire gap — fix it or admit it in $LIST with a reason):"; printf '%s\n' "$UNEXPECTED" | sed 's/^/      /'; fail=1; fi
 if [ -n "$STALE" ]; then echo "  ✗ STALE known-red entry — the file passes now; delete its line from $LIST:"; printf '%s\n' "$STALE" | sed 's/^/      /'; fail=1; fi
-if [ "$fail" -eq 0 ]; then echo "  ✓ conformance@major2: red set == known-red list ($(printf '%s\n' "$RED" | grep -c .) admitted), $PASS pass"; fi
+# BLOCKED IS NOT PASS (#5916, the openwop#2093 class). A scenario whose host
+# stopped answering soft-skips: vitest prints ✓ for the file, so the red set
+# above cannot see it, and the ledger records the row `blocked`. If the lane's
+# backend dies mid-run, every later gated file reads as a pass. So read the
+# ledger and fail closed on any blocked row not admitted in $BLOCKED_LIST (both
+# ways, like the known-red list), and on a ledger that is missing or empty: no
+# ledger means no way to tell blocked from passed.
+if [ -z "$LEDGER" ] || [ ! -s "$LEDGER" ]; then
+  echo "  ✗ no requirement ledger (${LEDGER:-unset}) — cannot tell a blocked scenario from a passing one, so this is not a lane result"; fail=1
+else
+  COUNTS=$(node -e 'const c={};for(const l of require("fs").readFileSync(process.argv[1],"utf8").split("\n")){if(!l.trim())continue;let d;try{d=JSON.parse(l).disposition}catch{continue}c[d]=(c[d]||0)+1}console.log(Object.entries(c).map(([k,v])=>k+" "+v).join(" · "))' "$LEDGER")
+  echo "  dispositions: ${COUNTS:-none}"
+  BLOCKED=$(node -e 'const s=new Set();for(const l of require("fs").readFileSync(process.argv[1],"utf8").split("\n")){if(!l.trim())continue;let e;try{e=JSON.parse(l)}catch{continue}if(e.disposition==="blocked")s.add(String(e.requirementId||"(unnamed)"))}console.log([...s].sort().join("\n"))' "$LEDGER" | grep . | sort -u)
+  KNOWN_BLOCKED=""
+  [ -f "$BLOCKED_LIST" ] && KNOWN_BLOCKED=$(grep -vE '^\s*(#|$)' "$BLOCKED_LIST" | sed -E 's/[[:space:]]*#.*$//; s/[[:space:]]+$//' | sort -u)
+  NEW_BLOCKED=$(comm -23 <(printf '%s\n' "$BLOCKED" | grep .) <(printf '%s\n' "$KNOWN_BLOCKED" | grep .))
+  STALE_BLOCKED=$(comm -13 <(printf '%s\n' "$BLOCKED" | grep .) <(printf '%s\n' "$KNOWN_BLOCKED" | grep .))
+  if [ -n "$NEW_BLOCKED" ]; then echo "  ✗ UNADMITTED blocked requirement(s) — the scenario could not run, and vitest counted it as a pass (admit in $BLOCKED_LIST with a reason, or fix the host):"; printf '%s\n' "$NEW_BLOCKED" | sed 's/^/      /'; fail=1; fi
+  if [ -n "$STALE_BLOCKED" ]; then echo "  ✗ STALE known-blocked entry — the requirement is no longer blocked; delete its line from $BLOCKED_LIST:"; printf '%s\n' "$STALE_BLOCKED" | sed 's/^/      /'; fail=1; fi
+fi
+if [ "$fail" -eq 0 ]; then echo "  ✓ conformance@major2: red set == known-red list ($(printf '%s\n' "$RED" | grep -c .) admitted), blocked set == known-blocked list ($(printf '%s\n' "$BLOCKED" | grep -c .) admitted), $PASS pass"; fi
 exit "$fail"

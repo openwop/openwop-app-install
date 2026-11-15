@@ -186,6 +186,11 @@ Claude Design prototype crop-by-crop). These govern EVERY surface, not just
 5. **Toolbars are one row.** Search grows, selects hug content
    (`.filterbar` — the global `input/select { width: 100% }` baseline must be
    scoped away in toolbars). Stacked full-width filter controls are a defect.
+   A single-line select draws its own arrow inside the field (#5883): the base
+   rule sets `appearance: none` and reserves `--select-arrow-room` at the inline
+   end. A rule that restyles a select sets `background-color`, never the
+   `background` shorthand, and keeps `var(--select-arrow-room)` in its inline-end
+   padding (`selectArrowRatchet.test.ts`), or the select is left with no arrow.
 6. **Rows at fleet scale, with honest sub-lines.** Past ~5 homogeneous
    entities, dense rows beat card grids. The contextual sub-line composes
    from REAL fields only (the working card's title, the next schedule's
@@ -578,6 +583,7 @@ These exist so every surface (Chat, Agents, Workflows, Runs, Kanban, Roster, Org
 | Class / Component | Purpose | Notes |
 |---|---|---|
 | `a.btn` | navigational `<Link>`/`<a>` opting into the button chrome | selector-LIST arm on the existing `button` rules (base/hover/`.secondary`/`:focus-visible`/`.btn-sm`) — never `:is()`, so the `button` arm stays at (0,0,1) and class-only button resets keep winning. There is deliberately NO `.primary`/`.btn-primary` class: the bare `<button>` (or bare `a.btn`) IS the primary action; `.secondary` composes for the quiet variant. Use for CTA links that read as buttons (empty-state actions, back-to-list); use `.inline-link`/`.linklike` for text links |
+| `CreateDialog` (`ui/CreateDialog.tsx`) | #5921 — the create form a list page opens from its header's "New …" button (and from its empty state), instead of a form sitting above the list on every visit | Rides `ui/Modal` (focus trap, focus return to the button, Escape, announced error). Owns busy / error / close: success closes and the page announces + refreshes; a failure keeps it open with the message inside; `ready={false}` (a read the fields need failed or came back empty) leaves only Close, never a dead primary. Pages keep their own gating (whether to offer the button). `ui/__tests__/inlineCreateFormRatchet.test.ts` pins per-file `<form>` counts in page/tab/panel files so moved forms do not come back |
 | Modal-composed drawers (`.notifpanel-scrim`/`.netpanel-backdrop` + docked box) | edge-docked panels ride `ui/Modal`, not a second dialog system | `ui/Modal` is drawer-capable via its `scrimClassName`/`className` props: pass a scrim class that docks the box (`justify-content:flex-end` or a fixed-position child) and the drawer inherits the ONE focus-trap + Escape + focus-restore + `aria-modal` + scrim-dismiss contract. NotificationPanel and the devtools NetworkPanel are the references. A surface MUST NOT hand-roll a `role=dialog` overlay |
 | `ui/Button` (`variant` primary/secondary/quiet/danger/link · `size` md/sm) | the explicit action-intent API (ADR 0510 §4) | maps 1:1 onto the existing button classes (bare = primary, `.secondary`, `.btn-ghost`, `.secondary.u-text-danger`, `.btn-link`; `.btn-sm`), so adoption is a no-visual-change refactor. `type` defaults to `button`; `loading` = `aria-busy` + disabled with the label still visible. New actions use it — `check-unwrapped-buttons` ratchets the raw `<button` count to zero, at which point the bare-element rule becomes reset-only |
 | `ui/InlineState` + `EmptyRow` (`.inline-state*`) | the COMPACT designed-state primitives for embedded regions (ADR 0510 §4, DSA-030) | full-page states stay `<StateCard>`; panels/tabs/table bodies use `kind` loading/empty/failed. `failed` announces via the shared live region (or carries `role=alert`) and offers a retry — the honest-read doctrine at every size; `EmptyRow` is the `<td colSpan>` table arm |

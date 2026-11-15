@@ -36,6 +36,7 @@ import { requireProtocolScope, type EnforcedProtocolScope } from './protocolAuth
 import { verifyRunStreamToken } from './runStreamToken.js';
 import { setBearerChallenge } from '../middleware/authChallenge.js';
 import { disposePinnedRun } from './pinnedRunDisposition.js';
+import { assertRunClientReadable } from './runClientAccess.js';
 
 /**
  * Load a run the caller is authorized to READ, or throw. Returns the
@@ -107,6 +108,10 @@ async function loadByScopeAndTenant(req: Request, storage: Storage, runId: strin
   if (run.tenantId !== tenantId) {
     throw new OpenwopError('run_not_found', `run ${runId} not found`, 404);
   }
+  // ADR 1121 (#5929) — a run for a client is read only by people who may read
+  // that client: `runs:read` is a tenant-wide union, so the tenant check alone
+  // let one client's members read another's runs.
+  await assertRunClientReadable(req, run, scope);
   // `persistence.md` §"Runs pinned to v1" — EVERY authorized return disposes.
   // This tenant branch used to `return run` and only the wildcard branch above
   // disposed, so the rule held for `dev-token` (the wildcard every host test
@@ -150,6 +155,7 @@ export async function loadOwnedRun(
   if (run.tenantId !== tenantId) {
     throw new OpenwopError('run_not_found', `run ${runId} not found`, 404);
   }
+  await assertRunClientReadable(req, run, scope); // ADR 1121 — the client floor, at this site's scope
   // `persistence.md` §"Runs pinned to v1" — dispose an inherited run before any
   // reader sees it. Placed on the SHARED reader so poll, snapshot and every other
   // by-id read get the same disposition; a per-route call would be a rule some

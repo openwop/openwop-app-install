@@ -463,7 +463,7 @@ export function registerProjectsRoutes(deps: RouteDeps): void {
     try {
       const { id } = await requireProject(req, 'workspace:write');
       const body = (req.body ?? {}) as { ref?: unknown; role?: unknown };
-      const updated = await addProjectMember(tenantOf(req), id, body.ref, body.role);
+      const updated = await addProjectMember(tenantOf(req), id, body.ref, body.role, actingUserOf(req));
       res.status(201).json({ members: updated.members ?? [] });
     } catch (err) { next(err); }
   });
@@ -471,7 +471,7 @@ export function registerProjectsRoutes(deps: RouteDeps): void {
   app.delete(`${BASE}/:id/members/:ref`, async (req, res, next) => {
     try {
       const { id } = await requireProject(req, 'workspace:write');
-      await removeProjectMember(tenantOf(req), id, decodeURIComponent(req.params.ref));
+      await removeProjectMember(tenantOf(req), id, decodeURIComponent(req.params.ref), actingUserOf(req));
       res.status(204).end();
     } catch (err) { next(err); }
   });
@@ -479,7 +479,7 @@ export function registerProjectsRoutes(deps: RouteDeps): void {
   app.patch(`${BASE}/:id/visibility`, async (req, res, next) => {
     try {
       const { id } = await requireProject(req, 'workspace:write');
-      await setProjectVisibility(tenantOf(req), id, (req.body ?? {})?.visibility);
+      await setProjectVisibility(tenantOf(req), id, (req.body ?? {})?.visibility, actingUserOf(req));
       res.json(await view(tenantOf(req))(id, actingUserOf(req)));
     } catch (err) { next(err); }
   });

@@ -20,6 +20,10 @@
  * add gates on `canManage`; the forced delete losing `force`; a declined confirm
  * still deleting; the consumer list or the "could not check" title dropped;
  * `readOk` ignoring a failed read; the override confirm not `danger`.
+ * Zero keys (2026-10-17 fix, re-graded /grade-tests wave 108): one button per
+ * BYOK provider (never only the first, never a hidden/managed one), each opening
+ * ITS provider's form, the zero state gone once one is chosen, and none of it for
+ * a member without the scope.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -131,9 +135,10 @@ describe('KeysPage — ADR 0779 D7', () => {
     listStoredRefs.mockReset().mockResolvedValue([]);
     render(<KeysPage />);
     expect(await screen.findByText('No API keys yet')).toBeTruthy();
-    for (const label of ['Anthropic', 'OpenAI', 'Google']) {
-      expect(screen.getByRole('button', { name: `Add ${label} key` }), label).toBeTruthy();
-    }
+    // Exactly the BYOK providers of providers.json (MiniMax is hidden, "Try it free"
+    // is managed): no first-provider-only button, and no hidden/managed one either.
+    expect(screen.getAllByRole('button', { name: /^Add .* key$/ }).map((b) => b.textContent?.trim()))
+      .toEqual(['Add Anthropic key', 'Add OpenAI key', 'Add Google key']);
     fireEvent.click(screen.getByRole('button', { name: 'Add Google key' }));
     expect(await screen.findByPlaceholderText('AIza…')).toBeTruthy();
     expect(screen.queryByPlaceholderText('sk-ant-…')).toBeNull();

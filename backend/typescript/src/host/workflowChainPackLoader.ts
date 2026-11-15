@@ -1283,6 +1283,14 @@ interface ChainParamSpec {
   format?: string;
 }
 
+/** RFC 0124 §Rewrite targets row 3, issue #5897 — `config` keys whose WHOLE-VALUE
+ *  `{{params.x}}` token a deferred copy binds to a run variable instead of freezing.
+ *  Only the AI provider and model for now: they are the keys the Run dialog offers
+ *  as a per-run choice, and both are already run-scoped (ADR 0903). Other whole-value
+ *  keys (`orgId`, `contactId`, …) would let a run caller retarget a node, so they
+ *  stay frozen until that is reviewed. */
+const DEFERRABLE_CONFIG_KEYS: ReadonlySet<string> = new Set(['provider', 'model']);
+
 /** RFC 0124 G3 — inline `config` prompt-body keys that the deferred-mode lift turns
  *  into a minted PromptTemplate + `*PromptRef`. A `{{params.x}}` in one of these
  *  defers portably (via a `{{varName}}` slot), so it is a SAFE position for a
@@ -1507,10 +1515,11 @@ export function expandChain(authoredChain: WorkflowChain, opts: ExpandOptions = 
   // reusing the per-expansion prefix. A whole-value `{{params.x}}` top-level
   // `node.inputs` entry is rewritten to a variable-sourced PortValue that the
   // executor resolves per run from the bag (`{type:'variable', variableName}`).
-  // Everything else (config, embedded/nested inputs) falls back to expansion-time
-  // freeze — the spec-sanctioned §Rewrite-targets fallback (increment 1; the
-  // prompt-body PromptTemplate lift that would defer config prompt tokens is a
-  // follow-up). The §Security gate above guarantees no SENSITIVE param reaches a
+  // Config prompt bodies are lifted (G3) and whole-value `provider`/`model` bind to
+  // run variables (`DEFERRABLE_CONFIG_KEYS`, #5897). Everything else (other config
+  // keys, embedded/nested inputs) is frozen at expansion. RFC 0124's table permits
+  // that only for EMBEDDED tokens; other whole-value config keys are a known gap,
+  // and the Run dialog does not offer a variable nothing reads. The §Security gate above guarantees no SENSITIVE param reaches a
   // frozen position, so a fallback-freeze here can never leak a secret.
   // Materialized-variable names must be `\w`-safe (`[a-zA-Z0-9_]`): they become
   // PromptTemplate `{{varName}}` placeholders, and the composer's placeholder regex
@@ -1590,8 +1599,14 @@ export function expandChain(authoredChain: WorkflowChain, opts: ExpandOptions = 
     const out: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(config)) {
       const pb = LIFTABLE_PROMPT_BODY_KEYS[key];
+      const whole = DEFERRABLE_CONFIG_KEYS.has(key) && typeof val === 'string' ? WHOLE_PARAM.exec(val) : null;
       if (pb && typeof val === 'string' && bodyHasKnownParam(val)) {
         out[pb.refKey] = liftPromptBody(nodeId, pb.kind, val); // lift → *PromptRef
+      } else if (whole && paramProps[whole[1]!] && !sensitiveParams.has(whole[1]!)) {
+        // RFC 0124 row 3 / issue #5897 — bind to the run variable, resolved per run
+        // by `resolveNodeConfig`. Freezing it here left the Run dialog offering a
+        // model the run then ignored.
+        out[key] = { type: 'variable', variableName: varNameOf(whole[1]!) };
       } else {
         // ADR 0616 — same as `materializeInputs`: a non-liftable config key is
         // frozen here, so it needs the CHAIN-EMBED-1 marker too. Without it

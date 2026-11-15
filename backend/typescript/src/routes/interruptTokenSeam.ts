@@ -29,6 +29,7 @@ import type { Storage } from '../storage/storage.js';
 import { sendError } from '../middleware/errorEnvelope.js';
 import { OpenwopError } from '../types.js';
 import { loadOwnedRun } from '../host/runAccess.js';
+import { fromWireRunId } from '../host/v2Ids.js';
 import { signVoterBinding } from '../host/interruptVoterBinding.js';
 import { requestSubjectV2, sessionSubjectV2 } from '../host/runOwner.js';
 import { isDeepStrictEqual } from 'node:util';
@@ -53,7 +54,13 @@ export async function readInterruptTokenForCaller(storage: Storage, req: Request
   if (typeof b.runId !== 'string' || b.runId === '') throw new OpenwopError('validation_error', 'runId is required', 400, { field: 'runId' });
   if (typeof b.nodeId !== 'string' || b.nodeId === '') throw new OpenwopError('validation_error', 'nodeId is required', 400, { field: 'nodeId' });
   if (b.bind !== undefined && typeof b.bind !== 'boolean') throw new OpenwopError('validation_error', 'bind must be a boolean', 400, { field: 'bind' });
-  const run = await loadOwnedRun(req, storage, b.runId, 'approvals:respond');
+  // #5918 — the suite sends the runId it got from `POST /runs`, which on the v2 wire
+  // is tenant-bound (`<tenant>/<id>`). Path ids are decoded by the v2 identity
+  // middleware, but a BODY id is not, so the stored lookup missed and every call
+  // answered 404 (the sibling `eventLogSeedSeam` already decodes its body id).
+  const wire = fromWireRunId(b.runId, req.tenantId ?? 'default');
+  if (!wire.ok) throw new OpenwopError('run_not_found', `run ${b.runId} not found`, 404);
+  const run = await loadOwnedRun(req, storage, wire.runId, 'approvals:respond');
   const interrupt = (await storage.listOpenInterrupts(run.runId)).find((i) => i.nodeId === b.nodeId && !i.resolvedAt);
   if (!interrupt) throw new OpenwopError('not_found', `no open interrupt on node ${b.nodeId}`, 404);
   if (b.bind !== true) return { token: interrupt.token };

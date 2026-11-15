@@ -20,7 +20,7 @@ import { PageHeader } from '../../ui/PageHeader.js';
 import { Notice } from '../../ui/Notice.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { Skeleton, SkeletonRows } from '../../ui/Skeleton.js';
-import { Field } from '../../ui/Field.js';
+import { Field, TextField } from '../../ui/Field.js';
 import { Combobox, type ComboboxOption } from '../../ui/Combobox.js';
 import { DataTable, type DataColumn } from '../../ui/DataTable.js';
 import { StatusBadge } from '../../ui/StatusBadge.js';
@@ -34,6 +34,7 @@ import { InlineState } from '../../ui/InlineState.js';
 import { InfoTip } from '../../ui/InfoTip.js';
 import { Tooltip } from '../../ui/Tooltip.js';
 import { ToastCard } from '../../ui/ToasterView.js';
+import { CreateDialog } from '../../ui/CreateDialog.js';
 import { AlertIcon, CheckIcon, ChevronDownIcon, SearchIcon, SettingsIcon, ShieldIcon, UserIcon, WorkflowIcon } from '../../ui/icons/index.js';
 import { NavRailItemContent, NavRailSection } from '../../chrome/NavRailPrimitives.js';
 import { EnvelopeEventsTimeline } from '../../chat/EnvelopeEventsTimeline.js';
@@ -116,6 +117,32 @@ function ComboboxSpecimen({ label, help }: { label: string; help: string }): JSX
       onChange={setValue}
       load={(q) => Promise.resolve(COMBO_OPTIONS.filter((o) => o.label.toLowerCase().includes(q.trim().toLowerCase())))}
     />
+  );
+}
+
+/** The create dialog a list page opens from its header button. Closed on load, so
+ *  the page snapshots stay deterministic and no focus trap fires; opening it shows
+ *  the real dialog. Its submit fails on purpose, so the error state is visible too. */
+function CreateDialogSpecimen(): JSX.Element {
+  const { t } = useTranslation('design-system-gallery');
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState('');
+  return (
+    <>
+      <Button variant="primary" size="sm" onClick={() => setOpen(true)}>{t('dialogOpen')}</Button>
+      {open ? (
+        <CreateDialog
+          title={t('dialogTitle')}
+          submitLabel={t('dialogSubmit')}
+          canSubmit={name.trim().length > 0}
+          onSubmit={async () => { throw new Error(t('dialogError')); }}
+          onClose={() => setOpen(false)}
+          errorFallback={t('dialogError')}
+        >
+          <TextField label={t('dialogField')} value={name} onChange={(e) => setName(e.target.value)} />
+        </CreateDialog>
+      ) : null}
+    </>
   );
 }
 
@@ -402,6 +429,12 @@ export function GalleryPage(): JSX.Element {
           <ToastCard item={{ id: 3, variant: 'warning', message: t('toastWarning') }} onDismiss={() => undefined} />
           <ToastCard item={{ id: 4, variant: 'error', message: t('toastError') }} onDismiss={() => undefined} />
         </div>
+      </Section>
+
+      <Section id="dialogs" title={t('dialogs')}>
+        <Specimen label="CreateDialog: closed / open from its button (submit fails, to show the error)">
+          <CreateDialogSpecimen />
+        </Specimen>
       </Section>
     </div>
   );

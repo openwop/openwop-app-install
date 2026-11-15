@@ -23,6 +23,11 @@
  * flag, the skip-past stop (a hop that only checks its own endpoint), the
  * required-stop split, the per-hop operator actions, the downgrade refusal, the
  * CLI's exit 2, and the requiredStopReason and newest-first rules each red a case.
+ * Re-graded (wave 108, TST-8W6-1): the 0.1.0 case now derives the expected stop
+ * reasons from releases.json (one per crossed not-rolling-safe release, so keeping only
+ * the last one reds it), and the printed plan orders breaking configuration after the
+ * backup and any old-binary stop and before the new binary starts (ADR 0981 P3;
+ * printing it after the Start line reds both rows).
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
@@ -135,24 +140,31 @@ describe('required stops and validation rules (fixtures)', () => {
     expect(plan.steps.map((s) => s.operatorActions)).toEqual([['1.1.0: A', '1.2.0: B'], ['1.3.0: C']]);
   });
 
-  it.each([true, false])('applies required startup configuration before starting the new binary (rollingSafe=%s)', (rollingSafe) => {
+  // ADR 0981 P3 — breaking configuration can be a boot prerequisite, so the printed plan
+  // must order it after the backup (and after the old-binary stop, when there is one) and
+  // before the new binary starts. The order is read off the text the operator follows.
+  it.each([
+    [true, ['backup', 'configure', 'start']],
+    [false, ['backup', 'stop', 'configure', 'start']],
+  ] as const)('rollingSafe=%s: applies required startup configuration before starting the new binary', (rollingSafe, expected) => {
     const action = 'Set OPENWOP_AUTHORIZATION_ENFORCEMENT=true before starting';
     const m = manifest(
       rel('1.1.0', { breakingConfig: [action], rollingSafe, rollingUnsafeReason: rollingSafe ? null : 'schema rename' }),
       rel('1.0.0'),
     );
     const instructions = formatPlan(planUpgrade(m, '1.0.0'));
-    const backup = instructions.indexOf('Back up the database');
-    const configure = instructions.indexOf(action);
-    const start = instructions.indexOf('Start 1.1.0.');
-    expect(backup).toBeGreaterThanOrEqual(0);
-    expect(configure).toBeGreaterThan(backup);
-    expect(start).toBeGreaterThan(configure);
-    if (!rollingSafe) {
-      const stop = instructions.indexOf('STOP every 1.0.0 instance');
-      expect(stop).toBeGreaterThan(backup);
-      expect(configure).toBeGreaterThan(stop);
-    }
+    const marks: Record<string, string> = {
+      backup: 'Back up the database',
+      stop: 'STOP every 1.0.0 instance',
+      configure: action,
+      start: 'Start 1.1.0.',
+    };
+    // Each marker printed once at most; the ones present, in printed order.
+    for (const text of Object.values(marks)) expect(instructions.split(text).length, text).toBeLessThanOrEqual(2);
+    const order = Object.keys(marks)
+      .filter((k) => instructions.includes(marks[k]!))
+      .sort((a, b) => instructions.indexOf(marks[a]!) - instructions.indexOf(marks[b]!));
+    expect(order).toEqual(expected);
   });
 
   it('rejects the manifest shapes an upgrade tool could not trust', () => {

@@ -75,8 +75,11 @@ export interface BuiltinTool {
    *  in this host (rows, cards, artifacts, canvases, settings, memory) or cause
    *  an effect outside it (email/SMS/push, webhook, payment, post, connector
    *  write). `'read'` otherwise, including external READS and pure compute. An
-   *  argument-dependent tool (`preview | apply`) is `'write'`. DISPLAY ONLY (the
-   *  turn receipt): never an input to gating, capability or permission checks. */
+   *  argument-dependent tool (`preview | apply`) is `'write'`. Shown on the turn
+   *  receipt, and (CC-AGENT-3) read by the tool loop's repeat guard to answer an
+   *  identical repeat of a READ from its earlier result. Never an input to gating,
+   *  capability or permission checks. Mislabel a write as `'read'` and an identical
+   *  repeat of it inside one turn is not re-run. */
   effect: 'read' | 'write';
   /**
    * ADR 0604 (TOCC-2) — does this tool's RESULT carry a CLOSED WORLD the model

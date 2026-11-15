@@ -35,6 +35,8 @@ import { resolveRunMemoryClient, runClientStamp } from '../../host/runClientOrg.
 import { fenceUntrustedItems, neutralizeUntrusted } from '../../host/untrustedContent.js';
 import { degradationNotice } from '../../host/agentKnowledgeComposition.js';
 import { featureAccessRefusal } from '../../host/workflowFeatureGate.js';
+import { planExemptScopeOfRun, tenantToggleSubject } from '../../host/operatorPlanExemption.js';
+import type { ToggleSubject } from '../../host/featureToggles/types.js';
 import { getOrg } from '../../host/accessControlService.js';
 import { OpenwopError } from '../../types.js';
 import { levelSatisfies, type SubjectCaller } from '../../host/subjectAccess.js';
@@ -164,8 +166,8 @@ function unavailable(label: string, why: 'toggle' | 'plan' | 'unresolved'): stri
   return `## ${label}\n(Not included: ${reason}.)`;
 }
 
-async function brandSection(tenantId: string, orgId: string, sources: ClientContextSource[]): Promise<Section | null> {
-  const refusal = await featureAccessRefusal('brand', tenantId);
+async function brandSection(tenantId: string, orgId: string, sources: ClientContextSource[], subject: ToggleSubject): Promise<Section | null> {
+  const refusal = await featureAccessRefusal('brand', tenantId, subject);
   if (refusal) return { kind: 'brand', text: unavailable('Brand voice', refusal) };
   const brand = (await listBrands(tenantId, orgId)).find((b) => b.status === 'active');
   if (!brand) return null;
@@ -175,8 +177,8 @@ async function brandSection(tenantId: string, orgId: string, sources: ClientCont
   return { kind: 'brand', text: `## Brand voice (source: brand ${brand.id}, revision ${brand.updatedAt})\n${resolveVoice(brand, rules ? { extraBannedPhrases: rules.bannedPhrases } : {})}` };
 }
 
-async function knowledgeSection(tenantId: string, orgId: string, sources: ClientContextSource[], kept: string[], caller: SubjectCaller): Promise<Section | null> {
-  const refusal = await featureAccessRefusal('kb', tenantId);
+async function knowledgeSection(tenantId: string, orgId: string, sources: ClientContextSource[], kept: string[], caller: SubjectCaller, subject: ToggleSubject): Promise<Section | null> {
+  const refusal = await featureAccessRefusal('kb', tenantId, subject);
   if (refusal) return { kind: 'knowledge', text: unavailable('Client knowledge', refusal) };
   const names: string[] = [];
   for (const id of await getClientContextSources(tenantId, orgId)) {
@@ -196,8 +198,8 @@ async function knowledgeSection(tenantId: string, orgId: string, sources: Client
 
 const money = (n: number | null | undefined): string => (typeof n === 'number' && Number.isFinite(n) ? n.toFixed(2) : 'n/a');
 
-async function performanceSection(tenantId: string, orgId: string, sources: ClientContextSource[]): Promise<Section | null> {
-  const refusal = await featureAccessRefusal('campaign-connectors', tenantId);
+async function performanceSection(tenantId: string, orgId: string, sources: ClientContextSource[], subject: ToggleSubject): Promise<Section | null> {
+  const refusal = await featureAccessRefusal('campaign-connectors', tenantId, subject);
   if (refusal) return { kind: 'performance', text: unavailable('Past performance', refusal) };
   const records = await listRecords(tenantId, orgId);
   if (records.length === 0) return null;
@@ -214,9 +216,9 @@ async function performanceSection(tenantId: string, orgId: string, sources: Clie
   return { kind: 'performance', text: `## Past performance (source: imported campaign records, ${range})\n${fenceUntrustedItems(items)}` };
 }
 
-async function decisionsSection(tenantId: string, orgId: string, sources: ClientContextSource[], caller: SubjectCaller): Promise<Section | null> {
+async function decisionsSection(tenantId: string, orgId: string, sources: ClientContextSource[], caller: SubjectCaller, subject: ToggleSubject): Promise<Section | null> {
   for (const featureId of ['team-intent-ledger', 'projects', 'documents']) {
-    const refusal = await featureAccessRefusal(featureId, tenantId);
+    const refusal = await featureAccessRefusal(featureId, tenantId, subject);
     if (refusal) return { kind: 'decisions', text: unavailable('Approved decisions', refusal) };
   }
   const lines: string[] = [];
@@ -259,15 +261,15 @@ export function renderClientContextBlock(header: string, sections: readonly Sect
   return { block: block.length <= maxChars ? block : '', omitted };
 }
 
-async function buildSnapshot(tenantId: string, stamp: ClientContextStamp, caller: SubjectCaller): Promise<ClientContextSnapshot> {
+async function buildSnapshot(tenantId: string, stamp: ClientContextStamp, caller: SubjectCaller, subject: ToggleSubject): Promise<ClientContextSnapshot> {
   const sources: ClientContextSource[] = [];
   const collectionIds: string[] = [];
   const org = await getOrg(stamp.orgId);
   const sections = (await Promise.all([
-    brandSection(tenantId, stamp.orgId, sources),
-    knowledgeSection(tenantId, stamp.orgId, sources, collectionIds, caller),
-    performanceSection(tenantId, stamp.orgId, sources),
-    decisionsSection(tenantId, stamp.orgId, sources, caller),
+    brandSection(tenantId, stamp.orgId, sources, subject),
+    knowledgeSection(tenantId, stamp.orgId, sources, collectionIds, caller, subject),
+    performanceSection(tenantId, stamp.orgId, sources, subject),
+    decisionsSection(tenantId, stamp.orgId, sources, caller, subject),
   ])).filter((s): s is Section => s !== null);
   const createdAt = new Date().toISOString();
   const header = `Client context — frozen for this run at ${createdAt} (snapshot ${stamp.snapshotId}). `
@@ -278,7 +280,7 @@ async function buildSnapshot(tenantId: string, stamp: ClientContextStamp, caller
 }
 
 /** The run's snapshot, materialized on first read (insert-if-absent). */
-async function snapshotFor(tenantId: string, stamp: ClientContextStamp, caller: SubjectCaller): Promise<ClientContextSnapshot> {
+async function snapshotFor(tenantId: string, stamp: ClientContextStamp, caller: SubjectCaller, subject: ToggleSubject): Promise<ClientContextSnapshot> {
   const key = `${tenantId}::${stamp.orgId}::${stamp.snapshotId}`;
   const existing = await snapshots.get(key);
   if (existing) {
@@ -287,7 +289,7 @@ async function snapshotFor(tenantId: string, stamp: ClientContextStamp, caller: 
     }
     return existing;
   }
-  const built = await buildSnapshot(tenantId, stamp, caller);
+  const built = await buildSnapshot(tenantId, stamp, caller, subject);
   if (await snapshots.compareAndSwap(null, built)) return built;
   const winner = await snapshots.get(key);
   if (!winner || winner.tenantId !== tenantId || winner.orgId !== stamp.orgId || winner.snapshotId !== stamp.snapshotId) {
@@ -303,7 +305,12 @@ export async function clientContextForRun(tenantId: string, runId: string): Prom
   const meta = run.metadata as Record<string, unknown> | undefined;
   const stamp = readClientContextStamp(meta);
   if (!stamp) return null;
-  if (await featureAccessRefusal('campaign-ops', tenantId)) return null;
+  // CC-CTX-1 (ADR 1108): every source-feature check resolves with the RUN's
+  // tenant-only toggle subject, so a run the listed operator started in a
+  // narrowed-plan workspace is not told a switched-on feature is "not in this
+  // workspace plan". The stamp holds only while the operator is still listed.
+  const subject = tenantToggleSubject(planExemptScopeOfRun(tenantId, meta));
+  if (await featureAccessRefusal('campaign-ops', tenantId, subject)) return null;
   const client = await resolveRunMemoryClient({
     tenantId, runId,
     actingUserId: typeof meta?.['actingUserId'] === 'string' ? meta['actingUserId'] : undefined,
@@ -312,14 +319,14 @@ export async function clientContextForRun(tenantId: string, runId: string): Prom
   if (!client || !('orgId' in client) || client.orgId !== stamp.orgId) return { refused: true };
   // The actual actor is authority for subject-bound KB; a causing member never grants it.
   const caller: SubjectCaller = typeof meta?.['actingUserId'] === 'string' ? { subject: meta['actingUserId'] } : {};
-  const snapshot = await snapshotFor(tenantId, stamp, caller);
+  const snapshot = await snapshotFor(tenantId, stamp, caller, subject);
   // A frozen read is never authority to use a feature disabled since first use.
   const features: Record<ClientContextSectionKind, readonly string[]> = {
     brand: ['brand'], knowledge: ['kb'], performance: ['campaign-connectors'],
     decisions: ['team-intent-ledger', 'projects', 'documents'],
   };
   for (const featureId of new Set(snapshot.sources.flatMap((source) => features[source.kind]))) {
-    if (await featureAccessRefusal(featureId, tenantId)) return { refused: true };
+    if (await featureAccessRefusal(featureId, tenantId, subject)) return { refused: true };
   }
   for (const id of snapshot.collectionIds) {
     if (!(await getCollection(tenantId, stamp.orgId, id, caller))) return { refused: true };

@@ -43,7 +43,7 @@ vi.mock('../src/byok/userNamedSecret.js', async (orig) => ({
 }));
 
 const { runAiDefaultContributor, runAiDefaultFor, withRunAiDefault, runCredentialRefFor, RUN_AI_DEFAULT_KEY } = await import('../src/host/runAiDefault.js');
-const { getDefaultModel, listManagedProviderIds } = await import('../src/providers/catalog.js');
+const { getDefaultModel, listManagedProviderIds, getProviderConfig } = await import('../src/providers/catalog.js');
 const { expandChain } = await import('../src/host/workflowChainPackLoader.js');
 const { openStorage } = await import('../src/storage/index.js');
 const { __resetHostExtPersistence, initHostExtPersistence } = await import('../src/host/hostExtPersistence.js');
@@ -69,6 +69,44 @@ describe('withRunAiDefault — fills only what the node left out', () => {
     const req = { provider: 'anthropic', model: 'm' };
     expect(withRunAiDefault(req, def)).toBe(req);
     expect(withRunAiDefault({ provider: undefined }, null)).toEqual({ provider: undefined });
+  });
+});
+
+/**
+ * ADR 1117 follow-up (DAC-2, reproduced on prod 2026-11-14: a run that chose only
+ * `MiniMax-M3.1-Flash` ran `openwop-free`). A model chosen without a provider runs on
+ * the provider that offers it, and that provider never takes the default's key.
+ * Sabotage (2026-11-14): restoring `model: def.model` in the credential branch reds
+ * the first and fourth cases; dropping the owner lookup reds the second and third.
+ */
+describe('withRunAiDefault — a model chosen without a provider', () => {
+  const otherGoogle = getProviderConfig('google')!.models.find((m) => m.id !== getDefaultModel('google'))!.id;
+  const anthropicModel = getDefaultModel('anthropic');
+  const managedId = listManagedProviderIds()[0]!;
+  const workspaceGoogle = { provider: 'google', model: getDefaultModel('google'), source: 'workspace' as const, credentialRef: 'google:testing' };
+  const managed = { provider: managedId, model: getDefaultModel(managedId), source: 'managed' as const, credentialRef: `managed:${managedId}` };
+
+  it('a model the default\'s provider offers is kept, with the default\'s key', () => {
+    expect(withRunAiDefault({ model: otherGoogle }, workspaceGoogle)).toEqual({ provider: 'google', model: otherGoogle, credentialRef: 'google:testing' });
+  });
+  it('a model another provider offers moves the call to that provider, without the default\'s key', () => {
+    const out = withRunAiDefault({ model: anthropicModel }, managed);
+    expect(out).toEqual({ provider: 'anthropic', model: anthropicModel });
+    expect('credentialRef' in out).toBe(false);
+  });
+  it('the same holds for a default without a key (it used to send the model to the wrong provider)', () => {
+    expect(withRunAiDefault({ model: anthropicModel }, { provider: 'google', model: 'g', source: 'catalog' })).toEqual({ provider: 'anthropic', model: anthropicModel });
+  });
+  it('a model the catalog does not know passes through on the default provider', () => {
+    expect(withRunAiDefault({ model: 'custom-finetune-1' }, workspaceGoogle)).toEqual({ provider: 'google', model: 'custom-finetune-1', credentialRef: 'google:testing' });
+  });
+  it('on the managed tier, a listed model is kept and an id the catalog does not know runs on the tier\'s model', () => {
+    expect(withRunAiDefault({ model: getDefaultModel(managedId) }, managed)).toMatchObject({ provider: managedId, model: getDefaultModel(managedId) });
+    expect(withRunAiDefault({ model: 'custom-finetune-1' }, managed)).toEqual({ provider: managedId, model: getDefaultModel(managedId), credentialRef: `managed:${managedId}` });
+  });
+  it('a call that carries its own key is left as it was', () => {
+    const req = { model: anthropicModel, credentialRef: 'anthropic:mine' };
+    expect(withRunAiDefault(req, managed)).toBe(req);
   });
 });
 

@@ -3,15 +3,24 @@
  * covers. Born red: before ADR 0834 the only surface was a bare gear icon with no pending
  * indicator, the dialog showed the tool name alone, and approve sent no version.
  *
- * Sabotage-witnessed (wave 51): drop the pending style or count → case 2 red; approve
- * without `requestedAt` → case 2 red; drop Continue → case 2 red; offer Approve or the
- * grain note to a viewer without authority, or stop reporting the viewer upward → case 3
- * red; stop re-reading on `refreshKey` → case 4 red; offer Save / hide the read-only
- * note to a viewer who may not edit the scope → case 5 red.
  * FW2-D1 (CHAN-F2): the primary button sends `grain:'call'`; the conversation-wide grant
  * is its own button, never offered for a channel ask or for arguments not all shown.
+ * CHAN-F17: approvals already given are listed by grain and revocable by whoever may
+ * approve; an expired one says so; an expired channel ask is not counted as waiting
+ * and has no decision buttons.
+ *
+ * Sabotage-witnessed (waves 51 and 109; each reddens the named case): drop the pending
+ * style or count ("says when a call is waiting"); approve without `requestedAt`, with
+ * the conversation grain, or without Continue (same case); send the primary grain from
+ * the conversation button, or offer it for a channel or truncated ask ("FW2-D1");
+ * swap the grain labels or revoke with the wrong version ("listed by grain" — the label
+ * is read per ROW, so a swap is visible); drop the expired label ("labelled expired");
+ * offer Revoke, count an expired ask, or offer its decision buttons ("a viewer without
+ * authority sees no Revoke"); offer Approve or the grain note to a viewer without
+ * authority, or stop reporting the viewer upward; stop re-reading on `refreshKey`
+ * (FW2-UX-1); offer Save / hide the read-only note (FW2-UX-2).
  */
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // A STABLE `t` (as react-i18next's is): the dialog's loader depends on it, and a fresh
@@ -104,11 +113,16 @@ describe('conversation tools control (ADR 0834 D6)', () => {
     await waitFor(() => expect(getCapabilityScope).toHaveBeenCalled());
     fireEvent.click(screen.getByTestId('conversation-tools-control'));
     expect(await screen.findByText('grantedHeading')).toBeTruthy();
-    expect(screen.getByText('grantedConversation')).toBeTruthy();
-    expect(screen.getByText('grantedOnce')).toBeTruthy();
-    const buttons = screen.getAllByRole('button', { name: 'revokeAria' });
-    expect(buttons).toHaveLength(2);
-    fireEvent.click(buttons[0]!);
+    // Each label on ITS row: two labels anywhere on the page would pass a swap.
+    const rowOf = (tool: string): HTMLElement => {
+      const li = screen.getByText(tool).closest('li');
+      if (!li) throw new Error(`no row for ${tool}`);
+      return li;
+    };
+    expect(within(rowOf('tool.wide')).getByText('grantedConversation')).toBeTruthy();
+    expect(within(rowOf('tool.once')).getByText('grantedOnce')).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: 'revokeAria' })).toHaveLength(2);
+    fireEvent.click(within(rowOf('tool.wide')).getByRole('button', { name: 'revokeAria' }));
     await waitFor(() => expect(revokeToolApproval).toHaveBeenCalledWith('s1', 'tool.wide', WIDE.resolvedAt));
   });
 

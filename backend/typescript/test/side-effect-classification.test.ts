@@ -17,39 +17,54 @@
  * a gate that needs a 7-deep allowlist on day one is not a gate. "Calls the
  * notification emitter" is mechanically true and has no judgement in it.
  *
- * TWO SOURCES (named, /grade-tests wave 61): `isSideEffectingNode` is the union
- * of the DERIVED manifest set `MANIFEST_FAST_PATH_SERVED` (ADR 0572 P3) and the
- * hand-written `SIDE_EFFECTING_TYPE_PATTERNS` regexes. For a typeId in BOTH, a
- * single-source sabotage is masked by design: deleting the session-reminder
- * regex stayed green (8fw3g1-sec-reminder, vacuous) because the node is also
- * served. The host-surface case therefore also asserts the served-set
- * membership directly (8fw3g1-sec-reminder-served-r2); the regex half stays an
- * honest ceiling while the node is served (the pattern list is unexported).
- * What else breaks it: the notify classification (#2871), the integration family
- * regex (held alone by `feature.whatsapp.nodes.send`, which is not served), a
- * blanket `true`, the explicit module flag (8fw3g1-sec-*).
+ * SOURCES (re-graded /grade-tests wave 108): `isSideEffectingNode` is the
+ * union of the DERIVED manifest set `MANIFEST_FAST_PATH_SERVED` (ADR 0572 P3),
+ * the adopter served set (ADR 1048), the module flag, the FEATURE-declared
+ * typeIds (`hostContributions.sideEffectingNodeTypes`, ADR 1031 P2) and the
+ * hand-written `SIDE_EFFECTING_TYPE_PATTERNS` regexes. The notify node and
+ * `feature.whatsapp.nodes.send` are NOT in the served set, so each is held by
+ * its regex alone and witnesses it; the other integration-family ids are held
+ * by both the served set and a regex (a single-source sabotage stays green by
+ * design — an honest double guard, the pattern list is unexported).
+ *
+ * The feature-declared source is tested on a FRESH module graph with a stub
+ * feature (the `adr1031-round3-host-tables` pattern): since KickTodo left this
+ * repo (ADR 1031 P3, 96cf0ce05) no first-party feature declares a typeId, so a
+ * loop over the composed registry iterated nothing and could not fail.
+ *
+ * Red when (w108 probes): the notify regex is dropped (#2871 — also reds the
+ * pack-source scan); the whatsapp regex is dropped; the feature-declared arm is
+ * not read or not recorded; the classifier returns `true` for everything; the
+ * module flag is ignored.
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync, existsSync, globSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-// ADR 1031 P2 — feature-declared side-effecting types are recorded at composition.
-import '../src/features/index.js';
 import { isSideEffectingNode } from '../src/executor/sideEffects.js';
-import { featureSideEffectingNodeTypes } from '../src/host/featureContributions.js';
 
 const REPO = join(import.meta.dirname, '..', '..', '..');
 
 describe('the classifier covers the families it claims', () => {
+  afterEach(() => { vi.resetModules(); });
+
   it('classifies the in-app notify node — the #2871 regression', () => {
     expect(isSideEffectingNode('feature.notifications.nodes.notify')).toBe(true);
   });
 
-  it('classifies every node a FEATURE declares side-effecting through its host surface (ADR 1031 P2)', () => {
+  it('classifies every node a FEATURE declares side-effecting through its host surface (ADR 1031 P2)', async () => {
     // A node that reaches the emitter through its feature's host surface (not its
     // pack `.mjs`) is declared by that feature (`hostContributions.sideEffectingNodeTypes`).
-    // KickTodo's session reminder is the live case: test/kicktodo/kicktodo-side-effect-classification.test.ts.
-    for (const t of featureSideEffectingNodeTypes()) expect(isSideEffectingNode(t), t).toBe(true);
-    expect(isSideEffectingNode('feature.not-a-pack.nodes.not-declared')).toBe(false);
+    // Fresh graph: record a stub feature the way an adopter composes its own, then
+    // read the classifier from the SAME graph.
+    vi.resetModules();
+    const leaf = await import('../src/host/featureContributions.js');
+    const fresh = await import('../src/executor/sideEffects.js');
+    const declared = 'acme.adopter.nodes.host-surface-send';
+    const sibling = 'acme.adopter.nodes.host-surface-read';
+    expect(fresh.isSideEffectingNode(declared), 'classified before any declaration').toBe(false);
+    leaf.recordFeatureHostContributions([{ id: 'acme', hostContributions: { sideEffectingNodeTypes: [declared] } }]);
+    expect(fresh.isSideEffectingNode(declared)).toBe(true);
+    expect(fresh.isSideEffectingNode(sibling), 'an undeclared sibling stays live').toBe(false);
   });
 
   // Of these six, only `feature.whatsapp.nodes.send` is absent from the served
@@ -88,10 +103,9 @@ describe('any node pack that reaches the notification emitter IN PACK SOURCE is 
   // This scan sees ONE of the two ways a node reaches the emitter — a direct
   // reference in the pack's own `.mjs`. It CANNOT see the other: a node that
   // delegates to a host feature surface which emits.
-  // `feature.kicktodo.nodes.session-reminder` is exactly that — its pack source
-  // is clean, while `features/kicktodo-accountability/sessionService.ts` imports
-  // `getNotificationEmitter`. It is classified by an explicit entry in
-  // `sideEffects.ts`, not by this scan.
+  // KickTodo's `session-reminder` was exactly that (its pack source was clean,
+  // its feature's host surface emitted); since ADR 1031 P2 such a node is
+  // declared by its feature, which the fresh-graph case above covers.
   //
   // So this block protects new PACK-SOURCE emitters, and the explicit assertions
   // above protect the host-surface ones. Claiming it catches "any emitting node"

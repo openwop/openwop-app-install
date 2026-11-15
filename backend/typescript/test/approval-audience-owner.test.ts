@@ -22,14 +22,19 @@
  * audience with its decision recipe (`registerFeatureApprovalKind`), so it cannot
  * exist without one; leg 5 pins that a kind in NEITHER place fails closed instead of
  * reading as tenant-wide. KickTodo's six kinds (including branch 1,
- * `kicktodo-plan-proposal`) are pinned by their owner's test,
- * `kicktodo-approval-kinds.test.ts`.
+ * `kicktodo-plan-proposal`) moved to kicktodo-core and then left openwop-app with
+ * KickTodo (ADR 1031 P3, 96cf0ce05, which deleted their pin,
+ * `kicktodo-approval-kinds.test.ts`); they now register from the adopter's tree.
  *
  * TST-BXF-1. Red when: a kind is added to or removed from the table without its
  * twin in APPROVAL_KINDS (w66 aud-extra, aud-missing), a scoped kind becomes
  * null or changes scope (aud-content, aud-dealer), `run-proposal` stops being
  * tenant-wide, or `assistant-action` loses its conditional variant (aud-runprop,
- * aud-assist).
+ * aud-assist); the unregistered-kind fallback becomes tenant-wide or the named ref
+ * (w108 aud-orphan-null, aud-orphan-ref), or a feature may register a host kind
+ * (w108 aud-hostkind). Since `kicktodo-plan-proposal` left the table, leg 4's
+ * `policyApproverRef` arm rests on `claude-code-permission` alone (w108 aud-ccp reds
+ * legs 2 and 4).
  */
 import { describe, expect, it } from 'vitest';
 import { APPROVAL_KINDS } from '../src/host/approvalService.js';
@@ -60,8 +65,8 @@ describe('ADR 0672 D1 — the audience table is complete and correct', () => {
     expect(APPROVAL_AUDIENCE['anon-surface-write']).toEqual({ orgScope: 'workspace:write' });
     // Branch 7 — superadmin tenant, NOT an org scope.
     expect(APPROVAL_AUDIENCE['commerce-listing-publish']).toEqual({ superadminTenant: true });
-    // Branch 1 (`kicktodo-plan-proposal`, one ref, not a scope) is a FEATURE kind since
-    // ADR 1031 P2 — pinned in kicktodo-approval-kinds.test.ts; ADR 0785 P4's
+    // Branch 1 (`kicktodo-plan-proposal`, one ref, not a scope) became a FEATURE kind in
+    // ADR 1031 P2 and left this repo with KickTodo (P3); ADR 0785 P4's
     // claude-code-permission carries the same variant here.
     expect(APPROVAL_AUDIENCE['claude-code-permission']).toEqual({ policyApproverRef: true });
   });
@@ -91,7 +96,11 @@ describe('ADR 0672 D1 — the audience table is complete and correct', () => {
   });
 
   it('leg 5 (ADR 1031 P2): a kind in neither the host table nor the feature registry fails CLOSED', async () => {
-    const orphan = { kind: 'retired-feature-kind' as never, policy: { requiredApprovals: 1, approverRefs: ['user:named'] } };
+    // A row read back from storage (parsed JSON, exactly how it reaches the predicate):
+    // its kind no longer type-checks because no feature declares it any more.
+    const orphan: Parameters<typeof mayViewApproval>[2] = JSON.parse(
+      '{"kind":"retired-feature-kind","policy":{"requiredApprovals":1,"approverRefs":["user:named"]}}',
+    );
     expect(featureApprovalKinds()).not.toContain('retired-feature-kind');
     // Not tenant-wide: no ordinary tenant member — not even the named ref — sees it.
     expect(await mayViewApproval('ws:ordinary', 'user:named', orphan)).toBe(false);

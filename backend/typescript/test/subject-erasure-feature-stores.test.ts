@@ -418,6 +418,13 @@ const EXPECTED_COVERED = new Set([
   // bounded by the consent tombstone erasure writes: the eligibility check refuses an
   // erased person before any group arbitration matters.
   'campaign-journeys:enrollment',
+  // ADR 1115 D8 (`PODC93-10`, row 93) — moved out of RECORDED_DEBT: the podcasts
+  // owner's decision is "scrub the person, keep the show". `erasePodcastsSubject`
+  // (`features/podcasts/podcastsService.ts`) tombstones `createdBy` and, on a matching
+  // email key, removes `ownerEmail` + `ownerName`; the feed then omits `<itunes:owner>`.
+  // The debt note's worry (removing them "breaks the feed") was weighed and rejected:
+  // an owner-less feed is valid RSS, and the operator can enter a new contact.
+  'podcasts:show',
 ]);
 
 /**
@@ -431,7 +438,6 @@ const RECORDED_DEBT = new Map<string, string>([
   // ── FOUND BY the CRM-2 contactId/email widening. Each was read individually; none
   //    is a coverage claim. They are recorded rather than covered because each needs
   //    a decision from its owning feature that this CRM change is not the place to make.
-  ['podcasts:show', 'FOUND BY the CRM-2 email widening: `ownerName`/`ownerEmail` are the RSS-required podcast owner contact, which is published in the feed itself. Erasure semantics are genuinely unclear (removing them breaks the feed the directories validate), so this needs the podcasts owner rather than a guess made here.'],
   ['production:vendor', 'FOUND BY the CRM-2 email widening: `contactEmail` is an EXTERNAL person\'s address on a vendor row (already declared PII by PROD2-M6). A vendor is an org business record like a CRM contact, so the cure is the same anonymize-do-not-delete shape crm/erasure.ts now uses — it just needs the production owner to confirm which fields are relationship vs person.'],
   // ADR 1102 D8 (2026-11-11) — `insights:config` LEFT this ledger because the work
   //    landed (`eraseInsightsSuiteSubject`, `features/insights-suite/insightsSuiteService.ts`),
@@ -724,7 +730,10 @@ const ACTOR_DEBT_CEILING = 13;
 /*  ADR 1102 D8 (2026-11-11, feature loop row 91) — 6 -> 5: `insights:config` leaves
  *  the ledger because the work landed (`eraseInsightsSuiteSubject`).
  */
-const DEBT_CEILING = 5;
+/*  ADR 1115 D8 (2026-11-13, feature loop row 93) — 5 -> 4: `podcasts:show` leaves the
+ *  ledger because the work landed (`erasePodcastsSubject`).
+ */
+const DEBT_CEILING = 4;
 
 /**
  * ADR 0584 §Correction (FORM-ERASE-1) — PARTIAL COVERAGE: a store that DOES
@@ -1824,8 +1833,18 @@ const SIGNAL_FREE_BASELINE: readonly string[] =
 /** The baseline size. It may only go DOWN; never raise it.
  *  252 when the gate landed (P1, #5647). Wave 1 (P2, 2026-11-09): 31 reviewed → 221.
  *  D2 (2026-11-10): 8 that declare PII via declarePiiFields joined the census → 213.
- *  ADR 1036 D7 (row 81): job-search:steering keyed per subject, now census-governed → 212. */
-const SIGNAL_FREE_BASELINE_CEILING = 212;
+ *  ADR 1036 D7 (row 81): job-search:steering keyed per subject, now census-governed → 212.
+ *  Wave 3 (P2, 2026-11-13): 101 reviewed → 111. Every entry left names a person, or
+ *  may (4 unresolved), so it leaves by an eraser or a census signal, not a review
+ *  line (ADR 0464 §9, wave 3).
+ *  CHAN-F19 #1 (2026-11-13): crm:sender-health-seen hashes the address, ages out in 2 days
+ *  and is erased by crm's eraser; it declares PII, so the census governs it → 110.
+ *  CHAN-F19 #2 (2026-11-13): team-ledger:suggester-queue records `authorUserId` (a census
+ *  signal), team-ledger erases it, and a 7-day TTL bounds author-less rows → 109.
+ *  CHAN-F19 #3 (2026-11-14): campaign-ops:request (its fields come through `extends
+ *  ChangeRequest`, which the census cannot follow) declares PII, and campaign-ops'
+ *  eraser tombstones its creator, answerers and override author → 108. */
+const SIGNAL_FREE_BASELINE_CEILING = 108;
 
 /** Reviewed signal-free feature stores: each holds no subject data, and says why.
  *  Each was read at its declaration: the row type with its nested types, AND the
@@ -1841,44 +1860,145 @@ const SIGNAL_FREE_BASELINE_CEILING = 212;
  *  refuses a reviewed entry whose row carries such a field, so this list cannot
  *  absorb them. */
 const SIGNAL_FREE_REVIEWED = new Map<string, string>([
+  ['agent-deployment-pending-approvals', 'an open-approval claim: tenant, agent id, version, run id and created time'],
+  ['agent-deployments', 'an agent version\'s deploy state: canary percent, channels, eval and run ids'],
+  ['analytics:heat', 'daily heatmap counts per page, device and arm (views, clicks, scroll); page path only, no query'],
+  ['analytics:heat-catalog', 'per-org list of page paths with first and last seen dates; keyed by a hash of tenant and org'],
+  ['analytics:heat-page', 'legacy page index: tenant, org, page path, first and last seen'],
+  ['analytics:nav-counts', 'weekly in-app nav counts per source and route pattern; no ids'],
+  ['analytics:replay-admission', 'per-org daily count of admitted replay sessions, keyed tenant:org:day'],
+  ['analytics:replay-enablement', 'per-tenant replay epoch, disabled flag and applied toggle-write ids'],
+  ['analytics:replay-meta', 'a host-global backfill sentinel: a fixed id and a timestamp'],
   ['analytics:retention-watermark', 'one row per tenant: the purge cutoff timestamp'],
+  ['analytics:visitor-salt', 'a host-global random daily salt for visitor hashing, keyed by UTC day'],
+  ['app-builder:export-lineage', 'export history per canvas: version, target, file counts, zip hash'],
+  ['app-builder:sync-deliveries', 'the last GitHub webhook delivery GUIDs per canvas binding'],
+  ['app-builder:sync-webhook', 'lookup row: a random webhook id to tenant and canvas id'],
+  ['assistant:commitment:by-status', 'index row: tenant, status and a content-hash commitment id'],
+  ['assistant:commitment:by-tenant', 'index row: tenant and a content-hash commitment id'],
+  ['autonomy:creative-review', 'review binding: tenant, org, asset, verdict and approval ids'],
+  ['billing:bundle-entitlement', 'per-tenant bundle grants: status, Stripe subscription id and sync times'],
+  ['billing:checkout', 'a checkout session: Stripe session id, price id, kind and token count'],
+  ['billing:coupon', 'an operator-authored billing coupon: code, type and value'],
+  ['billing:erased-subscription', 'a marker: a Stripe subscription id and a timestamp, aged out at 30 days'],
+  ['billing:invoice', 'an invoice: plan tier, seats, amount, currency and markdown of the same'],
+  ['billing:subscription', 'per-tenant plan: tier, status, Stripe customer, subscription and price ids, period dates'],
+  ['billing:token-balance', 'per-tenant AI token balance and credited Stripe checkout session ids'],
+  ['billing:webhook-event', 'a Stripe event id dedup claim: event id, processed time and lease state'],
+  ['campaign-connectors:backfill', 'ad-platform backfill progress per tenant, org and platform: windows, lease, counts'],
+  ['campaign-connectors:catalog-feed', 'product feed settings: enabled, version, catalog and merchant ids, language'],
+  ['campaign-connectors:catalog-push', 'push ledger: platform, product item id, content hash and time'],
+  ['campaign-connectors:perf', 'ad performance rows: campaign and ad set names, date, spend, clicks, conversions'],
+  ['campaign-connectors:pixel', 'ad pixel config: platform, pixel id, ads customer id, conversion action names'],
+  ['campaign-connectors:sync-state', 'sync cooldown per tenant, org and platform: last sync and success times, outcome'],
+  ['campaign-intel:cap-state', 'spend-cap period state: spent amount, status and paused campaign targets'],
+  ['campaign-intel:pacing', 'the last pacing alert band per campaign, keyed tenant::campaign'],
+  ['campaign-ops:asset-claim', 'claim row: a destination and page or template id to an asset id'],
+  ['campaign-ops:changeset-key', 'an idempotency key to a change set id'],
+  ['campaign-ops:client-context-snapshot', 'a frozen AI context block: brand voice, collection names, campaign KPIs, decision titles'],
   ['campaign-orchestration:brief-index', 'index row: tenant, brief id and campaign id only'],
+  ['campaign-orchestration:product-ref', 'index row: tenant, product id and campaign id only'],
   ['campaign-orchestration:project-link', 'link row: tenant, campaign id, project id and a timestamp'],
+  ['campaign-orchestration:run-index', 'index row: tenant, campaign, org, run and workflow ids, start time, role'],
+  ['campaign-playbooks:content', 'content-slot apply state: playbook, slot, kind, status, resource id, hashes'],
+  ['campaign-playbooks:install-by-workflow', 'index row: tenant, workflow id, org and playbook id'],
   ['campaign-studio:plan-by-campaign', 'index row: tenant, campaign id and canvas id only'],
+  ['campaign-studio:plan-link', 'link row: tenant, canvas id, campaign id, org, linked and cleared times'],
+  ['cdp:destination-sync', 'sync config: operator label, destination kind, field map, cursor, connection id, target'],
   ['cdp:event-schema', 'an operator-authored JSON schema per event type and version'],
   ['cdp:purpose-vocab', 'per-tenant consent purpose codes added and removed, plus a strict flag'],
   ['cdp:retention-watermark', 'one row per tenant: the purge cutoff timestamp'],
+  ['cdp:visitor-index-built', 'a per-tenant marker that the visitor index backfill ran: tenant, time, format'],
+  ['cdp:warehouse-load-approval', 'approval index: tenant and approval id, keyed by a hash of the load target'],
+  ['chatwidget:anonwrite:day', 'a per-widget daily held-write counter, keyed widgetId:day'],
+  ['chatwidget:tokenidx', 'index row: a random widget embed token to the widget config key'],
   ['cms:redirect', 'an operator-authored slug-to-slug redirect'],
   ['cms:scheduled', 'a publish marker: tenant, org, page id and due time'],
   ['cms:scheduled-unpublish', 'an unpublish marker: tenant, org, page id and due time'],
+  ['commerce-connect:client-seller', 'a client org\'s Stripe Connect binding: account id, onboarding flags, region'],
+  ['commerce-connect:dispute', 'a chargeback record: dispute and order ids, seller tenant, amount, reason code, status'],
   ['commerce-connect:fee-config', 'the platform application-fee percentage'],
+  ['commerce-connect:order-by-intent', 'index row: Stripe payment intent id, order id and tenant'],
+  ['commerce-connect:order-by-seller', 'index row: order id and seller tenant only'],
+  ['commerce-connect:payout', 'a seller settlement: payout id, tenant, org, amount, currency, status, arrival date'],
+  ['commerce-connect:seller', 'a tenant\'s Stripe Connect binding: account id, onboarding flags, capabilities, region'],
+  ['commerce-connect:seller-by-account', 'index row: a Stripe account id to tenant and org'],
+  ['commerce-connect:webhook-event', 'a dedup row: a Stripe event id and its processed time'],
   ['commerce:catalog-index-day', 'ADR 1110: the UTC day the catalog-index drift repair last ran'],
+  ['commerce:coupon', 'an operator-defined coupon: code, type, value, currency and active flag'],
+  ['commerce:order-idem', 'a checkout dedup claim: a client idempotency key to an order id'],
   ['commerce:product-fielddef', 'an operator-defined custom product field (key, label, type, options)'],
+  ['commerce:reservation-due', 'a stock reservation expiry index: order id, tenant, org and due time'],
+  ['commerce:spend-approval', 'approval index: tenant and approval id, keyed by a quote or order content hash'],
+  ['commerce:ucp-client', 'an agent OAuth client: client id, operator label, hashed secret and scopes'],
+  ['computer-use:budget', 'a per-tenant daily session count, keyed tenant:date'],
+  ['connections:inbound', 'an inbound webhook config: connection id, provider, workflow and project ids, mode'],
+  ['connections:inbound-session', 'a pointer: connection id to the active run id, and the update time'],
+  ['connections:mcp-reach-pin', 'the pinned OAuth endpoints per provider manifest and MCP server URL'],
   ['consent:policy', 'per-tenant regulated regions and the default consent mode'],
   ['crm:fielddef', 'an operator-defined custom CRM field (key, label, type, options)'],
   ['crm:pipeline', 'a pipeline definition: name and stages (name, probability)'],
+  ['crm:sender-health-day', 'per sender-org daily counts of sends, bounces and complaints, keyed tenant::org::day'],
+  ['crm:sender-warmup', 'a sender org\'s first sending day, keyed tenant::org'],
+  ['crm:sms-inbound-seen', 'a replay dedup row: tenant and the Twilio message SID, plus a timestamp'],
+  ['crm:snapshot', 'weekly pipeline stage counts and sums per tenant, org and pipeline'],
+  ['crm:suppression-count', 'a per-tenant suppression-list length counter, keyed by tenant'],
+  ['crm:territory-active', 'a pointer: tenant and org to the active territory model id'],
+  ['crm:territory-assignment', 'an assignment: model, territory, company or deal record id and rule id'],
   ['crm:territory-type', 'a territory type: name and priority'],
-  ['email:webhook-config', 'a bounce-webhook registration: provider and enabled flag; the secret lives in BYOK'],
+  ['dealers:dealer', 'a dealer business: company id, business name, tier, status, territory id'],
+  ['dealers:outlet', 'a dealer\'s physical store: name, street address, coordinates and status'],
+  ['dealers:partner-token', 'a partner-portal link: a hash of a random token, dealer ids and expiry'],
+  ['devkey:hashidx', 'lookup row: a hash of a random API key secret to its key id and tenant'],
   ['discovery:embedding-stale', 'ADR 1110 P3: an org queued for an embedding rebuild (tenant, org, when)'],
+  ['documents:canvasmap', 'a mapping row keyed tenant:org:canvasId to a document id'],
+  ['email:engagement-by-contact-mark', 'a per-tenant backfill-done marker, keyed by tenant alone, with a timestamp'],
+  ['email:webhook-config', 'a bounce-webhook registration: provider and enabled flag; the secret lives in BYOK'],
   ['entity:count', 'a per-entity-type record count'],
+  ['entity:ref-idx', 'a reverse-reference pointer: tenant, target record key and source record key'],
+  ['entity:relationship', 'an entity-type relationship definition: from, to, cardinality, onDelete'],
   ['entity:sysidx', 'ADR 1110: a product index marker: product id, name, type, price, currency, facets and listing flags; deliberately no createdBy'],
   ['entity:sysidx-build', 'ADR 1110: a tenant waiting for a background index build (tenant, type, when)'],
   ['entity:sysidx-built', 'ADR 1110: when a tenant index was last rebuilt'],
   ['entity:sysidx-count', 'ADR 1110: a per-org row count'],
   ['entity:sysidx-manifest', 'ADR 1110: the index keys and projection hash of one row'],
   ['entity:sysidx-pend', 'ADR 1110: an unfinished index write: row id, lease token and expiry'],
-  ['entity:relationship', 'an entity-type relationship definition: from, to, cardinality, onDelete'],
   ['entity:taxonomy', 'a taxonomy definition: name and display name'],
   ['entity:term', 'a taxonomy term: slug, label, order and parent'],
+  ['entity:term-idx', 'a term-membership pointer: tenant, term id and record key'],
+  ['env:environment', 'a deployment environment: name, order, protection and snapshot hash'],
   ['env:settings', 'per-tenant flag: whether promotion needs approval'],
+  ['experiments:legacy-migration', 'a one-time migration marker keyed tenant::org::surface, with a timestamp'],
   ['forms:subcount', 'per-form submission, flagged and dropped counts'],
+  ['funnels:offer-decision', 'upsell step state per order, funnel and step: decision and child order id'],
   ['funnels:stat', 'per-funnel daily aggregates: distinct-visitor counts, revenue, orders'],
+  ['job-search:pipeline-binding', 'a binding row: tenant and org to the CRM pipeline id'],
   ['kb:docaiusage', 'per-tenant daily Document AI page count, keyed tenant:date'],
   ['kb:embedusage', 'per-tenant daily embedding token count, keyed tenant:date'],
+  ['kb:reindex', 're-embedding job state per collection: spec, cursor, counters and status'],
   ['kb:vertexrerankusage', 'per-tenant daily rerank query count, keyed tenant:date'],
+  ['knowledge-sync:filestate', 'a sync cursor: source id, provider file id, KB document id and revision'],
   ['media:token-idx', 'index row keyed by a sha256 of the share token: tenant and asset id'],
+  ['media:usage', 'a used-by link: asset id and the referencing page, campaign or brief id and title'],
+  ['notebook-source-level', 'a context-level setting (full, summary, excluded) per notebook source'],
+  ['podcast-episode', 'a generated episode: title, operator briefing, fictional cast clips, doc and media refs'],
+  ['podcast-episode-profile', 'a show-format config: name, model ids, segment count, language, default briefing'],
+  ['promotions:budget-hold', 'a promotion\'s budget ledger: hold ids, amounts, quantities, expiry and order ids'],
+  ['reco:affinity', 'per-product totals: related product ids with co-purchase and trending scores'],
+  ['service-desk:delivery', 'delivery state per ticket message: typed code and provider ref, never the address'],
+  ['service-desk:public-key', 'the tenant\'s public widget key (a random id) mapped to its tenant'],
+  ['service-desk:sla-timer', 'an SLA timer per ticket: org, due time and fired flag'],
+  ['sharing:frameview', 'a view count per share-link token hash and slide; nothing about the viewer'],
+  ['structured-handoffs:cards-posted', 'a once-only marker per handoff card or interrupt ref, with a timestamp'],
+  ['team-ledger:drift-budget', 'a per-tenant daily drift-check count, keyed tenant:date'],
+  ['team-ledger:drift-queue', 'a queue row keyed tenant:runId: run id and created time'],
+  ['team-ledger:resync', 'the last resync day per tenant and ledger'],
+  ['team-ledger:suggester-budget', 'a per-tenant daily classifier call count, keyed tenant:date'],
+  ['team-ledger:suggester-done', 'an already-classified marker keyed by tenant and message ref'],
   ['usage:rollup', 'per-tenant token and call totals by provider and model'],
   ['voice:realtime-config', 'per-tenant realtime provider and model; the credential is a BYOK ref'],
+  ['webinars:event', 'a webinar record: provider event id, title, start time, connection and form ids'],
+  ['webinars:form-binding', 'a binding row: form id, tenant, org, event id and connection id'],
   ['webinars:sync-state', 'last sync time per tenant, org and webinar event'],
   ['whatsapp:inbound-seen', 'keyed by a sha256 of tenant, connection and provider message id; holds status, time, state only (ADR 1053 D4)'],
   ['whatsapp:status-parked', 'keyed by a sha256 of tenant, connection and provider message id; holds status, time, state only (ADR 1053 D3)'],

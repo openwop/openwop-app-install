@@ -15,13 +15,22 @@ afterEach(cleanup);
  *  - an out-of-catalog component fails closed (no interactive render);
  *  - a catalog-version mismatch fails closed;
  *  - a resume action routes collected values through onAction('resolve', …);
- *  - a non-resume action target fails closed
+ *  - a non-resume action target fails closed (RFC 0255 §E dropped `exchange`);
  *  - a required-but-empty field disables the action.
+ *
+ * Resume value shape: ADR 1013 D4 `{ answers: [{ id, answer }] }`, one entry per
+ * field, nothing else. Sabotage-witnessed (wave 108): admitting an unknown
+ * component, accepting a non-`resume` target, skipping the id/label check, skipping
+ * the version check, dropping or adding an answer, removing the heading offset,
+ * and un-gating the required field each turn a named case red.
  */
 
 const ctx: CardProps['context'] = { runId: 'run-1', nodeId: 'node-1', tenantId: 'demo' };
 
-function renderCard(payload: unknown, onAction = vi.fn().mockResolvedValue(undefined)): { onAction: ReturnType<typeof vi.fn> } {
+function renderCard(
+  payload: unknown,
+  onAction = vi.fn<CardProps['onAction']>().mockResolvedValue(undefined),
+): { onAction: typeof onAction } {
   render(<A2uiSurfaceCard payload={payload} cardType="ui.a2ui-surface" context={ctx} onAction={onAction} />);
   return { onAction };
 }
@@ -45,13 +54,14 @@ const goodPayload = {
 
 describe('A2uiSurfaceCard — catalog parse', () => {
   it('accepts the day-1 form-subset surface', () => {
-    expect(parseSurface(goodPayload).ok).toBe(true);
+    // The whole parsed payload, not just `ok`: a parse that admitted the surface but
+    // dropped its title or a component would render a different form.
+    expect(parseSurface(goodPayload)).toEqual({ ok: true, payload: goodPayload });
   });
 
   it('rejects an out-of-catalog component', () => {
     const p = parseSurface({ catalogVersion: A2UI_CATALOG_VERSION, surface: { components: [{ component: 'iframe', src: 'x' }] } });
-    expect(p.ok).toBe(false);
-    if (!p.ok) expect(p.reason).toMatch(/not in the host A2UI catalog/);
+    expect(p).toEqual({ ok: false, reason: 'component "iframe" is not in the host A2UI catalog (v0.9.1)' });
   });
 
   it('rejects a malformed component (missing required props)', () => {
@@ -90,9 +100,12 @@ describe('A2uiSurfaceCard — render + action', () => {
     const { onAction } = renderCard(goodPayload);
     fireEvent.change(screen.getByLabelText(/Date/), { target: { value: '2026-07-01' } });
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
-    expect(onAction).toHaveBeenCalledWith('resolve', { answers: expect.arrayContaining([
+    // Exactly one call carrying exactly the three fields (in surface order): an
+    // extra or a missing answer is a different resume value.
+    expect(onAction).toHaveBeenCalledTimes(1);
+    expect(onAction).toHaveBeenCalledWith('resolve', { answers: [
       { id: 'when', answer: '2026-07-01' }, { id: 'dur', answer: '30' }, { id: 'remind', answer: false },
-    ]) });
+    ] });
   });
 
   it('fails closed on an action that does not resume the interrupt', () => {
@@ -100,6 +113,7 @@ describe('A2uiSurfaceCard — render + action', () => {
       { component: 'action.button', id: 'send', label: 'Send', action: { target: 'exchange' } },
     ] } });
     expect(screen.queryByRole('button')).toBeNull();
+    expect(screen.getByText('This interactive surface could not be rendered safely: "action.button" requires `action.target` of "resume".')).toBeTruthy();
   });
 
   it('fails closed on an out-of-catalog component (no button, shows a notice)', () => {

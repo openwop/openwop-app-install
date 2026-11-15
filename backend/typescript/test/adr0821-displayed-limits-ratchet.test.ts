@@ -8,9 +8,13 @@
  *   1. BEHAVIOUR — a configured key with no enforcement site (`seats`) is
  *      filtered out of `/public/pricing` and of `GET …/billing/entitlements`,
  *      while every enforced key survives (positive control).
- *   2. SOURCE — every key in `ENFORCED_PLAN_LIMIT_KEYS` names a file that
- *      actually reads it, so adding a key to the list without enforcing it
- *      fails here. Adding an enforcement site = add its key AND its row below.
+ *   2. SOURCE — every key in `enforcedPlanLimitKeys()` (the host's
+ *      `ENFORCED_PLAN_LIMIT_KEYS` plus any composed feature's declared keys,
+ *      ADR 1031 P2) names a file that actually reads it, so adding a key to the
+ *      list without enforcing it fails here. Adding a host enforcement site = add
+ *      its key AND its row below; a feature declares `enforcedPlanLimitSites` in
+ *      its ratchetDeclarations.ts. In openwop-app no feature declares one today, so
+ *      the merge adds nothing here: it is the adopter half.
  *
  * Tracker TST-BUL-1. Sabotage-witnessed (w62): red when `publicPricingCatalog`
  * or `displayablePlanLimits` stops filtering, when the entitlements route drops
@@ -53,7 +57,9 @@ describe('ADR 0821 D6 — displayed limits ⊆ enforced limits', () => {
   it('/public/pricing drops an unenforced key and keeps every enforced one', () => {
     process.env.OPENWOP_BILLING_PLAN_LIMITS = JSON.stringify({ pro: { workflowRuns: 1000, aiCreditsMonthly: 500, seats: 10 } });
     const pro = publicPricingCatalog().find((t) => t.tier === 'pro')!;
-    // (A feature-enforced key displays too: test/kicktodo/kicktodo-plan-limit-display.test.ts.)
+    // No first-party feature declares a plan-limit key since KickTodo left (ADR 1031 P3,
+    // 96cf0ce05, which took its display test with it); an adopter's declared key is
+    // merged into ENFORCEMENT_SITES below and must name its own site.
     expect(pro.limits).toEqual({ workflowRuns: 1000, aiCreditsMonthly: 500 });
     expect(pro.limits).not.toHaveProperty('seats');
   });

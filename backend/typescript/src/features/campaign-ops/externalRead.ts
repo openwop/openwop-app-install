@@ -162,7 +162,10 @@ export async function mcpGetCampaign(scope: BundleScope, clientId: string, campa
 export async function mcpCampaignPerformance(scope: BundleScope, clientId: string, campaignId: string): Promise<Record<string, unknown>> {
   await bindExternalRead(scope, clientId);
   const c = await campaignOf(scope.tenantId, clientId, campaignId);
-  if (await featureAccessRefusal('campaign-connectors', scope.tenantId)) {
+  // CC-MCP-1 residue (ADR 1108): the performance source check resolves with the
+  // run's tenant-only toggle subject too, or a plan-exempt operator is refused a
+  // feature the workspace has switched on (observed on prod f1b882654).
+  if (await featureAccessRefusal('campaign-connectors', scope.tenantId, tenantToggleSubject(scope))) {
     throw new OpenwopError('forbidden_scope', 'Campaign performance is unavailable because its source cannot be used.', 403, { reason: 'source_feature_unavailable', feature: 'campaign-connectors' });
   }
   const rows = (await listRecords(scope.tenantId, clientId, c.id)).filter((r) => r.orgId === clientId);

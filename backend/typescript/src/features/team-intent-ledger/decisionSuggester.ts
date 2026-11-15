@@ -20,6 +20,9 @@
  * recall ≥ 0.5 against a real model (`scripts/eval-decision-suggester.mjs`).
  */
 import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { registerKvAgeOut } from '../../host/kvAgeOut.js';
+import { registerSubjectEraser } from '../../host/subjectErasure.js';
+import { subjectKeyForms } from '../../host/subjectErasureRedaction.js';
 import { resolveHeadlessAi } from '../../host/headlessAi.js';
 import { fenceUntrustedBlock } from '../../host/untrustedContent.js';
 import { getConversationMeta } from '../../host/conversationStore.js';
@@ -40,10 +43,21 @@ export const dailyBudget = (): number => {
   return Number.isFinite(raw) && raw >= 0 ? raw : 200;
 };
 
-interface Pending { key: string; tenantId: string; projectId: string; conversationId: string; messageRef: string; text: string; createdAt: string }
+/** A queued chat message. `authorUserId` (CHAN-F19) is the person who wrote `text`, when the
+ *  emitter knows it; rows queued before CHAN-F19, and author-unknown rows, lack it. */
+interface Pending { key: string; tenantId: string; projectId: string; conversationId: string; messageRef: string; text: string; createdAt: string; authorUserId?: string }
 interface DayCount { key: string; tenantId: string; day: string; count: number }
 
 const queue = new DurableCollection<Pending>('team-ledger:suggester-queue', (p) => p.key, undefined, (p) => p.tenantId);
+/**
+ * CHAN-F19 (ADR 0464 §9) — the queue holds a person's chat text until the classifier reads it.
+ * `eraseSuggesterQueueSubject` deletes a person's queued rows on a DSAR, so the text never
+ * reaches the model afterwards. Rows with no author (queued before CHAN-F19, or from an
+ * emitter that did not know the author) cannot be attributed, so a TTL bounds them: the
+ * worker drains the queue every 30 s, and a row still queued after QUEUE_TTL_DAYS is stale.
+ */
+export const QUEUE_TTL_DAYS = 7;
+registerKvAgeOut({ id: 'team-ledger:suggester-queue', prefix: 'hostext:team-ledger:suggester-queue:', ttlDays: QUEUE_TTL_DAYS, timestampField: 'createdAt', acceptIndexed: true });
 const counts = new DurableCollection<DayCount>('team-ledger:suggester-budget', (c) => c.key, undefined, (c) => c.tenantId);
 const done = new DurableCollection<{ key: string; tenantId: string; at: string }>('team-ledger:suggester-done', (d) => d.key, undefined, (d) => d.tenantId);
 
@@ -67,8 +81,18 @@ export async function enqueueForSuggester(m: HumanChatMessage): Promise<boolean>
   if (!project || !(await getLedger(m.tenantId, project.id))) return false;
   const key = `${m.tenantId}:${m.messageRef}`;
   if (await done.get(key)) return false;
-  return queue.putIfAbsent({ key, tenantId: m.tenantId, projectId: project.id, conversationId: m.conversationId, messageRef: m.messageRef, text: text.slice(0, SUGGESTER_LIMITS.maxChars), createdAt: new Date().toISOString() });
+  return queue.putIfAbsent({ key, tenantId: m.tenantId, projectId: project.id, conversationId: m.conversationId, messageRef: m.messageRef, text: text.slice(0, SUGGESTER_LIMITS.maxChars), createdAt: new Date().toISOString(), ...(m.authorUserId ? { authorUserId: m.authorUserId } : {}) });
 }
+
+/** CHAN-F19 — DSAR: delete the subject's queued messages before the classifier reads them. */
+export async function eraseSuggesterQueueSubject(tenantId: string, subjectKey: string): Promise<void> {
+  if (!tenantId || !subjectKey) return; // fail-closed — never a tenant-wide sweep
+  const { forms } = subjectKeyForms(subjectKey);
+  for (const p of await queue.listForTenantIndexed(tenantId)) {
+    if (p.tenantId === tenantId && p.authorUserId && forms.has(p.authorUserId)) await queue.delete(p.key);
+  }
+}
+export function registerSuggesterQueueErasure(): void { registerSubjectEraser(eraseSuggesterQueueSubject); }
 
 export const SUGGESTER_PROMPT = [
   'You read ONE message from a team chat and decide whether it records a DECISION:',

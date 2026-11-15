@@ -157,9 +157,9 @@
       "digest": "2d7826db1630a13a566dfbffd81542dc6fe0caab95d579ac8edc784902871d3f"
     },
     "core.openwop.ai": {
-      "version": "1.5.0",
+      "version": "1.5.1",
       "files": 49,
-      "digest": "d016cc2343d76d5ead86e9941d672c0d44e331b21738f9df1359734ceaaff75d"
+      "digest": "0f3e482a022ed6934947659cfdabf271cd62d20a6e38f2d3319c549db3b8a202"
     },
     "core.openwop.artifact-types": {
       "version": "1.0.0",
@@ -547,9 +547,9 @@
       "digest": "3e7a5c01c1b007cd21afc0a320891b77a80cafce1f9442bcbf3855fc4a5ccb65"
     },
     "feature.podcasts.nodes": {
-      "version": "1.2.0",
+      "version": "1.3.0",
       "files": 3,
-      "digest": "cfe14b5e17650cfd2a87e8fe8afec0891eddade44011d6e78220b617a9f5b2ac"
+      "digest": "c4202a960b9a6e62083e0a2019107cc6f9aff963f88e5078143480ccd1783a3a"
     },
     "feature.priority-matrix.nodes": {
       "version": "1.5.1",
@@ -722,9 +722,9 @@
       "digest": "41a77b7930d4e593e368ebdc337a8d205a7b28a334211e39c8e5a0a66b584dca"
     },
     "vendor.myndhyve.chat": {
-      "version": "1.4.2",
+      "version": "1.5.0",
       "files": 22,
-      "digest": "cdf3ecd6f387cc549834ba26a4efb785aca432b657b7db7efa0df948b9223205"
+      "digest": "0eae50d4ead5ace9b355f6b33f577d5356654f491471ab1e760bc185ecaa1181"
     },
     "vendor.myndhyve.data-integration": {
       "version": "1.0.2",
@@ -997,9 +997,9 @@
       "digest": "d0681a616bdc4f122180e01fab07dfa4d9ef07f4f60374d5e7df55d6608fe79e"
     },
     "vendor.openwop-app.podcasts.agents": {
-      "version": "1.0.2",
+      "version": "1.0.3",
       "files": 2,
-      "digest": "8a35ae751757d2a4fc5be48a8b03f1c5ebf2e2d29fc36437dcdf3a6ba15de389"
+      "digest": "88b1af501a9a08675820ab29f0499509e05cab0566dd8832cc19af13c095b119"
     },
     "vendor.openwop-app.priority-matrix.agents": {
       "version": "1.0.2",

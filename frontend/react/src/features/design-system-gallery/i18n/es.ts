@@ -105,4 +105,10 @@ export const messages = {
   videoAccess: 'Accesibilidad',
   videoAccessBody: 'Subtítulos en todas las películas, generados a partir de las palabras habladas. Contraste de texto de al menos 4,5:1. Sin destellos, y ningún significado transmitido solo por el color o el sonido.',
   videoTokens: 'Tokens publicados para el renderizador de películas:',
+  dialogs: 'Diálogos',
+  dialogOpen: 'Nuevo elemento',
+  dialogTitle: 'Nuevo elemento',
+  dialogSubmit: 'Crear elemento',
+  dialogField: 'Nombre',
+  dialogError: 'Este ejemplo nunca crea nada.',
 } as const;

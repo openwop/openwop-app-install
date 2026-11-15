@@ -34,10 +34,11 @@ import {
 } from '../src/features/podcasts/agentTools.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { createOrg } from '../src/host/accessControlService.js';
+import { createOrg, createMember } from '../src/host/accessControlService.js';
+import { setProjectVisibility, createProject } from '../src/features/projects/projectsService.js';
 import { createNotebook, addSource } from '../src/features/notebooks/notebooksService.js';
 import { DEFAULT_TOP_K } from '../src/features/kb/kbService.js';
-import { createSpeakerProfile, createEpisodeProfile } from '../src/features/podcasts/podcastsService.js';
+import { createSpeakerProfile, createEpisodeProfile, createEpisode, getEpisode } from '../src/features/podcasts/podcastsService.js';
 
 const TENANT = 'default';
 const ORG = 'default';
@@ -258,6 +259,23 @@ describe('podcasts.list read tool', () => {
     // THIS case's profile (other cases create profiles in the same shared org).
     expect(res.speakerProfiles.map((p) => p.id)).toContain(created.id);
   });
+  it('ADR 1115 D1 (`PODC93-3`) — a private notebook\'s episode is hidden from an org reader who is not a notebook member, as on GET /episodes', async () => {
+    // An org reader who is not a notebook member (since ADR 1118 a non-member editor is
+    // hidden too; projects-route.test.ts witnesses that).
+    const MEMBER = 'u-pod-member';
+    await createMember({ tenantId: TENANT, orgId: ORG, subject: MEMBER, displayName: 'Member', roles: ['viewer'] });
+    const nb = await createNotebook(TENANT, ORG, USER, { name: 'Private pod NB' });
+    const cast = await createSpeakerProfile(TENANT, ORG, { name: 'Solo', speakers: [{ name: 'Host', voiceId: 'v1' }] });
+    const fmt = await createEpisodeProfile(TENANT, ORG, { name: 'Fmt', speakerProfileId: cast.id });
+    const episode = await createEpisode(TENANT, ORG, { notebookId: nb.id, episodeProfileId: fmt.id, title: 'Secret episode' });
+    const ids = async (who: string): Promise<string[]> =>
+      (parse((await provider({ actingUserId: who }).executeTool({ name: PODCASTS_LIST_TOOL_ID, input: { orgId: ORG } })).content) as { episodes: Array<{ id: string }> }).episodes.map((e) => e.id);
+    // CONTROL — org-visible: the member sees it.
+    expect(await ids(MEMBER)).toContain(episode.id);
+    await setProjectVisibility(TENANT, nb.id, 'private');
+    expect(await ids(MEMBER), 'the tool used to list it, handing out the id the publish door accepted').not.toContain(episode.id);
+    expect(await ids(USER), 'the notebook\'s owner still sees it').toContain(episode.id);
+  });
 });
 
 describe('podcasts.produce gates + ignites the real generation run', () => {
@@ -299,6 +317,28 @@ describe('podcasts.produce gates + ignites the real generation run', () => {
     // The episode row the run generates INTO exists, bound to this notebook + profile.
     const listed = parse((await provider({ actingUserId: USER }).executeTool({ name: PODCASTS_LIST_TOOL_ID, input: { orgId: ORG } })).content) as { episodes: Array<{ id: string; notebookId: string; episodeProfileId: string }> };
     expect(listed.episodes.find((e) => e.id === res.episodeId)).toMatchObject({ notebookId: nb.id, episodeProfileId: ep.id });
+  });
+  it('ADR 1115 D1/D4 — produce refuses a project with no sources, and notebooks turned off, typed', async () => {
+    const plain = await createProject(TENANT, ORG, { name: 'Plain project' }, USER);
+    const cast = await createSpeakerProfile(TENANT, ORG, { name: 'Solo', speakers: [{ name: 'Host', voiceId: 'v1' }] });
+    const fmt = await createEpisodeProfile(TENANT, ORG, { name: 'Fmt', speakerProfileId: cast.id });
+    const none = await provider({ actingUserId: USER }).executeTool({ name: PODCASTS_PRODUCE_TOOL_ID, input: { notebookId: plain.id, episodeProfileId: fmt.id, orgId: ORG } });
+    expect(parse(none.content)).toMatchObject({ error: 'notebook_has_no_sources' });
+    const nb = await createNotebook(TENANT, ORG, USER, { name: 'Off NB' });
+    await setToggle('notebooks', 'off');
+    try {
+      const off = await provider({ actingUserId: USER }).executeTool({ name: PODCASTS_PRODUCE_TOOL_ID, input: { notebookId: nb.id, episodeProfileId: fmt.id, orgId: ORG } });
+      expect(parse(off.content)).toMatchObject({ error: 'notebooks_disabled' });
+    } finally {
+      await setToggle('notebooks', 'on');
+    }
+  });
+  it('ADR 1115 D5 — produce claims the episode for its run before it starts', async () => {
+    const nb = await createNotebook(TENANT, ORG, USER, { name: 'Claim NB' });
+    const cast = await createSpeakerProfile(TENANT, ORG, { name: 'Solo', speakers: [{ name: 'Host', voiceId: 'v1' }] });
+    const fmt = await createEpisodeProfile(TENANT, ORG, { name: 'Fmt', speakerProfileId: cast.id });
+    const res = parse((await provider({ actingUserId: USER }).executeTool({ name: PODCASTS_PRODUCE_TOOL_ID, input: { notebookId: nb.id, episodeProfileId: fmt.id, title: 'Claimed', orgId: ORG } })).content);
+    expect((await getEpisode(TENANT, res.episodeId as string))?.runId).toBe(res.runId);
   });
   it('a duplicate produce inside the window reuses the run — no second run, no orphan episode (HIGH-1)', async () => {
     await setToggle('notebooks', 'on');

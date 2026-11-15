@@ -44,8 +44,8 @@ export interface CoreSubmitContext {
   /** CC-CHAT-4 — fired when a plain turn goes to the ALREADY-selected agent (e.g. a
    *  `?agent=` deep-link scope that never went through an `@`-mention), so the
    *  surface can persist it as a member: a reopened conversation then lists it in
-   *  the lineup (re-added as a member, NOT selected — the Assistant still answers
-   *  until the user picks it; ADR 0140 restore never changes the voice). */
+   *  the lineup, and the restore re-selects it when it answered last (ADR 0140
+   *  correction 2026-11-14; a choice already made is never replaced). */
   onAgentRouted?: (agentId: string) => void;
 }
 

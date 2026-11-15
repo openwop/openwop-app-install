@@ -4,6 +4,21 @@
  * matter for the a11y gate + wiring: keyboard node-move, the Connect affordance
  * (arm → target), activate, node selection, and keyboard edge-delete. The routing
  * geometry is proven separately in edgeRouting.test.
+ *
+ * ADR 0333 Phase 1 (7aed1ddf6): a pointer-down on an SVG icon INSIDE a chrome
+ * button is an interactive target, so it neither clears the selection
+ * (`onBgPointerDown`) nor arms a background pan (`armsBackgroundPan` →
+ * setPointerCapture, which in a browser would steal the click). Both gates read
+ * `isInteractiveTarget`; each is probed on its own and through the shared predicate.
+ *
+ * Sabotage-witnessed (wave 108): the HTMLElement-only predicate, either gate
+ * without it, read-only move/delete/connect/add, the derived-edge Delete, nudge
+ * size and coalescing, Enter, connect + its announcement, the 'c' key, click and
+ * focus selection, the empty state, the live-body cap and selected-is-live, the
+ * Add-connected selection gate, the zero-travel click, 'e' edge cycling, the ruler
+ * geometry and the device frame each turn a named case red. Recorded multi-guards:
+ * self-connect (three refusals) and Connect-Enter (sibling structure + target
+ * check), each broken in one edit.
  */
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
@@ -112,6 +127,9 @@ describe('GraphSurface', () => {
     expect(props.onSelectEdge).not.toHaveBeenCalled();
     expect(capture).not.toHaveBeenCalled();
     fireEvent(target, new MouseEvent('pointerup', { bubbles: true, button: 0 }));
+    // Positive control, not the witness: jsdom's capture stub never redirects the
+    // click, so the zoom still works here even when a pan WAS armed. The
+    // `capture` assertions above carry "activation preserved" (jsdom ceiling).
     fireEvent.click(target);
     expect(screen.getByRole('button', { name: /Zoom 120%/ })).toBeTruthy();
     // Empty graph background still owns deselection and background pan.
@@ -307,10 +325,11 @@ describe('GraphSurface device selector (ADR 0337 P2b)', () => {
       { id: 'iphone15', label: 'iPhone 15 Pro', width: 190, height: 360 },
       { id: 'ipad', label: 'iPad', width: 300, height: 400 },
     ], defaultDevice: 'iphone15' });
-    const sel = container.querySelector('.cv-graph__device-select');
+    const sel = container.querySelector<HTMLSelectElement>('.cv-graph__device-select');
     expect(sel).not.toBeNull();
-    expect((sel as HTMLSelectElement).value).toBe('iphone15');
-    expect([...(sel as HTMLSelectElement).options].map((o) => o.textContent)).toEqual(['iPhone 15 Pro', 'iPad']);
+    expect(sel?.value).toBe('iphone15');
+    expect(sel?.getAttribute('aria-label')).toBe('Device frame');
+    expect([...(sel?.options ?? [])].map((o) => o.textContent)).toEqual(['iPhone 15 Pro', 'iPad']);
   });
 
   it('APPLIES the selected frame size — the path the `w`/`h` typo hid', () => {
@@ -320,10 +339,10 @@ describe('GraphSurface device selector (ADR 0337 P2b)', () => {
     const { container } = setup({ deviceFrames: [
       { id: 'iphone15', label: 'iPhone 15 Pro', width: 190, height: 360 },
     ], defaultDevice: 'iphone15' });
-    const node = container.querySelector('.cv-graph__node') as HTMLElement | null;
+    const node = container.querySelector<HTMLElement>('.cv-graph__node');
     expect(node, 'fixture guard: a node must render').not.toBeNull();
-    expect(node!.style.width).toBe('190px');
-    expect(node!.style.height).toBe('360px');
+    expect(node?.style.width).toBe('190px');
+    expect(node?.style.height).toBe('360px');
   });
 
   it('shows NO device selector when the trait supplies no frames (the default)', () => {

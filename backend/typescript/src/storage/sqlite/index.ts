@@ -2793,6 +2793,21 @@ export function openSqliteStorage(dbPath: string): Storage {
       return res.changes;
     },
 
+    async resolveRequestNotificationsOfKind(kind, resolution) {
+      // #5922 — mirrors postgres.
+      const res = db.prepare(
+        `UPDATE notifications
+            SET metadata = json_set(COALESCE(metadata, '{}'), '$.resolution', json(?)),
+                read_at = CASE WHEN status = 'unread' THEN COALESCE(read_at, ?) ELSE read_at END,
+                status = CASE WHEN status = 'unread' THEN 'read' ELSE status END
+          WHERE interrupt_id IS NOT NULL
+            AND json_extract(COALESCE(metadata, '{}'), '$.kind') = ?
+            AND status <> 'archived'
+            AND json_extract(COALESCE(metadata, '{}'), '$.resolution') IS NULL`,
+      ).run(JSON.stringify(resolution), resolution.at, kind);
+      return res.changes;
+    },
+
     async markAllNotificationsRead(tenantId, now, recipientUserId, recipientRoles) {
       // ADR 0050 — when scoped to a recipient, clear only the rows that user can
       // see (their addressed rows + true broadcasts + role rows they hold, Phase 3),

@@ -223,5 +223,29 @@ export interface RunVariable {
  *  failure throws so the caller can fall back. */
 export async function getWorkflowRunInputs(workflowId: string): Promise<RunVariable[]> {
   const def = await getWorkflowDefinitionRaw(workflowId);
-  return def && Array.isArray(def.variables) ? (def.variables as RunVariable[]) : [];
+  return def && Array.isArray(def.variables) ? runInputsRead(def, def.variables as RunVariable[]) : [];
+}
+
+/** Issue 5897 — a deferred chain copy declares a variable for EVERY chain
+ *  parameter, but a parameter frozen at copy time (an `orgId`, or the `model` of a
+ *  copy made before provider/model were bound per run) is read by nothing. Offering
+ *  it told people their choice was recorded and used while the run ignored it. So a
+ *  deferred-materialized variable (one named in `metadata.deferredParameterAliases`)
+ *  is offered only when the definition names it somewhere else: a node, an edge, or
+ *  a lifted prompt template. Fails open: when a node holds a `*PromptRef` whose
+ *  template is not in the definition, every variable is kept. Exported for tests. */
+export function runInputsRead(def: Record<string, unknown>, variables: RunVariable[]): RunVariable[] {
+  const metadata = (def.metadata && typeof def.metadata === 'object' ? def.metadata : {}) as Record<string, unknown>;
+  const aliases = metadata.deferredParameterAliases;
+  if (!aliases || typeof aliases !== 'object') return variables;
+  const materialized = new Set(Object.values(aliases as Record<string, unknown>).filter((v): v is string => typeof v === 'string'));
+  if (materialized.size === 0) return variables;
+  const nodes = Array.isArray(def.nodes) ? def.nodes : [];
+  const refsTemplate = nodes.some((n) => /PromptRefs?"\s*:/.test(JSON.stringify((n as { config?: unknown }).config ?? {})));
+  if (refsTemplate && !Array.isArray(metadata.mintedPromptTemplates)) return variables;
+  const rest = { ...metadata };
+  delete rest.deferredParameterAliases;
+  const haystack = JSON.stringify([nodes, def.edges ?? [], rest]);
+  const named = (name: string): boolean => new RegExp(`(?<![\\w])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w])`).test(haystack);
+  return variables.filter((v) => !materialized.has(v.name) || named(v.name));
 }

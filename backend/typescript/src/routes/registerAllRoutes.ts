@@ -99,7 +99,8 @@ import { registerAgentProfileRoutes } from './agentProfile.js';
 import { registerOrgChartRoutes, registerOrgChartNormativeRoutes } from './orgChart.js';
 import { registerMultiPartyConversationSeamRoutes } from './multiPartyConversationSeam.js';
 import { registerWorkforceRoutes } from './workforces.js';
-import { registerAccessControlRoutes } from './accessControl.js';
+import { ACCESS_CONTROL_MEMBER_GUARDS, registerAccessControlRoutes } from './accessControl.js';
+import { registerOrgAddExistingRoutes } from './orgAddExisting.js';
 import { registerWorkspaceTenancyRoutes } from './workspaces.js';
 import { registerOperatorAccessRoutes } from './operatorAccess.js';
 import { registerKanbanRoutes } from './kanban.js';
@@ -386,6 +387,8 @@ const ROUTE_MODULES: RouteModule[] = [
   // (non-normative). Roles map to RFC 0049 scopes; a SEPARATE layer from the
   // descriptive org-chart above (org position still confers no authority).
   { name: 'accessControl', register: ({ app }) => registerAccessControlRoutes(app) },
+  // ADR 1123 — add an existing person / link an unbound row, with accessControl's own guards.
+  { name: 'orgAddExisting', register: ({ app }) => registerOrgAddExistingRoutes(app, ACCESS_CONTROL_MEMBER_GUARDS) },
   // Workspace lifecycle (ADR 0015 — workspace-as-tenant): list / create / switch.
   // Mounts after accessControl (the single owner of orgs/members/roles it builds on).
   { name: 'workspaces', register: ({ app }) => registerWorkspaceTenancyRoutes(app) },

@@ -23,6 +23,10 @@ export const messages = {
   rejectConfirmBody: 'La suite dépend du workflow ; le rejet peut mettre fin à l’exécution. Le travail déjà effectué n’est pas annulé.',
   cuRejectConfirmTitle: 'Rejeter cette action et mettre fin à la session de navigation ?',
   cuRejectConfirmBody: 'L’agent de navigation n’effectuera pas cette action et la session s’arrête ici. Ce qu’il a déjà fait sur le site reste fait.',
+  // ADR 1040 D7 F1 — a gate that marks reject as an expected decline.
+  declineConfirmTitle: 'Refuser ?',
+  declineConfirmBody: 'Cela répond non à cette demande et termine cette étape. Rien n’en est appliqué, et la réponse ne peut plus être modifiée ensuite.',
+  declineConfirmLabel: 'Refuser',
   actionRequestChanges: 'Demander des modifications',
   actionRefine: 'Affiner',
   actionDefer: 'Reporter',

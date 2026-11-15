@@ -107,4 +107,10 @@ export const messages = {
   videoAccess: 'Accessibility',
   videoAccessBody: 'Captions on every film, generated from the spoken words. Text contrast of at least 4.5:1. No flashing, and no meaning carried by colour or sound alone.',
   videoTokens: 'Published tokens for the film renderer:',
+  dialogs: 'Dialogs',
+  dialogOpen: 'New item',
+  dialogTitle: 'New item',
+  dialogSubmit: 'Create item',
+  dialogField: 'Name',
+  dialogError: 'This specimen never creates anything.',
 } as const;

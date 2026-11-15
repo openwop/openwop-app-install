@@ -37,7 +37,7 @@ function renderPanel(scopes: string[]): void {
       assignableRoleIds={['viewer', 'editor', 'admin']}
       editingId={null} setEditingId={() => {}} draftRoles={new Set()} setDraftRoles={() => {}}
       accessFor={null} access={null}
-      onCreateMember={() => {}} onShowAccess={() => {}} startEdit={() => {}} onDeleteMember={() => {}} onSaveRoles={() => {}}
+      onCreateMember={() => {}} onMembersChanged={async () => {}} isSuperadmin={false} onShowAccess={() => {}} startEdit={() => {}} onDeleteMember={() => {}} onSaveRoles={() => {}}
       can={can} roleLabel={(id) => id} toggleStr={(s) => s}
     />,
   );

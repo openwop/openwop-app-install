@@ -14,6 +14,9 @@ import { useCallback, useEffect, useMemo, useRef, useState, type Ref } from 'rea
 import { useTranslation } from 'react-i18next';
 import { confirm } from '../ui/confirm.js';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { useAuth } from '../auth/useAuth.js';
+import { useBackendSession } from '../auth/backendSession.js';
+import { openHeaderSignIn, rememberReturn, takeReturn } from '../auth/signInReturn.js';
 import { scrollBehavior } from '../ui/motion.js';
 import { useNotificationStore } from './notificationStore.js';
 import { PageHeader } from '../ui/PageHeader.js';
@@ -66,6 +69,8 @@ const RESOLUTION_KEYS: Record<RequestResolutionState, string> = {
   'timed-out': 'endTimedOut',
   answered: 'endAnswered',
   'run-ended': 'endRunEnded',
+  // #5922 — an idle chat's old item: it was never waiting on anyone.
+  withdrawn: 'endRunEnded',
 };
 
 type Tab = InboxTab;
@@ -116,6 +121,21 @@ export function NotificationsPage(): JSX.Element {
   // against the FULL list (not the current tab's filter) so the row is findable
   // even when it lives under a different tab.
   const deepLink = useMemo(() => parseInboxDeepLink(search), [search]);
+  // ADR 1120 — a Review link opened while signed out: offer sign-in, then come back
+  // to this exact URL (the same remembered return the store uses).
+  const { user } = useAuth();
+  const backendUser = useBackendSession().user;
+  const signedIn = Boolean(user || backendUser);
+  const hasDeepLink = Boolean(deepLink.notificationId || deepLink.approvalId);
+  useEffect(() => {
+    if (!signedIn) return;
+    const url = takeReturn();
+    if (url && url !== `${window.location.pathname}${window.location.search}`) navigate(url);
+  }, [signedIn, navigate]);
+  const signInToReview = useCallback(() => {
+    rememberReturn(`${window.location.pathname}${window.location.search}`);
+    if (!openHeaderSignIn()) takeReturn();
+  }, []);
   const target = useMemo<Notification | null>(() => {
     if (!deepLink.notificationId && !deepLink.approvalId) return null;
     return notifications.find((n) => matchesInboxDeepLink(n, deepLink)) ?? null;
@@ -290,6 +310,12 @@ export function NotificationsPage(): JSX.Element {
           </>
         }
       />
+      {!signedIn && hasDeepLink && (
+        <Notice variant="info">
+          {t('deepLinkSignInBody')}{' '}
+          <Button variant="secondary" onClick={signInToReview}>{t('deepLinkSignInCta')}</Button>
+        </Notice>
+      )}
       {/* R2 IB-SP-8/9 — localized copy (no endpoint paths), and a failed FIRST
           read must not co-render the 0/0/0 band + "all clear" below. */}
       {error && (

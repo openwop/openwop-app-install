@@ -127,8 +127,7 @@ import { stampRunCostOnTerminal } from '../observability/costEmitter.js';
 import { foldWorkflowSpendOnTerminal } from '../host/workflowBudgets.js';
 import { scoreOnlineEvalsOnTerminal } from '../host/workflowEvalOnline.js';
 import { ensureMintedTemplatesRegistered } from '../host/promptStore.js';
-import { interpolateRunInputs, hasInputTokens } from './runInputInterpolation.js';
-import { resolveDeclaredInputs, buildNodeCtxInputs } from './nodeCtxInputs.js';
+import { resolveDeclaredInputs, buildNodeCtxInputs, resolveNodeConfig } from './nodeCtxInputs.js';
 
 import { setRunAgent, hydrateRunAgent } from '../host/runAgentRuntime.js';
 import { hydrateRunChannels } from '../host/channelsRuntime.js';
@@ -598,6 +597,11 @@ async function runOneNodeBody(input: {
   const eventLog = getEventLog();
 
   const { storage, run, nodeRef, inputsByPort, policyResolver } = input;
+  // Issue #5897 — the config this node runs with, resolved ONCE from the run's
+  // variable bag (a deferred copy's `provider`/`model` are variable-sourced
+  // PortValues, RFC 0124 row 3). The capability gate below and `ctx.config` read
+  // the same value, so the gate checks the model the call will actually use.
+  const nodeConfig = resolveNodeConfig(nodeRef.config, snapshotRunVariables(run.runId));
   // ADR 0554 P2 — filled by `assertEffectAllowed`'s allow branch during this
   // node's execution, so the compensation obligation is classified by what the
   // node DID rather than by a second typeId allowlist beside sideEffects.ts.
@@ -667,13 +671,14 @@ async function runOneNodeBody(input: {
       // simply never read.
       //
       // A chain freezes `provider`/`model` into node config at expansion (ADR 0498),
-      // which is exactly the value dispatch will use, so this is the honest input.
+      // or, in a deferred copy, binds them to run variables (#5897); `nodeConfig` is
+      // the resolved value dispatch will use, so this is the honest input.
       // Non-string/absent ⇒ host default, so non-chain nodes are unaffected.
-      activeProvider: typeof nodeRef.config?.provider === 'string' && nodeRef.config.provider
-        ? nodeRef.config.provider
+      activeProvider: typeof nodeConfig.provider === 'string' && nodeConfig.provider
+        ? nodeConfig.provider
         : gateConfig.defaultProvider,
-      activeModel: typeof nodeRef.config?.model === 'string' && nodeRef.config.model
-        ? nodeRef.config.model
+      activeModel: typeof nodeConfig.model === 'string' && nodeConfig.model
+        ? nodeConfig.model
         : gateConfig.defaultModel,
       substitutionSupported: gateConfig.substitutionSupported,
       supportedProviders: gateConfig.supportedProviders,
@@ -921,13 +926,10 @@ async function runOneNodeBody(input: {
     ...(runTrace ? { traceContext: runTrace } : {}),
     ...(input.loopbackState ? { loopback: input.loopbackState } : {}),
     inputs: ctxInputs,
-    // Resolve `{{inputs.NAME}}` tokens in config from the per-run variable bag
-    // (reusable templates — the value arrives per run, not frozen at instantiate).
-    // Only rebuild config when a token is actually present (the common case has
-    // none — avoid deep-cloning every node's config on every run).
-    config: hasInputTokens(nodeRef.config)
-      ? interpolateRunInputs(nodeRef.config ?? {}, variableBag)
-      : (nodeRef.config ?? {}),
+    // Variable-sourced config values and `{{inputs.NAME}}` tokens, resolved from
+    // the per-run bag above (`resolveNodeConfig`; it allocates only when a value
+    // needs resolving).
+    config: nodeConfig,
     ...(nodeRef.agent ? { nodeAgent: nodeRef.agent } : {}),
     // ADR 1014 D3 — the version the pin recorded is the version that runs.
     ...(pinHolder.pin ? { agentVersion: pinHolder.pin.version } : typeof nodeRef.agent?.version === 'string' ? { agentVersion: nodeRef.agent.version } : {}),
@@ -1258,7 +1260,7 @@ async function runOneNodeBody(input: {
       // closed failure of the served node, never a live re-execution.
       if (module.applyServed) {
         try {
-          await module.applyServed({ runId: run.runId, ...(nodeRef.config ? { config: nodeRef.config as Record<string, unknown> } : {}), outputs: recorded.outputs ?? {} });
+          await module.applyServed({ runId: run.runId, ...(nodeRef.config ? { config: nodeConfig } : {}), outputs: recorded.outputs ?? {} });
         } catch (err) {
           replayServed = { status: 'failure', error: { code: 'replay_source_missing', message: err instanceof Error ? err.message : String(err) } };
         }

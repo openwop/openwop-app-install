@@ -983,6 +983,20 @@ export const BACKGROUND_APP_JOBS: readonly BackgroundAppJob[] = [
       return { complete: mode === 'apply' && r.conflicts === 0 && r.truncatedTenants === 0 };
     },
   },
+  {
+    // #5922 — every idle chat used to file an "Input needed" item that nothing
+    // retires. The suspend manager no longer files them; this marks the ones
+    // already sent `withdrawn` (read, out of "Action needed", not archived), via
+    // the ADR 1114 stamp. One UPDATE, idempotent (a stamped row no longer
+    // matches) and safe on two instances at once.
+    id: 'retire-conversation-requests',
+    async run(storage: Storage): Promise<{ complete: boolean }> {
+      const { retireConversationRequests } = await import('../notifications/retireRequests.js');
+      const retired = await retireConversationRequests(storage);
+      log.info('app_bg_job_retire_conversation_requests', { retired });
+      return { complete: retired !== null };
+    },
+  },
 ];
 
 const bgMarkerKey = (id: string): string => `app_bg_job:${id}`;

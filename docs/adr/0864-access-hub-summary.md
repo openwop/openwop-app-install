@@ -43,6 +43,17 @@ reader refuses (401/403/404) or throws is **omitted** from the response; it is
 never reported as zero. The SPA shows no count for an omitted section, so absence
 is never presented as "none".
 
+> **CORRECTED 2026-11-14 (issue 5929 item 2).** The organizations reader this
+> section shares with `GET /orgs`, `listCallerOrgs(req)`, returned every org in the
+> tenant, so in a workspace holding several clients every member saw every client's
+> name, in each org picker and in this count. It now lists the orgs the caller can
+> act in: `callerOrgAccess` narrowed by act-as holds a scope there. Everything is
+> listed for an operator (superadmin, wildcard bearer, env key) and for a workspace
+> admin, meaning `host:members:manage` on the root of a membership-rooted workspace.
+> D2 holds as written: the summary still calls the same reader, so its org count
+> and its endpoint count now follow the narrower list. Test:
+> `issue5929-org-list-membership.test.ts`.
+
 **D3 — counts, not rows.** The response carries counts plus the minimum needed
 for the banner (the display name and provider of connections that need
 reconnecting). No secret refs, key names, member identities or rule bodies.

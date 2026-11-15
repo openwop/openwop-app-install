@@ -1,6 +1,6 @@
 {
   "name": "vendor.openwop-app.podcasts.agents",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "kind": "node",
   "description": "Podcasts feature agent pack — a feature-bound manifest agent that helps a user PLAN and PRODUCE a multi-speaker audio episode from a research notebook: shaping the briefing, proposing the cast (1–4 speakers + personas), segment count, and outline angle, then igniting the generation run. CFP-1: the Producer now has the feature's OWN chat tools — openwop:podcasts.list (ground on the org's cast/format profiles, shows, and episodes) + openwop:podcasts.produce (start the real podcasts.generate run, sharing the POST /episodes workspace:write predicate). The generation still runs as an RBAC-gated async executor run — the tool ignites it behind the same write gate; the run never publishes on its own.",
   "author": "OpenWOP App",

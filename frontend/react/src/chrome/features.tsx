@@ -218,7 +218,7 @@ const CORE_FEATURES: FeatureRoute[] = [
     // ADR 0396 — the consolidated personal-settings shell (composition only;
     // every panel's capability keeps its owning feature + toggle).
     path: '/settings', element: <SettingsPage />, tier: 'workspace', archetype: 'standard-index',
-    nav: { group: 'Workspace', labelKey: 'settingsShellLabel', icon: SettingsIcon, hintKey: 'settingsShellHint', order: 100, featureId: 'settings-shell' },
+    nav: { group: 'Workspace', labelKey: 'settingsShellLabel', icon: SettingsIcon, hintKey: 'settingsShellHint', order: 100, featureId: 'settings-shell', lockVisible: true },
   },
   { path: '/runs/:runId', element: <RunDetailPage />, tier: 'admin' , archetype: 'admin',},
   { path: '/runs/:runId/audit', element: <RunAuditPage />, tier: 'admin' , archetype: 'admin',},
