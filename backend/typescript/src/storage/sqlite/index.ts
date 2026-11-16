@@ -58,6 +58,23 @@ import { toolBoundaryKeyPatterns, clarificationCheckpointKeyPattern } from '../r
  *  per Database). The single source of truth for tenant-scoped bulk ops
  *  (ADR 0003 Phase 4c) — see `../tenantMigration.ts`. Introspection means a new
  *  tenant table is covered automatically; nothing to register, nothing to forget. */
+/** ADR 1124 D1 — the ADR 1114 stamp, for a run that is being DELETED: every
+ *  still-open request about it reads `run-deleted` and unread → read. Called
+ *  inside the delete's own transaction, so the two never disagree. Rows that
+ *  name no interrupt, archived rows and already-stamped rows are untouched. */
+function stampDeletedRunRequests(db: Database.Database, tenantId: string, runId: string, at: string = new Date().toISOString()): number {
+  const res = db.prepare(
+    `UPDATE notifications
+        SET metadata = json_set(COALESCE(metadata, '{}'), '$.resolution', json(?)),
+            read_at = CASE WHEN status = 'unread' THEN COALESCE(read_at, ?) ELSE read_at END,
+            status = CASE WHEN status = 'unread' THEN 'read' ELSE status END
+      WHERE tenant_id = ? AND run_id = ? AND interrupt_id IS NOT NULL
+        AND status <> 'archived'
+        AND json_extract(COALESCE(metadata, '{}'), '$.resolution') IS NULL`,
+  ).run(JSON.stringify({ state: 'run-deleted', at }), at, tenantId, runId);
+  return Number(res.changes ?? 0);
+}
+
 const tenantTablesCache = new WeakMap<Database.Database, string[]>();
 function tenantScopedTables(db: Database.Database): string[] {
   const cached = tenantTablesCache.get(db);
@@ -2142,6 +2159,8 @@ export function openSqliteStorage(dbPath: string): Storage {
         // ADR 0889 EVD-2 — the run's tool-boundary capture (keyed by its tenant) retires with it.
         const owner = db.prepare(`SELECT tenant_id FROM runs WHERE run_id = ?`).get(rid) as { tenant_id: string } | undefined;
         if (owner?.tenant_id) for (const pattern of toolBoundaryKeyPatterns(owner.tenant_id, rid)) db.prepare(`DELETE FROM host_ext_kv WHERE k LIKE ? ESCAPE '\\'`).run(pattern);
+        // ADR 1124 D1 — a deleted run appends no event, so retire its requests here.
+        if (owner?.tenant_id) stampDeletedRunRequests(db, owner.tenant_id, rid);
         const rr = db.prepare(`DELETE FROM runs WHERE run_id = ?`).run(rid);
         return Number(rr.changes ?? 0) > 0;
       });
@@ -2197,6 +2216,7 @@ export function openSqliteStorage(dbPath: string): Storage {
           const owner = db.prepare(`SELECT tenant_id FROM runs WHERE run_id = ?`).get(run_id) as { tenant_id: string } | undefined;
           if (owner?.tenant_id) {
             for (const pattern of toolBoundaryKeyPatterns(owner.tenant_id, run_id)) childRows += Number(db.prepare(`DELETE FROM host_ext_kv WHERE k LIKE ? ESCAPE '\\'`).run(pattern).changes ?? 0);
+            stampDeletedRunRequests(db, owner.tenant_id, run_id); // ADR 1124 D1
           }
           runs += Number(db.prepare(`DELETE FROM runs WHERE run_id = ?`).run(run_id).changes ?? 0);
         }
@@ -2791,6 +2811,20 @@ export function openSqliteStorage(dbPath: string): Storage {
             AND json_extract(COALESCE(metadata, '{}'), '$.resolution') IS NULL`,
       ).run(JSON.stringify(resolution), resolution.at, tenantId, runId, interruptId ?? null, interruptId ?? null);
       return res.changes;
+    },
+
+    async listUnstampedRequestRows({ after, limit }) {
+      // ADR 1124 D2 — mirrors postgres: keyset on (tenant_id, run_id, notification_id).
+      const rows = db.prepare(
+        `SELECT notification_id, tenant_id, run_id, interrupt_id FROM notifications
+          WHERE interrupt_id IS NOT NULL AND run_id IS NOT NULL
+            AND status <> 'archived'
+            AND json_extract(COALESCE(metadata, '{}'), '$.resolution') IS NULL
+            AND (tenant_id, run_id, notification_id) > (?, ?, ?)
+          ORDER BY tenant_id, run_id, notification_id
+          LIMIT ?`,
+      ).all(after?.tenantId ?? '', after?.runId ?? '', after?.notificationId ?? '', limit) as Array<{ notification_id: string; tenant_id: string; run_id: string; interrupt_id: string }>;
+      return rows.map((r) => ({ notificationId: r.notification_id, tenantId: r.tenant_id, runId: r.run_id, interruptId: r.interrupt_id }));
     },
 
     async resolveRequestNotificationsOfKind(kind, resolution) {

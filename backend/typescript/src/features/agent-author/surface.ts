@@ -15,18 +15,19 @@ import {
   persistAgentDraft,
 } from './agentAuthorService.js';
 import { stashAgentDraft } from './draftStash.js';
+import { workflowClientReaderForScope } from '../../host/workflowClientAccess.js'; // ADR 1132 D5
 
 export function buildAgentAuthorSurface(scope: BundleScope): FeatureSurface {
   return {
     /** The closed world: visible agents, the tenant's workflow ids, the current
      *  roster (read-before-write), and the legal autonomy levels. */
-    getCatalog: async () => ({ ...(await buildAgentAuthorCatalog({ tenantId: scope.tenantId })) }),
+    getCatalog: async () => ({ ...(await buildAgentAuthorCatalog({ tenantId: scope.tenantId, mayRead: workflowClientReaderForScope(scope) })) }),
 
     /** Validate a candidate roster-entry draft WITHOUT persisting; returns
      *  `{ ok, errors }` so the model can repair on the errors (ONE bounded
      *  repair — the doctrine). */
     validateDraft: async (args) => {
-      const v = await validateAgentDraft((args ?? {}).draft, { tenantId: scope.tenantId });
+      const v = await validateAgentDraft((args ?? {}).draft, { tenantId: scope.tenantId, mayRead: workflowClientReaderForScope(scope) });
       return { ok: v.ok, errors: v.errors };
     },
 
@@ -45,7 +46,7 @@ export function buildAgentAuthorSurface(scope: BundleScope): FeatureSurface {
      *  typed failure otherwise, never a silent no-op. */
     stashDraft: async (args) => {
       if (!scope.actingUserId) throw new Error('stashDraft requires an acting user — the draft stash is per-user.');
-      const v = await validateAgentDraft((args ?? {}).draft, { tenantId: scope.tenantId });
+      const v = await validateAgentDraft((args ?? {}).draft, { tenantId: scope.tenantId, mayRead: workflowClientReaderForScope(scope) });
       if (!v.ok) throw new Error(`draft not valid: ${v.errors.join(' ')}`);
       await stashAgentDraft(scope.tenantId, scope.actingUserId, v.draft);
       return { stashed: true, persona: v.draft.persona };

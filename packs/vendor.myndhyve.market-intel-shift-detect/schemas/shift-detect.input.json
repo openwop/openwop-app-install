@@ -1,9 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-shift-detect/1.0.1/shift-detect.input.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-shift-detect/1.1.0/shift-detect.input.json",
   "title": "MarketIntelShiftDetectInput",
   "type": "object",
-  "required": ["previous", "current"],
+  "required": ["previous"],
+  "anyOf": [{ "required": ["current"] }, { "required": ["records"] }, { "required": ["rankedAngles"] }],
   "properties": {
     "previous": {
       "type": "object",
@@ -22,7 +23,9 @@
         "angles": { "type": "array", "items": { "type": "object", "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "score": { "type": "number" } } } }
       },
       "additionalProperties": true
-    }
+    },
+    "records": { "type": "array", "description": "ADR 1116: the current run's VoC records (voc.records), used when `current` is absent.", "items": { "type": "object" } },
+    "rankedAngles": { "type": "array", "description": "ADR 1116: the current run's scored angles (opportunity-scoring.rankedAngles; angleId/angleName, score.total), used when `current` is absent.", "items": { "type": "object" } }
   },
   "additionalProperties": true
 }

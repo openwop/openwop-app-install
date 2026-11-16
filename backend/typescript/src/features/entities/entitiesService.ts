@@ -27,7 +27,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { OpenwopError } from '../../types.js';
-import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { DurableCollection, hostExtStorage } from '../../host/hostExtPersistence.js';
 import {
   FIELD_TYPES,
   buildFieldSpec,
@@ -996,6 +996,28 @@ export async function getSystemEntities(tenantId: string, typeName: string, enti
  *  for daily jobs only; never a request path). */
 export async function listSystemTypeTenants(typeName: string): Promise<string[]> {
   return (await types.list()).filter((t) => t.system && t.name === typeName).map((t) => t.tenantId);
+}
+
+/**
+ * ADR 1122 P1 — one bounded page of the tenants that hold system type `typeName`, by
+ * key order on a cursor (`after` is the last type-row key returned). A paged walk for
+ * a background backfill: `listSystemTypeTenants` reads every type row of every tenant
+ * at once. `next` is absent when the walk has reached the end.
+ */
+export async function systemTypeTenantsPage(typeName: string, after: string | undefined, limit = 200): Promise<{ tenants: Array<{ tenantId: string; key: string }>; next?: string }> {
+  const storage = hostExtStorage();
+  const prefix = 'hostext:entity:type:';
+  const rows = storage.kvListPage
+    ? await storage.kvListPage(prefix, { ...(after ? { after } : {}), limit })
+    : (await storage.kvList(prefix)).filter((r) => !after || r.key > after).slice(0, limit);
+  const tenants: Array<{ tenantId: string; key: string }> = [];
+  for (const { key, value } of rows) {
+    let row: { system?: unknown; name?: unknown; tenantId?: unknown };
+    try { row = JSON.parse(value) as typeof row; } catch { continue; }
+    if (row.system === true && row.name === typeName && typeof row.tenantId === 'string') tenants.push({ tenantId: row.tenantId, key });
+  }
+  const last = rows[rows.length - 1]?.key;
+  return { tenants, ...(rows.length >= limit && last ? { next: last } : {}) };
 }
 
 /** ADR 1110 — the number of rows of one SYSTEM type in the tenant, counted in the database. */

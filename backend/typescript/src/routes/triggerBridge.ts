@@ -44,6 +44,7 @@ import { signStandardWebhooks } from '../host/webhookSignature.js';
 import { fromWireRunId, toWireRunId } from '../host/v2Ids.js';
 import { looksProjected, unprojectBoundId } from '../host/boundIdProjection.js';
 import { createLogger } from '../observability/logger.js';
+import { assertWorkflowClientAccess } from '../host/workflowClientAccess.js';
 
 const log = createLogger('routes.triggerIngestSigned');
 
@@ -189,6 +190,8 @@ export function registerTriggerBridgeRoutes(app: Express, deps?: Deps): void {
       // cannot start. The host resolves the workflow under the caller's tenant —
       // ADR 0823: it said so, and did not; another tenant's id now 404s too.
       const tenantId = tenantOf(req);
+      // ADR 1132 D5 — binding a client's workflow needs launch authority in that client.
+      await assertWorkflowClientAccess(req, workflowId, 'runs:create', tenantId);
       const wf = await resolveTenantWorkflow(deps.hostSuite.workflowCatalog, tenantId, workflowId);
       if (!wf) {
         throw new OpenwopError('not_found', 'Workflow not found (cannot bind a subscription to a workflow the caller cannot start).', 404, { workflowId });

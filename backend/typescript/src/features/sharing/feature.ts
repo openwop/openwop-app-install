@@ -48,6 +48,7 @@
  * @see docs/adr/0434-graduate-substrate-toggles.md
  */
 
+import { registerShareLinkAssetGrantProvider } from './assetGrantProvider.js';
 import type { BackendFeature } from '../types.js';
 import { rekeySharingAtRest, backfillLinkDeadAt } from './sharingService.js';
 import { registerSharingRoutes } from './routes.js';
@@ -58,6 +59,7 @@ const log = createLogger('features.sharing');
 export const sharingFeature: BackendFeature = {
   id: 'sharing',
   registerRoutes: (deps) => {
+    registerShareLinkAssetGrantProvider(); // ADR 1122 P1b — a live share link grants what it exposes
     registerSharingRoutes(deps);
     // ADR 0448 P2 — hashed-at-rest re-key: idempotent by shape, safe every
     // boot, best-effort (a hiccup never blocks boot; the next boot resumes).

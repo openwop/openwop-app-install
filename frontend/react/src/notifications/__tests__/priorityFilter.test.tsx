@@ -177,14 +177,27 @@ describe('inbox — keyboard queue nav (IB-R2-1, first tests: review F13)', () =
   });
 
   it('e archives the cursor row through the store action', async () => {
-    withNotifications([note('n1', 'normal', 'First'), note('n2', 'normal', 'Second')]);
+    // ADR 1125 D3 — `e` archives news; an open request is skipped (next case).
+    const newsRow = (id: string, title: string): Notification => ({ ...note(id, 'normal', title), type: 'workflow.completed' });
+    withNotifications([newsRow('n1', 'First'), newsRow('n2', 'Second')]);
     renderInbox();
+    fireEvent.click(screen.getByRole('button', { name: /^All/ }));
     await screen.findByText('First');
     // Cursor on the SECOND row, so "the cursor row" differs from "the first row".
     kd('j');
     kd('j');
     kd('e');
     expect(storeState.archive).toHaveBeenCalledWith('n2');
+  });
+
+  it('e skips an open request: it still waits on someone (ADR 1125 D3)', async () => {
+    withNotifications([note('n1', 'normal', 'First'), note('n2', 'normal', 'Second')]);
+    renderInbox();
+    await screen.findByText('First');
+    kd('j');
+    kd('j');
+    kd('e');
+    expect(storeState.archive).not.toHaveBeenCalled();
   });
 
   it('u marks the unread cursor row read', async () => {

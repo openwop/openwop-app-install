@@ -163,26 +163,34 @@ function hasTenantOfArg(args: readonly string[]): boolean {
   return args.length >= 4 && args[3] !== '' && args[3] !== 'undefined';
 }
 
-function parseSites(): Site[] {
+/** Every `new DurableCollection<…>(…)` construction in ONE (comment-stripped)
+ *  source text. Read by parseSites AND by the self-sabotage case below, so the
+ *  case tests the scan the gate runs, not a copy of it. The type argument may
+ *  nest one level (`<Record<string, X>>`): a flat `<[^>]*>` stops at the inner
+ *  `>`, the construction never matches, and the store is silently invisible. */
+function parseSource(src: string, file: string): Site[] {
   const sites: Site[] = [];
-  // ADR 1031 — an adopter's feature packages (`src/adopter/features/`) too.
-  for (const file of featureSourceRoots().flatMap((root) => walk(root))) {
-    const src = stripComments(readFileSync(file, 'utf8'));
-    const re = /new\s+DurableCollection\s*(?:<[^>]*>)?\s*\(/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(src))) {
-      const openIdx = m.index + m[0].length - 1;
-      const args = extractArgs(src, openIdx);
-      const ns = (args[0] ?? '').replace(/^['"`]|['"`]$/g, '');
-      // A DurableCollection namespace is a lowercase-initial token; anything else
-      // (e.g. a stray regex-in-a-comment the strip missed) is not a real store.
-      if (!/^[a-z][A-Za-z0-9:_-]*$/.test(ns)) continue;
-      const line = src.slice(0, m.index).split('\n').length;
-      const hasTenantOf = hasTenantOfArg(args);
-      sites.push({ ns, keyFn: args[1] ?? '', hasTenantOf, file, line });
-    }
+  const re = /new\s+DurableCollection\s*(?:<(?:[^<>]|<[^<>]*>)*>)?\s*\(/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src))) {
+    const openIdx = m.index + m[0].length - 1;
+    const args = extractArgs(src, openIdx);
+    const ns = (args[0] ?? '').replace(/^['"`]|['"`]$/g, '');
+    // A DurableCollection namespace is a lowercase-initial token; anything else
+    // (e.g. a stray regex-in-a-comment the strip missed) is not a real store.
+    if (!/^[a-z][A-Za-z0-9:_-]*$/.test(ns)) continue;
+    const line = src.slice(0, m.index).split('\n').length;
+    const hasTenantOf = hasTenantOfArg(args);
+    sites.push({ ns, keyFn: args[1] ?? '', hasTenantOf, file, line });
   }
   return sites;
+}
+
+function parseSites(): Site[] {
+  // ADR 1031 — an adopter's feature packages (`src/adopter/features/`) too.
+  return featureSourceRoots()
+    .flatMap((root) => walk(root))
+    .flatMap((file) => parseSource(stripComments(readFileSync(file, 'utf8')), file));
 }
 
 /** The key-fn references a TOP-LEVEL `<param>.tenantId` (⇒ the row carries a
@@ -331,7 +339,9 @@ describe('PROPC-ERASURE-RATCHET-BLINDSPOT — every feature DurableCollection is
     // measured − 1 (never a multiple of 10). The old `> 250` let a parser that
     // silently lost a third of the stores pass. A change that deletes stores
     // lowers this floor in the same commit, to its own measured − 1.
-    expect(namespaces.length).toBeGreaterThanOrEqual(369);
+    // The message prints the measured count, so a run report shows how far the
+    // floor sits below the truth (w112: ≈432 by a comment-naive grep).
+    expect(namespaces.length, `measured ${namespaces.length} distinct namespaces`).toBeGreaterThanOrEqual(369);
   });
 
   it('every namespace is auto-reachable (tenantOf / key.tenantId) OR classified with a cited reason', () => {
@@ -383,21 +393,24 @@ describe('PROPC-ERASURE-RATCHET-BLINDSPOT — the mechanism the map rests on (ru
 
     // UNREACHABLE — jsonTenantId probes only a top-level `tenantId`, finds none,
     // so the row (and its PII) SURVIVES. This is what a missing tenantOf costs.
-    expect(await nested.get(`${TENANT}::x`)).not.toBeNull();
+    expect(await nested.get(`${TENANT}::x`)).toEqual({ k: 'x', owner: { tenant: TENANT }, pii: 'alice@example.com' });
   });
 
   it('a tenantOf-armed collection IS purged on teardown', async () => {
-    interface FlatRow {
+    // The SAME nested shape as the case above, so only the `tenantOf` resolver
+    // can reach it: a top-level `tenantId` here would also be found by the
+    // `jsonTenantId` fallback, and the case could not tell the two signals apart.
+    interface NestedArmedRow {
       k: string;
-      tenantId: string;
+      owner: { tenant: string };
     }
-    const armed = new DurableCollection<FlatRow>(
+    const armed = new DurableCollection<NestedArmedRow>(
       'test:teardown-witness-armed',
-      (r) => `${r.tenantId}::${r.k}`,
+      (r) => `${r.owner.tenant}::${r.k}`,
       undefined,
-      (r) => r.tenantId,
+      (r) => r.owner.tenant,
     );
-    await armed.put({ k: 'x', tenantId: TENANT });
+    await armed.put({ k: 'x', owner: { tenant: TENANT } });
     expect(await armed.get(`${TENANT}::x`)).not.toBeNull();
 
     await purgeTenantHostExt(TENANT);
@@ -419,17 +432,16 @@ describe('PROPC-ERASURE-RATCHET-BLINDSPOT — the detection signals are not vacu
     const src =
       "const a = new DurableCollection<T>('x:armed', (r) => r.id, undefined, (r) => r.tenantId);\n" +
       "const b = new DurableCollection<T>('x:unarmed', (r) => r.id);\n" +
-      "const c = new DurableCollection<T>('x:explicit-undefined', (r) => r.id, undefined, undefined);\n";
-    const re = /new\s+DurableCollection\s*(?:<[^>]*>)?\s*\(/g;
+      "const c = new DurableCollection<T>('x:explicit-undefined', (r) => r.id, undefined, undefined);\n" +
+      "const d = new DurableCollection<Record<string, T>>('x:nested-generic', (r) => r.id);\n";
     const found: Record<string, boolean> = {};
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(src))) {
-      const args = extractArgs(src, m.index + m[0].length - 1);
-      const ns = (args[0] ?? '').replace(/^['"`]|['"`]$/g, '');
-      found[ns] = hasTenantOfArg(args);
-    }
-    expect(found['x:armed']).toBe(true);
-    expect(found['x:unarmed']).toBe(false);
-    expect(found['x:explicit-undefined']).toBe(false);
+    for (const s of parseSource(src, 'fixture.ts')) found[s.ns] = s.hasTenantOf;
+    // The exact set: a nested type argument must not hide a store (`x:nested-generic`).
+    expect(found).toEqual({
+      'x:armed': true,
+      'x:unarmed': false,
+      'x:explicit-undefined': false,
+      'x:nested-generic': false,
+    });
   });
 });

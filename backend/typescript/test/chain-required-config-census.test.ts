@@ -106,6 +106,7 @@ const REQUIRED_BINDINGS: Record<string, string[]> = {
   'feature.documents.nodes.render': ['orgId', 'documentId'],
   'feature.documents.nodes.get-document': ['orgId', 'documentId'],
   'feature.documents.nodes.generate-from-template': ['orgId', 'templateId'], // DOCWF2-7: was a phantom `create-document` typeId
+  'feature.documents.nodes.save-document': ['orgId'], // CC-SEO-2 (content arrives over the portless edge)
 };
 
 /** Chains this feature owns — excluded from the anti-vacuity floor below, so the
@@ -120,8 +121,6 @@ const QUARANTINE = new Set<string>([
   // ── `core.email.draft` with `config: {}` — one structural cure (ISU-4) ──
   // owner: incident-postmortem
   'postmortem.draft-blameless::save',
-  // owner: seo-content-ops
-  'seo.keyword-brief::save',
   // owner: support
   'support.email-triage::toDrafts',
   // ── `core.web.search` with no `query`, fed only by a trigger node ──────
@@ -131,8 +130,6 @@ const QUARANTINE = new Set<string>([
   'digest.topic-watch::search',
   // owner: sales-outreach. Upstream `core.trigger.event` → `{eventName,payload}`.
   'outreach.researched-firsttouch::search',
-  // owner: seo-content-ops. Same shape (this chain is starved TWICE over).
-  'seo.keyword-brief::search',
 ]);
 
 interface ChainNode { id?: string; typeId?: string; config?: Record<string, unknown>; inputs?: Record<string, unknown> }

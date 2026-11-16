@@ -12,13 +12,19 @@
  * that shape (and says it was not type-checked), and malformed JSON keeps the
  * text path.
  *
+ * ADR 1031 P2: the envelope cases ride the test-only `testOutlineRenderer`
+ * fixture type (it was KickTodo's challenge-plan, now in its own package), so
+ * the matcher is a FIXTURE; what is under test is that ReadableJson and the
+ * registry APPLY it (`getReviewArtifactMatch`).
+ *
  * Sabotage that turns it red: routing JSON back to Markdown in AssetPreview;
- * dropping the awaiting-review line or mapping `submitted` to "Published";
- * removing the plan's `matches` (the envelope case falls to fields); letting a
- * matcher accept a payload with no days; dropping the "not checked" note;
- * rendering strings as HTML; removing the item cap; dropping the stored-key
- * tooltip; humanizing without kebab keys; parsing malformed JSON as an empty
- * object. All measured by wave 79 sabotage probes.
+ * dropping the awaiting-review line or quoting a non-awaiting state as awaiting;
+ * the registry ignoring a type's matcher (a shapeless payload, or a type with no
+ * matcher, dressed up as the type); never matching an envelope; dropping the
+ * "not checked" note or the "All saved fields" view; rendering strings as HTML;
+ * removing the item cap; dropping the stored-key tooltip; humanizing without
+ * kebab keys; parsing malformed JSON as an empty object. Measured by wave 79
+ * sabotage probes and re-probed in wave 116 (w116g3-rj-*).
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup, within } from '@testing-library/react';
@@ -90,13 +96,20 @@ describe('ReadableJson — untyped JSON under review', () => {
     expect(screen.queryByRole('status')).toBeNull();
   });
 
-  it('a SAVED plan envelope uses the outline layout, says it was not type-checked, and keeps every field', async () => {
+  it('a SAVED plan envelope uses the outline layout, says it was not type-checked, and keeps every field', () => {
     show(envelope);
-    expect(screen.getByText(/Saved as plain data, so its format was not checked/)).toBeTruthy();
-    expect(await screen.findByRole('heading', { name: 'Twenty-One Days of Focus' })).toBeTruthy();
-    expect(screen.getByText('Day 1: First block')).toBeTruthy();
-    const details = screen.getByText('All saved fields').closest('details')!;
-    expect(within(details).getByText('Artifact type id')).toBeTruthy();
+    // The fixture renderer is synchronous, so everything is asserted on the first paint.
+    expect(screen.getAllByText(/Saved as plain data, so its format was not checked/)).toHaveLength(1);
+    expect(screen.getByRole('heading', { name: 'Twenty-One Days of Focus' }).tagName).toBe('H3');
+    expect(screen.getByText('Day 1: First block').tagName).toBe('LI');
+    const details = screen.getByText('All saved fields').closest('details');
+    expect(details?.open).toBe(false);
+    const all = within(details!);
+    expect(all.getByText('Artifact type id')).toBeTruthy();
+    // Every field, nested ones too: the day's alternative (the field whose loss sent this
+    // outline down the untyped path) is kept, once under `plan` and once under the payload.
+    expect(all.getAllByText('Walk for 10 minutes.')).toHaveLength(2);
+    expect(all.getAllByText('d1-alt')).toHaveLength(2);
   });
 
   it('an envelope whose payload lacks the shape is NOT dressed up as that type', () => {

@@ -35,6 +35,9 @@ import type { RunVariable } from '../workflows/workflowsClient.js';
 import { listConnections, listProviders } from '../features/connections/connectionsClient.js';
 import { useAllFeatureAccess } from '../featureToggles/FeatureAccessContext.js';
 import type { ChainTemplate } from './persistence/backendStore.js';
+import { listOrgs, type Organization } from '../client/accessClient.js';
+import { SelectField } from '../ui/Field.js';
+import { useOrgSelection } from '../ui/useOrgSelection.js';
 
 /** Map a chain's JSON-Schema `parameters` to the shared RunVariable shape the
  *  RunInputsForm renders. Exported for tests. */
@@ -72,14 +75,24 @@ export function TemplatePreflightModal({
   chain: ChainTemplate;
   busy: boolean;
   error: string | null;
-  /** Called with the (possibly empty) params object to instantiate with. */
-  onConfirm: (params: Record<string, unknown>) => void;
+  /** Called with the (possibly empty) params object to instantiate with, and the
+   *  client the copy is for (ADR 1132), when the person chose one. */
+  onConfirm: (params: Record<string, unknown>, clientOrgId?: string) => void;
   onClose: () => void;
 }): JSX.Element {
   const { t } = useTranslation('builder');
   const nav = useNavigate();
   const variables = useMemo(() => chainParamsToVariables(chain.parameters), [chain.parameters]);
   const [values, setValues] = useState<Record<string, unknown>>(() => initialRunInputValues(variables));
+
+  // ADR 1132 — which client this copy is for. Its filled-in values can be that
+  // client's own content, so the copy is visible only to people in that client.
+  // Offered only when the caller can see client orgs (non-root orgs). A failed
+  // list says so and offers a retry rather than reading as "no clients"; the
+  // server still applies its own rule either way.
+  const { orgs, orgsFailed, retry: retryOrgs } = useOrgSelection<Organization>(listOrgs);
+  const clients = useMemo(() => (orgs ?? []).filter((o) => o.orgId !== o.tenantId), [orgs]);
+  const [clientOrgId, setClientOrgId] = useState('');
 
   // The caller's own connections + the provider labels — best-effort: a fetch
   // failure (or an anon session with none) honestly reads as "not connected".
@@ -145,7 +158,7 @@ export function TemplatePreflightModal({
         className="u-grid u-gap-4"
         onSubmit={(e) => {
           e.preventDefault();
-          if (!busy) onConfirm(toRunInputs(variables, values));
+          if (!busy) { const inputs = toRunInputs(variables, values); if (clientOrgId) onConfirm(inputs, clientOrgId); else onConfirm(inputs); }
         }}
       >
         <div className="u-grid u-gap-1">
@@ -157,6 +170,18 @@ export function TemplatePreflightModal({
              with its text already inside, so it announces nothing while looking
              correct (ui/Notice's own docblock). This is the flow's only failure. */}
         {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}
+
+        {orgsFailed ? (
+          <Notice variant="warning" announce={t('preflightClientFailed')}>
+            {t('preflightClientFailed')}{' '}
+            <Button variant="link" onClick={retryOrgs}>{t('preflightClientRetry')}</Button>
+          </Notice>
+        ) : clients.length > 0 ? (
+          <SelectField label={t('preflightClientLabel')} help={t('preflightClientHelp')} value={clientOrgId} onChange={(e) => setClientOrgId(e.target.value)}>
+            <option value="">{t('preflightClientNone')}</option>
+            {clients.map((o) => <option key={o.orgId} value={o.orgId}>{o.name}</option>)}
+          </SelectField>
+        ) : null}
 
         {requirements != null ? (
         <section className="u-grid u-gap-2" aria-label={t('preflightRequirementsTitle')}>

@@ -20,8 +20,13 @@
  * campaigns / sends), an assertive suppressions announce, a dead filter or sends
  * Retry, and dropping `danger` from send / re-send each turn its case red.
  *
- * Mocks are typed against the real client (`vi.fn<typeof EC.x>`), so a fixture
- * that drifts from `Campaign` / `ProviderStatus` / `Suppression` fails `tsc`.
+ * Mocks are typed against the real client (`vi.fn<typeof EC.x>`), and the
+ * ADR 0955 D7 / ADR 0905 D7 neighbour reads use `satisfies`, so a fixture that
+ * drifts from `Campaign` / `ProviderStatus` / `Suppression` / `SendingHealth`
+ * fails `tsc`. The module-level announcer is cleared before every case: the
+ * campaigns-failed case also announces "Could not load" assertively, so without
+ * the reset the templates case's announcement check passed on a neighbour's
+ * leftover under shuffle.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react';
@@ -49,16 +54,16 @@ import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatu
 vi.mock('../emailClient.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   // ADR 0955 D7 — the page's sending-health card (a healthy sender).
-  getSendingHealth: async () => ({ state: null, window: { sent: 0, hardBounces: 0, complaints: 0 }, thresholds: { minSends: 500, complaintRate: 0.001, hardBounceRate: 0.02 }, canResume: false }),
+  getSendingHealth: async () => ({ state: null, window: { sent: 0, hardBounces: 0, complaints: 0 }, thresholds: { minSends: 500, complaintRate: 0.001, hardBounceRate: 0.02 }, canResume: false } satisfies EC.SendingHealth),
   listCampaigns: (...a: Parameters<typeof EC.listCampaigns>) => api.listCampaigns(...a),
   listTemplates: (...a: Parameters<typeof EC.listTemplates>) => api.listTemplates(...a),
   sendCampaign: (...a: Parameters<typeof EC.sendCampaign>) => api.sendCampaign(...a),
   listSends: (...a: Parameters<typeof EC.listSends>) => api.listSends(...a),
   getProviderStatus: (...a: Parameters<typeof EC.getProviderStatus>) => api.getProviderStatus(...a),
   listSegments: async () => [],
-  listTopics: async () => ({ topics: [], max: 20 }),
-  getEmailSettings: async () => ({ senderAddress: 'news@acme.test', configured: true }),
-  listOrgs: async () => [{ orgId: 'org:1', name: 'Acme' }],
+  listTopics: async () => ({ topics: [], max: 20 } satisfies Awaited<ReturnType<typeof EC.listTopics>>),
+  getEmailSettings: async () => ({ senderAddress: 'news@acme.test', configured: true } satisfies EC.EmailSettings),
+  listOrgs: async () => [{ orgId: 'org:1', name: 'Acme' }] satisfies EC.Org[],
 }));
 vi.mock('../suppressionsClient.js', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -72,7 +77,7 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
 }));
 
 const { EmailPage } = await import('../EmailPage.js');
-const { currentAnnouncements } = await import('../../../ui/announce.js');
+const { announce, currentAnnouncements } = await import('../../../ui/announce.js');
 
 const tpl: EmailTemplate = { templateId: 'tpl1', orgId: 'org:1', name: 'Welcome', subject: 's', body: 'b', createdAt: '', updatedAt: '' };
 const campaign = (status: Campaign['status']): Campaign => ({
@@ -94,7 +99,11 @@ const row = (email: string, reason: Suppression['reason']): Suppression => ({
 const renderPage = () => render(<MemoryRouter><EmailPage /></MemoryRouter>);
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  // reset, not clear: a case that stops early must not leave a queued
+  // `mockRejectedValueOnce` to answer the next case's read.
+  vi.resetAllMocks();
+  announce('');
+  announce('', { assertive: true });
   api.listTemplates.mockResolvedValue([tpl]);
   api.listCampaigns.mockResolvedValue([]);
   api.listSends.mockResolvedValue([]);
@@ -138,6 +147,7 @@ describe('ADR 0655 D10 — Suppressions panel (EM-UX-5 / EM-UX-23)', () => {
     // sender needs a door for every kind (the operator's attested `?force=true`).
     const releases = screen.getAllByRole('button', { name: /^release /i });
     expect(releases).toHaveLength(2);
+    expect(releases[0]!.getAttribute('aria-label')).toBe('Release a@x.test?');
     expect(screen.queryByText(/only the recipient can lift this/i)).toBeNull();
 
     fireEvent.click(releases[0]!);
@@ -150,7 +160,7 @@ describe('ADR 0655 D10 — Suppressions panel (EM-UX-5 / EM-UX-23)', () => {
     await waitFor(() => expect(supp.removeSuppression).toHaveBeenCalledWith('a@x.test', { force: false }));
     // The released row leaves the list; success is announced via toast.
     await waitFor(() => expect(screen.queryByText('a@x.test')).toBeNull());
-    expect(toasts.success).toHaveBeenCalled();
+    expect(toasts.success).toHaveBeenCalledWith('a@x.test released — it can receive marketing email again.');
 
     // The unsubscribed row: the confirm names that the recipient ASKED to stop and is
     // the operator's attestation; the call carries force.
@@ -248,8 +258,11 @@ describe('EM-UX-6 / EM-UX-7 — failed page-level reads state the failure, never
     await waitFor(() => expect(currentAnnouncements().assertive).toMatch(/could not load/i));
     const retries = screen.getAllByRole('button', { name: /retry/i });
     expect(retries.length).toBeGreaterThanOrEqual(2);
+    // The Retry INSIDE the page-level Notice (the one beside the server message),
+    // not the templates card's own Retry.
+    const noticeRetry = within(screen.getByText('tpl_500')).getByRole('button', { name: /retry/i });
     api.listTemplates.mockResolvedValue([]);
-    fireEvent.click(retries[0]!);
+    fireEvent.click(noticeRetry);
     expect(await screen.findByText(/No templates yet/i)).toBeTruthy();
     expect(screen.queryByText('Couldn’t load templates')).toBeNull();
   });

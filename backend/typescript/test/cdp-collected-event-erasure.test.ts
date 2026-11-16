@@ -61,8 +61,10 @@ describe('CONS-6 — the CDP ingest store is reachable by a DSAR', () => {
     await put('e-other', { sessionKey: 'sess-zzz', path: '/pricing' });
 
     await eraseCdpCollectedEvents(T, 'sess-abc');
-    await eraseCdpCollectedEvents(T, 'crm:jane');
-    await eraseCdpCollectedEvents(T, 'JANE@EXAMPLE.COM'); // case-folded
+    // Case-folded both ways: a non-email identity folds only through
+    // `foldCollectedIdentity`; an email also folds in `tombstoneKeyForms`.
+    await eraseCdpCollectedEvents(T, 'CRM:Jane');
+    await eraseCdpCollectedEvents(T, 'JANE@EXAMPLE.COM');
 
     expect(await ids()).toEqual(['e-other']);
     // The payload is gone, while the opaque primary fence prevents a delayed
@@ -74,17 +76,24 @@ describe('CONS-6 — the CDP ingest store is reachable by a DSAR', () => {
     await put('keep-other-subject', { sessionKey: 'sess-zzz' });
     await put('keep-substring', { sessionKey: 'sess-abc-extended' }); // superstring, not equal
     await put('keep-untagged-freetext', { note: 'sess-abc mentioned in a comment' }); // not an identity key, not tagged
+    // The EXACT value under a key that is neither an identity field nor tagged: only
+    // the key restriction keeps it (the free-text row is also kept by the exact match).
+    await put('keep-untagged-exact', { note: 'sess-abc' });
     await put('keep-other-tenant', { sessionKey: 'sess-abc' }, [], 'ws:someone-else');
 
     await eraseCdpCollectedEvents(T, 'sess-abc');
 
-    expect(await ids()).toEqual(['keep-other-subject', 'keep-other-tenant', 'keep-substring', 'keep-untagged-freetext'].sort());
+    expect(await ids()).toEqual(['keep-other-subject', 'keep-other-tenant', 'keep-substring', 'keep-untagged-exact', 'keep-untagged-freetext'].sort());
   });
 
   it('is idempotent and no-ops on a falsy tenant or subject (never a global purge)', async () => {
     await put('e1', { sessionKey: 'sess-abc' });
-    // A BLANK identity value folds to '' — exactly what a blank subject folds to. Without
-    // the empty-subject guard a whitespace subject would erase this stranger's row.
+    // A BLANK identity value folds to '' — exactly what a blank subject folds to. Two
+    // guards keep this stranger's row from a whitespace subject: the eraser's
+    // empty-subject return AND `collectedIdentityValues` skipping blank values. Both
+    // read `foldCollectedIdentity`, which is where the probe breaks them together.
+    // The falsy-TENANT return is likewise backed by the per-row tenant filter and
+    // `deleteCollectedEvent`'s tenant refusal (another file: a recorded double guard).
     await put('e-blank', { sessionKey: '   ' });
     await eraseCdpCollectedEvents('', 'sess-abc');
     await eraseCdpCollectedEvents(T, '');

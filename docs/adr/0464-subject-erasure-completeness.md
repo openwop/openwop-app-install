@@ -529,3 +529,54 @@ through `eraseSubject`: the erased person's fields on two requests, the other pe
 kept, text and values and version kept, another workspace untouched). Four sabotage
 probes, each red: the leg unwired, the PII declaration dropped (census red), every
 answer tombstoned regardless of author, the override reason kept.
+
+**CHAN-F19 #4 (2026-11-14): `settings:byok-usage` and `settings:user-prefs`, baseline
+108 → 107 (ceiling 107), and one RECORDED_DEBT line closed.**
+The ADR 0396 settings feature keeps two stores, and every row of each is keyed to one
+person: `settings:user-prefs` (`${tenantId}:${userId}`: personal budget cap, reasoning
+override, privacy opt-outs) and `settings:byok-usage` (`${tenantId}:${userId}:${day}`:
+that person's BYOK token counters). The prefs store sat in RECORDED_DEBT ("simply has
+no eraser yet"). The usage rows named the user only in the key, so the census saw no
+signal and the store sat in the baseline.
+- *The eraser* (`eraseSettingsSubject`, `settings/prefsStore.ts`, registered by the
+  settings feature): deletes the subject's prefs row for each key form, and every usage
+  row in the tenant whose user is a key form. Deleted, not scrubbed: neither store holds
+  a shared or tenant-level setting, a personal pref has no meaning without its person,
+  and the org lane (ADR 0178) keeps its own count. Tenant-scoped.
+- *The census signal:* usage rows now record `userId` (the USER_ID_FIELD signal). Rows
+  written before that are matched from the key, cut at its last `:` (a user id may hold
+  `:`; a day never does). The 90-day age-out removes the last of them.
+- *Manifest:* a new eraser id, so `eraseSettingsSubject` joins the WF-CONS-2 manifest
+  with its ledger edge.
+Tests: `test/chan-f19-settings-erasure.test.ts` (the real app's eraser set through
+`eraseSubject`: the subject's prefs and day counters deleted, a legacy key-only counter
+deleted, another person kept, the same person in another workspace kept). Four sabotage
+probes, each red: the eraser unwired, the legacy key parse dropped, the tenant filter
+dropped, the `userId` field removed from the row type (census red).
+
+**CHAN-F19 #5 (2026-11-15): `commerce:affiliate` and `commerce:payout`, baseline 107 → 105
+(ceiling 105). A DSAR for an affiliate is the operator redact route.**
+A commerce affiliate (ADR 0177 P5, ADR 0447 P2) is an external person: a name, a
+referral code and a commission. They are not a workspace principal, so no subject key
+can reach them through `eraseSubject`, and an eraser leg would be a path that never fires.
+User decision (2026-11-14): the workspace operator redacts them.
+- *The route:* `POST /host/openwop-app/commerce/orgs/:orgId/affiliates/:affiliateId/redact`
+  (`redactAffiliate`, `commerce/affiliate.ts`). The name becomes `[erased]`, in one CAS.
+  A repeat is a no-op, and the telemetry event carries the id, never the old name.
+  It needs `host:org:manage`, which only an org owner holds: the change cannot be undone,
+  so it is an org-management act and not a member's write. An id from another tenant or
+  org reads as absent (404, nothing leaked). Affiliate ids are global, so that is the
+  cross-tenant case.
+- *Kept, by decision:* the referral code, the rates, the commission ledger
+  (`commerce:affiliate-ledger` and its payout runs, keyed by `payeeSubject` = affiliate
+  id) and `commerce:payout` rows. They are money records, and none of them holds the name.
+- *Census:* `declarePiiFields('commerce:affiliate', ['name'])` is the D2 signal.
+  `commerce:payout` (affiliate id, amount, currency, status) is reviewed signal-free.
+  No new eraser id, so the WF-CONS-2 manifest is unchanged.
+Tests: `test/chan-f19-commerce-affiliate-redact.test.ts` (real HTTP, cookie sessions):
+name erased with code, rates and accrued balance kept, the payout export shows the
+placeholder, a repeat writes nothing; an editor gets 403 and the name is unchanged;
+another workspace's manager gets 404 on a real id and it is unchanged. Six sabotage
+probes, each red: the route unwired, the scope lowered to `workspace:write`, the
+tenant/org check dropped, the code wiped too, the idempotence guard dropped, the PII
+declaration dropped (census red).

@@ -34,7 +34,7 @@
  * Postgres-backed flow gets per-tenant isolation for free.
  */
 
-import { Pool, type PoolConfig } from 'pg';
+import { Pool, type PoolClient, type PoolConfig } from 'pg';
 import { jsonbStringify, nulSafe } from '../jsonbSafe.js';
 import { aggregateHostExtTenantActivity, HOSTEXT_ACTIVITY_ROW_CAP } from '../hostExtActivity.js';
 import { withRemovalStamp } from '../runRetentionStamp.js';
@@ -1918,6 +1918,8 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
         // capture index row retire with the run; they outlived it by up to 30 days.
         const tid = owner.rows[0]?.tenant_id;
         if (tid) for (const pattern of toolBoundaryKeyPatterns(tid, runId)) await client.query(`DELETE FROM host_ext_kv WHERE k LIKE $1`, [pattern]);
+        // ADR 1124 D1 — a deleted run appends no event, so retire its requests here.
+        if (tid) await stampDeletedRunRequests(client, tid, runId);
         const rr = await client.query(`DELETE FROM runs WHERE run_id = $1`, [runId]);
         await client.query('COMMIT');
         return (rr.rowCount ?? 0) > 0;
@@ -2188,6 +2190,7 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
             const br = await client.query(`DELETE FROM host_ext_kv WHERE k LIKE $1`, [pattern]);
             childRows += br.rowCount ?? 0;
           }
+          await stampDeletedRunRequests(client, tid, rid); // ADR 1124 D1
         }
         const rr = await client.query(`DELETE FROM runs WHERE run_id = ANY($1::text[])`, [runIds]);
         await client.query('COMMIT');
@@ -2971,6 +2974,22 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
         [tenantId, runId, interruptId ?? null, JSON.stringify({ resolution }), resolution.at],
       );
       return res.rowCount ?? 0;
+    },
+
+    async listUnstampedRequestRows({ after, limit }) {
+      // ADR 1124 D2 — one page of ADR 1114's unstamped request rows, keyset on the
+      // partial index's leading columns (tenant_id, run_id), then notification_id.
+      const res = await pool.query<{ notification_id: string; tenant_id: string; run_id: string; interrupt_id: string }>(
+        `SELECT notification_id, tenant_id, run_id, interrupt_id FROM notifications
+          WHERE interrupt_id IS NOT NULL AND run_id IS NOT NULL
+            AND status <> 'archived'
+            AND (metadata IS NULL OR metadata->'resolution' IS NULL)
+            AND (tenant_id, run_id, notification_id) > ($1, $2, $3)
+          ORDER BY tenant_id, run_id, notification_id
+          LIMIT $4`,
+        [after?.tenantId ?? '', after?.runId ?? '', after?.notificationId ?? '', limit],
+      );
+      return res.rows.map((r) => ({ notificationId: r.notification_id, tenantId: r.tenant_id, runId: r.run_id, interruptId: r.interrupt_id }));
     },
 
     async resolveRequestNotificationsOfKind(kind, resolution) {
@@ -3884,3 +3903,22 @@ function rowToDeliveryLogPg(r: Row): DeliveryLogRecord {
     at: r.at as string,
   };
 }
+
+/** ADR 1124 D1 — the ADR 1114 stamp, for a run that is being DELETED (mirrors
+ *  sqlite): every still-open request about it reads `run-deleted`, unread →
+ *  read. Runs inside the delete's own transaction, on the ADR 1114 partial
+ *  index `(tenant_id, run_id) WHERE interrupt_id IS NOT NULL`. */
+async function stampDeletedRunRequests(client: PoolClient, tenantId: string, runId: string, at: string = new Date().toISOString()): Promise<number> {
+  const res = await client.query(
+    `UPDATE notifications
+        SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb,
+            read_at = CASE WHEN status = 'unread' THEN COALESCE(read_at, $4::timestamptz) ELSE read_at END,
+            status = CASE WHEN status = 'unread' THEN 'read' ELSE status END
+      WHERE tenant_id = $1 AND run_id = $2 AND interrupt_id IS NOT NULL
+        AND status <> 'archived'
+        AND (metadata IS NULL OR metadata->'resolution' IS NULL)`,
+    [tenantId, runId, JSON.stringify({ resolution: { state: 'run-deleted', at } }), at],
+  );
+  return res.rowCount ?? 0;
+}
+

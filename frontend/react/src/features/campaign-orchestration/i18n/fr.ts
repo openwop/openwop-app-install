@@ -12,6 +12,7 @@ export const messages = {
   emptyTitle: 'Aucune campagne',
   emptyBody: 'Finalisez un brief confirmé en campagne, ou lancez-en une de bout en bout avec le Stratège de campagne.',
   runWithStrategist: 'Lancer avec le Stratège',
+  strategistRunDraft: 'Vérifiez avec campaign-orchestration.status si la campagne « {{name}} » ({{campaignId}}, brief {{briefId}}, organisation {{orgId}}) est prête, et dites-moi ce qui sera exécuté avant de lancer quoi que ce soit.',
   designFunnelWithArchitect: 'Concevoir un tunnel avec l’Architecte de tunnels',
   designJourney: 'Concevoir un parcours',
   finalizeBrief: 'Finaliser un brief',

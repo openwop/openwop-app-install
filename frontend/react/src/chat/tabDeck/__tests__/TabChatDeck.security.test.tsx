@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, act, cleanup } from '@testing-library/react';
+import { render, screen, act, cleanup } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -9,16 +9,18 @@ import type { ChatSessionHeader } from '../../../client/chatSessionsClient.js';
 import type { BYOKActiveConfig } from '../../../byok/lib/useBYOKConfig.js';
 
 /**
- * ADR 0140 (security) — per-user persistence isolation. The deck is keyed on the uid
- * in ChatTab, so an in-page identity switch on a shared browser remounts it fresh from
- * the new user's key; user A's tab ids must never be written under user B's key.
+ * ADR 0140 (security) + ADR 0978 D4 — per-user persistence isolation. An in-page
+ * identity switch on a shared browser must remount the deck fresh from the new user's
+ * key; user A's tab ids must never be written under user B's key
+ * (`openwop-app.chat.tabdeck:<uid>@<workspace>`).
  *
- * The REMOUNT is ChatTab's `key={user?.uid ?? 'anon'}` — the deck has no defence of
- * its own if its subject changes without a remount (useTabDeck's persist effect
- * would save the old state under the new key). The behavioural case below supplies
- * that key itself (as ChatTab does), so it cannot see the key being removed from
- * ChatTab; the literal case pins it there (w44 probe sec-chattab-key). Breaks if the
- * storage key drops the subject, ChatTab stops keying the deck on the uid, or a
+ * DOUBLE GUARD, each half witnessed by its own case: ChatTab keys the deck on the uid
+ * (`key={user?.uid ?? 'anon'}`, pinned literally by case 2), AND since ADR 0978 D4
+ * TabChatDeck keys its inner deck on the persist subject (`key={subject ?? 'anon'}`).
+ * Without either remount, useTabDeck's persist effect would save the old state under
+ * the new key. The behavioural case renders the deck WITHOUT an outer key, so it
+ * witnesses the deck's own inner key (w114 probe w114g3-sec-innerkey). Breaks if the
+ * storage key drops the subject, either key stops following the identity, or a
  * logged-out deck persists.
  */
 
@@ -66,9 +68,10 @@ function sessionsStub(over: Partial<UseChatSessionsResult> = {}): UseChatSession
   };
 }
 const CONFIG: BYOKActiveConfig = { provider: 'demo', model: 'demo-model', credentialRef: 'managed:demo' };
-// Mirror ChatTab: the deck is keyed on the uid.
+// NO outer key here (ChatTab's key is pinned by case 2): the switch must be survived by
+// the deck's own inner `key={subject}` remount, which is what case 1 witnesses.
 const Surface = () => (
-  <MemoryRouter><TabChatDeck key={mockUid ?? 'anon'} config={CONFIG} byokStored onReconfigureBYOK={vi.fn()} /></MemoryRouter>
+  <MemoryRouter><TabChatDeck config={CONFIG} byokStored onReconfigureBYOK={vi.fn()} /></MemoryRouter>
 );
 
 beforeEach(() => { localStorage.clear(); mockUid = 'A'; vi.useFakeTimers(); });
@@ -87,10 +90,10 @@ describe('TabChatDeck — per-user persistence isolation', () => {
     // A's deck bootstraps a tab; flush the debounced save.
     await settle();
     const aTabs = loadTabDeck('A@ws-test')?.tabs.map((t) => t.sessionId) ?? [];
-    expect(aTabs.length).toBeGreaterThan(0); // A persisted its working set
+    expect(aTabs).toHaveLength(1); // A persisted its working set (the one bootstrapped tab)
 
-    // Switch identity in-page (no reload): mock uid → B and re-render. The key change
-    // remounts the deck fresh from B's (empty) key.
+    // Switch identity in-page (no reload): mock uid → B and re-render. The subject
+    // change remounts the inner deck fresh from B's (empty) key.
     mockUid = 'B';
     rerender(<Surface />);
     await settle();
@@ -101,6 +104,7 @@ describe('TabChatDeck — per-user persistence isolation', () => {
     const bRaw = localStorage.getItem('openwop-app.chat.tabdeck:B@ws-test');
     expect(bRaw).not.toBeNull(); // B persisted its own fresh deck (so the checks below read something)
     const bTabs = loadTabDeck('B@ws-test')?.tabs.map((t) => t.sessionId) ?? [];
+    expect(bTabs).toHaveLength(1); // B bootstrapped its own one fresh tab
     // B's key must contain ONLY B's own (fresh) tabs — never any of A's ids.
     for (const aId of aTabs) {
       expect(bRaw ?? '').not.toContain(aId);
@@ -119,11 +123,16 @@ describe('TabChatDeck — per-user persistence isolation', () => {
   // DOUBLE GUARD: useTabDeck skips both save effects without a subject AND
   // saveTabDeck no-ops on a null subject; removing either alone stays green (w44
   // probe sec-loggedout-hook). saveTabDeck's copy is witnessed in
-  // tabDeckPersistence.test.ts ("save is a no-op when logged out").
+  // tabDeckPersistence.test.ts ("save is a no-op when logged out"). Both read the
+  // subject TabChatDeck resolves (`uid ? … : null`), so a break there breaks both
+  // (w114 probe w114g3-sec-loggedout).
   it('a logged-out (no uid) deck persists nothing', async () => {
     mockUid = null;
     render(<Surface />);
     await settle();
+    // Positive control: the deck rendered and bootstrapped its tab, so the empty
+    // storage below is the guard, not a deck that never got past loading.
+    expect(screen.getAllByTestId('tabsession')).toHaveLength(1);
     expect(localStorage.length).toBe(0); // saveTabDeck no-ops without a subject
   });
 });

@@ -141,7 +141,8 @@ interface NotificationStoreActions {
   delete: (id: string) => Promise<void>;
   markAllRead: () => Promise<void>;
   /** R3 IB-R2-2 — archive every READ row (one request); state re-syncs via refresh. */
-  archiveRead: () => Promise<void>;
+  /** ADR 1125 D3 — archive every read row except `keep` (the open requests). */
+  archiveRead: (keep?: readonly string[]) => Promise<void>;
   /** R3 IB-R2-2 — mark the given rows read (one request); optimistic like markAllRead. */
   markRead: (ids: readonly string[]) => Promise<void>;
 
@@ -544,16 +545,18 @@ export const useNotificationStore = create<NotificationStore>((set, get) => ({
     }
   },
 
-  async archiveRead() {
+  async archiveRead(keep = []) {
+    const kept = new Set(keep);
+    const sweeps = (n: Notification): boolean => n.status === 'read' && !kept.has(n.notificationId);
     const prev = get().notifications;
     const now = new Date().toISOString();
-    const next: Notification[] = prev.map((n) => n.status === 'read'
+    const next: Notification[] = prev.map((n) => sweeps(n)
       ? { ...n, status: 'archived' as const, archivedAt: n.archivedAt ?? now }
       : n);
     set({ notifications: next, unreadCount: recountUnread(next, get().preferences) });
-    try { await archiveReadRemote(); } catch (err) {
+    try { await archiveReadRemote(keep); } catch (err) {
       // Restore only the rows WE flipped (the IB-SP-11 surgical-rollback shape).
-      const flipped = new Map(prev.filter((n) => n.status === 'read').map((n) => [n.notificationId, n]));
+      const flipped = new Map(prev.filter(sweeps).map((n) => [n.notificationId, n]));
       set((st) => {
         const rolled = st.notifications.map((n) => flipped.get(n.notificationId) ?? n);
         return { notifications: rolled, unreadCount: recountUnread(rolled, st.preferences),

@@ -4,11 +4,19 @@
  * intersection composition, unlabelled = top element, `[]` = contagious/no-onward-use,
  * and the widen prohibition.
  *
- * Sabotage-witnessed (/grade-tests w38): `normalizeLabel`'s `out.sort()` → `out`, `isNoOnwardUse`
- * dropping the length check, `isNonWidening`'s `onw.every(...)` → `true`, `reEmitLabel`'s narrowTo
- * intersection → `normalizeLabel(narrowTo)` each turn a case below red. (The `selectEligible`
- * drop is witnessed in `adr1024-destination-sync-egress.test.ts` since ADR 1024 made it
- * unconditional.)
+ * Sabotage-witnessed (/grade-tests w38, re-probed at d5b98aafaa as w115 `w115g2-cdp-*`):
+ * `normalizeLabel`'s sort, dedupe and non-array guard, `isNoOnwardUse` dropping the length check,
+ * `intersectLabels`' filter (→ a union), its unlabelled skip and its all-unlabelled return,
+ * `isNonWidening`'s `onw.every(...)` → `true` and its unlabelled-inbound branch, and each
+ * `reEmitLabel` branch each turn a case below red. (The `selectEligible` drop is witnessed in
+ * `adr1024-destination-sync-egress.test.ts` since ADR 1024 made it unconditional.)
+ *
+ * Production reaches this algebra through `reEmitLabel` / `intersectLabels` / `isNoOnwardUse`
+ * (`routes/purposePropagationSeam.ts`, `destination-sync/destinationSyncService.ts`).
+ * `isNonWidening` has no production caller; it is the invariant checker for the reEmit property
+ * loop below. Its "labelled → unlabelled is a narrowing" leg is the product's documented reading,
+ * which RFC 0128 §3's "a host that simply drops the label … also fails" does not share — recorded
+ * as grade-code row TST-NZZ-2, not changed here.
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -53,13 +61,13 @@ describe('CDP-1d purpose-label algebra (RFC 0128)', () => {
     expect(intersectLabels([['analytics', 'marketing'], []])).toEqual([]);
   });
 
-  it('isNonWidening: the conformance-tested MUST NOT (widening is the violation)', () => {
+  it('isNonWidening: the never-widen predicate (widening is the violation)', () => {
     // unlabelled inbound = no constraint ⇒ anything allowed
     expect(isNonWidening(undefined, ['analytics', 'advertising'])).toBe(true);
     // narrowing / equal ⇒ ok
     expect(isNonWidening(['analytics', 'marketing'], ['analytics'])).toBe(true);
     expect(isNonWidening(['analytics'], ['analytics'])).toBe(true);
-    // dropping the label is a narrowing ⇒ ok
+    // dropping the label is a narrowing ⇒ ok (the product's reading; header, TST-NZZ-2)
     expect(isNonWidening(['analytics'], undefined)).toBe(true);
     // WIDENING ⇒ violation
     expect(isNonWidening(['analytics'], ['analytics', 'advertising'])).toBe(false);

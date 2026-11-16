@@ -6,7 +6,10 @@
  * Red if (grade-tests w7 probes): a negative `arr` or an unparseable `renewalDate` is
  * accepted (depth-arr-neg, depth-date); create drops `owner`/`renewalDate`
  * (depth-owner-create, depth-renewal-create); an explicit `null` on update stops
- * clearing (depth-owner-null). Internal-column stripping is csm-feature.test.ts's claim.
+ * clearing (depth-owner-null). Internal-column stripping is csm-feature.test.ts's claim;
+ * the two OWNER fields are this file's: they are stored, and the surface read (the run
+ * lane, recorded in the run-event log) never carries `owner` or `ownerUserId`
+ * (ADR 0882 D3, CSM2CD-5).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -47,12 +50,18 @@ describe('CRM-3 — CSM account depth', () => {
   });
 
   it('flows through the surface projection to reads', async () => {
-    await createAccount({ tenantId: T, name: 'Acme', arr: 90000, renewalDate: '2027-06-01', owner: 'user:cs' });
+    const a = await createAccount({ tenantId: T, name: 'Acme', arr: 90000, renewalDate: '2027-06-01', owner: 'Dana Cs-Lead', ownerUserId: 'user:cs-owner' });
+    // Control: both owner fields ARE stored, so their absence below is the
+    // projection's doing, not a write that dropped them.
+    expect(await getAccountForTenant(T, a.accountId)).toMatchObject({ owner: 'Dana Cs-Lead', ownerUserId: 'user:cs-owner' });
     const surface = buildCsmSurface({ tenantId: T });
     const out = await surface.listAccounts!({}) as { accounts: Array<Record<string, unknown>> };
-    expect(out.accounts[0]).toMatchObject({ arr: 90000, renewalDate: '2027-06-01' });
-    // ADR 0882 (CSM2CD-5) — the owner is a person: read outputs are recorded in
-    // the run-event log and reach model context, so the run lane never carries it.
+    expect(out.accounts).toHaveLength(1);
+    expect(out.accounts[0]).toMatchObject({ accountId: a.accountId, arr: 90000, renewalDate: '2027-06-01' });
+    // ADR 0882 D3 (CSM2CD-5) — the owner is a person, as a typed name (`owner`)
+    // or a member id (`ownerUserId`): read outputs are recorded in the run-event
+    // log and reach model context, so the run lane carries neither.
     expect(out.accounts[0]).not.toHaveProperty('owner');
+    expect(out.accounts[0]).not.toHaveProperty('ownerUserId');
   });
 });

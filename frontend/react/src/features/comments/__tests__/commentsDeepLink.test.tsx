@@ -14,7 +14,8 @@
  * carrying an id on the FAILURE branch. That is why `HV-3` in
  * `docs/steward/UX_UPGRADE-comments.md` sat checked over a broken round trip.
  *
- * So this file: (a) drives ALL SIX types through a real notification `actionUrl`
+ * So this file: (a) drives EVERY type in `ALL_RESOURCE_TYPES` (eight at
+ * `ea379aab2`) through a real notification `actionUrl`
  * and asserts the panel fetched THAT (type, id) and rendered THAT thread's body;
  * (b) asserts a deep-linked id is never silently substituted by the org's first
  * resource; (c) asserts an unknown type is NAMED rather than coerced; (d) asserts
@@ -27,6 +28,12 @@
  * `setResourceId` reds both CMNT-UX-4 cases; a no-op exit button reds the exit case.
  * The "picker still wins" CONTROL ends in an absence `waitFor`, which no single
  * realistic sabotage reds — it is kept as a control, not counted as a witness.
+ *
+ * (e) ADR 0886 SL2UX-4 — a slide thread's "Open the slide" lands on the exact
+ * `/slides/<deck>?org=…&frame=<slide>` address. Re-probed at /grade-tests w110, which
+ * also mocked the member directory (`loadOrgMembers` used to issue a LIVE fetch from
+ * jsdom here) and made the FAILURE MODE case judge the substitution only after the
+ * resource list had answered.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor, fireEvent } from '@testing-library/react';
@@ -58,6 +65,10 @@ vi.mock('../../../client/useEffectiveAccess.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
   return { ...orig, useOrgEffectiveAccess: () => orgAccess.value };
 });
+
+// The panel's author-name directory. Unmocked, it issued a REAL fetch from jsdom
+// (the ADR 0661 live-fetch class) and the panel silently took its failure branch.
+vi.mock('../../../orgs/orgMembers.js', () => ({ loadOrgMembers: vi.fn(async () => []), invalidateOrgMembers: vi.fn() }));
 
 const cms = vi.hoisted(() => ({ listPages: vi.fn() }));
 vi.mock('../../cms/cmsClient.js', async (importOriginal) => {
@@ -151,14 +162,22 @@ describe('CMNT-1 — a notification actionUrl opens the thread it names, for eve
 describe('CMNT-1 — a deep-linked id is never replaced by the org’s first resource', () => {
   it('FAILURE MODE (regression): a linked page id absent from the org list survives and is NAMED', async () => {
     view(actionUrl(ORG.orgId, 'cms_page', 'page_deleted'));
-    await waitFor(() => expect(api.listThread).toHaveBeenCalledWith(ORG.orgId, 'cms_page', 'page_deleted'));
-    // Never the substitution the old `opts[0]?.id ?? ''` fallback performed.
-    expect(api.listThread).not.toHaveBeenCalledWith(ORG.orgId, 'cms_page', 'page_first');
     // CMNT-UX-19 / ADR 0659 D2 — the hedge is now the UNIFORM sentence shared with
     // the panel's gone-state. It no longer promises "showing its thread anyway"
     // (there may be no thread to show) and no longer guesses WHICH of "deleted" /
     // "not yours to see" it was, because the read answers one status for both.
-    expect((await screen.findAllByText(/isn’t available to you/i)).length).toBeGreaterThan(0);
+    // The thread read here answers 200 [], so the ONE hedge is the page's own
+    // list-derived Notice — which renders only after the resource list answered.
+    const hedges = await screen.findAllByText(/isn’t available to you/i);
+    expect(hedges).toHaveLength(1);
+    expect(hedges[0]!.closest('.alert')?.classList.contains('warning')).toBe(true);
+    // Judged only now, after the list answered (the substitution, if any, happens
+    // in that answer's handler — checked earlier, it passed on the first render):
+    // the picker still holds the linked id, and the panel read it, never the org's
+    // first page (the old `opts[0]?.id ?? ''` fallback).
+    expect((screen.getByLabelText('Resource') as HTMLSelectElement).value).toBe('page_deleted');
+    expect(api.listThread).toHaveBeenCalledWith(ORG.orgId, 'cms_page', 'page_deleted');
+    expect(api.listThread).not.toHaveBeenCalledWith(ORG.orgId, 'cms_page', 'page_first');
   });
 
   it('CONTROL: with NO deep link, the picker still auto-selects the first resource', async () => {
@@ -183,20 +202,6 @@ describe('CMNT-1 — an unknown resourceType is named, not substituted', () => {
 });
 
 describe('CMNT-UX-4 — a SECOND notification while already on /comments re-seeds the page', () => {
-  it('a slide thread links back to its slide (ADR 0886 SL2UX-4)', async () => {
-    render(
-      <MemoryRouter initialEntries={[actionUrl(ORG.orgId, 'canvas_slides', 'cnv_9#slide-3')]}>
-        <Routes>
-          <Route path="/comments" element={<CommentsPage />} />
-          <Route path="/slides/:canvasId" element={<LocationProbe />} />
-        </Routes>
-      </MemoryRouter>,
-    );
-    fireEvent.click(await screen.findByRole('button', { name: 'Open the slide' }));
-    const at = await screen.findByTestId('location');
-    expect(at.textContent).toBe(`/slides/cnv_9?org=${ORG.orgId}&frame=slide-3`);
-  });
-
   it('following a second in-app link switches the thread', async () => {
     api.listThread.mockImplementation(async (_org: string, type: string, resourceId: string) =>
       [comment('cmt:x', `thread(${type},${resourceId})`)]);
@@ -221,6 +226,22 @@ describe('CMNT-UX-4 — a SECOND notification while already on /comments re-seed
     // Before the fix the seed was memoized on `[]`, so this stayed on thread 1.
     expect(await screen.findByText('thread(chat_message,sess_2#msg_2)')).toBeTruthy();
     expect(screen.queryByText('thread(chat_message,sess_1#msg_1)')).toBeNull();
+  });
+});
+
+describe('ADR 0886 SL2UX-4 — a slide thread links back to its slide', () => {
+  it('a slide thread links back to its slide (ADR 0886 SL2UX-4)', async () => {
+    render(
+      <MemoryRouter initialEntries={[actionUrl(ORG.orgId, 'canvas_slides', 'cnv_9#slide-3')]}>
+        <Routes>
+          <Route path="/comments" element={<CommentsPage />} />
+          <Route path="/slides/:canvasId" element={<LocationProbe />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Open the slide' }));
+    const at = await screen.findByTestId('location');
+    expect(at.textContent).toBe(`/slides/cnv_9?org=${ORG.orgId}&frame=slide-3`);
   });
 });
 

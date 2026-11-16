@@ -362,9 +362,11 @@ export async function indexedCount(tenantId: string, typeName: string, org: stri
  *  last key read, base64url. A cursor outside the slice is ignored (start over). */
 export async function listIndexPage(
   tenantId: string, typeName: string, family: string, org: string | undefined,
-  opts: { segments?: string[]; openLast?: boolean; cursor?: string; limit: number },
+  opts: { segments?: string[]; openLast?: boolean; cursor?: string; limit: number; allOrgs?: boolean },
 ): Promise<{ rows: { id: string; p: Record<string, unknown>; cursor: string }[]; cursor?: string }> {
-  const prefix = familyPrefix(tenantId, typeName, family, org, opts.segments ?? [], opts.openLast ?? false);
+  // `allOrgs` (ADR 1122 P1b): every org of the tenant, for a paged background walk. An
+  // undefined `org` alone means the no-org segment, not every org.
+  const prefix = opts.allOrgs ? `${[tenantId, enc(typeName), family].join(':')}:` : familyPrefix(tenantId, typeName, family, org, opts.segments ?? [], opts.openLast ?? false);
   let afterId: string | undefined;
   if (opts.cursor) {
     const decoded = Buffer.from(opts.cursor, 'base64url').toString('utf8');

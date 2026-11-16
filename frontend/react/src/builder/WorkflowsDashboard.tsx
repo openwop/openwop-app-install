@@ -266,12 +266,12 @@ export function WorkflowsDashboard() {
     setPreflightChain(chain);
   }
 
-  async function onPreflightConfirm(params: Record<string, unknown>) {
+  async function onPreflightConfirm(params: Record<string, unknown>, clientOrgId?: string) {
     if (!preflightChain) return;
     setPreflightBusy(true);
     setPreflightError(null);
     try {
-      const out = await instantiateChain(preflightChain.chainId, params);
+      const out = await instantiateChain(preflightChain.chainId, params, clientOrgId);
       // §Correction (grade-ux TPI-3) + XCH-UP-3 — a copy with blank required
       // config or blank template inputs says so (fromChainNotices).
       for (const note of fromChainNotices(out, t)) toast.warning(note);
@@ -732,7 +732,7 @@ export function WorkflowsDashboard() {
           chain={preflightChain}
           busy={preflightBusy}
           error={preflightError}
-          onConfirm={(params) => { void onPreflightConfirm(params); }}
+          onConfirm={(params, clientOrgId) => { void onPreflightConfirm(params, clientOrgId); }}
           onClose={() => setPreflightChain(null)}
         />
       )}

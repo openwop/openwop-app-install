@@ -11,7 +11,8 @@
  * relevant communities, URLs, and search queries — replaces the manual URL
  * input step of the marketIntel research pipeline.
  *
- * One AI call. Pure-JS, Node-20 stdlib only.
+ * One AI call, plus up to `searchLimit` (default 2) live searches through
+ * ctx.webResearch when the host has one (ADR 1135). Pure-JS, Node-20 stdlib only.
  */
 
 function makeLog(ctx) {
@@ -58,7 +59,8 @@ Guidelines:
 - Prioritize active communities with recent discussions
 - Include a mix of high-traffic and niche communities
 - Suggest specific search queries that would surface VoC-rich content
-- For Reddit: suggest specific subreddits (e.g., r/SaaS, r/startups)
+- For Reddit: suggest specific subreddits (e.g., r/SaaS, r/startups) as communities
+- In "urls", put PUBLIC pages a server can read without logging in FIRST: forum threads, Hacker News items, StackExchange questions, review sites, blogs. Reddit, X/Twitter, Quora, Facebook, LinkedIn, Instagram and TikTok block automated reads, so list them last or leave them to "communities"
 - For HackerNews: suggest search terms that work with HN search
 - For StackExchange: suggest relevant sites and tags
 - relevanceScore: 0.9+ = highly relevant, 0.7-0.9 = relevant, 0.5-0.7 = tangential`;
@@ -155,6 +157,99 @@ function validateOutput(raw) {
   return { urls, communities, searchQueries, warnings };
 }
 
+/* ─── ADR 1135 (CC-CHAIN-8): a fetch list a server can actually read ────────
+ *
+ * The digest chains fetch the first N discovered URLs. A model that returns only
+ * reddit.com links (the prompt used to steer it there) fills every slot with a
+ * host that answers server fetches with 403, so voc saw "5 fetched, 0 readable".
+ * `fetchSources` is ordered for fetching: live-search URLs first (real pages,
+ * not guesses), then the model's URLs, interleaved by host, with hosts that block
+ * automated reads last and NAMED in a warning. `sources` is unchanged. */
+
+/** Hosts that refuse server-side reads (login wall or anti-bot). Demoted, never dropped. */
+export const WALLED_HOSTS = Object.freeze([
+  'reddit.com', 'x.com', 'twitter.com', 'quora.com', 'facebook.com',
+  'linkedin.com', 'instagram.com', 'tiktok.com',
+]);
+
+/** Search engines whose results are query URLs, not pages. */
+const NON_PAGE_ENGINES = new Set(['demo', 'stub']);
+
+const SEARCH_LIMIT_DEFAULT = 2;
+const SEARCH_LIMIT_MAX = 3;
+const SEARCH_RESULTS_PER_QUERY = 5;
+const PER_HOST_PER_ROUND = 1;
+
+function hostOf(url) {
+  try { return new URL(url).hostname.toLowerCase().replace(/^www\./, ''); } catch { return null; }
+}
+
+export function walledHostOf(url) {
+  const h = hostOf(url);
+  if (!h) return null;
+  return WALLED_HOSTS.find((w) => h === w || h.endsWith(`.${w}`)) ?? null;
+}
+
+/** A chain param may arrive as a string (ADR 0507); anything unusable → default. */
+function searchLimitOf(raw) {
+  if (raw === undefined || raw === null || raw === '') return SEARCH_LIMIT_DEFAULT;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return SEARCH_LIMIT_DEFAULT;
+  return Math.min(SEARCH_LIMIT_MAX, Math.floor(n));
+}
+
+/**
+ * Order candidate URLs for fetching. Keeps input order within a host and takes
+ * one URL per host per round (round-robin), so one site cannot fill the first N
+ * slots; walled hosts follow every open one.
+ */
+export function orderForFetch(candidates) {
+  const seen = new Set();
+  const open = new Map();
+  const walled = [];
+  for (const u of candidates) {
+    if (typeof u !== 'string' || !/^https?:\/\//.test(u) || seen.has(u)) continue;
+    const h = hostOf(u);
+    if (!h) continue;
+    seen.add(u);
+    if (walledHostOf(u)) { walled.push(u); continue; }
+    if (!open.has(h)) open.set(h, []);
+    open.get(h).push(u);
+  }
+  const ordered = [];
+  const queues = [...open.values()];
+  while (queues.some((q) => q.length > 0)) {
+    for (const q of queues) ordered.push(...q.splice(0, PER_HOST_PER_ROUND));
+  }
+  return { ordered: [...ordered, ...walled], openCount: ordered.length, walled };
+}
+
+async function searchForPages(ctx, queries, limit, warnings, log) {
+  const urls = [];
+  const wr = ctx.webResearch;
+  if (limit === 0) return urls;
+  if (!wr || typeof wr.search !== 'function') {
+    if (queries.length > 0) warnings.push('Live search unavailable on this host (no webResearch); fetch order uses the model\'s URLs only');
+    return urls;
+  }
+  for (const query of queries.slice(0, limit)) {
+    try {
+      const r = await wr.search({ query, maxResults: SEARCH_RESULTS_PER_QUERY, suitability: 'answer-only' });
+      if (NON_PAGE_ENGINES.has(String(r?.engine ?? ''))) {
+        warnings.push(`Search for "${query.slice(0, 60)}" returned ${r.engine} results (no live provider); ignored`);
+        continue;
+      }
+      for (const item of Array.isArray(r?.results) ? r.results : []) {
+        if (typeof item?.url === 'string') urls.push(item.url);
+      }
+    } catch (err) {
+      log.warn('discovery search failed', { error: String(err?.message ?? err) });
+      warnings.push(`Search for "${query.slice(0, 60)}" failed: ${String(err?.message ?? err).slice(0, 120)}`);
+    }
+  }
+  return urls;
+}
+
 export async function aiDiscovery(ctx) {
   ensureCallAI(ctx);
   const log = makeLog(ctx);
@@ -226,20 +321,51 @@ export async function aiDiscovery(ctx) {
 
   const validated = validateOutput(parsed);
 
+  const warnings = validated.warnings;
+  const searchLimit = searchLimitOf(inputs.searchLimit ?? config.searchLimit);
+  const searched = await searchForPages(ctx, validated.searchQueries, searchLimit, warnings, log);
+  const { ordered: fetchSources, openCount, walled } = orderForFetch([...searched, ...validated.urls]);
+  if (walled.length > 0) {
+    const hosts = [...new Set(walled.map(walledHostOf))];
+    warnings.push(`Moved ${walled.length} URL(s) on hosts that block automated reads to the end of fetchSources: ${hosts.join(', ')}`);
+  }
+
+  // Opt-in (the digest chains set it): with nothing a server can read, fail here,
+  // typed and named, before the fetch and voc steps spend on pages that will 403.
+  const requireFetchable = (inputs.requireFetchable ?? config.requireFetchable) === true
+    || (inputs.requireFetchable ?? config.requireFetchable) === 'true';
+  if (requireFetchable && openCount === 0) {
+    const hosts = [...new Set(walled.map(walledHostOf))];
+    return {
+      status: 'error',
+      error: {
+        code: 'NO_FETCHABLE_SOURCES',
+        message: hosts.length > 0
+          ? `Discovery found no page a server can read: every URL is on a host that blocks automated reads (${hosts.join(', ')}), and live search added none.`
+          : 'Discovery found no fetchable http(s) URL, and live search added none.',
+        retryable: true,
+      },
+    };
+  }
+
   log.info('AI source discovery completed', {
     urlCount: validated.urls.length,
+    searchUrlCount: searched.length,
+    fetchSourceCount: fetchSources.length,
+    walledCount: walled.length,
     communityCount: validated.communities.length,
     queryCount: validated.searchQueries.length,
-    warnings: validated.warnings.length,
+    warnings: warnings.length,
   });
 
   return {
     status: 'success',
     outputs: {
       sources: validated.urls,
+      fetchSources,
       communities: validated.communities,
       searchQueries: validated.searchQueries,
-      warnings: validated.warnings,
+      warnings,
       model: aiResult?.model,
       usage: aiResult?.usage,
       success: true,

@@ -2,7 +2,9 @@
  * ADR 0454 — the one shared RFC 5545 iCalendar builder (`host/ics.ts`). Pins:
  *  - §3.3.11 text escaping incl. the Unicode line/para separators (injection guard);
  *  - §3.1 75-octet line folding (continuation = CRLF + space);
- *  - byte-exact output for both caller shapes (crm timed invite + kicktodo all-day feed).
+ *  - byte-exact output for both event shapes: the crm timed invite (every field the
+ *    booking adapter can pass) and the all-day feed (its in-tree caller left with
+ *    KickTodo, ADR 1031 P3; the shape stays part of the shared builder).
  *
  * BLOCKED-ON-PRODUCT: ICS-FOLD-OCTETS. RFC 5545 §3.1 folds at 75 OCTETS; `foldIcsLine`
  * counts JS string units, so multi-byte text yields longer lines and can split a
@@ -12,6 +14,7 @@
  * Tracker TST-DFD-2. Red when (w71g1, witnessed): backslash or the Unicode separators
  * stop being escaped; the fold threshold moves off 75 (a 76-char line must fold, a 75-char line must not) or the 74-wide continuation changes; a
  * `sequence: 0` is dropped; the trailing CRLF is dropped; the UTC stamp keeps millis.
+ * Wave 116 adds: the timed VEVENT's field order or the ORGANIZER/ATTENDEE lines change.
  */
 import { describe, expect, it } from 'vitest';
 import { buildIcsCalendar, escapeIcsText, foldIcsLine, icsUtc } from '../src/host/ics.js';
@@ -84,13 +87,35 @@ describe('buildIcsCalendar — timed invite shape (crm booking)', () => {
           end: { kind: 'utc', ms: Date.UTC(2026, 6, 20, 14, 0, 0) },
           summary: 'Intro; call, with comma',
           status: 'CONFIRMED',
+          description: 'Agenda: scope, budget',
           location: 'Remote',
+          organizerEmail: 'host@example.invalid',
+          attendeeEmail: 'guest@example.invalid',
         },
       ],
     });
-    expect(ics).toContain('CALSCALE:GREGORIAN\r\nMETHOD:REQUEST\r\n');
-    expect(ics).toContain('SEQUENCE:0\r\nDTSTAMP:19700101T000000Z\r\nDTSTART:20260720T130000Z\r\nDTEND:20260720T140000Z\r\n');
-    expect(ics).toContain('SUMMARY:Intro\\; call\\, with comma\r\nSTATUS:CONFIRMED\r\nLOCATION:Remote\r\n');
-    expect(ics.endsWith('END:VEVENT\r\nEND:VCALENDAR\r\n')).toBe(true);
+    // Byte-exact: every field the CRM booking adapter (features/crm/ics.ts) can
+    // pass is populated, so the canonical order and each prefix are pinned.
+    expect(ics).toBe(
+      'BEGIN:VCALENDAR\r\n' +
+        'VERSION:2.0\r\n' +
+        'PRODID:-//OpenWOP//CRM Booking//EN\r\n' +
+        'CALSCALE:GREGORIAN\r\n' +
+        'METHOD:REQUEST\r\n' +
+        'BEGIN:VEVENT\r\n' +
+        'UID:b1@openwop\r\n' +
+        'SEQUENCE:0\r\n' +
+        'DTSTAMP:19700101T000000Z\r\n' +
+        'DTSTART:20260720T130000Z\r\n' +
+        'DTEND:20260720T140000Z\r\n' +
+        'SUMMARY:Intro\\; call\\, with comma\r\n' +
+        'STATUS:CONFIRMED\r\n' +
+        'DESCRIPTION:Agenda: scope\\, budget\r\n' +
+        'LOCATION:Remote\r\n' +
+        'ORGANIZER:mailto:host@example.invalid\r\n' +
+        'ATTENDEE;RSVP=FALSE:mailto:guest@example.invalid\r\n' +
+        'END:VEVENT\r\n' +
+        'END:VCALENDAR\r\n',
+    );
   });
 });

@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { readdirSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
 
 import { MAJOR2_UNDECLARED_FAMILIES } from '../conformance/major2Ledger.js';
 import { buildV2Advertisement } from '../src/routes/discovery.js';
@@ -74,5 +77,78 @@ describe('RFC 0148 §B — the major-2 opt-out ledger and the served v2 root can
     const advertised = advertisedV2Paths();
     const sabotaged = [...MAJOR2_UNDECLARED_FAMILIES, 'family.interrupt'];
     expect(sabotaged.filter((e) => advertised.has(e))).toEqual(['family.interrupt']);
+  });
+});
+
+/**
+ * Every v2 family the INSTALLED suite gates on is either advertised or on the ledger.
+ *
+ * Suite 2.49.0 added `gateFamily('budget')` and `gateFamily('production')`. The host
+ * serves neither, and neither had a ledger row. The gate's m2 lane runs without
+ * `OPENWOP_REQUIRE_BEHAVIOR`, so both read `inapplicable` and the gate stayed green.
+ * The strict prod cut (bff8b2dfd) recorded seven `executed-fail` rows on behaviorGate
+ * alone. This reads the gates from the pinned suite's own scenario sources, so a pin
+ * bump that brings a new gated family fails here, before any cut.
+ *
+ * Red when (sabotage witness): drop `'family.budget'` from the ledger, or pin a suite
+ * that gates on a family the host neither advertises nor opts out of.
+ */
+describe('every family the pinned suite gates on is advertised or opted out (suite pin bumps)', () => {
+  const CONFIG: AppConfig = { port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.0', enableConsoleTracer: false };
+  const SCENARIOS = join(dirname(createRequire(import.meta.url).resolve('@openwop/openwop-conformance/package.json')), 'src', 'scenarios');
+
+  function gatedFamilies(): Set<string> {
+    const keys = new Set<string>();
+    for (const f of readdirSync(SCENARIOS)) {
+      if (!f.endsWith('.ts')) continue;
+      for (const m of readFileSync(join(SCENARIOS, f), 'utf8').matchAll(/\bgateFamily\(\s*['"]([A-Za-z][A-Za-z0-9]*)['"]\s*\)/g)) keys.add(m[1]!);
+    }
+    return keys;
+  }
+
+  it('reads a real gate list from the installed suite', () => {
+    const gated = gatedFamilies();
+    // `interrupt` and `replay` are gated by many scenarios and advertised today; an
+    // empty read would make the check below pass while measuring nothing.
+    expect(gated.has('interrupt')).toBe(true);
+    expect(gated.size).toBeGreaterThan(5);
+  });
+
+  // A family advertised only when the deploy turns it on. The strict cut reads the
+  // DEPLOYED root, and the production deploy sets each of these (the bff8b2dfd cut's
+  // discovery carries `loopback`), so this test builds the advertisement with them on.
+  // Each entry is checked below to be really env-gated, so a stale row cannot hide a
+  // family that is never advertised.
+  const ENV_GATED: Record<string, string> = { loopback: 'OPENWOP_BOUNDED_LOOPBACK' };
+
+  function advertWith(on: boolean): Record<string, unknown> {
+    const saved = Object.fromEntries(Object.values(ENV_GATED).map((k) => [k, process.env[k]]));
+    try {
+      for (const k of Object.values(ENV_GATED)) { if (on) process.env[k] = 'true'; else delete process.env[k]; }
+      return buildV2Advertisement(CONFIG) as Record<string, unknown>;
+    } finally {
+      for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    }
+  }
+
+  it('each env-gated family is advertised exactly when its switch is on', () => {
+    const off = advertWith(false);
+    const on = advertWith(true);
+    for (const family of Object.keys(ENV_GATED)) {
+      expect(family in off, `${family} is advertised with its switch off — drop it from ENV_GATED`).toBe(false);
+      expect(family in on, `${family} is not advertised with ${ENV_GATED[family]} on`).toBe(true);
+    }
+  });
+
+  it('no gated family is both unadvertised and missing from the ledger', () => {
+    const advert = advertWith(true);
+    const ledger = new Set<string>(MAJOR2_UNDECLARED_FAMILIES);
+    const uncovered = [...gatedFamilies()].filter((k) => !(k in advert) && !ledger.has(`family.${k}`)).sort();
+    expect(
+      uncovered,
+      `the pinned suite gates on ${uncovered.map((k) => `family.${k}`).join(', ')}, which the v2 root does not advertise `
+        + 'and the ledger does not opt out of. A strict cut records every leg behind those gates as executed-fail. '
+        + 'Advertise the family (if the host serves it) or add an honest ledger row with its reason.',
+    ).toEqual([]);
   });
 });

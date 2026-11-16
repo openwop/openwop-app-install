@@ -177,7 +177,7 @@ describe('ADR 0419 — priced ⟹ gated (structural)', () => {
     //     the factory is already plural, not a one-off.
     // ANY authz gate counts here — this check is "is the surface open?", NOT "is the
     // ENTITLEMENT choke present?" (that is the request-subject check above). So the
-    // RBAC gates (`requireOrgScope`, `requireTenantScope`, `requireKicktodoManage`)
+    // RBAC gates (`requireOrgScope`, `requireTenantScope`, plus any a feature declares)
     // are included: a route behind RBAC is not "ungated", even though RBAC alone does
     // not apply the paywall. Omitting them would false-positive a legitimately
     // RBAC-gated feature. The request-subject check remains the entitlement-specific

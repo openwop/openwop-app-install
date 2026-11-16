@@ -18,6 +18,7 @@ vi.mock('../../platform/useStorageSubject.js', () => ({ useStorageSubject: () =>
 vi.mock('../../workflows/fleetInsightsClient.js', () => ({ fetchFleetStats: vi.fn(async () => ({ rowsConsidered: 0, workflows: [] })) }));
 vi.mock('../../featureToggles/FeatureAccessContext.js', () => ({ useAllFeatureAccess: () => ({ byId: {} }) }));
 vi.mock('../../features/connections/connectionsClient.js', () => ({ listConnections: vi.fn(async () => []), listProviders: vi.fn(async () => []) }));
+vi.mock('../../client/accessClient.js', async (orig) => ({ ...await orig<Record<string, unknown>>(), listOrgs: vi.fn(async () => []) }));
 import { TemplatePreflightModal } from '../TemplatePreflightModal.js';
 import { WorkflowsDashboard } from '../WorkflowsDashboard.js';
 import { runsWithZeroConnections } from '../persistence/backendStore.js';

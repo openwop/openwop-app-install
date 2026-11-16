@@ -31,7 +31,7 @@ import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface } from 
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { CampaignRunWrongClientError, readCampaignRunTag, type CampaignRunTag } from '../../host/campaignRefs.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
-import { tenantToggleSubject } from '../../host/operatorPlanExemption.js';
+import { planExemptScopeOfRun, tenantToggleSubject } from '../../host/operatorPlanExemption.js';
 import { runOrgScopeFilter, type Scope } from '../../host/accessControlService.js';
 import { getBrief } from '../campaign-brief/briefService.js';
 import { attachCampaignAssets, getCampaign, getCampaignByBrief, listCampaigns, finalizeFromBrief } from './campaignService.js';
@@ -144,7 +144,7 @@ export function buildCampaignStudioSurface(scope: BundleScope): FeatureSurface {
         const campaign = tag ? await getCampaign(tenantId, tag.campaignId) : null;
         if (campaign && tag && campaign.orgId === tag.orgId) live = { campaignStatus: campaign.status };
       }
-      const verdict = decideGate({ run, actionClass, ...(stage ? { stage } : {}), facts, ...(contentHash ? { contentHash } : {}), toggleOn: await autonomyToggleOn(tenantId), ...(live ? { live } : {}) });
+      const verdict = decideGate({ run, actionClass, ...(stage ? { stage } : {}), facts, ...(contentHash ? { contentHash } : {}), toggleOn: await autonomyToggleOn(tenantId, planExemptScopeOfRun(tenantId, run.metadata as Record<string, unknown> | undefined)), ...(live ? { live } : {}) });
       // D5 — a class with no wired chokepoint (plan.approve, creative.review, …) is
       // told by the gate itself; a chokepoint class is told after its effect lands.
       if (verdict.mode === 'proceed' && verdict.decision.outcome === 'notify-after' && !replaying && !CHOKEPOINT_CLASSES.has(actionClass)) {

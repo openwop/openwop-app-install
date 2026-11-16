@@ -51,13 +51,14 @@ beforeEach(() => { delete process.env.OPENWOP_CODE_EXEC_ENDPOINT; delete process
 afterAll(() => { delete process.env.OPENWOP_CODE_EXEC_RUNTIME; });
 
 describe('sandbox adapter', () => {
-  it('honest-off: createSandboxRunner is undefined with no endpoint (WASI opted out)', () => {
+  it('honest-off: selectSandboxExecutor is undefined with no endpoint (WASI opted out)', () => {
     expect(selectSandboxExecutor()).toBeUndefined();
   });
 
   it('is wired when an endpoint is configured', () => {
     process.env.OPENWOP_CODE_EXEC_ENDPOINT = endpoint;
-    expect(typeof selectSandboxExecutor()).toBe('function');
+    // Reference identity (ADR 0995 D7): the external Code-API executor, not just "a function".
+    expect(selectSandboxExecutor()).toBe(runSandboxedCode);
   });
 
   it('dispatches to the configured endpoint and returns the result', async () => {
@@ -75,14 +76,9 @@ describe('sandbox adapter', () => {
 
   it('SSRF: a private endpoint is blocked without allow-private (and §D: no URL leak)', async () => {
     process.env.OPENWOP_CODE_EXEC_ENDPOINT = endpoint; // loopback = private, allow-private NOT set
-    try {
-      await runSandboxedCode({ language: 'python', code: 'print(1)' });
-      throw new Error('should have thrown');
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      expect(msg).toBe('sandbox_transport_error'); // generic — endpoint host/port NOT echoed (§D)
-      expect(msg).not.toContain('127.0.0.1');
-    }
+    // The exact generic message: the endpoint host/port is NOT echoed (§D).
+    await expect(runSandboxedCode({ language: 'python', code: 'print(1)' }))
+      .rejects.toMatchObject({ code: 'sandbox_transport_error', message: 'sandbox_transport_error' });
   });
 });
 
@@ -91,7 +87,7 @@ describe('ADR 0114 hardening — stdin cap + concurrency (CXE-4/CXE-5)', () => {
     process.env.OPENWOP_CODE_EXEC_ENDPOINT = endpoint;
     process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
     await expect(runSandboxedCode({ language: 'python', code: 'x=1', stdin: 'a'.repeat(200_001) }))
-      .rejects.toMatchObject({ code: 'content_too_long' });
+      .rejects.toMatchObject({ code: 'content_too_long', message: 'stdin exceeds the 200000-byte cap.' });
   });
 
   it('CXE-4: fails fast over the concurrency cap (resource_exhausted)', async () => {
@@ -119,8 +115,8 @@ describe('ADR 0114 hardening — stdin cap + concurrency (CXE-4/CXE-5)', () => {
 
 describe('ADR 0114 Phase 7 — language allowlist', () => {
   it('defaults to the common interpreters', () => {
-    expect(allowedLanguages()).toContain('python');
-    expect(allowedLanguages()).toContain('javascript');
+    // The exact default set: a widened default (another runtime) is a policy change.
+    expect(allowedLanguages()).toEqual(['python', 'javascript', 'typescript', 'bash', 'ruby', 'go']);
   });
   it('rejects an unlisted language BEFORE any egress (validation_error)', async () => {
     process.env.OPENWOP_CODE_EXEC_ENDPOINT = 'http://127.0.0.1:1/never';

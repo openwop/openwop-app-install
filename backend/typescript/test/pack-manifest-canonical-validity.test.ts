@@ -37,9 +37,15 @@ const SCHEMAS = join(REPO, 'schemas');
 const PACKS = join(REPO, 'packs');
 
 /** Kinds whose shipped packs are ALREADY canonical. Adding a kind here is a
- *  claim that every shipped pack of that kind validates — measure first. */
+ *  claim that every shipped pack of that kind validates — measure first.
+ *
+ *  #5993: a kind validates against the schema major the host LOADS it under.
+ *  Form-content packs load under v2: `formContentPackLoader` honours
+ *  `FormField.when` (RFC 0177 §E.4, ADR 0808 `sanitizeWhen`), which the frozen
+ *  v1 schema does not define. Validating against v1 refused a pack using a
+ *  supported field. `spec/v1/` stays frozen; the v2 copy is already vendored. */
 const ENFORCED: Record<string, string> = {
-  'form-content': 'form-content-pack-manifest.schema.json',
+  'form-content': 'v2/form-content-pack-manifest.schema.json',
 };
 
 /**
@@ -56,9 +62,13 @@ const ENFORCED: Record<string, string> = {
  */
 const RESIDUAL_ID_NAMESPACE_ONLY = ['community.openwop.canvas-checklist', 'core.openwop.artifact-types'];
 
+const readSchema = (file: string) => JSON.parse(readFileSync(join(SCHEMAS, file), 'utf8')) as object;
+
 function compile(schemaFile: string) {
   const ajv = new Ajv2020({ strict: false, allErrors: true });
-  return ajv.compile(JSON.parse(readFileSync(join(SCHEMAS, schemaFile), 'utf8')) as object);
+  // v2 schemas share id patterns through a sibling `ids.schema.json` `$ref`.
+  if (schemaFile.startsWith('v2/')) ajv.addSchema(readSchema('v2/ids.schema.json'));
+  return ajv.compile(readSchema(schemaFile));
 }
 
 describe('publishable pack manifests validate against their canonical schema', () => {
@@ -87,6 +97,32 @@ describe('publishable pack manifests validate against their canonical schema', (
     // Non-vacuity: if no pack of an enforced kind exists, the loop asserted
     // nothing and would pass silently.
     expect(checked, 'no pack of an ENFORCED kind was found — the assertion was vacuous').toBeGreaterThan(0);
+  });
+});
+
+describe('form-content packs validate against the schema the host loads them under (#5993)', () => {
+  const starter = () => JSON.parse(readFileSync(join(PACKS, 'core.openwop.forms.starters', 'pack.json'), 'utf8')) as {
+    templates: Array<{ fields: Array<Record<string, unknown>> }>;
+  };
+
+  it('a field with a `when` condition (RFC 0177 §E.4) validates under v2, and the frozen v1 refuses it', () => {
+    const manifest = starter();
+    const fields = manifest.templates[0]!.fields;
+    expect(fields.length, 'the starter form needs two fields for a condition').toBeGreaterThan(1);
+    fields[1]!.when = { type: 'truthy', left: String(fields[0]!.id) };
+    const v2 = compile(ENFORCED['form-content']!);
+    expect(v2(manifest), JSON.stringify(v2.errors?.slice(0, 3))).toBe(true);
+    expect(compile('form-content-pack-manifest.schema.json')(manifest), 'v1 should not define `when`').toBe(false);
+  });
+
+  it('a field neither schema defines is still refused (sabotage witness)', () => {
+    const manifest = starter();
+    manifest.templates[0]!.fields[0]!.notAFormFieldKey = true;
+    for (const file of [ENFORCED['form-content']!, 'form-content-pack-manifest.schema.json']) {
+      const validate = compile(file);
+      expect(validate(manifest), `${file} accepted an undefined FormField key`).toBe(false);
+      expect(validate.errors?.some((e) => e.keyword === 'additionalProperties')).toBe(true);
+    }
   });
 });
 

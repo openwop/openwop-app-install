@@ -6,6 +6,9 @@
  * `canAccessChannel` call — a same-tenant non-member could then write to or read a
  * private channel. The post-side call site is guarded only here (the route tests
  * cover the read/stream 403s; `channels-service.test.ts` covers the predicate).
+ * Wave 112: each refusal asserts its own guard's message (the posting-policy and
+ * role gates also throw a 403), and the member post is read back by id and text,
+ * so a refused post that still landed would show.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -30,16 +33,17 @@ describe('channel post/read membership gate', () => {
 
   it('a private channel denies a non-member (post + read) and admits a member', async () => {
     const ch = await createChannel(T, 'alice', { name: 'secret', visibility: 'private' }, FULL_AUTHORITY);
-    await expect(postChannelMessage(T, ch.conversationId, 'mallory', 'sneak', FULL_AUTHORITY)).rejects.toMatchObject({ code: 'forbidden' });
-    await expect(listChannelMessages(T, ch.conversationId, 'mallory')).rejects.toMatchObject({ code: 'forbidden' });
+    const notMember = { code: 'forbidden', message: 'Not a member of this channel.' };
+    await expect(postChannelMessage(T, ch.conversationId, 'mallory', 'sneak', FULL_AUTHORITY)).rejects.toMatchObject(notMember);
+    await expect(listChannelMessages(T, ch.conversationId, 'mallory')).rejects.toMatchObject(notMember);
     await addChannelMember(T, ch.conversationId, 'alice', FULL_AUTHORITY, 'alice'); // owner 'alice' self-joins
     const r = await postChannelMessage(T, ch.conversationId, 'alice', 'members only', FULL_AUTHORITY);
-    expect(r.messageId).toBeTruthy();
-    expect(await listChannelMessages(T, ch.conversationId, 'alice')).toHaveLength(1);
+    const listed = await listChannelMessages(T, ch.conversationId, 'alice');
+    expect(listed.map((m) => [m.messageId, m.content])).toEqual([[r.messageId, 'members only']]);
   });
 
   it('rejects empty content', async () => {
     const ch = await createChannel(T, 'alice', { name: 'g2', visibility: 'public' }, FULL_AUTHORITY);
-    await expect(postChannelMessage(T, ch.conversationId, 'bob', '   ', FULL_AUTHORITY)).rejects.toMatchObject({ code: 'validation_error' });
+    await expect(postChannelMessage(T, ch.conversationId, 'bob', '   ', FULL_AUTHORITY)).rejects.toMatchObject({ code: 'validation_error', message: 'Message content is required.' });
   });
 });

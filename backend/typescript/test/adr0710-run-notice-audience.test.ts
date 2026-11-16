@@ -116,7 +116,11 @@ describe('ADR 0710 — run-notice audience', () => {
     const notify = src('notifications/notify.ts');
     expect(notify, 'the failure emit must set recipientRole from the audience').toContain('...(audience.recipientRole ? { recipientRole: audience.recipientRole } : {})');
     expect(notify, 'the open gate must no longer be an unaddressed broadcast').not.toContain('await getNotificationEmitter().emit(base); // broadcast');
-    expect(notify, 'the open gate emits the role from the same predicate').toContain('...(gateAudience.recipientRole ? { recipientRole: gateAudience.recipientRole } : {})');
+    // ADR 1125 D5 stamps `reason` beside the role, so the spread spans lines now;
+    // the pin still requires the role to come from `gateAudience`, and binds
+    // `gateAudience` to the shared predicate.
+    expect(notify, 'the open gate reads the shared predicate').toContain('const gateAudience = runNoticeAudience({ tenantId: run.tenantId, metadata: run.metadata });');
+    expect(notify, 'the open gate emits the role from the same predicate').toMatch(/\.\.\.\(gateAudience\.recipientRole\s*\?\s*\{ recipientRole: gateAudience\.recipientRole[,\s]/);
     // NOTE: this file previously asserted `toContain('alreadyNoticedToday')` here.
     // That was a GATE THAT COULD NOT FAIL — the function DEFINITION keeps the
     // string in the file, so deleting the CALL left the leg green (measured).

@@ -15,14 +15,12 @@ import type { HandoffRecorded } from '../../host/handoff/handoffObservers.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { getBoard, getCard } from '../../host/kanbanService.js';
 import { postProjectNotice } from '../../host/projectConversations.js';
-import { resolveRunProject } from '../../host/runProjectBinding.js';
+import { runProject } from '../../host/runProjectBinding.js';
 import { resolveSubjectDisplays } from '../../host/subjectDisplay.js';
 import { neutralizeUntrusted } from '../../host/untrustedContent.js';
 
 const posted = new DurableCollection<{ key: string; tenantId: string; at: string }>('structured-handoffs:cards-posted', (r) => r.key, undefined, (r) => r.tenantId);
 
-type Obj = Record<string, unknown>;
-const isObj = (x: unknown): x is Obj => x !== null && typeof x === 'object' && !Array.isArray(x);
 
 async function nameOf(tenantId: string, ref: string | undefined, fallback: string): Promise<string> {
   if (!ref) return fallback;
@@ -50,10 +48,7 @@ export function handoffCardObserver(storage: RouteDeps['storage']) {
       if (!e.origin.ref.startsWith('interrupt:')) return;
       const run = await storage.getRun(e.origin.runId);
       if (!run || run.tenantId !== e.tenantId) return;
-      projectId = await resolveRunProject(e.tenantId, run.metadata ?? {})
-        ?? (isObj(run.metadata?.kanban) && typeof run.metadata.kanban.boardId === 'string'
-          ? await getBoard(run.metadata.kanban.boardId).then((b) => (b?.ownerSubject?.kind === 'project' ? b.ownerSubject.id : undefined))
-          : undefined);
+      projectId = await runProject(e.tenantId, run.metadata ?? {}); // ADR 1133: the one derivation
       if (!projectId) return;
       text = `A run needs a person to decide: ${neutralizeUntrusted(e.record.intent)}`;
       link = `/runs/${encodeURIComponent(run.runId)}`;

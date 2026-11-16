@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.seo-content-ops",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "kind": "workflow-chain",
   "description": "SEO content-ops chains (RFC 0013): a research-grounded content pipeline — a keyword brief from live search, a drafted article for human review, and an on-publish internal-link suggestion pass. Drafts are reviewed before anything is treated as final. Replay-deterministic.",
   "author": "openwop",
@@ -14,13 +14,13 @@
   "chains": [
     {
       "chainId": "seo.keyword-brief",
-      "version": "1.2.0",
+      "version": "1.3.0",
       "label": "Topic → Research-Grounded Brief",
-      "description": "Researches a topic with live web search and produces a keyword-targeted content brief (angle, outline, target queries, sources) as a saved draft for the writer.",
+      "description": "Researches a topic with live web search and produces a keyword-targeted content brief (angle, outline, target queries, sources), saved as a draft Document the writer can open (no mailbox needed; CC-SEO-2).",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["triggerEventName"],
+        "required": ["triggerEventName", "orgId"],
         "properties": {
           "topic": {
             "type": "string",
@@ -29,7 +29,8 @@
           },
           "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
           "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." },
-          "triggerEventName": { "type": "string", "description": "Host event name that starts this workflow. MUST match the `events.md` §Types grammar: two or three kebab-case segments under a registered org, never `openwop.`-prefixed (e.g. `example.deal.won`)." }
+          "triggerEventName": { "type": "string", "description": "Host event name that starts this workflow. MUST match the `events.md` §Types grammar: two or three kebab-case segments under a registered org, never `openwop.`-prefixed (e.g. `example.deal.won`)." },
+          "orgId": { "type": "string", "description": "The organization (your workspace or a client) to save the brief in as a draft Document." }
         }
       },
       "capabilities": [],
@@ -57,7 +58,9 @@
               "y": 0
             },
             "config": {},
-            "inputs": {}
+            "inputs": {
+              "query": "{{params.topic}}"
+            }
           },
           {
             "id": "brief",
@@ -76,14 +79,18 @@
           },
           {
             "id": "save",
-            "typeId": "core.email.draft@1.0.0",
+            "typeId": "feature.documents.nodes.save-document@1.0.0",
             "name": "Save brief",
             "position": {
               "x": 840,
               "y": 0
             },
             "config": {},
-            "inputs": {}
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "title": "SEO brief: {{params.topic}}",
+              "kind": "seo-brief"
+            }
           }
         ],
         "edges": [

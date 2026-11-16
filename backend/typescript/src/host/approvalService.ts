@@ -910,6 +910,9 @@ export type ApprovalEligibilityCheck = (
      *  withdraw) reads it. Both decide lanes pass it; absent means a caller that
      *  predates the field, which a check must treat as the stricter `approved`. */
     outcome?: 'approved' | 'rejected';
+    /** The sole-admin self-approval ADR (D1) — the decider signed in interactively (the
+     *  route's auth Subject, `isHumanSignInSubject`). Absent means not a person. */
+    humanSession?: boolean;
   },
 ) => Promise<void>;
 
@@ -944,7 +947,7 @@ export async function assertApprovalEligibility(
   tenantId: string,
   decidedBy: string | undefined,
   approval: PendingApproval,
-  opts?: { isOperator?: boolean; isPersonalOwner?: boolean; spellings?: string[]; outcome?: 'approved' | 'rejected' },
+  opts?: { isOperator?: boolean; isPersonalOwner?: boolean; spellings?: string[]; outcome?: 'approved' | 'rejected'; humanSession?: boolean },
 ): Promise<void> {
   const check = approval.kind ? eligibilityChecks.get(approval.kind) : undefined;
   if (check) await check(tenantId, decidedBy, approval, opts);

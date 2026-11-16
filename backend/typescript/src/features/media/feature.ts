@@ -9,6 +9,8 @@
  * org-scoped RBAC gate (`requireOrgScope`); only the toggle gate is gone.
  */
 
+import { registerAssetOrgResolver } from '../../host/assetAccess.js';
+import { backfillServeTokenIndexStep, orgOfServeTokenIndexed } from './mediaService.js';
 import type { BackendFeature } from '../types.js';
 import { registerMediaRoutes } from './routes.js';
 import { registerImageGenRoutes } from './imageGenRoutes.js';
@@ -23,6 +25,8 @@ export const mediaFeature: BackendFeature = {
   // asset with lineage. Always-on ⇒ ungated at the surface seam (ADR 0027).
   surface: { id: 'media', build: buildMediaSurface },
   registerRoutes: (deps) => {
+    // ADR 1122 P1c — the asset serve route's org floor reads the library's own token index.
+    registerAssetOrgResolver({ orgOf: orgOfServeTokenIndexed, backfillStep: (cursor) => backfillServeTokenIndexStep(cursor) });
     // MED2-M3 (R3) — DSAR erasure + PII declaration; registered with the routes
     // (the documents feature.ts precedent) so a tenant that used media is erasable.
     registerMediaErasure();

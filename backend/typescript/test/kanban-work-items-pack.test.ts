@@ -47,4 +47,19 @@ describe('core.openwop.kanban-work-items', () => {
     expect(received[0]?.idempotencyKey).toEqual(received[1]?.idempotencyKey);
     expect(received[0]).not.toHaveProperty('tenantId');
   });
+  it('ADR 1137: forwards refresh only when configured, and passes a proposal item\'s assignee through untouched', async () => {
+    const { materializeWorkItems } = await pack();
+    const received: Array<Record<string, unknown>> = [];
+    const kanban = {
+      materializeWorkItems: async (command: Record<string, unknown>) => {
+        received.push(command);
+        return { dryRun: false, workItems: [], cards: [], refreshedCardIds: [] };
+      },
+    };
+    const assigned = { ...proposal, items: [{ ...proposal.items[0], assigneeId: 'user:alice', labels: ['waiting-on'] }] };
+    await materializeWorkItems({ runId: 'run-1', nodeId: 'n', inputs: { boardId: 'b', proposal: assigned }, config: { refresh: true }, kanban });
+    await materializeWorkItems({ runId: 'run-1', nodeId: 'n', inputs: { boardId: 'b', proposal }, config: {}, kanban });
+    expect(received[0]).toMatchObject({ refresh: true, items: [{ assigneeId: 'user:alice', labels: ['waiting-on'] }] });
+    expect(received[1]).not.toHaveProperty('refresh');
+  });
 });

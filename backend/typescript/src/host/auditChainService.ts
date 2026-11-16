@@ -89,7 +89,10 @@ interface AuditHead {
 /** The chain's row collection. Hash-linked: a row edited after the fact fails
  *  `verifyChain`, so a data migration must never rewrite it (CHAN-F14). The
  *  constructor below keeps the literal (the ADR 0464 census reads it from
- *  source); `adr1045-legacy-bearer-rewrite.test.ts` reds if the two drift. */
+ *  source). Exported for any data rewrite's skip list: the CHAN-F14 rewrite
+ *  that first used it was removed in CHAN-F18, so nothing imports it today and
+ *  no test pins the two literals together. A new rewrite must skip it and
+ *  assert so (ADR 1045 UPDATED 2026-11-16). */
 export const AUDIT_CHAIN_COLLECTION = 'cdp:audit-chain';
 const entries = new DurableCollection<AuditEntry>(
   'cdp:audit-chain',

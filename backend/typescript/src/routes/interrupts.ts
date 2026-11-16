@@ -41,7 +41,7 @@ import { AGENT_MENTION_WORKFLOW_ID, agentMentionConfigurable } from '../host/age
 import { appendDecision, tallyDecisions, clearDecisions, evaluateQuorumTally, readRejectionPolicy, type DecisionOutcome } from '../host/reviewDecisionLedger.js';
 import { listTenantMembers, resolveEffectiveAccess } from '../host/accessControlService.js';
 import { isEligibleApprover, consumeVoteIdentity, gateAclOf, gateApproverRefs } from '../host/approverResolution.js';
-import { isAutonomyGateData, isAutonomyRequester } from '../host/autonomyPolicy/selfApproval.js';
+import { isAutonomyGateData, isAutonomyRequester, isHumanSignInSubject, soleAdminSelfApproval, type SoleAdminVerdict } from '../host/autonomyPolicy/selfApproval.js';
 import { verifyVoterBinding } from '../host/interruptVoterBinding.js';
 import { tokenResolvedVia } from '../host/interruptResolvedVia.js';
 import { loadOwnedRun } from '../host/runAccess.js';
@@ -1824,7 +1824,31 @@ export async function resolveAndResume(
     throw new OpenwopError('forbidden_scope', 'You requested this step, so someone else has to approve it.', 403,
       { reason: 'autonomy_self_approval_refused' });
   };
-  if (autonomyRun && reviewerRef && await isAutonomyRequester(autonomyRun, [reviewerRef])) refuseSelfApproval();
+  // the sole-admin self-approval ADR (D1) — the one escape: a person in their own session who is the only
+  // admin who could decide this gate. Asked once per vote, at decide time.
+  let soleAdmin: Promise<SoleAdminVerdict> | undefined;
+  const refuseUnlessSoleAdmin = async (actedBy?: string): Promise<void> => {
+    const run = autonomyRun;
+    const voter = reviewerRef;
+    if (!run || !voter || actedBy) return refuseSelfApproval();
+    const approverOrgId = (run.metadata as Record<string, unknown> | undefined)?.approverOrgId;
+    const required = (interrupt.data as { requiredApprovals?: unknown } | undefined)?.requiredApprovals;
+    soleAdmin ??= soleAdminSelfApproval({
+      tenantId: run.tenantId,
+      ...(typeof approverOrgId === 'string' ? { orgId: approverOrgId } : {}),
+      gateId: interruptId,
+      voter,
+      // From the auth middleware's Subject for this request only (deriveReviewer →
+      // requestSubjectV2(req)); a token lane or an in-process caller has none.
+      humanSession: reviewer?.capabilityToken !== true && isHumanSignInSubject(reviewer?.resolvedBy),
+      runs: [run],
+      refs: gateApproverRefs(interrupt.data),
+      quorum: typeof required === 'number' && required > 1,
+      surface: 'interrupt',
+    });
+    if (!(await soleAdmin).allowed) refuseSelfApproval();
+  };
+  if (autonomyRun && reviewerRef && await isAutonomyRequester(autonomyRun, [reviewerRef])) await refuseUnlessSoleAdmin();
   // ADR 0198 — eligibility returns the CONSUMED vote identity: the reviewer
   // themselves normally; the covered principal when they vote as a delegate
   // (with `actedBy` preserving who really clicked). The ledger dedups on the
@@ -1835,12 +1859,13 @@ export async function resolveAndResume(
 
   // ADR 0942 D10.2 — no self-approval on an autonomy gate, on EVERY vote lane
   // (bound user, capability token, delegate). The run's requesters (its acting
-  // user and its owner) may not decide it, and there is no sole-approver escape.
-  // Only the approving action is refused: a requester may still reject their own
-  // request.
+  // user and its owner) may not decide it. Only the approving action is refused:
+  // a requester may still reject their own request.
+  // CORRECTED (the sole-admin self-approval ADR (D1)): the narrow sole-admin escape applies here too, and
+  // never to a delegate's vote (`actedBy`) or a token lane (no `reviewerRef`).
   if (autonomyRun) {
     const voters = [reviewerRef, voteIdentity?.countAs, voteIdentity?.actedBy];
-    if (voters.some(Boolean) && await isAutonomyRequester(autonomyRun, voters)) refuseSelfApproval();
+    if (voters.some(Boolean) && await isAutonomyRequester(autonomyRun, voters)) await refuseUnlessSoleAdmin(voteIdentity?.actedBy);
   }
 
   // Quorum-gate handling: accumulate votes (durable ledger) until threshold met.

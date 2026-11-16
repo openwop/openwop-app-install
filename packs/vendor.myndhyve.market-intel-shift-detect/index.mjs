@@ -40,10 +40,48 @@ function angleEntries(set) {
   return out;
 }
 
+/** An object, or the same object as a JSON string; anything else → undefined. */
+function asObject(v) {
+  if (typeof v === 'string' && v.trim() !== '') {
+    try { v = JSON.parse(v); } catch { return undefined; }
+  }
+  return v && typeof v === 'object' && !Array.isArray(v) ? v : undefined;
+}
+
+/**
+ * ADR 1116 D4 — the CURRENT set, from either shape:
+ *  - `current: { records, angles }` (the documented diff input), or
+ *  - the market-intel chain's ports: `records` (voc) + `rankedAngles` (scoring),
+ *    an angle keyed by `angleId`/`angleName` and scored by `score.total`.
+ * Before this the chain wired `score → shift` with no port, so `current` was
+ * never set and every run diffed against `{}`: "no shift" whatever happened.
+ */
+function currentSet(i) {
+  const direct = asObject(i.current);
+  if (direct) return direct;
+  if (!Array.isArray(i.records) && !Array.isArray(i.rankedAngles)) return undefined;
+  const angles = arr(i.rankedAngles).map((a) => ({
+    id: str(a?.angleId),
+    name: str(a?.angleName),
+    score: num(a?.score?.total) ?? num(a?.score),
+  }));
+  return { records: arr(i.records), angles };
+}
+
 export async function shiftDetect(ctx) {
   const i = ctx.inputs ?? {};
-  const prev = i.previous && typeof i.previous === 'object' ? i.previous : {};
-  const curr = i.current && typeof i.current === 'object' ? i.current : {};
+  // ADR 1116 D4 — `previous` from inputs, else config: the shipped chain put it in
+  // `config.previous`, which this node never read, so every pain read as "new".
+  const prev = asObject(i.previous) ?? asObject(ctx.config?.previous);
+  const curr = currentSet(i);
+  if (!prev) {
+    return { status: 'error', error: { code: 'INVALID_INPUTS', message: 'previous is required: the prior run\'s { records, angles } (an object or its JSON)', retryable: false } };
+  }
+  if (!curr) {
+    // Never diff against nothing: an absent current set would report "no material
+    // market shift", a false all-clear.
+    return { status: 'error', error: { code: 'INVALID_INPUTS', message: 'current is required: { records, angles }, or records + rankedAngles from the market-intel chain', retryable: false } };
+  }
 
   // ── pain-point set diff ──
   const prevPains = new Map(painRecords(prev).map((r) => [painKey(r), r]));
@@ -91,6 +129,12 @@ export async function shiftDetect(ctx) {
         angleDeltas: angleDeltas.slice(0, 100),
         summary,
         hasShift,
+      },
+      // This run's set in the `previous` shape, so the next scheduled run can diff
+      // against it directly (ADR 1116 D4).
+      snapshot: {
+        records: painRecords(curr).slice(0, 200).map((r) => ({ quote: str(r?.quote || r?.text), tagType: str(r?.tagType || r?.tag || 'pain'), ...(num(r?.confidence) !== undefined ? { confidence: num(r?.confidence) } : {}) })),
+        angles: [...angleEntries(curr)].slice(0, 200).map(([id, score]) => ({ id, score })),
       },
     },
   };

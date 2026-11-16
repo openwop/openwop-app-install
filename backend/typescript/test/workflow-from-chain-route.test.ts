@@ -40,8 +40,9 @@ describe('workflow-chain templates (ADR 0163 Phase 2)', () => {
     const mi = body.chains.find((c) => c.chainId === 'market-intel.digest');
     expect(mi, 'market-intel.digest should be installed').toBeTruthy();
     expect(mi!.label).toMatch(/\S/);
-    // the param schema, read through: `topic` is declared and required (pack.json).
-    expect(mi!.parameters).toMatchObject({ type: 'object', required: ['topic'], properties: { topic: { type: 'string' } } });
+    // the param schema, read through: `topic` and (ADR 1116) both contexts are
+    // declared and required (pack.json).
+    expect(mi!.parameters).toMatchObject({ type: 'object', required: ['topic', 'icpContext', 'productContext'], properties: { topic: { type: 'string' }, icpContext: { type: 'object' }, productContext: { type: 'object' } } });
   });
 
   it('POST /workflows/from-chain instantiates a fresh owned workflow that appears in the scoped list', async () => {
@@ -53,7 +54,7 @@ describe('workflow-chain templates (ADR 0163 Phase 2)', () => {
     expect(r.status).toBe(201);
     const body = (await r.json()) as { workflowId: string; nodeCount: number; warnings?: string[] };
     expect(body.workflowId).toMatch(/^wf\.copy\.market-intel-digest\.[0-9a-f]{16}$/);
-    expect(body.nodeCount).toBe(4);
+    expect(body.nodeCount).toBe(5); // discover, fetch (ADR 1116), voc, score, synthesize
     // the workflow now appears in the caller's tenant-scoped list (a real owned workflow)
     const list = (await (await fetch(url('/workflows'), { headers: { cookie: c } })).json()) as { workflows: { workflowId: string }[] };
     expect(list.workflows.map((w) => w.workflowId)).toContain(body.workflowId);

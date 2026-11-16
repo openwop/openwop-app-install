@@ -66,9 +66,15 @@ describe('the real releases.json', () => {
   });
 
   it('a 0.1.0 install must stop the old binary whether it lands on 0.2.0 or skips past it', () => {
+    // One step per required stop crossed, plus the last hop (0.14.0 became the
+    // first required stop at the 0.15.0 cut, CHAN-F18). The hop that crosses
+    // 0.2.0 is the first, and it must stop the old binary.
+    const stopsBefore = (to: string) => real.releases
+      .filter((r) => r.requiredStop && compareVersions(r.version, '0.1.0') > 0 && compareVersions(r.version, to) < 0)
+      .length;
     for (const to of ['0.2.0', real.latest]) {
       const plan = planUpgrade(real, '0.1.0', to);
-      expect(plan.steps.length, to).toBe(1);
+      expect(plan.steps.length, to).toBe(stopsBefore(to) + 1);
       expect(plan.steps[0]!.stopOldBinary, to).toBe(true);
     }
     expect(planUpgrade(real, '0.1.0', '0.2.0').steps[0]!.stopOldBinaryBecause).toEqual([expect.stringMatching(/^0\.2\.0: /)]);
@@ -77,7 +83,7 @@ describe('the real releases.json', () => {
       .filter((r) => !r.rollingSafe && compareVersions(r.version, '0.1.0') > 0 && compareVersions(r.version, real.latest) <= 0)
       .map((r) => r.version)
       .sort(compareVersions);
-    const because = planUpgrade(real, '0.1.0', real.latest).steps[0]!.stopOldBinaryBecause;
+    const because = planUpgrade(real, '0.1.0', real.latest).steps.flatMap((s) => s.stopOldBinaryBecause);
     expect(because.map((b) => b.split(':')[0]).sort(compareVersions)).toEqual(crossedUnsafe);
     expect(because).toEqual(expect.arrayContaining([expect.stringMatching(/^0\.2\.0: /)]));
     // From 0.2.0 on, the old binary must stop only when a later not-rolling-safe release is crossed.
@@ -110,6 +116,38 @@ describe('the real releases.json', () => {
       }
     }
     expect(pairs).toBe((versions.length * (versions.length - 1)) / 2);
+  });
+
+  // ADR 1045 CHAN-F18 — 0.14.0 is the last release with the legacy env-key id
+  // rewrite, so an upgrade that crosses it must land there. A synthetic release
+  // one minor ABOVE `latest` goes on top of the REAL entries, so the case holds
+  // whatever has shipped since (a literal 0.15.0 duplicated the real one at the
+  // 0.15.0 cut and broke the newest-first rule).
+  it('an upgrade crossing 0.14.0 lands on it first (the legacy bearer-id rewrite stop)', () => {
+    const v0140 = real.releases.find((r) => r.version === '0.14.0')!;
+    expect(v0140.requiredStop).toBe(true);
+    expect(v0140.requiredStopReason).toMatch(/OPENWOP_LEGACY_BEARER_REWRITE/);
+    const m = clone();
+    const top = m.releases.find((r) => r.version === m.latest)!;
+    const [maj, min] = top.version.split('.').map(Number) as [number, number];
+    const target = `${maj}.${min + 1}.0`;
+    m.releases.unshift({ ...top, version: target, date: '2099-01-01', requiredStop: false, requiredStopReason: null, breakingConfig: [], notes: '' });
+    m.latest = target;
+    expect(validateReleases(m)).toEqual([]);
+    // Every release after 0.14.0 is a single hop from it unless it is itself a stop.
+    const laterStops = m.releases
+      .filter((r) => compareVersions(r.version, '0.14.0') > 0 && compareVersions(r.version, target) < 0 && r.requiredStop)
+      .map((r) => r.version)
+      .sort(compareVersions);
+    for (const from of ['0.13.0', '0.1.0']) {
+      const plan = planUpgrade(m, from, target);
+      expect(plan.steps.map((s) => s.to), from).toEqual(['0.14.0', ...laterStops, target]);
+      expect(plan.steps[0]!.requiredStop, from).toBe(true);
+      expect(plan.steps[0]!.requiredStopReason, from).toMatch(/OPENWOP_LEGACY_BEARER_REWRITE/);
+    }
+    expect(formatPlan(planUpgrade(m, '0.13.0', target))).toMatch(/REQUIRED STOP: Last release with the one-time legacy env-key id rewrite/);
+    // From 0.14.0 itself the legacy stop is behind it.
+    expect(planUpgrade(m, '0.14.0', target).steps.map((s) => s.to)).toEqual([...laterStops, target]);
   });
 
   it('a downgrade or an unknown version is refused, not planned', () => {

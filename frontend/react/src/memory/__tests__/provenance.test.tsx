@@ -13,7 +13,12 @@
  * scope, into which every completed turn writes a summary. The tab called itself
  * "{{persona}}'s long-term memory". `recallOnlyCount` discloses the gap.
  *
- * Sabotage that turns it red: invert/force either chip; render a date other than the
+ * ADR 0982 MAE2UX-3: an auto-learned note is untrusted by construction, so it
+ * carries ONLY the Auto-learned chip; the external chip is for untrusted notes of
+ * any other source (ADR 0601 copied text).
+ *
+ * Sabotage that turns it red: invert/force either chip; drop the source half of the
+ * external chip's condition (or its trust half); render a date other than the
  * row's `createdAt`; prefix the content; disclose for 0 or for an unknown count; show
  * the wrong disclosed count.
  */
@@ -70,11 +75,14 @@ describe('MEM-UX-3 — a model-inferred belief is visibly distinguishable from a
     await mount();
     const row = screen.getByText('Pasted from a vendor page').closest('li')!;
     expect(within(row).getByText('External · unverified')).toBeTruthy();
+    expect(within(row).queryByText('Auto-learned')).toBeNull();
   });
 
   it('ANTI-ROT: a user-typed note carries NEITHER chip — this is not "label everything"', async () => {
     list.mockResolvedValue([TYPED]);
     await mount();
+    // The row has rendered, so the absences below are evidence, not a loading list.
+    expect(screen.getByText('I prefer concise briefings')).toBeTruthy();
     expect(screen.queryByText('Auto-learned')).toBeNull();
     expect(screen.queryByText('External · unverified')).toBeNull();
   });
@@ -97,16 +105,23 @@ describe('MEM-UX-3 — a model-inferred belief is visibly distinguishable from a
 describe('MEM-UX-1 — the list does not imply it is everything the subject remembers', () => {
   it('discloses rows the subject recalls that this list does not show', async () => {
     await mount({ recallOnlyCount: 3 });
-    expect(screen.getByText(/3 more things were remembered from conversations/)).toBeTruthy();
+    // The same `.alert.info` selector the silence cases use, so their absence check is live.
+    expect(document.querySelector('.alert.info')?.textContent).toMatch(/3 more things were remembered from conversations/);
   });
 
+  // Absence is asserted as NO info Notice at all, not as missing copy: with an
+  // undefined count i18next resolves no plural form, so a wrongly rendered
+  // disclosure carries text that matches no catalog sentence (w113 probe
+  // prov-unknown stayed green against the copy regex).
   it('says NOTHING when the count is unknown — silence, never an implied zero', async () => {
     await mount(); // no recallOnlyCount prop
-    expect(screen.queryByText(/remembered from conversations/)).toBeNull();
+    expect(screen.getByText('I prefer concise briefings')).toBeTruthy();
+    expect(document.querySelector('.alert.info')).toBeNull();
   });
 
   it('says nothing when there genuinely are none', async () => {
     await mount({ recallOnlyCount: 0 });
-    expect(screen.queryByText(/remembered from conversations/)).toBeNull();
+    expect(screen.getByText('I prefer concise briefings')).toBeTruthy();
+    expect(document.querySelector('.alert.info')).toBeNull();
   });
 });

@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.marketing",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "kind": "workflow-chain",
   "description": "Real-work workflow pack (RFC 0013, ADR 0149) — the Marketing & Advertising cluster: Full Campaign Launch, Ad Performance Optimization Loop, Content Brief Generator, and Content Repurposing. Reasons with core.ai.chatCompletion over real tenant data (feature.crm / feature.kb / feature.cms / feature.email); reads/optimizes the ad platforms provider-agnostically via the core.openwop.connectors.ad-* capability nodes (Meta or Google, whichever the tenant connected — ADR 0186). The optimization loop routes within-guardrail changes to auto-apply and out-of-guardrail changes to a core.chat.approvalGate via a core.flow.if conditional node (ADR 0149 open-question resolution: a flow conditional, not a new primitive). Every launch/publish/apply is approval- or guardrail-gated; all tenant values are run parameters (replay-deterministic). Published under core.openwop.workflows.* (openwop-team key).",
   "author": "openwop",
@@ -10,9 +10,9 @@
   "chains": [
     {
       "chainId": "marketing.campaign-launch",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "label": "Full Campaign Launch",
-      "description": "From a brief: select the audience (CRM), draft ad copy and creative, reference the landing page (CMS), consolidate for review, then launch on the ad platform after approval.",
+      "description": "From a brief: select the audience (CRM), draft ad copy and creative, reference the landing page (CMS), consolidate for review, then launch after approval through the governed ad step (feature.campaign-channels.nodes.publish-ad-variants, ADR 1111). With an ad account id and a connected platform it creates the campaign PAUSED (no spend until a person activates it; the tenant's spend threshold can require a further approval). With no account or no connection it hands the approved ad copy off as a draft document instead, so the run completes and the approved copy is kept.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -20,6 +20,9 @@
         "properties": {
           "brief": { "type": "string", "description": "The campaign brief." },
           "orgId": { "type": "string", "description": "The CRM/CMS org id to read the audience + landing page from." },
+          "adAccountId": { "type": "string", "default": "", "description": "The ad account to create the campaign in. Leave it blank to hand the approved ad copy off as a draft document instead of launching." },
+          "platform": { "type": "string", "default": "", "description": "Ad platform to launch on: meta, google, tiktok or linkedin. Blank means meta. Each platform needs its own details (for example a Facebook Page for Meta, a landing page URL for Google); the launch step names any that are missing." },
+          "briefId": { "type": "string", "default": "", "description": "The campaign brief this launch belongs to. Needed to launch on an ad account, so a retry or a re-run reuses the same campaign instead of creating a second one." },
           "provider": { "type": "string", "description": "AI provider id for this chain's model-calling nodes. Set it to fix a provider into those nodes when the workflow is created. Leave it unset and each run uses the run's chosen provider, else the workspace's AI setting, else the host's catalog default (ADR 0903); whichever is chosen is recorded on the run, so a replay or fork uses the same one. The workspace needs a key for the provider that runs." },
           "model": { "type": "string", "description": "Model id for this chain's model-calling nodes. Must be offered by the provider in the host catalog. Leave it unset to use the provider's model from the same choice (ADR 0903)." }
         }
@@ -28,7 +31,8 @@
       "dag": {
         "nodes": [
           { "id": "audience", "typeId": "feature.crm.nodes.list-companies@1.0.0", "name": "Audience select", "position": { "x": 0, "y": 0 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
-          { "id": "copy", "typeId": "core.ai.chatCompletion@1.0.0", "name": "Ad copy", "position": { "x": 320, "y": 0 }, "config": { "systemPrompt": "Write ad copy variants for the campaign brief: {{params.brief}}",
+          { "id": "copy", "typeId": "core.ai.structuredOutput@1.0.0", "name": "Ad copy", "position": { "x": 320, "y": 0 }, "config": { "systemPrompt": "Write ad copy variants for the campaign brief: {{params.brief}}. Group them by ad platform; give each variant a headline, a description and a call to action.",
+            "outputSchema": { "type": "object", "additionalProperties": false, "required": ["platformSets"], "properties": { "platformSets": { "type": "array", "minItems": 1, "items": { "type": "object", "additionalProperties": false, "required": ["platform", "variants"], "properties": { "platform": { "type": "string", "description": "The ad platform these variants are for." }, "variants": { "type": "array", "minItems": 1, "items": { "type": "object", "additionalProperties": false, "required": ["headline", "description", "cta"], "properties": { "headline": { "type": "string" }, "description": { "type": "string" }, "cta": { "type": "string" } } } } } } } } },
             "provider": "{{params.provider}}",
             "model": "{{params.model}}"
           }, "inputs": {} },
@@ -39,19 +43,19 @@
           { "id": "page", "typeId": "feature.cms.nodes.list-pages@1.0.0", "name": "Landing page (CMS)", "position": { "x": 320, "y": 280 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
           { "id": "review", "typeId": "core.chat.approvalGate@1.1.0", "name": "Consolidated review", "position": { "x": 640, "y": 140 }, "config": { "title": "Approve launching this campaign on the ad platform", "artifactType": "marketing.campaign", "actions": ["approve", "reject"] }, "inputs": {} },
           { "id": "gate-reject", "typeId": "core.flow.noop@1.0.0", "name": "Rejected — campaign not launched", "position": { "x": 960, "y": 300 }, "config": {}, "inputs": {} },
-          { "id": "launch", "typeId": "core.openwop.http.openapi-call@1.0.0", "name": "Launch campaign (Google Ads)", "position": { "x": 960, "y": 140 }, "config": { "connectionRef": "core.openwop.connections.google-ads", "operationId": "createCampaign" }, "inputs": {} }
+          { "id": "launch", "typeId": "feature.campaign-channels.nodes.publish-ad-variants@1.4.0", "name": "Launch campaign (created paused)", "position": { "x": 960, "y": 140 }, "config": {}, "inputs": { "orgId": "{{params.orgId}}", "adAccountId": "{{params.adAccountId}}", "platform": "{{params.platform}}", "briefId": "{{params.briefId}}" } }
         ],
         "edges": [
           { "from": "audience", "to": "copy" },
           { "from": "audience", "to": "creative" },
-          { "from": "copy", "to": "review.copy" },
+          { "from": "copy.data", "to": "review.artifact" },
           { "from": "creative", "to": "review.creative" },
           { "from": "page", "to": "review.page" },
-          { "from": "review", "to": "launch", "condition": { "type": "truthy", "left": "approved" } },
+          { "from": "review.artifact", "to": "launch.draft", "condition": { "type": "truthy", "left": "approved" } },
           { "from": "review", "to": "gate-reject", "condition": { "type": "falsy", "left": "approved" } }
         ]
       },
-      "outputs": { "campaign": { "type": "string", "description": "The launched campaign." } }
+      "outputs": { "campaign": { "type": "string", "description": "The PAUSED campaign created on the ad platform, or the draft ad-copy document it was handed off to." } }
     },
     {
       "chainId": "marketing.ad-optimization",

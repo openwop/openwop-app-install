@@ -4,6 +4,9 @@
  * one input port for a node whose input schema declares several `required`
  * fields, so restoring `required` does not re-route saved edges.
  * (A real pack's both-directions check is in its owner's tests.)
+ *
+ * Red when (wave 116 probes): the hint is never served; any truthy `x-ports`
+ * value is served as `single`; the input schema stops being inlined.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -35,9 +38,12 @@ describe('buildNodeCatalog — x-ports hint (ADR 0782)', () => {
   it('serves ports:"single" and still serves the schema with its required fields', () => {
     const n = node('vendor.test.ph.single');
     expect(n?.ports).toBe('single');
-    expect((n?.inputSchema as { required?: string[] }).required).toEqual(['a', 'b']);
+    expect(n?.inputSchema).toMatchObject({ required: ['a', 'b'] });
   });
   it('serves nothing for an absent or unrecognised hint', () => {
+    // Both entries ARE served (from this pack): the absence is of the hint, not the node.
+    expect(node('vendor.test.ph.default')?.packName).toBe(PACK);
+    expect(node('vendor.test.ph.unknown')?.packName).toBe(PACK);
     expect(node('vendor.test.ph.default')).not.toHaveProperty('ports');
     expect(node('vendor.test.ph.unknown')).not.toHaveProperty('ports');
   });

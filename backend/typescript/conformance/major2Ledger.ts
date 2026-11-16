@@ -67,4 +67,16 @@ export const MAJOR2_UNDECLARED_FAMILIES = [
   'family.sandbox',                // sandbox.isolationModel — the pack sandbox names no v2 isolation model. STILL TRUE:
                                    // measured 2026-09-13, `sandbox` is absent from this host's v1 document too, so
                                    // there is no behaviour to declare. This one is an honest opt-out, not a stale row.
+  // Suite 2.49.0 added gated witness legs for these two (#5927 pinned it). The host
+  // serves neither, so they had no row, and the bff8b2dfd prod cut recorded
+  // `executed-fail` on behaviorGate alone: the strict cut fails an unadvertised family
+  // that is not opted out, while the gate's m2 lane runs non-strict and read
+  // `inapplicable`. `major2-undeclared-ledger.test.ts` now derives every family the
+  // installed suite gates on, so the next pin bump finds a missing row locally.
+  'family.budget',                 // RFC 0084 — the v2 `budget` family (reserved limit, per-dimension accounting
+                                   // events, threshold-crossed): this host emits no budget.reserved/accounting
+                                   // events at major 2 and advertises no `budget` record.
+  'family.production',             // RFC 0009 — the v2 production profile: not claimed. The v1 ledger's
+                                   // `openwop-production` row in run.ts is the same honest absence under its
+                                   // major-1 name; the v2 gate is `family.production`.
 ];

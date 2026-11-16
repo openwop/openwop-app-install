@@ -8,19 +8,24 @@
  * `legal_hold`, `validation_error`) render as designed, localized states — never
  * the raw server prose, never a generic toast.
  *
- * Observation seams: `confirm()` falls back to `window.confirm` because no
- * `ConfirmRoot` is mounted, so the gate is a spy. A `<Notice>`'s variant is
+ * Observation seams: `confirm()` falls back to `window.confirm(title)` where no
+ * `ConfirmRoot` is mounted, so the gate is a spy. The Delete case mounts the real
+ * `<ConfirmRoot>` instead, because its claim is the confirm's BODY (the blast
+ * radius), which the `window.confirm` fallback drops. A cancelled confirm is checked
+ * after a drain, so a handler that ignores the answer has time to call the client.
+ * The announcer is module state, reset per case. A `<Notice>`'s variant is
  * observed through the shared announcer — `error` announces ASSERTIVELY, every
  * other variant POLITELY (`ui/Notice.tsx`) — not through its CSS class. The
  * `<Toaster>` IS mounted, so a raw-message leak through the toast fallback is
  * visible to the absence assertions.
  *
  * Sabotage that turns it red (one per claim): drop the own-row guard; rename a
- * refusal code in `surfaceFailure`; flip a refusal's `variant`; bypass a
- * `confirm(...)`; drop the duplicate-principal precheck.
+ * refusal code in `surfaceFailure`; flip a refusal's `variant`; ignore a
+ * `confirm(...)` answer; drop the Delete confirm's body; drop the duplicate-principal
+ * precheck or the server `validation_error` mapping.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type * as UsersClient from '../usersClient.js';
 
 const mocks = vi.hoisted(() => ({
@@ -40,8 +45,9 @@ vi.mock('../SsoPanel.js', () => ({ SsoPanel: () => null }));
 
 import { UsersPage } from '../UsersPage.js';
 import { UsersApiError, type User } from '../usersClient.js';
-import { currentAnnouncements } from '../../../ui/announce.js';
+import { announce, currentAnnouncements } from '../../../ui/announce.js';
 import { Toaster, dismiss, getToasts } from '../../../ui/toast.js';
+import { ConfirmRoot } from '../../../ui/confirm.js';
 
 const me: User = {
   userId: 'u-me', tenantId: 't1', principalId: 'oidc:me', email: 'me@example.com', displayName: 'Ada Admin',
@@ -52,6 +58,9 @@ const other: User = { ...me, userId: 'u-bob', principalId: 'oidc:bob', email: 'b
 beforeEach(() => {
   // Toasts are module state (an error toast persists until dismissed).
   for (const t of getToasts()) dismiss(t.id);
+  // The shared announcer is module state: clear both channels so no case reads
+  // another case's announcement.
+  announce(''); announce('', { assertive: true });
   vi.restoreAllMocks();
   vi.clearAllMocks();
   mocks.getMe.mockResolvedValue(me);
@@ -61,6 +70,11 @@ beforeEach(() => {
   mocks.revokeUserSessions.mockResolvedValue(undefined);
   mocks.createUser.mockResolvedValue(other);
 });
+
+/** Let a handler that resumed after `await confirm(...)` run to its client call. */
+async function drain(): Promise<void> {
+  for (let i = 0; i < 5; i++) await act(async () => { await new Promise<void>((r) => setImmediate(r)); });
+}
 
 async function renderPage(): Promise<void> {
   render(<><UsersPage /><Toaster /></>);
@@ -116,6 +130,7 @@ describe('UsersPage — Disable is confirm-gated (USERS-UX-12)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Disable Bob Builder' }));
     await waitFor(() => expect(confirmSpy).toHaveBeenCalledTimes(1));
     expect(confirmSpy.mock.calls[0]?.[0]).toBe('Disable "Bob Builder"?');
+    await drain();
     expect(mocks.setUserEnabled).not.toHaveBeenCalled();
   });
 
@@ -146,20 +161,34 @@ describe('UsersPage — Sign out everywhere (USERS-UX-11)', () => {
     const btn = screen.getByRole('button', { name: 'Sign Bob Builder out everywhere' });
     fireEvent.click(btn);
     await waitFor(() => expect(confirmSpy).toHaveBeenCalledTimes(1));
+    await drain();
     expect(mocks.revokeUserSessions).not.toHaveBeenCalled();
     fireEvent.click(btn);
     await waitFor(() => expect(mocks.revokeUserSessions).toHaveBeenCalledWith('u-bob'));
+    expect(mocks.revokeUserSessions).toHaveBeenCalledTimes(1);
   });
 });
 
 describe('UsersPage — Delete (USERS-UX-15)', () => {
   it('the confirm names the blast radius; a legal-hold 409 renders a localized warning notice', async () => {
     mocks.deleteUser.mockRejectedValue(new UsersApiError('This workspace is under legal hold (audit)', 409, { error: 'legal_hold', message: 'This workspace is under legal hold (audit)' }));
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
-    await renderPage();
+    render(<><UsersPage /><Toaster /><ConfirmRoot /></>);
+    const dialogName = 'Delete user "Bob Builder"?';
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete Bob Builder' }));
+    // The confirm names the user AND what the erasure takes with it.
+    const first = await screen.findByRole('dialog', { name: dialogName });
+    expect(first.textContent).toContain('This permanently erases the account of Bob Builder and every record stored under it');
+    // Cancel: the client is never called.
+    fireEvent.click(within(first).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: dialogName })).toBeNull());
+    await drain();
+    expect(mocks.deleteUser).not.toHaveBeenCalled();
+    // Confirm: called exactly once, for that user.
     fireEvent.click(screen.getByRole('button', { name: 'Delete Bob Builder' }));
+    const second = await screen.findByRole('dialog', { name: dialogName });
+    fireEvent.click(within(second).getByRole('button', { name: 'Delete' }));
     await waitFor(() => expect(mocks.deleteUser).toHaveBeenCalledWith('u-bob'));
-    expect(confirmSpy.mock.calls[0]?.[0]).toBe('Delete user "Bob Builder"?');
+    expect(mocks.deleteUser).toHaveBeenCalledTimes(1);
     await screen.findByText(/under legal hold, so user data cannot be erased/);
     // A WARNING notice: announced politely, never on the assertive channel.
     await waitFor(() => expect(currentAnnouncements().polite).toMatch(/under legal hold, so user data cannot be erased/));
@@ -184,10 +213,15 @@ describe('UsersPage — add-user form (USERS-UX-16)', () => {
   it('a server validation_error lands on the field, localized', async () => {
     mocks.createUser.mockRejectedValue(new UsersApiError('Field `principalId` is required', 400, { error: 'validation_error', message: 'Field `principalId` is required', details: { field: 'principalId' } }));
     await renderPage();
-    fireEvent.change(screen.getByLabelText(/Principal id/), { target: { value: 'oidc:new' } });
+    const input = screen.getByLabelText(/Principal id/);
+    fireEvent.change(input, { target: { value: 'oidc:new' } });
     fireEvent.click(screen.getByRole('button', { name: 'Add user' }));
     const err = await screen.findByRole('alert');
+    // The refusal came from the SERVER (the local whitespace check shows the same copy).
+    expect(mocks.createUser).toHaveBeenCalledWith({ principalId: 'oidc:new' });
     expect(err.textContent).toMatch(/single token without spaces/);
     expect(err.textContent).not.toMatch(/Field `principalId`/);
+    // …and it lands on the field.
+    expect(input.getAttribute('aria-invalid')).toBe('true');
   });
 });

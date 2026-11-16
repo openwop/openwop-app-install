@@ -9,11 +9,16 @@
  * user-typed note in the same scope stays trusted; (3) the legacy `[auto-extracted] ` prefix is
  * honoured as untrusted, and ONLY when present.
  *
- * Witnessed (wave 12 probes): `isGranted: async () => true` reds case 1; dropping
- * `{ source: 'auto-extract' }` in `extractionBinding.ts`, or the `contentTrust` derivation in
- * `addSubjectNote`, reds the AGMEM-2 cases; `const legacy = r.source === undefined` reds the
- * legacy ANTI-ROT case. The real `User.userId` key contract and the positive extraction path
- * live in `memory-extraction-grant-key.test.ts` (`BORN RED`).
+ * Sabotage witnesses (grade-tests wave 111 g1, `w111g1-mxb-*`): the binding granting always
+ * (bind-granted) or the op skipping its FIRST consent read (op-first-gate, which the post-model
+ * re-read would otherwise hide from the outcome) red case 1; dropping `{ source: 'auto-extract' }`
+ * (source) or the `contentTrust` derivation in `addSubjectNote` (trust-derive) red the AGMEM-2
+ * cases; gluing the legacy prefix back into the content (prefix) reds `provenance is DATA`; a
+ * trusted recency projection (recency-trust) or trusted vector metadata (rag-meta) red the recall
+ * case; `const legacy = r.source === undefined` (legacy-any) reds the legacy ANTI-ROT case and
+ * `const legacy = false` (legacy-off) the prefix case; rethrowing the `conflict` (conflict) reds
+ * the A4 race. The real `User.userId` key contract and the route live in
+ * `memory-extraction-grant-key.test.ts` (`BORN RED`).
  */
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -68,18 +73,21 @@ describe('AGMEM-2 — auto-extracted facts are UNTRUSTED at every read altitude'
   // ADR 0982 D1 — the lane writes only in the person's own tenant, keyed on the canonical id.
   let T2 = '';
   let subj = personSubject('unset');
+  let outcome: Awaited<ReturnType<typeof extractConversationMemory>> | undefined;
 
   beforeAll(async () => {
     const p = await personalChat('mxb-trust');
     T2 = p.home;
     subj = personSubject(p.userId);
     await setExtractionGrant(p.home, p.userId, true, p.userId);
-    await extractConversationMemory(await p.run(), ['transcript'], facts('the deploy token is rotated weekly'));
+    outcome = await extractConversationMemory(await p.run(), ['transcript'], facts('the deploy token is rotated weekly'));
     // A fact the PERSON typed, in the same scope, for the discrimination arm.
     await addSubjectNote(p.home, subj, 'I prefer concise briefings');
   });
 
   it('the durable projection labels the model-authored fact untrusted + auto-extract', async () => {
+    // The setup write landed through the lane (asserted here, not in the hook, so a skip reds a case).
+    expect(outcome).toEqual({ status: 'written', written: 1, duplicates: 0, rejected: 0, suppressed: 0, failedWrites: 0, budgetFull: false });
     const notes = await listSubjectNotes(T2, subj);
     const auto = notes.find((n) => n.content.includes('deploy token'));
     const typed = notes.find((n) => n.content.includes('concise briefings'));

@@ -1,7 +1,7 @@
 {
   "name": "vendor.myndhyve.market-intel-voc",
-  "version": "1.0.2",
-  "description": "MyndHyve market-intel.voc-extraction — extract Voice of Customer records (verbatim quotes + tagType + intentStage + confidence + rationale) from a single piece of content via a single AI call. First marketIntel pack of the Stage 5 cohort. Schema validation strips invalid records with per-record warnings; output preserves source structure (records + summary + warnings).",
+  "version": "1.1.0",
+  "description": "MyndHyve market-intel.voc-extraction — extract Voice of Customer records (verbatim quotes + tagType + intentStage + confidence + rationale) from one piece of content (one AI call) or from the pages a chain fetched (one AI call per page, ADR 1116). First marketIntel pack of the Stage 5 cohort. Schema validation strips invalid records with per-record warnings; output preserves source structure (records + summary + warnings).",
   "author": "MyndHyve",
   "license": "Apache-2.0",
   "homepage": "https://myndhyve.ai/packs/market-intel-voc",
@@ -29,9 +29,9 @@
   "nodes": [
     {
       "typeId": "market-intel.voc-extraction",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Extract Voice of Customer",
-      "description": "Issue one AI call against content + ICP/product context; parse JSON; validate against the VoC schema (6 tag types × 4 intent stages × clamped confidence). Records that fail validation are dropped with per-record warnings, NOT errored — so a partial parse still returns the valid subset.",
+      "description": "Content lane: one AI call against `content` + ICP/product context. Pages lane (ADR 1116): given `core.web.fetch` `pages`, one AI call per readable page (default 3, cap 5), records stamped with their page and merged. Every source body reaches the model inside the untrusted-content fence. Output is validated closed-world (6 tag types × 4 intent stages × clamped confidence, and each quote must be verbatim from its source); invalid records are dropped with warnings. A pages run that keeps no record fails typed (VOC_NO_RECORDS), never succeeds empty.",
       "category": "data",
       "role": "action",
       "capabilities": [

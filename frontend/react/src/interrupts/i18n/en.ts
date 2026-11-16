@@ -6,8 +6,13 @@ export const messages = {
   // ADR 0755 D3 — the resume token is projected only to an approvals:respond holder.
   noRespondPermission: 'You can see this step, but you don\'t have permission to respond to it.',
   // RenderInterrupt fallback — neutral copy; never instructs users to edit source (DEMO-14)
-  unknownKindBody: 'This app can\'t answer this kind of step ({{kind}}) yet, so it can\'t be completed here.',
+  unknownKindBody: 'This request can\'t be answered here. Ask whoever runs this workspace to update the app.',
+  credentialTitle: 'Connect {{provider}}',
+  credentialAnAccount: 'an account',
+  credentialBody: 'This needs access to {{provider}} before it can continue.',
+  credentialConnect: 'Connect',
   timerWaits: 'This run is waiting on a timer and resumes on its own.',
+  externalEventWaits: 'This run is waiting for linked runs or an outside event, and continues on its own. There is nothing to do here.',
   timerWaitsUntil: 'This run is waiting on a timer and resumes on its own at {{when}}.',
   walkthroughStepBody: 'This run is a guided walkthrough step; it continues as someone plays the walkthrough.',
   walkthroughStepLink: 'Open Guided walkthroughs',

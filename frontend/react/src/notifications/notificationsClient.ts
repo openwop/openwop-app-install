@@ -117,10 +117,13 @@ export async function markAllNotificationsRead(): Promise<{ updated: number }> {
 }
 
 /** R3 IB-R2-2 — archive every READ row (server-side scope; one request). */
-export async function archiveReadNotifications(): Promise<{ updated: number }> {
+/** ADR 1125 D3 — `keep` (the inbox's open requests) is left in place. */
+export async function archiveReadNotifications(keep: readonly string[] = []): Promise<{ updated: number }> {
   return jsonFetch<{ updated: number }>(
     `/host/openwop-app/notifications:archive-read`,
-    { method: 'POST' },
+    keep.length > 0
+      ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ keep }) }
+      : { method: 'POST' },
   );
 }
 

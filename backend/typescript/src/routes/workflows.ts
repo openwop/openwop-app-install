@@ -21,9 +21,12 @@ import type { Express, Request, Response } from 'express';
 import { OpenwopError } from '../types.js';
 import { validateWorkflowDefinition, WORKFLOW_ID_PATTERN } from '../host/workflowDefinitionValidation.js';
 import type { HostAdapterSuite } from '../host/index.js';
-import { tenantOf } from '../host/requestSubject.js';
+import { callerSubject, isOwnPersonalWorkspace, tenantOf } from '../host/requestSubject.js';
+import { actingAccess, callerTenantAccess } from '../host/actingAccess.js';
+import { getOrg } from '../host/accessControlService.js';
+import { appendAudit } from '../host/auditChainService.js';
 import { requireWorkflowWrite } from '../host/workflowWriteAuthority.js';
-import { recordOwnership, listOwned, getOwned, isWorkflowForeignTo, PUBLIC_WORKFLOW_ID, isSharedWorkflowId, WORKFLOW_SUBJECT_PATTERN } from '../host/workflowOwnership.js';
+import { recordOwnership, listOwned, getOwned, isWorkflowForeignTo, PUBLIC_WORKFLOW_ID, isSharedWorkflowId, WORKFLOW_SUBJECT_PATTERN, stampOwnershipClientOnce } from '../host/workflowOwnership.js';
 import { forkSharedWorkflow, retryPendingRepoints, forkOfShared, CANVAS_PRISTINE_HEADER } from '../host/sharedWorkflowFork.js';
 import { lifecycleOf, withLifecycle } from '../host/workflowLifecycle.js';
 import { registerWorkflowComposeTool, registerWorkflowProposeTool, registerComposedWorkflowDecisionHandler } from '../host/workflowComposeTool.js';
@@ -51,7 +54,7 @@ import { RETIRED_CHAIN_ALIASES } from '../features/walkthroughs/walkthroughIds.j
 import { getToggleDefault } from '../host/featureToggles/registry.js';
 import { buildNodeCatalog, requiredConfigKeysFor } from '../host/nodeCatalogBuilder.js';
 import { assertInstallable, installFromConfiguredRegistry } from '../packs/installLane.js';
-import { requireSuperadmin } from '../host/superadmin.js';
+import { isSuperadmin, requireSuperadmin } from '../host/superadmin.js';
 
 import type { WorkflowDefinition } from '../executor/types.js';
 import { isServerMintedWorkflowId, workflowKind } from '../host/workflowId.js';
@@ -59,6 +62,7 @@ import { createLogger } from '../observability/logger.js';
 import { getChainBackedWorkflow } from '../host/chainBackedWorkflows.js';
 import { resolveCallerDisplayName } from '../host/chatContext.js';
 import { assessWorkflowAvailability } from '../host/workflowDemoAvailability.js';
+import { assertWorkflowClientAccess, filterClientReadableWorkflows, resolveInstantiateClient, workflowClientReader } from '../host/workflowClientAccess.js';
 import { getNodeRegistry } from '../executor/nodeRegistry.js';
 
 const log = createLogger('routes.workflows');
@@ -280,7 +284,8 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
       // that matters is the GLOBAL registry consumers (P1). The Draft chip
       // rides the `transient` field.
       const includeArchived = req.query.includeArchived === 'true';
-      const visible = owned.filter((o) => includeArchived || !o.archivedAt);
+      // ADR 1132 — drop the definitions for a client the caller may not read.
+      const visible = (await filterClientReadableWorkflows(req, owned)).filter((o) => includeArchived || !o.archivedAt);
       // ADR 0482 §6 — the dashboard budget chip data, joined via TWO tenant
       // prefix reads total (budget store + today's spend-day rows), never a
       // per-row point-read fan-out. Fail-soft: a budget-store read error
@@ -343,6 +348,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
   // endpoints.md §"Error envelope"`.
   app.get('/workflows/:workflowId', async (req, res, next) => {
     try {
+      await assertWorkflowClientAccess(req, req.params.workflowId); // ADR 1132
       const wf = await deps.hostSuite.workflowCatalog.getWorkflow(req.params.workflowId);
       if (!wf) {
         throw new OpenwopError(
@@ -377,6 +383,8 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
       await requireWorkflowWrite(req); // ADR 0770 D1
       const def = validateWorkflowDefinition(req.body);
       await assertNoDisabledPacks(def, tenantOf(req)); // ADR 0194 P3 (403 + disabledPacks)
+      // ADR 1132 — overwriting a client's definition needs write in that client.
+      await assertWorkflowClientAccess(req, def.workflowId, 'workspace:write');
 
       // ADR 0440 P4 — the write half of the M7 tenant-isolation fix. Without
       // this, any tenant could OVERWRITE another tenant's definition by POSTing
@@ -583,6 +591,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
 
   app.delete('/host/openwop-app/workflows/:workflowId', async (req, res, next) => {
     try {
+      await assertWorkflowClientAccess(req, req.params.workflowId, 'workspace:write'); // ADR 1132
       const id = req.params.workflowId;
       if (!WORKFLOW_ID_PATTERN.test(id)) {
         throw new OpenwopError('validation_error', 'Invalid workflowId.', 400, { workflowId: id });
@@ -626,6 +635,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
           throw new OpenwopError('validation_error', 'Invalid workflowId.', 400, { workflowId: id });
         }
         await requireWorkflowWrite(req); // ADR 0770 D1
+        await assertWorkflowClientAccess(req, id, 'workspace:write'); // ADR 1132
         const tenantId = tenantOf(req);
         const owned = await getOwned(tenantId, id);
         const def = owned ? await getRegisteredWorkflowAsync(id) : null;
@@ -741,9 +751,86 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
   // ADR 0476 §2 — fleet insights: ONE bounded aggregation over the caller's
   // tenant's run rows (no per-workflow N+1, no durable read-model). The
   // response DISCLOSES the window; the FE labels stats with it.
+  // ADR 1132 D6 — definitions from before the stamp stay readable tenant-wide.
+  // A workspace admin finds them here (ids and names only) and stamps each one
+  // with its client, once. Root admins only: an org admin cannot claim a
+  // definition for their own client, which would take it away from the others.
+  const requireRootMemberAdmin = async (req: Parameters<Parameters<Express['post']>[1]>[0]): Promise<void> => {
+    if (isSuperadmin(req) || req.principal?.tenants?.includes('*') === true || isOwnPersonalWorkspace(req)) return;
+    const access = await actingAccess(req, await callerTenantAccess(req));
+    if (!access.scopes.includes('host:members:manage')) {
+      throw new OpenwopError('forbidden_scope', 'Only a workspace admin can assign a workflow to a client.', 403, { requiredScope: 'host:members:manage' });
+    }
+  };
+  app.get('/host/openwop-app/workflows/unstamped', async (req, res, next) => {
+    try {
+      await requireRootMemberAdmin(req);
+      const rows = (await listOwned(tenantOf(req))).filter((o) => o.clientOrgId === undefined && !o.archivedAt);
+      res.json({ workflows: rows.map((o) => ({ workflowId: o.workflowId, ...(o.name !== undefined ? { name: o.name } : {}) })) });
+    } catch (err) { next(err); }
+  });
+  // ADR 1132 D5/D6 — bindings made before the binding-create floor were never
+  // checked. This lists every trigger subscription, kanban column or card, and
+  // schedule that launches a client's definition, with its owner where the store
+  // records one, so an operator can review them. Read-only; ids and names only.
+  app.get('/host/openwop-app/workflows/client-bindings', async (req, res, next) => {
+    try {
+      await requireRootMemberAdmin(req);
+      const tenantId = tenantOf(req);
+      const stamped = new Map((await listOwned(tenantId)).filter((o) => o.clientOrgId !== undefined).map((o) => [o.workflowId, o]));
+      type Binding = { kind: 'trigger' | 'kanban-column' | 'kanban-card' | 'schedule'; bindingId: string; name?: string; workflowId: string; workflowName?: string; clientOrgId: string; owner: string | null };
+      const out: Binding[] = [];
+      const push = (kind: Binding['kind'], bindingId: string, workflowId: string | undefined, name: string | undefined, owner: string | undefined): void => {
+        const row = workflowId ? stamped.get(workflowId) : undefined;
+        if (!row || !workflowId) return;
+        out.push({ kind, bindingId, workflowId, clientOrgId: row.clientOrgId!, owner: owner ?? null, ...(name ? { name } : {}), ...(row.name ? { workflowName: row.name } : {}) });
+      };
+      if (stamped.size > 0) {
+        const { listSubscriptions } = await import('../host/triggerBridgeService.js');
+        for (const sub of await listSubscriptions(tenantId)) push('trigger', sub.subscriptionId, sub.workflowId, sub.label, undefined);
+        const { listBoards, listCards, boardSubject } = await import('../host/kanbanService.js');
+        for (const board of await listBoards(tenantId)) {
+          const boardOwner = boardSubject(board);
+          const owner = boardOwner ? `${boardOwner.kind}:${boardOwner.id}` : undefined;
+          for (const col of board.columns) push('kanban-column', `${board.id}/${col.id}`, col.triggerWorkflowId, `${board.name} / ${col.name}`, owner);
+          for (const card of await listCards(board.id)) push('kanban-card', card.id, card.workflowId, card.title, card.createdBy);
+        }
+        const { listJobs } = await import('../host/schedulingService.js');
+        for (const job of await listJobs(tenantId)) push('schedule', job.jobId, job.workflowId, undefined, job.ownerUserId);
+      }
+      res.json({ bindings: out });
+    } catch (err) { next(err); }
+  });
+  app.post('/host/openwop-app/workflows/:workflowId/client', async (req, res, next) => {
+    try {
+      await requireRootMemberAdmin(req);
+      const tenantId = tenantOf(req);
+      const clientOrgId = (req.body as { clientOrgId?: unknown } | undefined)?.clientOrgId;
+      if (typeof clientOrgId !== 'string' || clientOrgId.length === 0) throw new OpenwopError('validation_error', 'clientOrgId is required.', 400, { field: 'clientOrgId' });
+      const org = await getOrg(clientOrgId);
+      if (!org || org.tenantId !== tenantId || clientOrgId === tenantId) throw new OpenwopError('not_found', 'Client not found.', 404, { field: 'clientOrgId' });
+      const outcome = await stampOwnershipClientOnce(tenantId, req.params.workflowId, clientOrgId);
+      if (outcome === 'missing') throw new OpenwopError('workflow_not_found', 'workflow not found', 404, { workflowId: req.params.workflowId });
+      if (outcome === 'already') throw new OpenwopError('conflict', 'This workflow is already assigned to a client, and an assignment is never changed.', 409, { workflowId: req.params.workflowId, reason: 'client_already_set' });
+      const actor = callerSubject(req);
+      try {
+        await appendAudit(tenantId, 'security.workflow.client-stamped', { workflowId: req.params.workflowId, clientOrgId, ...(actor ? { actor } : {}) });
+      } catch (err) {
+        log.warn('workflow_client_stamp_audit_failed', { tenantId, workflowId: req.params.workflowId, error: err instanceof Error ? err.message : String(err) });
+      }
+      res.json({ workflowId: req.params.workflowId, clientOrgId });
+    } catch (err) { next(err); }
+  });
+
   app.get('/host/openwop-app/workflows/stats', async (req, res, next) => {
     try {
-      res.json(await aggregateFleetStats(deps.storage, tenantOf(req)));
+      const stats = await aggregateFleetStats(deps.storage, tenantOf(req));
+      // ADR 1132 — the cache is tenant-wide; the caller sees only the rows of definitions they may read.
+      const owned = new Map((await listOwned(tenantOf(req))).map((o) => [o.workflowId, o]));
+      const may = workflowClientReader(req);
+      const rows = [];
+      for (const w of stats.workflows) if (await may(owned.get(w.workflowId))) rows.push(w);
+      res.json({ ...stats, workflows: rows });
     } catch (err) { next(err); }
   });
 
@@ -764,7 +851,9 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
           // and an unknown one cost the same reads (as resolveTenantWorkflow).
           const foreign = await isForeignOwned(tenantId, req.principal, workflowId);
           const wf = await deps.hostSuite.workflowCatalog.getWorkflow(workflowId);
-          if (!wf || foreign) return null;
+          // ADR 1132 — another client's definition reads as unknown, like a foreign one.
+          const clientOk = await assertWorkflowClientAccess(req, workflowId).then(() => true, () => false);
+          if (!wf || foreign || !clientOk) return null;
           return wf.definition as WorkflowDefinition;
         },
         isResolvable: (typeId) => getNodeRegistry().isResolvable(typeId),
@@ -778,6 +867,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
   // a STATIC order-of-magnitude floor from the head's AI-node composition.
   app.get('/host/openwop-app/workflows/:workflowId/estimate', async (req, res, next) => {
     try {
+      await assertWorkflowClientAccess(req, req.params.workflowId); // ADR 1132
       const id = req.params.workflowId ?? '';
       const owned = id ? await getOwned(tenantOf(req), id) : null;
       const def = owned ? await getRegisteredWorkflowAsync(id) : null;
@@ -793,6 +883,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
   // Registered at the canonical `/host/openwop-app/…` root (ADR 0652).
   app.get('/host/openwop-app/workflows/:workflowId/head', async (req, res, next) => {
     try {
+      await assertWorkflowClientAccess(req, req.params.workflowId); // ADR 1132
       const id = req.params.workflowId ?? '';
       if (!WORKFLOW_ID_PATTERN.test(id)) throw new OpenwopError('validation_error', 'Invalid workflowId.', 400, { workflowId: id });
       if (!(await getOwned(tenantOf(req), id))) throw new OpenwopError('not_found', 'workflow not found', 404, { workflowId: id });
@@ -812,6 +903,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
   // foreign/unknown ids are an indistinguishable 404).
   app.get('/host/openwop-app/workflows/:workflowId/revisions', async (req, res, next) => {
     try {
+      await assertWorkflowClientAccess(req, req.params.workflowId); // ADR 1132
       const id = req.params.workflowId ?? '';
       if (!WORKFLOW_ID_PATTERN.test(id)) throw new OpenwopError('validation_error', 'Invalid workflowId.', 400, { workflowId: id });
       const tenantId = tenantOf(req);
@@ -905,6 +997,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
   // recordRevision — history is append-only; the restored row re-heads by seq).
   app.post('/host/openwop-app/workflows/:workflowId/rollback', async (req, res, next) => {
     try {
+      await assertWorkflowClientAccess(req, req.params.workflowId, 'workspace:write'); // ADR 1132
       const id = req.params.workflowId ?? '';
       if (!WORKFLOW_ID_PATTERN.test(id)) throw new OpenwopError('validation_error', 'Invalid workflowId.', 400, { workflowId: id });
       const revisionHash = (req.body as { revisionHash?: unknown } | undefined)?.revisionHash;
@@ -1026,7 +1119,14 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
   app.post('/host/openwop-app/workflows/from-chain', async (req, res, next) => {
     try {
       await requireWorkflowWrite(req); // ADR 0770 D1
-      const body = (req.body ?? {}) as { chainId?: unknown; params?: unknown; deferred?: unknown; subject?: unknown };
+      const body = (req.body ?? {}) as { chainId?: unknown; params?: unknown; deferred?: unknown; subject?: unknown; clientOrgId?: unknown };
+      if (body.clientOrgId !== undefined && (typeof body.clientOrgId !== 'string' || body.clientOrgId.length === 0)) {
+        throw new OpenwopError('validation_error', 'clientOrgId must be an organization id.', 400, { field: 'clientOrgId' });
+      }
+      // ADR 1132 D1 — the client this definition is for: act-as, else a client-only
+      // writer's one client, else what the caller named. Frozen params can be that
+      // client's own content, so the stamp decides who may read it.
+      const clientOrgId = await resolveInstantiateClient(req, typeof body.clientOrgId === 'string' ? body.clientOrgId : undefined);
       if (typeof body.chainId !== 'string') {
         throw new OpenwopError('validation_error', 'chainId is required.', 400, {});
       }
@@ -1071,6 +1171,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
       // install, so the two can never drift (architect H1).
       const { def, workflowId, coRegisteredChildIds, reusedChildIds } = await instantiateOwnedChain({
         tenantId: tenantOf(req),
+        ...(clientOrgId ? { clientOrgId } : {}),
         chain: found.chain,
         params,
         deferred,

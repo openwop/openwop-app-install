@@ -6,9 +6,14 @@
  * and a "nothing queued" message would be a lie about why the list is absent.
  * That is also the state a component test is uniquely able to catch — the server
  * suites cannot see what the panel chooses to draw.
+ *
+ * Also pinned: a FAILED read says so instead of looking like "off" (UPN-2), the
+ * disclosure state is announced (`aria-expanded`), and cards HELD after a stopped
+ * or failed run are listed apart from the order with how to release them
+ * (ADR 0963 D3), including when every To Do card is held.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react';
 import type { HeldCard, RankedCard, RankingResult } from '../workSelectionClient.js';
 
 const { getBoardRanking } = vi.hoisted(() => ({
@@ -116,13 +121,21 @@ describe('AgentUpNextPanel', () => {
     render(<AgentUpNextPanel boardId="b1" />);
 
     await screen.findByText(/Crashed thing/);
-    expect(screen.getAllByRole('list')[0]!.textContent, 'a held card is not in the order').not.toContain('Crashed thing');
-    expect(screen.getByRole('group', { name: 'Held' }).textContent).toContain('Clear the note on a card to release it');
+    // The order is the <ol>; anchor on it (and on its own card) so the absence
+    // check reads the order list, not whichever list happens to come first.
+    const order = screen.getAllByRole('list')[0]!;
+    expect(order.tagName).toBe('OL');
+    expect(order.textContent).toContain('Ship the thing');
+    expect(order.textContent, 'a held card is not in the order').not.toContain('Crashed thing');
+    const heldGroup = screen.getByRole('group', { name: 'Held' });
+    expect(within(heldGroup).getByRole('button', { name: 'Crashed thing' })).toBeTruthy();
+    expect(heldGroup.textContent).toContain('Clear the note on a card to release it');
   });
 
   it('still renders when every To Do card is held', async () => {
     getBoardRanking.mockResolvedValue(ok([], [{ cardId: 'h1', title: 'Crashed thing' }]));
     render(<AgentUpNextPanel boardId="b1" />);
-    expect(await screen.findByText(/Crashed thing/)).toBeTruthy();
+    const heldGroup = await screen.findByRole('group', { name: 'Held' });
+    expect(within(heldGroup).getByRole('button', { name: 'Crashed thing' })).toBeTruthy();
   });
 });

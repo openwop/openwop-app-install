@@ -21,11 +21,14 @@
  * otpauth URI each turn a case red.
  *
  * Disclosure + naming (2026-10-23), sabotage-witnessed: rendering the key
- * outside the <details>, not opening it when the QR fails, ignoring the typed
- * name, or not resetting it (on cancel and on start) each turn a case red.
+ * outside the <details>, not opening it when the QR fails, or ignoring the typed
+ * name each turn a case red. The name is reset on cancel AND on start: a double
+ * guard (either reset alone keeps the next form empty), so it is witnessed by
+ * breaking both at once. The same holds for the QR: `clearQr()` runs on cancel,
+ * on completion and on start, and only removing all of them reds a case.
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, cleanup, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, cleanup, fireEvent, act } from '@testing-library/react';
 import { SecurityPanel } from '../SecurityPanel.js';
 import type { AuthUser, MfaFactor } from '../../../auth/firebase.js';
 
@@ -139,7 +142,9 @@ describe('SecurityPanel — backup-factor recovery affordance (ADR 0389 § Corre
     mocks.getCurrentUser.mockReturnValue(USER);
     mocks.listMfaFactors.mockResolvedValue([factor('p1', 'phone')]);
     render(<SecurityPanel />);
-    await waitFor(() => expect(setUpButton()).toBeTruthy());
+    // The claim is that enrollment is still OFFERED: the button is present and usable.
+    const setUp = await screen.findByRole('button', { name: /Set up authenticator app/i });
+    expect((setUp as HTMLButtonElement).disabled).toBe(false);
   });
 
   it('zero factors → neither backup message (nothing to back up yet), and the set-up button', async () => {
@@ -241,8 +246,9 @@ describe('SecurityPanel — enrollment QR code (the otpauth URI carries the TOTP
     fireEvent.click(await screen.findByRole('button', { name: /Set up authenticator app/i }));
     await screen.findByText('KRSX G5CT MVRX EZLU');
     // The FIRST secret's QR now finishes — it must not appear beside the second key.
-    finishFirst('data:image/png;base64,FIRST');
-    await new Promise((r) => setTimeout(r, 0));
+    // `act` flushes the encode's continuation AND the render it would cause, so
+    // the absence below is read after the late result had its chance to paint.
+    await act(async () => { finishFirst('data:image/png;base64,FIRST'); });
     expect(screen.queryByRole('img', { name: /QR code to scan/i })).toBeNull();
   });
 
@@ -258,11 +264,14 @@ describe('SecurityPanel — enrollment QR code (the otpauth URI carries the TOTP
     const setLocal = vi.spyOn(Storage.prototype, 'setItem');
     const logs = (['log', 'info', 'warn', 'error', 'debug'] as const).map((m) => vi.spyOn(console, m).mockImplementation(() => {}));
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    await startEnroll();
-    await screen.findByRole('img', { name: /QR code to scan/i });
-    const seen = JSON.stringify([setLocal.mock.calls, ...logs.map((l) => l.mock.calls), fetchSpy.mock.calls]);
-    expect(seen).not.toContain(SECRET);
-    setLocal.mockRestore(); logs.forEach((l) => l.mockRestore()); fetchSpy.mockRestore();
+    try {
+      await startEnroll();
+      await screen.findByRole('img', { name: /QR code to scan/i });
+      const seen = JSON.stringify([setLocal.mock.calls, ...logs.map((l) => l.mock.calls), fetchSpy.mock.calls]);
+      expect(seen).not.toContain(SECRET);
+    } finally {
+      setLocal.mockRestore(); logs.forEach((l) => l.mockRestore()); fetchSpy.mockRestore();
+    }
   });
 });
 

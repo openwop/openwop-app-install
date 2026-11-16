@@ -134,7 +134,13 @@ describe('the free default a signed-out visitor cannot use', () => {
     await waitFor(() => expect(result.current.signInRequired).toBe(true));
     putActiveConfig.mockRejectedValue(new Error('binding refused'));
     await expect(act(async () => { await result.current.setConfig(GOOGLE); })).rejects.toThrow('binding refused');
+    // A rejected act() does not flush what was queued inside it; flush, so a binding
+    // painted before the refused PUT would be committed and seen here.
+    await drain();
     expect(result.current.config).toMatchObject(FREE);
+    // Nothing was cached either: the managed default was never a stored choice, and
+    // the refused binding must not reach the first-paint cache.
+    expect(localStorage.getItem(LS_KEY)).toBeNull();
     expect(result.current.signInRequired).toBe(true);
     expect(result.current.stored).toBe(false);
   });
@@ -226,6 +232,10 @@ describe('ADR 0517 fix D — a lapsed session is not a missing key', () => {
 
     const { result } = renderHook(() => useBYOKConfig());
     await waitFor(() => expect(result.current.status).toBe('needs-key'));
+    // The wizard starts from nothing: no binding painted, none cached, none written.
+    expect(result.current.config).toBeNull();
+    expect(localStorage.getItem(LS_KEY)).toBeNull();
+    expect(putActiveConfig).not.toHaveBeenCalled();
   });
 });
 
@@ -241,6 +251,7 @@ describe('ADR 0517 fix C — the browser-local pointer migrates to the server', 
     const { result } = renderHook(() => useBYOKConfig());
     await waitFor(() => expect(result.current.status).toBe('ready'));
     expect(putActiveConfig).toHaveBeenCalledWith(expect.objectContaining({ credentialRef: 'byok:google' }));
+    expect(putActiveConfig).toHaveBeenCalledTimes(1);
   });
 
   it('migrates a HISTORICAL timestamped ref onto the binding', async () => {
@@ -278,6 +289,11 @@ describe('ADR 0517 fix C — the browser-local pointer migrates to the server', 
 
     const { result } = renderHook(() => useBYOKConfig());
     await waitFor(() => expect(result.current.status).toBe('needs-key'));
+    // The heal WAS attempted (so this is the refusal path, not "nothing to adopt"),
+    // and the refused binding is neither painted nor left cached.
+    expect(putActiveConfig).toHaveBeenCalledTimes(1);
+    expect(result.current.config).toBeNull();
+    expect(localStorage.getItem(LS_KEY)).toBeNull();
   });
 
   it('heals a STALE SERVER binding whose key was deleted, using another stored key', async () => {
@@ -398,6 +414,9 @@ describe('ADR 0517 Phase E — the surface waits for auth, and heals when it lan
     subject = { status: 'user', subject: 'user:abc' };
     rerender();
     await waitFor(() => expect(result.current.status).toBe('ready'));
+    // Exactly one read, made for the settled identity, and its binding is painted.
+    expect(getActiveConfig).toHaveBeenCalledTimes(1);
+    expect(result.current.config).toMatchObject(GOOGLE);
   });
 
   it('does not cry "session expired" while the auth layer says we ARE signed in', async () => {
@@ -447,6 +466,10 @@ describe('ADR 0517 Phase E — the surface waits for auth, and heals when it lan
     // Advance past the 1.2s grace, then assert a retry happened at all.
     await act(async () => { await vi.advanceTimersByTimeAsync(1300); });
     await waitFor(() => expect(getActiveConfig.mock.calls.length).toBeGreaterThan(reAuthBaselineCalls));
+    // ...and it is still ONE retry for the mount: the second StrictMode read finds the
+    // grace already taken, and the retry itself does not wait again.
+    await drain();
+    expect(getActiveConfig).toHaveBeenCalledTimes(reAuthBaselineCalls + 1);
   });
 
   it('still reports session-expired when the re-auth genuinely does not land', async () => {

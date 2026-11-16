@@ -25,6 +25,7 @@ import { useOrgSelection } from '../../ui/useOrgSelection.js';
 import { formatCurrencyMinor, formatDateTime, formatNumber } from '../../i18n/format.js';
 import { ArrowLeftIcon, MegaphoneIcon, PackageIcon, SparklesIcon } from '../../ui/icons/index.js';
 import { getProductsByIds, listProductsPage, type Product } from '../commerce/commerceClient.js';
+import { stageComposerDraft } from '../../chat/composerSeed.js';
 import { CampaignLedgerSection } from './CampaignLedgerSection.js';
 import { StatusChip } from './CampaignStatusChip.js';
 import {
@@ -84,7 +85,14 @@ function CampaignDetail({ campaignId }: { campaignId: string }): JSX.Element {
   useEffect(() => { void load(); }, [load]);
 
   const back = (): void => { void navigate('/campaigns'); };
-  const run = (): void => { void navigate(`/?agent=${encodeURIComponent(CAMPAIGN_STRATEGIST_AGENT)}`); };
+  // CC-HUB-2 — the Strategist used to open on an empty composer, so the person had
+  // to say which campaign they meant. Stage a one-shot draft naming it (the CC-UX-2
+  // / ADR 0334 5b precedent). It asks for readiness first and never starts the run:
+  // the person still sends it, and the agent confirms before it ignites anything.
+  const run = (): void => {
+    if (campaign) stageComposerDraft(t('strategistRunDraft', { name: campaign.name, campaignId: campaign.id, briefId: campaign.briefId, orgId: campaign.orgId }));
+    void navigate(`/?agent=${encodeURIComponent(CAMPAIGN_STRATEGIST_AGENT)}`);
+  };
 
   if (state === 'loading') return <StateCard icon={<MegaphoneIcon size={20} />} title={t('loadingCampaign')} loading />;
   if (state === 'disabled') return <StateCard icon={<MegaphoneIcon size={22} />} title={t('notEnabledTitle')} body={t('notEnabledBody')} />;

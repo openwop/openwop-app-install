@@ -17,6 +17,7 @@ vi.mock('../../features/connections/connectionsClient.js', () => ({
   listConnections: () => Promise.resolve([]),
   listProviders: () => Promise.resolve([]),
 }));
+vi.mock('../../client/accessClient.js', async (orig) => ({ ...await orig<Record<string, unknown>>(), listOrgs: vi.fn(async () => []) }));
 
 const { TemplatePreflightModal } = await import('../TemplatePreflightModal.js');
 

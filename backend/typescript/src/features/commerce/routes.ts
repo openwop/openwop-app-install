@@ -35,7 +35,7 @@ import { recordCommerceAction } from './telemetry.js';
 import { listPriceLists, createPriceList, updatePriceList, deletePriceList, resolvePrice, resolveSellable } from './pricing.js';
 import { listQuotes, getQuote, createQuote, reviseQuote, sendQuote, declineQuote, acceptQuote, listQuoteRevisions, projectQuotePublic, QUOTE_STATUSES, type QuoteStatus, type QuoteLineInput } from './quotes.js';
 import { assertLiveLinkFor } from '../sharing/sharingService.js';
-import { listAffiliates, createAffiliate, recordPayout, listPayouts, affiliateCodeExists, payoutExportRows } from './affiliate.js';
+import { listAffiliates, createAffiliate, recordPayout, redactAffiliate, listPayouts, affiliateCodeExists, payoutExportRows } from './affiliate.js';
 import { listProductFieldDefs, createProductFieldDef, deleteProductFieldDef } from './productFields.js';
 import { subscribeToProduct, listProductSubscriptions, cancelSubscription, runSubscriptionCycle } from './subscriptions.js';
 import { sendError } from '../../middleware/errorEnvelope.js';
@@ -90,6 +90,14 @@ function publicCustomFields(defs: { key: string; label: string }[], cf?: Record<
  * products and taking orders (gating-audit commerce #1, a kill-switch hole).
  * The shopper is never refused for their own state, only for the merchant's.
  */
+/** ADR 1122 P1b — whether this tenant's storefront serves the public now: the same
+ *  toggle + owner-lapse check `publicStoreOrg` applies, exported so the storefront's
+ *  public-asset provider follows the lane's own decision instead of applying the
+ *  policy itself (ADR 0820 §7 keeps the set of files that apply it reviewed). */
+export async function storefrontOwnerServes(tenantId: string): Promise<boolean> {
+  return (await checkOwnerPublicAccess('commerce', tenantId)).serve;
+}
+
 async function publicStoreOrg(orgId: string): Promise<NonNullable<Awaited<ReturnType<typeof getOrg>>>> {
   const org = await getOrg(orgId);
   if (!org) throw new OpenwopError('not_found', 'Store not found.', 404, {});
@@ -808,6 +816,11 @@ export function registerCommerceRoutes(deps: RouteDeps): void {
 
   app.post(`${BASE}/affiliates/:affiliateId/payout`, async (req, res, next) => {
     try { const ctx = await authz(req, 'workspace:write'); res.status(201).json(await recordPayout(ctx.tenantId, ctx.orgId, req.params.affiliateId)); } catch (err) { next(err); }
+  });
+  // CHAN-F19 #5 (ADR 0464 §9) — an affiliate's DSAR: the name becomes `[erased]`; the
+  // code, ledger and payouts stay. It cannot be undone, so it is an org-management act.
+  app.post(`${BASE}/affiliates/:affiliateId/redact`, async (req, res, next) => {
+    try { const ctx = await authz(req, 'host:org:manage'); res.json(await redactAffiliate(ctx.tenantId, ctx.orgId, req.params.affiliateId, ctx.user.userId)); } catch (err) { next(err); }
   });
   app.get(`${BASE}/payouts`, async (req, res, next) => {
     try { const ctx = await authz(req, 'workspace:read'); res.json({ payouts: await listPayouts(ctx.tenantId, ctx.orgId) }); } catch (err) { next(err); }

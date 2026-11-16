@@ -7,7 +7,7 @@ import type { ChatSessionHeader } from '../../../client/chatSessionsClient.js';
 import type { BYOKActiveConfig } from '../../../byok/lib/useBYOKConfig.js';
 
 /**
- * ADR 0140 P6 deck-level integration: restore + lazy-mount-then-keep-alive + dead-tab
+ * ADR 0140 P6 (+ ADR 0978 D4 subject) deck-level integration: restore + lazy-mount-then-keep-alive + dead-tab
  * prune. TabSession is stubbed (presence == mounted) so the test targets the deck's
  * mount/prune behaviour, not the conversation machinery. The stub also LOGS every
  * mount, because "never mounted" (no doomed history fetch) is not the same claim as
@@ -68,7 +68,10 @@ function sessionsStub(over: Partial<UseChatSessionsResult> = {}): UseChatSession
   };
 }
 const CONFIG: BYOKActiveConfig = { provider: 'demo', model: 'demo-model', credentialRef: 'managed:demo' };
-const mountedSids = () => screen.queryAllByTestId('tabsession').map((el) => el.getAttribute('data-sid'));
+// ADR 0978 D4 — the per-workspace subject the deck reads (uid u1 @ the mocked ws-test).
+// The legacy uid-only adoption path is covered by TabChatDeck.adr0978.test.tsx.
+const SUBJECT = 'u1@ws-test';
+const mountedSids = () =>screen.queryAllByTestId('tabsession').map((el) => el.getAttribute('data-sid'));
 
 beforeEach(() => {
   localStorage.clear();
@@ -80,7 +83,7 @@ describe('TabChatDeck P6 — lazy-mount-then-keep-alive', () => {
   it('a restored BACKGROUND tab stays unmounted until visited, then keep-alive', async () => {
     // Both restored conversations exist server-side (so the prune keeps them).
     sessionsState = { sessions: [row({ sessionId: 'a' }), row({ sessionId: 'b' })], isLoading: false, error: null };
-    saveTabDeck({ tabs: [{ sessionId: 'a', pinned: false, lastActiveSeq: 2 }, { sessionId: 'b', pinned: false, lastActiveSeq: 1 }], activeSessionId: 'a', seq: 2 }, 'u1');
+    saveTabDeck({ tabs: [{ sessionId: 'a', pinned: false, lastActiveSeq: 2 }, { sessionId: 'b', pinned: false, lastActiveSeq: 1 }], activeSessionId: 'a', seq: 2 }, SUBJECT);
 
     await act(async () => { render(<MemoryRouter><TabChatDeck config={CONFIG} byokStored onReconfigureBYOK={vi.fn()} /></MemoryRouter>); });
     // Only the active tab 'a' is mounted; background 'b' is NOT.
@@ -101,7 +104,7 @@ describe('TabChatDeck P6 — lazy-mount-then-keep-alive', () => {
 describe('TabChatDeck P6 — dead-tab prune', () => {
   it('prunes a restored tab whose conversation no longer exists, on a clean sessions load', async () => {
     sessionsState = { sessions: [row({ sessionId: 'a' })], isLoading: false, error: null }; // 'b' is gone
-    saveTabDeck({ tabs: [{ sessionId: 'a', pinned: false, lastActiveSeq: 2 }, { sessionId: 'b', pinned: false, lastActiveSeq: 1 }], activeSessionId: 'a', seq: 2 }, 'u1');
+    saveTabDeck({ tabs: [{ sessionId: 'a', pinned: false, lastActiveSeq: 2 }, { sessionId: 'b', pinned: false, lastActiveSeq: 1 }], activeSessionId: 'a', seq: 2 }, SUBJECT);
 
     await act(async () => { render(<MemoryRouter><TabChatDeck config={CONFIG} byokStored onReconfigureBYOK={vi.fn()} /></MemoryRouter>); });
     // 'b' pruned (absent from the loaded list); 'a' survives.
@@ -114,7 +117,7 @@ describe('TabChatDeck P6 — dead-tab prune', () => {
     registerDeckTabKind({ kind: 'test-tool', label: () => 'Tool', featureId: 'claude-code', Component: () => <div data-testid="kind-surface" />, onClose });
     try {
       sessionsState = { sessions: [row({ sessionId: 'a' })], isLoading: false, error: null }; // the kind tab is NOT a conversation
-      saveTabDeck({ tabs: [{ sessionId: 'a', pinned: false, lastActiveSeq: 1 }, { sessionId: 'tool-1', pinned: false, lastActiveSeq: 2, kind: 'test-tool' }], activeSessionId: 'tool-1', seq: 2 }, 'u1');
+      saveTabDeck({ tabs: [{ sessionId: 'a', pinned: false, lastActiveSeq: 1 }, { sessionId: 'tool-1', pinned: false, lastActiveSeq: 2, kind: 'test-tool' }], activeSessionId: 'tool-1', seq: 2 }, SUBJECT);
       await act(async () => { render(<MemoryRouter><TabChatDeck config={CONFIG} byokStored onReconfigureBYOK={vi.fn()} /></MemoryRouter>); });
       // The prune calls closeTab, never handleClose, so a kind's onClose is not
       // reachable from it today; this line guards a future prune→handleClose change.
@@ -126,7 +129,7 @@ describe('TabChatDeck P6 — dead-tab prune', () => {
 
   it('does NOT prune while the sessions list is still loading (offline safety)', async () => {
     sessionsState = { sessions: [], isLoading: true, error: null }; // not yet loaded
-    saveTabDeck({ tabs: [{ sessionId: 'a', pinned: false, lastActiveSeq: 2 }, { sessionId: 'b', pinned: false, lastActiveSeq: 1 }], activeSessionId: 'a', seq: 2 }, 'u1');
+    saveTabDeck({ tabs: [{ sessionId: 'a', pinned: false, lastActiveSeq: 2 }, { sessionId: 'b', pinned: false, lastActiveSeq: 1 }], activeSessionId: 'a', seq: 2 }, SUBJECT);
 
     await act(async () => { render(<MemoryRouter><TabChatDeck config={CONFIG} byokStored onReconfigureBYOK={vi.fn()} /></MemoryRouter>); });
     // Both restored tabs survive — pruning waits for a successful load.
@@ -148,7 +151,7 @@ describe('TabChatDeck P6 — restore mount-gate (no doomed messages fetch)', () 
     // not fail (w44 probe dp-gate-dead-r2). The gate is what holds 'dead' back during
     // the load window.
     sessionsState = { sessions: [], isLoading: true, error: null };
-    saveTabDeck({ tabs: [{ sessionId: 'dead', pinned: false, lastActiveSeq: 2 }, { sessionId: 'a', pinned: false, lastActiveSeq: 1 }], activeSessionId: 'dead', seq: 2 }, 'u1');
+    saveTabDeck({ tabs: [{ sessionId: 'dead', pinned: false, lastActiveSeq: 2 }, { sessionId: 'a', pinned: false, lastActiveSeq: 1 }], activeSessionId: 'dead', seq: 2 }, SUBJECT);
 
     const view = (): JSX.Element => <MemoryRouter><TabChatDeck config={CONFIG} byokStored onReconfigureBYOK={vi.fn()} /></MemoryRouter>;
     let rerender: (ui: JSX.Element) => void = () => undefined;
@@ -166,7 +169,7 @@ describe('TabChatDeck P6 — restore mount-gate (no doomed messages fetch)', () 
 
   it('gates a restored tab mount until the list resolves (nothing mounts mid-load)', async () => {
     sessionsState = { sessions: [], isLoading: true, error: null }; // list not yet resolved
-    saveTabDeck({ tabs: [{ sessionId: 'a', pinned: false, lastActiveSeq: 1 }], activeSessionId: 'a', seq: 1 }, 'u1');
+    saveTabDeck({ tabs: [{ sessionId: 'a', pinned: false, lastActiveSeq: 1 }], activeSessionId: 'a', seq: 1 }, SUBJECT);
 
     const view = (): JSX.Element => <MemoryRouter><TabChatDeck config={CONFIG} byokStored onReconfigureBYOK={vi.fn()} /></MemoryRouter>;
     let rerender: (ui: JSX.Element) => void = () => undefined;

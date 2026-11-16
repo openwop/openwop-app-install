@@ -9,7 +9,10 @@
  * Sabotage that turns it red: accept any non-empty password; drop `persistUnlocked`; never
  * disable the empty-password gate; gate mode "none"; render the mismatch error without
  * `role="alert"` (a conditionally mounted `status` is silent); let `SignInGate` render its
- * children while `loading`.
+ * children while `loading`, or once the session resolves signed out; never render them
+ * signed in; show the "not set up" error on a site that IS configured; name the vendor in
+ * that visitor-facing error; drop the operator's console warning (9e0ff0ec9, myndhyve.ai
+ * 2026-11-07). Re-probed in /grade-tests wave 116 (w116g3-ag-*).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent } from '@testing-library/react';
@@ -35,7 +38,7 @@ beforeEach(() => {
   brandMock.appGate.password = 'sekret';
   authMock.state = { user: null, loading: false, isConfigured: false };
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe('AppGate password mode', () => {
   it('hides children until the correct password is entered, then persists', () => {
@@ -88,14 +91,17 @@ describe('AppGate sign-in mode (GT-APPGATE-SIGNIN-1)', () => {
     authMock.state = { user: null, loading: false, isConfigured: true };
     render(<AppGate><div>SECRET CONTENT</div></AppGate>);
     expect(screen.queryByText('SECRET CONTENT')).toBeNull();
-    expect(screen.getByText('Sign in to open this workspace.')).toBeTruthy();
+    expect(screen.getByText('Sign in to open this workspace.').tagName).toBe('P');
+    // A configured site shows the wall with no "not set up" error.
+    expect(screen.queryAllByRole('alert')).toHaveLength(0);
   });
 
   it('signed in: the child renders', () => {
     brandMock.appGate.mode = 'sign-in';
     authMock.state = { user, loading: false, isConfigured: true };
     render(<AppGate><div>SECRET CONTENT</div></AppGate>);
-    expect(screen.getByText('SECRET CONTENT')).toBeTruthy();
+    expect(screen.getByText('SECRET CONTENT').tagName).toBe('DIV');
+    expect(screen.queryAllByRole('heading', { name: 'Sign in' })).toHaveLength(0);
   });
 
   // myndhyve.ai 2026-11-07: a visitor read "requires sign-in, but Firebase Auth is not
@@ -104,13 +110,16 @@ describe('AppGate sign-in mode (GT-APPGATE-SIGNIN-1)', () => {
   it('sign-in not configured: plain visitor copy, operator detail only in the console', () => {
     brandMock.appGate.mode = 'sign-in';
     authMock.state = { user: null, loading: false, isConfigured: false };
+    // Restored by the afterEach `vi.restoreAllMocks()`, even when an assertion fails.
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     render(<AppGate><div>SECRET CONTENT</div></AppGate>);
     expect(screen.queryByText('SECRET CONTENT')).toBeNull();
-    const alert = screen.getByRole('alert').textContent ?? '';
+    const alerts = screen.queryAllByRole('alert');
+    expect(alerts).toHaveLength(1);
+    const alert = alerts[0]!.textContent ?? '';
     expect(alert).toMatch(/isn’t set up on this site yet/);
     expect(alert).not.toMatch(/firebase|deployment|configured/i);
-    expect(warn.mock.calls.some((c) => /VITE_FIREBASE_/.test(String(c[0])))).toBe(true);
-    warn.mockRestore();
+    // Exactly one operator warning, naming the build variables.
+    expect(warn.mock.calls.filter((c) => /VITE_FIREBASE_/.test(String(c[0])))).toHaveLength(1);
   });
 });

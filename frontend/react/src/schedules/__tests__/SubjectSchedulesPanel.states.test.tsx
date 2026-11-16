@@ -6,8 +6,11 @@ import * as confirmModule from '../../ui/confirm.js';
 import { SubjectSchedulesPanel, type SubjectSchedulesClient, type SubjectScheduleRow } from '../SubjectSchedulesPanel.js';
 
 /**
- * The panel is shared by three subjects (projects, profiles, agents) and had NO test
- * at all, so both defects below shipped three times over.
+ * #2613 — the panel is shared by three subjects (projects, profiles, agents) and had
+ * NO test at all, so both defects below shipped three times over. The later blocks
+ * pin the skip-reason line (GEN-PRJ-1; every known reason, ADR 0775 P3/P3b, ADR 0908
+ * D8, ADR 0957 D2, reads as known, never "unrecognized"), the ADR 0787 contract, the
+ * ADR 0820 §7 lapse pause and the ADR 0815 D4 re-own confirmation.
  *
  *  1. `jobs` initialised to `[]` — indistinguishable from a successful empty read — so
  *     "No schedules yet" + its instruction rendered on the FIRST paint, before the list

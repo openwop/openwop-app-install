@@ -32,6 +32,14 @@
  * added signature header, `follow` redirects, the 3xx branch, the plaintext
  * seal, the CRLF credential check, the auth-over-token precedence, the
  * terminal strip, and the URL or credential added to the failure log.
+ *
+ * CHAN-F7 (ADR 1045 D6): a 1.0 config's push body is a 1.0 `StreamResponse`
+ * (`statusUpdate`, no `final`) as `application/a2a+json`, a 0.3 config keeps the
+ * 0.3 `TaskStatusUpdateEvent`; 1.0 Get/List/Delete return id, task and url only.
+ * Wave 112: every TASK_NOT_FOUND is pinned to its code (-32001), so two
+ * "same answer" checks cannot pass on two successes; the minted config ids
+ * must differ (a constant `pnc_` id is not random); and the "cannot read" Delete
+ * targets a REAL task in another tenant, whose config must survive the attempt.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -59,6 +67,9 @@ const SCHEME = 'Token';
 const SENTINEL = 'zq-push-sentinel-credential-Kx';
 
 const ALICE: A2aPrincipal = { tenantId: 'tenant-alice', principalId: 'p-alice', protocolVersion: '1.0' };
+const BOB: A2aPrincipal = { tenantId: 'tenant-bob', principalId: 'p-bob', protocolVersion: '1.0' };
+/** A2A 1.0 `TaskNotFoundError`. */
+const TASK_NOT_FOUND = -32001;
 
 let deps: A2aServiceDeps;
 let agent: MockAgent;
@@ -139,10 +150,10 @@ afterEach(async () => {
   await agent.close();
 });
 
-async function send10(method: string, params: Record<string, unknown>) {
+async function send10(method: string, params: Record<string, unknown>, principal: A2aPrincipal = ALICE) {
   return handleA2aRequest10(
     { jsonrpc: '2.0', id: 1, method, params },
-    { agentCard: {}, principal: ALICE, deps },
+    { agentCard: {}, principal, deps },
   );
 }
 
@@ -287,14 +298,15 @@ describe('CHAN-F7 / RFC 0214 — 1.0 Get, List and Delete of a push config', () 
     // Another config id, and an unknown task, answer the same TASK_NOT_FOUND.
     const wrongId = await send10('GetTaskPushNotificationConfig', { taskId, id: 'not-mine' });
     const unknownTask = await send10('GetTaskPushNotificationConfig', { taskId: 'task-that-does-not-exist', id: 'my-config' });
-    expect(wrongId.error?.code).toBe(unknownTask.error?.code);
+    expect(unknownTask.error?.code).toBe(TASK_NOT_FOUND);
+    expect(wrongId.error?.code).toBe(TASK_NOT_FOUND);
     expect(wrongId.result).toBeUndefined();
 
     expect((await send10('DeleteTaskPushNotificationConfig', { taskId, id: 'my-config' })).result).toEqual({});
     expect((await send10('DeleteTaskPushNotificationConfig', { taskId, id: 'my-config' })).result).toEqual({}); // idempotent
     expect((await getA2aTask(taskId))?.pushConfig).toBeUndefined(); // the sealed credential went with it
     expect((await send10('ListTaskPushNotificationConfigs', { taskId })).result).toEqual({ configs: [], nextPageToken: '' });
-    expect((await send10('GetTaskPushNotificationConfig', { taskId, id: 'my-config' })).error?.code).toBe(unknownTask.error?.code);
+    expect((await send10('GetTaskPushNotificationConfig', { taskId, id: 'my-config' })).error?.code).toBe(TASK_NOT_FOUND);
 
     // §A discard on delete: no push after Delete, even at the terminal transition.
     await finishRun(taskId);
@@ -306,12 +318,24 @@ describe('CHAN-F7 / RFC 0214 — 1.0 Get, List and Delete of a push config', () 
     const id = (created.result as { id?: string }).id ?? '';
     expect(id).toMatch(/^pnc_[0-9a-f]{16}$/);
     const odd = await taskWithPush({ id: 'tenant:alice/../x' });
-    expect((odd.created.result as { id?: string }).id).toMatch(/^pnc_[0-9a-f]{16}$/);
+    const oddId = (odd.created.result as { id?: string }).id ?? '';
+    expect(oddId).toMatch(/^pnc_[0-9a-f]{16}$/);
+    // Random, not a constant: two minted ids differ.
+    expect(oddId).not.toBe(id);
   });
 
   it('Delete on a task the caller cannot read answers as for an unknown task', async () => {
     const unknown = await send10('DeleteTaskPushNotificationConfig', { taskId: 'task-that-does-not-exist', id: 'x' });
     expect(unknown.result).toBeUndefined();
-    expect(unknown.error).toBeDefined();
+    expect(unknown.error?.code).toBe(TASK_NOT_FOUND);
+
+    // A real task in ANOTHER tenant: the same answer, and its config is untouched.
+    const { taskId } = await taskWithPush({ id: 'alice-config', authentication: { scheme: SCHEME, credentials: SENTINEL } });
+    const foreign = await send10('DeleteTaskPushNotificationConfig', { taskId, id: 'alice-config' }, BOB);
+    expect(foreign.result).toBeUndefined();
+    expect(foreign.error?.code).toBe(TASK_NOT_FOUND);
+    const kept = (await getA2aTask(taskId))?.pushConfig;
+    expect(kept?.id).toBe('alice-config');
+    expect(kept?.sealedAuthorization?.startsWith('a2apush:kms:v1:')).toBe(true);
   });
 });

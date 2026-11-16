@@ -450,11 +450,13 @@ export interface InstantiateResult {
 export async function instantiateChain(
   chainId: string,
   params?: Record<string, unknown>,
+  /** ADR 1132 — the client this copy is for; the server may also derive one. */
+  clientOrgId?: string,
 ): Promise<InstantiateResult> {
   const res = await fetch(FROM_CHAIN_URL, fetchOpts({
     method: 'POST',
     headers: authedHeaders({ 'content-type': 'application/json' }),
-    body: JSON.stringify({ chainId, ...(params ? { params } : {}) }),
+    body: JSON.stringify({ chainId, ...(params ? { params } : {}), ...(clientOrgId ? { clientOrgId } : {}) }),
   }));
   await assertSynced(res);
   return res.json() as Promise<InstantiateResult>;

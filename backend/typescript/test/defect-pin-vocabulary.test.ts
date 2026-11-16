@@ -64,7 +64,10 @@ const KNOWN = new Map<string, 'correction' | 'pin'>([
   // fixed (the core.flow.if branch wiring + the newsletter render inputs), so
   // the file no longer carries the vocabulary at all.
   // Live pins — real debt, tracked. Each asserts a shipped defect as correct.
-  ['workflow-chain-market-intel-digest-execution.test.ts', 'pin'],
+  // REMOVED 2026-11-13 (ADR 1116, CC-CHAIN-7): `workflow-chain-market-intel-digest-
+  // execution.test.ts` pinned MKTI-VOC-1 (voc could never get content) as an
+  // `it.fails`. ADR 1116 fixed the chain and the file now asserts the fixed
+  // behaviour end to end, so it no longer uses the vocabulary.
   // REMOVED 2026-10-12 (grade-tests wave 31): `workflow-chain-campaign-journeys-
   // execution.test.ts` no longer carries the vocabulary. Its ~200-line header
   // described node `inputs` being dropped before execution as NOT FIXED; that
@@ -148,7 +151,7 @@ const offenders = [...walk(TEST_ROOT), ...walk(FE_ROOT)]
 describe('defect-pin vocabulary', () => {
   it('is non-vacuous — the scan really reads files and the pattern really matches', () => {
     expect(offenders.length, 'no hits at all — the walker or pattern is broken').toBeGreaterThan(0);
-    expect(offenders).toContain('workflow-chain-market-intel-digest-execution.test.ts');
+    expect(offenders).toContain('run-metadata-copy-sites.test.ts');
   });
 
   it('no NEW file adopts the vocabulary', () => {

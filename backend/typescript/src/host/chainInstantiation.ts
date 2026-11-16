@@ -29,6 +29,10 @@ export interface InstantiateOwnedChainInput {
   createdBy?: string;
   /** ADR 0913 — a feature-owned erasure label on the PARENT only. */
   subject?: string;
+  /** ADR 1132 D1 — the client org this definition is for, on the PARENT only:
+   *  sub-chain children are shared across instantiations (their id keys on the
+   *  chain version), so one client's stamp cannot go on them. */
+  clientOrgId?: string;
   /** ADR 0959 D2 — sub-chain resolution hooks (see `SubChainDeps`); absent = the registry. */
   resolve?: Pick<SubChainDeps, 'resolveSibling' | 'resolveExternal' | 'mintChildId'>;
   /** Host-only random copy id reserved in a durable install claim before this call. */
@@ -254,6 +258,7 @@ export async function instantiateOwnedChain(input: InstantiateOwnedChainInput): 
     // instantiations (their id keys on the chain version), so labelling one
     // would let one subject's erasure delete another's child.
     ...(input.subject ? { subject: input.subject } : {}),
+    ...(input.clientOrgId ? { clientOrgId: input.clientOrgId } : {}),
   });
   return { def, workflowId, name, coRegisteredChildIds, reusedChildIds };
 }

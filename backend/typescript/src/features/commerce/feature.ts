@@ -26,6 +26,7 @@ import { onCrmRecordDeleted } from '../../host/crmRecordLifecycle.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { deleteSavedPaymentMethodsForContact, anonymizeOrderShippingForContacts, deleteCartsForUser, catalogIndexGauge } from './commerceService.js';
 import { registerIntegrityGauge } from '../../host/integrityGauges.js';
+import { registerCommerceAssetGrantProvider } from './assetGrantProvider.js';
 import { registerFeatureDataPagedExporter } from '../../host/featureDataExport.js';
 import { exportCommerceDataPage } from './dataExport.js';
 
@@ -35,6 +36,7 @@ export const commerceFeature: BackendFeature = {
     registerProductSourceVerifier(isProductSource); // ADR 0945 P2 — media's product-hint check asks the catalog
     registerFeatureDataPagedExporter('commerce', exportCommerceDataPage); // ADR 0820 §7 + ADR 1110 P3 — read-only, paged export, served after a plan lapse
     registerIntegrityGauge('commerce-catalog-index', catalogIndexGauge); // ADR 1110 D1 — drift + pending intents, daily
+    registerCommerceAssetGrantProvider(); // ADR 1122 P1b — listed products grant their images
     registerCommerceRoutes(deps);
     // ADR 0447 D3 — opening-balance backfill: frozen `balanceOwed` values become
     // deterministic ledger rows. Idempotent by row key (never a sentinel), so

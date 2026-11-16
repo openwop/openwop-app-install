@@ -11,6 +11,10 @@
  * exact-tag branch — every supported locale has a unique base language, so the base
  * match returns the same answer (probe w51g1-i18n-exact-branch; a redundant product
  * branch, not a test gap).
+ *
+ * Re-graded (grade-tests w116): bytes and the pseudo string are exact literals
+ * (a padding change or a '12 kB' now reds), and the ADR 0065 i18next init must
+ * keep `showSupportNotice: false` (dropping it reds the last case).
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
@@ -66,7 +70,7 @@ describe('Intl formatting layer', () => {
     expect(formatPercent(0.42)).toBe('42%');
   });
   it('formats bytes + lists + relative time', () => {
-    expect(formatBytes(2048)).toMatch(/2 kB/);
+    expect(formatBytes(2048)).toBe('2 kB'); // exact: a regex /2 kB/ also passed '12 kB'
     expect(formatList(['A', 'B', 'C'])).toBe('A, B, and C');
     const now = new Date('2026-06-18T12:00:00Z');
     expect(formatRelativeTime(new Date('2026-06-18T11:58:00Z'), now)).toBe('2 minutes ago');
@@ -97,9 +101,9 @@ describe('locale negotiation', () => {
 describe('pseudo-localization', () => {
   it('accents + preserves interpolation tokens', () => {
     const out = pseudoLocalize({ greeting: 'Hello {{name}}' }) as { greeting: string };
-    expect(out.greeting).toContain('{{name}}');
-    expect(out.greeting).not.toContain('Hello');
-    expect(out.greeting).toMatch(/^⟦.*⟧$/);
+    // Computed by hand: 'Hello' accented letter by letter, the token verbatim,
+    // then ceil(14 × 0.4) = 6 padding dots for the 14-character body.
+    expect(out.greeting).toBe('⟦Ĥéļļó {{name}} ······⟧');
   });
 });
 
@@ -109,6 +113,12 @@ describe('catalogs', () => {
   it('aggregates en eagerly across all namespaces; pt-BR is lazy-only', () => {
     // 132 namespaces MEASURED 2026-10-16 (e3c2492be) — the floor is the truth, not 40.
     // 128 after KickTodo's four namespaces left (ADR 1031 P3).
+    // CAUTION (grade-tests w116, TST-OAF-1): this counts more than the EAGER set.
+    // `NAMESPACES` is the array passed to i18next as `ns`, and i18next pushes every
+    // namespace that `src/test/i18n-setup.ts` preloads into that same array, so in
+    // this suite it holds eager + lazy (inferred: the tree has 35 eager catalogs at
+    // 63e4c73654, so 128 is reachable no other way). The eager/lazy split itself is
+    // pinned by namespaceSplit.test.ts, not here.
     expect(NAMESPACES.length).toBeGreaterThanOrEqual(128);
     expect(Object.keys(resourcesByLocale)).toEqual(['en']);
   });

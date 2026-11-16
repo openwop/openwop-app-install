@@ -169,6 +169,9 @@ describe('the retarget of #2871 stays repaired', () => {
     // ADR 0878 D8 — `feature.service-desk.nodes.notify-team` genuinely takes a title
     // (it IS the addressed notification's title; the generic notify could only broadcast).
     'service-desk.sla-escalation#notify',
+    // CC-SEO-2 — `feature.documents.nodes.save-document` genuinely takes a title
+    // (it IS the saved draft Document's title).
+    'seo.keyword-brief#save',
   ]);
 
   it('no non-notify node carries either of the retarget\'s two keys', () => {

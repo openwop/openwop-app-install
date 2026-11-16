@@ -14,12 +14,23 @@
  * the sentinel the flag exists to replace, and it had no zero-organization branch
  * at all. The strings asserted below are the SHARED ones, so a page that re-grew
  * its own copy — or the old "workspace" noun — goes red here.
+ *
+ * ADR 0985 D6 added a second list (schedules made in chat) that reads on its
+ * own; it is answered with `[]` so only the WORKSPACE list's org states are in
+ * play. Sabotage (/grade-tests wave 113, `w113g4-sc-*`): ignoring `orgsFailed`,
+ * dropping `failedBody` or `emptyBody`, a dead retry, or loading rows without an
+ * `orgId` each turn a case red.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import type * as SCC from '../../../client/scheduledChatsClient.js';
 
-const { listOrgs, listScheduledChats, listMyChatSchedules } = vi.hoisted(() => ({ listOrgs: vi.fn(), listScheduledChats: vi.fn(), listMyChatSchedules: vi.fn() }));
+const { listOrgs, listScheduledChats, listMyChatSchedules } = vi.hoisted(() => ({
+  listOrgs: vi.fn<typeof SCC.listOrgs>(),
+  listScheduledChats: vi.fn<typeof SCC.listScheduledChats>(),
+  listMyChatSchedules: vi.fn<typeof SCC.listMyChatSchedules>(),
+}));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../../../client/scheduledChatsClient.js', async (orig) => ({
   ...(await orig<typeof import('../../../client/scheduledChatsClient.js')>()),
@@ -31,9 +42,9 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
 }));
 
 import { ScheduledChatsPage } from '../ScheduledChatsPage.js';
-import type { ScheduledChat } from '../../../client/scheduledChatsClient.js';
+import type { Org, ScheduledChat } from '../../../client/scheduledChatsClient.js';
 
-const ORG = { orgId: 'o1', name: 'Acme' };
+const ORG: Org = { orgId: 'o1', name: 'Acme' };
 // Typed as the real `ScheduledChat`: this used to carry `scheduledChatId`/`cron`/
 // `timezone`, none of which exist, so the row key and schedule cell were undefined.
 const CHAT: ScheduledChat = {
@@ -48,7 +59,7 @@ const mount = async (): Promise<void> => {
 
 afterEach(cleanup);
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   listOrgs.mockResolvedValue([ORG]);
   listScheduledChats.mockResolvedValue([CHAT]);
   // ADR 0985 D6 — the page's other list (schedules made in chat) reads on its own.
@@ -78,7 +89,9 @@ describe('a failed ORGANIZATION read is not a loading schedule', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })); });
     expect(listOrgs).toHaveBeenCalledTimes(2);
     expect(document.body.textContent).not.toContain(FAILED);
-    // …and the schedule actually rendered (its prompt), not a skeleton.
+    // …and the schedule actually rendered (its prompt), not a skeleton, read for
+    // the organization the retried read returned.
+    expect(listScheduledChats).toHaveBeenCalledWith('o1');
     expect(document.body.textContent).toContain('daily standup');
   });
 

@@ -5,14 +5,21 @@
  * rides ownerSubject on document creation. DOCNEW-1: off-toggle types stay
  * visible as inert "Off" cards.
  *
- * Sabotage witnesses (grade-tests w14): every type enabled, off types hidden, no
- * pack cards, no projectId / ownerSubject, no close, the wrong base path, the
- * wrong canvas materialized, the WRONG document handed to `onCreated` (from a
- * canvas or blank), and the empty picker drawn as a failure — each turns its
- * case red.
+ * CANVAS-ORG-1 (d530405e2): the editor URL a created canvas opens carries the
+ * creating org as `?org=`, URL-encoded (an org id like `org:qa-kicktodo` has a
+ * colon), so the editor reads the same client the canvas was created in.
+ *
+ * Sabotage witnesses (grade-tests w14, re-probed w116 as w116g3-nd-*): every
+ * type enabled, off types hidden, no pack cards, no projectId / ownerSubject, no
+ * close, the wrong base path, the wrong editor path, no `?org=` or an unencoded
+ * one, the wrong canvas materialized, the WRONG document handed to `onCreated`
+ * (from a canvas or blank), and the empty picker drawn as a failure — each turns
+ * its case red. Every case waits for the step's last effect (the navigate, the
+ * `onCreated`, the settled read) and then asserts exact values, so a break reds
+ * on a value rather than on a lookup timing out.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
+import { render, cleanup, fireEvent, screen, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 const navSpy = vi.fn();
@@ -110,8 +117,8 @@ describe('creation gallery (choose step)', () => {
     // Off types are visible but NOT buttons, and carry the Off chip.
     expect(screen.queryByRole('button', { name: /CAD model/ })).toBeNull();
     expect(screen.queryByRole('button', { name: /Campaign plan/ })).toBeNull();
-    expect(screen.getByText('CAD model')).toBeTruthy();
-    expect(screen.getByText('Campaign plan')).toBeTruthy();
+    expect(screen.queryAllByText('CAD model')).toHaveLength(1);
+    expect(screen.queryAllByText('Campaign plan')).toHaveLength(1);
     // Exactly the first-party types that are NOT on (slides + drawings are).
     expect(screen.getAllByText('Off')).toHaveLength(CREATABLE_CANVAS_TYPES.length - 2);
     // The Write + Reuse groups are always present.
@@ -123,14 +130,18 @@ describe('creation gallery (choose step)', () => {
     mount();
     expect(screen.getByText('Design')).toBeTruthy();
     expect(screen.queryByRole('button', { name: /Slide deck/ })).toBeNull();
-    expect(screen.getByText('Slide deck')).toBeTruthy();
+    expect(screen.queryAllByText('Slide deck')).toHaveLength(1);
+    expect(screen.queryAllByText('Off')).toHaveLength(CREATABLE_CANVAS_TYPES.length);
   });
 
   it('lists pack types as cards when canvas-packs is enabled', async () => {
     access.enabled = new Set(['documents', 'canvas-packs']);
     canvasApi.listPackCanvasTypes.mockResolvedValue([{ canvasTypeId: 'canvas.checklist', title: 'Checklist' }]);
     mount();
-    expect(await screen.findByRole('button', { name: /Checklist/ })).toBeTruthy();
+    await waitFor(() => expect(canvasApi.listPackCanvasTypes).toHaveBeenCalledWith('org1'));
+    // Let the resolved read land, then count: a break reds on the value, not a lookup timeout.
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(screen.queryAllByRole('button', { name: /Checklist/ })).toHaveLength(1);
   });
 });
 
@@ -142,10 +153,11 @@ describe('creating a canvas', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Campaign plan/ }));
     fireEvent.change(screen.getByPlaceholderText(/Q3 launch pitch/), { target: { value: 'QA campaign plan' } });
     fireEvent.click(screen.getByRole('button', { name: /Create and open/ }));
-    await waitFor(() => expect(canvasApi.createCanvas).toHaveBeenCalledWith('org:qa-kicktodo', { name: 'QA campaign plan' }));
-    expect(canvasApi.basePaths).toContain('/host/openwop-app/campaign-studio');
+    await waitFor(() => expect(navSpy).toHaveBeenCalledTimes(1));
+    expect(canvasApi.createCanvas.mock.calls).toEqual([['org:qa-kicktodo', { name: 'QA campaign plan' }]]);
+    expect(canvasApi.basePaths).toEqual(['/host/openwop-app/campaign-studio']);
     expect(onClose).toHaveBeenCalledOnce();
-    expect(navSpy).toHaveBeenCalledWith('/campaign-studio/plans/canvas-created?org=org%3Aqa-kicktodo');
+    expect(navSpy.mock.calls).toEqual([['/campaign-studio/plans/canvas-created?org=org%3Aqa-kicktodo']]);
   });
 
   it('names it, creates against the type base path, and opens its editor', async () => {
@@ -154,10 +166,11 @@ describe('creating a canvas', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Slide deck/ }));
     fireEvent.change(screen.getByPlaceholderText(/Q3 launch pitch/), { target: { value: 'Board pitch' } });
     fireEvent.click(screen.getByRole('button', { name: /Create and open/ }));
-    await waitFor(() => expect(canvasApi.createCanvas).toHaveBeenCalledWith('org1', { name: 'Board pitch' }));
-    expect(canvasApi.basePaths).toContain('/host/openwop-app/slides');
-    expect(navSpy).toHaveBeenCalledWith('/slides/c-1?org=org1');
-    expect(onClose).toHaveBeenCalled();
+    await waitFor(() => expect(navSpy).toHaveBeenCalledTimes(1));
+    expect(canvasApi.createCanvas.mock.calls).toEqual([['org1', { name: 'Board pitch' }]]);
+    expect(canvasApi.basePaths).toEqual(['/host/openwop-app/slides']);
+    expect(navSpy.mock.calls).toEqual([['/slides/c-1?org=org1']]);
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it('passes the selected project as projectId', async () => {
@@ -168,8 +181,9 @@ describe('creating a canvas', () => {
     const select = await screen.findByLabelText(/Add to project/);
     fireEvent.change(select, { target: { value: 'proj-1' } });
     fireEvent.click(screen.getByRole('button', { name: /Create and open/ }));
-    await waitFor(() => expect(canvasApi.createCanvas).toHaveBeenCalledWith('org1', { name: 'Bracket', projectId: 'proj-1' }));
-    expect(navSpy).toHaveBeenCalledWith('/cad/c-1?org=org1');
+    await waitFor(() => expect(navSpy).toHaveBeenCalledTimes(1));
+    expect(canvasApi.createCanvas.mock.calls).toEqual([['org1', { name: 'Bracket', projectId: 'proj-1' }]]);
+    expect(navSpy.mock.calls).toEqual([['/cad/c-1?org=org1']]);
   });
 });
 
@@ -182,14 +196,18 @@ describe('from a canvas (the picker)', () => {
     const { onCreated } = mount();
     fireEvent.click(await screen.findByRole('button', { name: /From a canvas/ }));
     fireEvent.click(await screen.findByRole('button', { name: /Q3 deck/ }));
-    await waitFor(() => expect(docsApi.materializeFromCanvas).toHaveBeenCalledWith('org1', 'c-9'));
-    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ documentId: 'doc-2' })));
+    await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+    expect(docsApi.materializeFromCanvas.mock.calls).toEqual([['org1', 'c-9']]);
+    expect(onCreated.mock.calls).toEqual([[{ documentId: 'doc-2' }]]);
   });
 
   it('shows the empty-state invitation when there are no canvases', async () => {
     mount();
     fireEvent.click(await screen.findByRole('button', { name: /From a canvas/ }));
-    expect(await screen.findByText('No canvases yet')).toBeTruthy();
+    // Wait for ANY state card (the empty one or a failure card), then read which it is.
+    await waitFor(() => expect(document.querySelectorAll('.state-card__title')).toHaveLength(1));
+    expect(Array.from(document.querySelectorAll('.state-card__title'), (n) => n.textContent)).toEqual(['No canvases yet']);
+    expect(docsApi.listCanvasSources.mock.calls).toEqual([['org1', '']]);
   });
 });
 
@@ -202,9 +220,10 @@ describe('blank document + project', () => {
     const select = await screen.findByLabelText(/Add to project/);
     fireEvent.change(select, { target: { value: 'proj-1' } });
     fireEvent.click(screen.getByRole('button', { name: /New document/i }));
-    await waitFor(() => expect(docsApi.createDocument).toHaveBeenCalledWith('org1', {
+    await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+    expect(docsApi.createDocument.mock.calls).toEqual([['org1', {
       title: 'SOW Alpha', kind: 'sow', ownerSubject: { kind: 'project', id: 'proj-1' },
-    }));
-    await waitFor(() => expect(onCreated).toHaveBeenCalledWith(expect.objectContaining({ documentId: 'doc-1' })));
+    }]]);
+    expect(onCreated.mock.calls).toEqual([[BLANK_DOC]]);
   });
 });

@@ -237,7 +237,9 @@ describe('people-hr.offboarding — end-to-end execution (real executor, honest 
 
     const snap = await pollRun(owner, runId);
     expect(snap.status).toBe('failed');
-    expect(snap.error?.code).toBe('openwop-app.config_invalid');
+    // CC-CHAIN-1 (core.openwop.http 2.1.3): a step that names a connection but has
+    // no wired OpenAPI document fails with the typed code that says so.
+    expect(snap.error?.code).toBe('openwop-app.openapi_document_missing');
 
     const events = await bundleEvents(owner, runId);
     // The two REAL connector nodes ran for real and degraded gracefully — no
@@ -247,9 +249,9 @@ describe('people-hr.offboarding — end-to-end execution (real executor, honest 
     expect(completedOutputs(events, 'finalPay')).toMatchObject({ connected: false, applied: false });
 
     // `deprovision` is the only node that can fail — `core.openwop.http.
-    // openapi-call` never reads `config.connectionRef` (presentational
-    // pre-flight metadata only); it requires an operator-wired
-    // `ctx.inputs.openapi` document no chain-pack ships.
+    // openapi-call` never resolves a document from `config.connectionRef`; it
+    // requires an operator-wired `ctx.inputs.openapi` document no chain-pack
+    // ships, and names the connection in its typed failure (CC-CHAIN-1).
     const failedEvent = events.find((e) => e.type === 'node.failed');
     expect(failedEvent?.nodeId?.endsWith('_deprovision')).toBe(true);
 

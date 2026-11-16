@@ -1,8 +1,9 @@
 /**
  * ADR 0140 P2 — the pure working-set state machine of the multi-tab chat deck:
  * open/dedupe/focus recency, LRU eviction at the soft cap (never the active,
- * a pinned or a streaming tab), the hard ceiling (pinned-idle sacrificed, streaming
- * never), neighbour activation on close, post-removal reorder, in-place rekey on
+ * a pinned or a streaming tab), the hard ceiling (pinned-idle sacrificed, a
+ * protected tab never — ADR 0978 D1 — and the open REFUSED, never grown, when every
+ * tab is active or protected — ADR 0978 D2), neighbour activation on close, post-removal reorder, in-place rekey on
  * `/clear`, and the G4 title cache. Breaks if any eviction exclusion, the LRU
  * comparison, the neighbour preference, or an identity-preserving no-op is lost.
  */
@@ -62,7 +63,7 @@ describe('tabDeckModel — LRU eviction at the soft cap', () => {
   it('opening beyond the soft cap evicts the least-recently-used tab', () => {
     // Fill to the cap, then touch 'a' so the LRU is 'b'.
     let s = deckOf(['a', 'b', 'c'], 3);
-    s = tabDeckReducer(s, { type: 'focus', sessionId: 'a' }); // recency: c<...,b oldest? order: a,b,c opened; b less recent than c; then focus a → MRU a
+    s = tabDeckReducer(s, { type: 'focus', sessionId: 'a' }); // focus a → a is the MRU
     // LRU is now 'b' (opened 2nd, never re-focused; c opened 3rd).
     const next = tabDeckReducer(s, { type: 'open', sessionId: 'd', maxTabs: 3 });
     expect(ids(next).sort()).toEqual(['a', 'c', 'd']);
@@ -224,7 +225,13 @@ describe('tabDeckModel — pinned', () => {
   });
 
   it('selectEvictionVictim returns null when there is room', () => {
-    expect(selectEvictionVictim(deckOf(['a']), { maxTabs: MAX_TABS_DEFAULT })).toBeNull();
+    // 'a' is soft-evictable (not active, not pinned), so only the room check can
+    // answer null here; the default cap is above two tabs.
+    expect(MAX_TABS_DEFAULT).toBeGreaterThan(2);
+    expect(selectEvictionVictim(deckOf(['a', 'b']), { maxTabs: MAX_TABS_DEFAULT })).toBeNull();
+    expect(selectEvictionVictim(deckOf(['a', 'b']), { maxTabs: 3 })).toBeNull();
+    // Control at the cap: the same LRU tab IS the victim once there is no room.
+    expect(selectEvictionVictim(deckOf(['a', 'b', 'c']), { maxTabs: 3 })).toEqual({ sessionId: 'a', kind: 'soft' });
   });
 });
 

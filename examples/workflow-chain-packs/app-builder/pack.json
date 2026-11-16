@@ -1,6 +1,6 @@
 {
   "name": "vendor.openwop.app-builder.workflows",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "kind": "workflow-chain",
   "description": "The App Builder production chains (ADR 0346 / RFC 0013). The design chain is the portable source of truth for `app-builder.design` \u2014 the host registers it at boot via the feature's registration adapter (RFC 0124 deferred expansion), and it remains instantiable from the chain gallery like any chain.",
   "keywords": [
@@ -266,7 +266,7 @@
     },
     {
       "chainId": "app-builder.plan-to-kanban",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "label": "App Builder work plan \u2192 Kanban",
       "description": "Turn an existing App Builder canvas into a reviewed, dependency-aware work plan on any selected Kanban board. The App Builder node only proposes work from the canvas; the reusable core Kanban node owns tenant scope, materialization, lifecycle and retries. Every node remains editable in the Workflow Builder.",
       "parameters": {
@@ -320,7 +320,7 @@
           },
           {
             "id": "materialize",
-            "typeId": "core.openwop.kanban.work-items.materialize@1.1.1",
+            "typeId": "core.openwop.kanban.work-items.materialize@1.2.0",
             "name": "Create reusable work items",
             "position": { "x": 600, "y": 0 },
             "config": { "requireApproval": true },

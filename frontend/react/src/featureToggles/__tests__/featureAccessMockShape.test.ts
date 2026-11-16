@@ -1,5 +1,6 @@
 /**
- * RATCHET — no test hand-rolls a PARTIAL `useFeatureAccess` return value.
+ * RATCHET (#2978, which added `makeFeatureAccess`) — no test hand-rolls a PARTIAL
+ * `useFeatureAccess` return value.
  *
  * The hook answers with eight fields. Across the suite its mock was written by
  * hand ~50 times and returned one, two, four, or five of them — four of those
@@ -120,6 +121,11 @@ describe('the useFeatureAccess mock shape', () => {
     expect(makeFeatureAccess({ enabled: false }).status).toBe('off');
     expect(makeFeatureAccess({ status: 'beta' }).isBeta).toBe(true);
     expect(makeFeatureAccess({ entitled: false }).locked).toBe(true);
+    // Both derivations need the toggle ON, as in the hook: an OFF feature is neither
+    // beta nor "locked behind the plan" (a paywall on a feature that is off is a
+    // state the resolver never produces).
+    expect(makeFeatureAccess({ enabled: false, status: 'beta' }).isBeta).toBe(false);
+    expect(makeFeatureAccess({ enabled: false, entitled: false }).locked).toBe(false);
     // …and an explicit value still wins, so a test may ask for an odd shape on
     // purpose, visibly.
     expect(makeFeatureAccess({ enabled: false, status: 'on' }).status).toBe('on');

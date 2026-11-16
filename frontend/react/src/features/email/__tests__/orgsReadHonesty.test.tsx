@@ -4,21 +4,32 @@
  *
  * What is pinned is EmailPage's WIRING into `ui/OrgSelectionState`: `orgsFailed`
  * (failed ≠ empty), `failedBody` (the email consequence clause) and `emptyBody`.
- * Sabotage-witnessed (/grade-tests wave 9, `w9g4-or-*`): passing `orgsFailed={false}`,
- * dropping `failedBody`, or folding an empty answer into the failed branch each turn
- * a case red.
+ * The failed clause says the template and campaign lists "were never requested",
+ * so the failed case also asserts that they were not: the org-gated load must
+ * not run on an empty `orgId`.
+ * Sabotage-witnessed (/grade-tests wave 9, `w9g4-or-*`; wave 113, `w113g4-or-*`):
+ * passing `orgsFailed={false}`, dropping `failedBody`, swapping `emptyBody`, or
+ * removing the `if (!orgId) return` guard each turn a case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import type * as EC from '../emailClient.js';
 
-const api = vi.hoisted(() => ({ listOrgs: vi.fn(), listSegments: vi.fn() }));
+const api = vi.hoisted(() => ({
+  listOrgs: vi.fn<typeof EC.listOrgs>(),
+  listSegments: vi.fn<typeof EC.listSegments>(),
+  listTemplates: vi.fn<typeof EC.listTemplates>(),
+  listCampaigns: vi.fn<typeof EC.listCampaigns>(),
+}));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../emailClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
-  return { ...actual, listOrgs: api.listOrgs, listSegments: api.listSegments, listTopics: async () => ({ topics: [], max: 20 }),
+  return { ...actual, listOrgs: api.listOrgs, listSegments: api.listSegments,
+    listTemplates: api.listTemplates, listCampaigns: api.listCampaigns,
+    listTopics: async () => ({ topics: [], max: 20 } satisfies Awaited<ReturnType<typeof EC.listTopics>>),
     // ADR 0955 D7 — the page's sending-health card (a healthy sender).
-    getSendingHealth: async () => ({ state: null, window: { sent: 0, hardBounces: 0, complaints: 0 }, thresholds: { minSends: 500, complaintRate: 0.001, hardBounceRate: 0.02 }, canResume: false }) };
+    getSendingHealth: async () => ({ state: null, window: { sent: 0, hardBounces: 0, complaints: 0 }, thresholds: { minSends: 500, complaintRate: 0.001, hardBounceRate: 0.02 }, canResume: false } satisfies EC.SendingHealth) };
 });
 const access = vi.hoisted(() => ({ useFeatureAccess: vi.fn() }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
@@ -28,9 +39,11 @@ vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
 import { EmailPage } from '../EmailPage.js';
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   access.useFeatureAccess.mockReturnValue(makeFeatureAccess({ enabled: true, loading: false }));
   api.listSegments.mockResolvedValue([]);
+  api.listTemplates.mockResolvedValue([]);
+  api.listCampaigns.mockResolvedValue([]);
 });
 afterEach(cleanup);
 
@@ -41,6 +54,9 @@ describe('EM-R2-1 — email orgs honesty', () => {
     expect(await screen.findByText('Could not load your organizations')).toBeTruthy();
     expect(screen.getByText(/template and campaign lists were never requested/i)).toBeTruthy();
     expect(screen.queryByText('No organizations')).toBeNull();
+    // The clause is a claim about behaviour: the lists really were never requested.
+    expect(api.listTemplates).not.toHaveBeenCalled();
+    expect(api.listCampaigns).not.toHaveBeenCalled();
   });
   it('TRUTHFUL empty: the real no-orgs state survives', async () => {
     api.listOrgs.mockResolvedValue([]);

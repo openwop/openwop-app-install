@@ -36,6 +36,10 @@ import { registerSubjectEraser } from './subjectErasure.js';
 import { createLogger } from '../observability/logger.js';
 import { ERASED, subjectKeyForms } from './subjectErasureRedaction.js';
 import { getRetentionHold } from './retentionHold.js';
+import { isWorkspaceMember } from './accessControlService.js';
+import { subjectReadAllowed, subjectRoleResolver } from './subjectAccess.js';
+import { isPersonalTenantId } from './requestSubject.js';
+import { emitAssignmentNotification } from './kanbanAssignmentNotify.js';
 
 /** Opaque hold state shared by restore, selection and erasure (ADR 0963 D3). */
 export const RESTORE_NOTE_MARK = '[auto:run-restore]';
@@ -491,6 +495,15 @@ export interface KanbanWorkItemProposal {
   /** Default manual. `auto` is an explicit, workflow-builder-editable opt-in
    * to the core work dispatcher; it never introduces a feature-specific runner. */
   execution?: { mode?: 'manual' | 'auto'; maxAttempts?: number };
+  /** ADR 1137 D1 — the one accountable person. Written when the card is CREATED,
+   *  never by a later materialize (the board owns who). The assignee must be a
+   *  workspace member who can read the board's subject; checked before any write. */
+  assigneeId?: string;
+  /** ADR 1137 D1 — a claimable role (ADR 0049 D2). Exclusive with `assigneeId`. */
+  assigneeRole?: string;
+  assignmentReason?: string;
+  sourceLabel?: string;
+  labels?: string[];
 }
 
 export interface MaterializeKanbanWorkItemsCommand {
@@ -504,6 +517,11 @@ export interface MaterializeKanbanWorkItemsCommand {
    * deterministic aggregate/event ids, never a process-local cache. */
   idempotencyKey: string;
   dryRun?: boolean;
+  /** ADR 1137 D3 — when an item's identity already exists, update the facts the
+   *  SOURCE owns (title, description, dueAt, sourceLabel) on its card. Never the
+   *  assignee, role, column, order or labels; never a terminal-column card; never
+   *  re-creates a deleted card. Keep `source.revision` stable to refresh. */
+  refresh?: boolean;
   /** ADR 0832 D3 — see `KanbanWorkItem.requestedBy`. Set by the host surface from
    *  the run scope, never from node args. */
   requestedBy?: string;
@@ -565,6 +583,8 @@ export interface MaterializeKanbanWorkItemsResult {
   dryRun: boolean;
   workItems: KanbanWorkItem[];
   cards: KanbanCard[];
+  /** ADR 1137 D3 — cards a `refresh` actually changed (empty otherwise). */
+  refreshedCardIds: string[];
 }
 
 export interface PatchKanbanCardResult {
@@ -658,6 +678,22 @@ const workItemOutbox = new DurableCollection<KanbanWorkItemOutboxEntry>(
 const workItemRunIndex = new DurableCollection<KanbanWorkItemRunIndexEntry>(
   'kanban:work-item-run',
   (entry) => entry.runId,
+  undefined,
+  (entry) => entry.tenantId,
+);
+/** ADR 1137 D3 — a person deleted this work item's card. A `refresh` sync skips
+ *  the identity from then on, so a periodic re-materialize never brings back
+ *  what someone removed. Ids only (no content); cleared with the board/tenant. */
+interface KanbanWorkItemDismissal {
+  workItemId: string;
+  tenantId: string;
+  boardId: string;
+  cardId: string;
+  dismissedAt: string;
+}
+const workItemDismissals = new DurableCollection<KanbanWorkItemDismissal>(
+  'kanban:work-item-dismissal',
+  (entry) => entry.workItemId,
   undefined,
   (entry) => entry.tenantId,
 );
@@ -875,6 +911,7 @@ export async function purgeTenantKanban(tenantId: string): Promise<{ boards: num
   // may represent a workflow-surface request that completed before its board
   // was created. They are tenant-scoped nevertheless, so tenant deletion owns
   // their complete removal rather than waiting for time-based retention.
+  for (const d of await workItemDismissals.listForTenantIndexed(tenantId)) await workItemDismissals.delete(d.workItemId);
   let operationReceiptCount = 0;
   for (const receipt of await operationReceipts.listForTenantIndexed(tenantId)) {
     if (await operationReceipts.delete(receipt.receiptId)) operationReceiptCount += 1;
@@ -886,7 +923,12 @@ export async function deleteBoard(boardId: string): Promise<boolean> {
   const board = await boards.get(boardId);
   const boardCards = (await cards.list()).filter((c) => c.boardId === boardId);
   for (const card of boardCards) await deleteCard(card.id);
-  if (board) await deleteWorkItemsForBoard(board.tenantId, boardId);
+  if (board) {
+    await deleteWorkItemsForBoard(board.tenantId, boardId);
+    for (const d of await workItemDismissals.listForTenantIndexed(board.tenantId)) {
+      if (d.boardId === boardId) await workItemDismissals.delete(d.workItemId);
+    }
+  }
   return boards.delete(boardId);
 }
 
@@ -973,6 +1015,7 @@ export async function createCard(input: {
   // ADR 0872 D1 — the card carries its board's tenant, so a board must exist.
   const board = await boards.get(input.boardId);
   if (!board) throw new Error(`kanban_board_not_found: ${input.boardId}`);
+  if (input.assigneeRole !== undefined) assertAssigneeRoleFits(board, input.assigneeRole);
   // Ordering only (D4): a missed sibling can only repeat an `order`.
   const siblings = (await cardsOnBoards(board.tenantId, new Set([board.id]))).filter((c) => c.columnId === input.columnId);
   const card: KanbanCard = {
@@ -1255,6 +1298,8 @@ function prepareWorkItems(
       throw boardCommandError('kanban_column_not_found', `Work item '${item.key}' names an unknown board column.`);
     }
     executionForProposal(item);
+    assertAssignmentShape(item);
+    if (item.assigneeRole !== undefined) assertAssigneeRoleFits(board, item.assigneeRole);
     if (item.dependsOnKeys?.some((dependency) => dependency === item.key || !command.items.some((candidate) => candidate.key === dependency))) {
       throw boardCommandError('kanban_dependency_invalid', `Work item '${item.key}' has an unknown or self dependency.`);
     }
@@ -1282,6 +1327,113 @@ function prepareWorkItems(
       dependencyIds: (proposal.dependsOnKeys ?? []).map((key) => ids.get(key) ?? ''),
     };
   });
+}
+
+const ASSIGNMENT_REASON_MAX = 500;
+const SOURCE_LABEL_MAX = 200;
+const LABELS_MAX = 20;
+const LABEL_MAX = 64;
+
+function assigneeInvalid(key: string, why: string): Error {
+  return boardCommandError('kanban_assignee_invalid', `Work item '${key}' ${why}`);
+}
+
+/** ADR 1137 D4 — `<kind>:<role>` names a role on the board's own subject (e.g.
+ *  `project:lead`) when that kind registered roles; anything else is a workspace
+ *  role key, as before. */
+function parseSubjectRole(assigneeRole: string): { kind: string; role: string } | null {
+  const at = assigneeRole.indexOf(':');
+  if (at <= 0) return null;
+  const kind = assigneeRole.slice(0, at);
+  return subjectRoleResolver(kind) ? { kind, role: assigneeRole.slice(at + 1) } : null;
+}
+
+/** ADR 1137 D4 — a subject role may address a card only on that subject's board,
+ *  and only a role its owner made addressable. Throws `kanban_assignee_invalid`. */
+export function assertAssigneeRoleFits(board: KanbanBoard, assigneeRole: string): void {
+  const parsed = parseSubjectRole(assigneeRole.trim());
+  if (!parsed) return;
+  const subject = boardSubject(board);
+  if (!subject || subject.kind !== parsed.kind) {
+    throw boardCommandError('kanban_assignee_invalid', `The role '${assigneeRole}' can only address a card on a ${parsed.kind}'s board.`);
+  }
+  if (!subjectRoleResolver(parsed.kind)!.addressable.includes(parsed.role)) {
+    throw boardCommandError('kanban_assignee_invalid', `The role '${assigneeRole}' can't be assigned work.`);
+  }
+}
+
+/** ADR 1137 D1 — the synchronous shape rules, inside `prepareWorkItems`. */
+function assertAssignmentShape(item: KanbanWorkItemProposal): void {
+  const bad = (v: unknown, max: number): boolean => v !== undefined && (typeof v !== 'string' || v.trim().length === 0 || v.length > max);
+  if (bad(item.assigneeId, 512)) throw assigneeInvalid(item.key, 'has an invalid assigneeId.');
+  if (bad(item.assigneeRole, 128)) throw assigneeInvalid(item.key, 'has an invalid assigneeRole.');
+  if (item.assigneeId !== undefined && item.assigneeRole !== undefined) {
+    throw assigneeInvalid(item.key, 'names both an assignee and a role; pick one.');
+  }
+  if (item.assignmentReason !== undefined && (typeof item.assignmentReason !== 'string' || item.assignmentReason.length > ASSIGNMENT_REASON_MAX)) {
+    throw boardCommandError('kanban_work_items_invalid', `Work item '${item.key}' has an assignmentReason over ${ASSIGNMENT_REASON_MAX} characters.`);
+  }
+  if (item.sourceLabel !== undefined && (typeof item.sourceLabel !== 'string' || item.sourceLabel.length > SOURCE_LABEL_MAX)) {
+    throw boardCommandError('kanban_work_items_invalid', `Work item '${item.key}' has a sourceLabel over ${SOURCE_LABEL_MAX} characters.`);
+  }
+  if (item.labels !== undefined && (!Array.isArray(item.labels) || item.labels.length > LABELS_MAX
+    || item.labels.some((l) => typeof l !== 'string' || l.trim().length === 0 || l.length > LABEL_MAX))) {
+    throw boardCommandError('kanban_work_items_invalid', `Work item '${item.key}' has invalid labels (at most ${LABELS_MAX}, each 1–${LABEL_MAX} characters).`);
+  }
+}
+
+/**
+ * ADR 1137 D1 — every named assignee must be able to SEE the card it would be
+ * handed: a member of the board's workspace and, on a subject's board (a
+ * project's), a reader of that subject in the subject's own org. That second
+ * check is what keeps a private project's card, or a client org's project card,
+ * from being assigned and notified to someone outside it (ADR 1118 / 1121). It
+ * asks about the ASSIGNEE, not the caller, and runs before any write so one bad
+ * assignee fails the whole materialization atomically.
+ */
+async function assertAssigneesCanRead(board: KanbanBoard, items: readonly KanbanWorkItemProposal[]): Promise<void> {
+  const subject = boardSubject(board);
+  const checked = new Map<string, Promise<boolean>>();
+  const canRead = (assigneeId: string): Promise<boolean> => {
+    let p = checked.get(assigneeId);
+    if (!p) {
+      p = (async () => {
+        // A personal workspace (`user:<id>`) is its owner's alone and seeds no
+        // member row for them — the assign route's self-on-own-workspace rule.
+        const ownPersonal = isPersonalTenantId(board.tenantId) && board.tenantId === assigneeId;
+        if (!ownPersonal && !(await isWorkspaceMember(assigneeId, board.tenantId))) return false;
+        return subject ? subjectReadAllowed(board.tenantId, subject, { subject: assigneeId }) : true;
+      })();
+      checked.set(assigneeId, p);
+    }
+    return p;
+  };
+  for (const item of items) {
+    if (item.assigneeId !== undefined && !(await canRead(item.assigneeId.trim()))) {
+      throw assigneeInvalid(item.key, 'names an assignee who cannot see this board.');
+    }
+  }
+}
+
+/** ADR 1137 D3 — the source-owned fields a refresh may change, and only those. */
+function refreshPatchFor(card: KanbanCard, proposal: KanbanWorkItemProposal): KanbanCardPatch {
+  const patch: KanbanCardPatch = {};
+  if (proposal.title !== card.title) patch.title = proposal.title;
+  if ((proposal.description ?? '') !== (card.description ?? '')) patch.description = proposal.description ?? '';
+  if (proposal.dueAt !== undefined && proposal.dueAt !== card.dueAt) patch.dueAt = proposal.dueAt;
+  if (proposal.sourceLabel !== undefined && proposal.sourceLabel !== card.sourceLabel) patch.sourceLabel = proposal.sourceLabel;
+  return patch;
+}
+
+/** ADR 1137 D1 — the assignment fields a proposal puts on the card it creates. */
+function assignmentFieldsOf(proposal: KanbanWorkItemProposal): Pick<KanbanCard, 'assigneeId' | 'assigneeRole' | 'assignmentReason' | 'sourceLabel' | 'labels'> {
+  return {
+    ...(proposal.assigneeId !== undefined ? { assigneeId: proposal.assigneeId.trim() } : {}),
+    ...(proposal.assigneeRole !== undefined ? { assigneeRole: proposal.assigneeRole.trim() } : {}),
+    ...(proposal.assignmentReason !== undefined ? { assignmentReason: proposal.assignmentReason } : {}),
+    ...(proposal.sourceLabel !== undefined ? { sourceLabel: proposal.sourceLabel } : {}),
+    ...(proposal.labels !== undefined ? { labels: [...proposal.labels] } : {}),
+  };
 }
 
 function sameWorkIdentity(existing: KanbanWorkItem, candidate: KanbanWorkItem): boolean {
@@ -1358,6 +1510,7 @@ export async function applyBoardCommand(
     throw boardCommandError('kanban_board_not_found', 'Board does not exist in this tenant.');
   }
   const prepared = prepareWorkItems(board, command);
+  await assertAssigneesCanRead(board, command.items);
   const now = nowIso();
   const projectedWorkItems = prepared.map(({ proposal, workItemId, cardId, dependencyIds }, order) => ({
     workItemId,
@@ -1388,6 +1541,7 @@ export async function applyBoardCommand(
     source: 'workflow' as const,
     ...(proposal.priority ? { priority: proposal.priority } : {}),
     ...(proposal.dueAt ? { dueAt: proposal.dueAt } : {}),
+    ...assignmentFieldsOf(proposal),
     dependsOn: dependencyIds.map((dependencyId) => prepared.find((item) => item.workItemId === dependencyId)?.cardId ?? ''),
     workItemId,
     order: 0,
@@ -1395,7 +1549,8 @@ export async function applyBoardCommand(
     updatedAt: now,
   } satisfies KanbanCard));
 
-  if (command.dryRun) return { dryRun: true, workItems: projectedWorkItems, cards: projectedCards };
+  if (command.dryRun) return { dryRun: true, workItems: projectedWorkItems, cards: projectedCards, refreshedCardIds: [] };
+  const refreshedCardIds: string[] = [];
 
   const materializedWorkItems: KanbanWorkItem[] = [];
   const materializedCards: KanbanCard[] = [];
@@ -1409,10 +1564,32 @@ export async function applyBoardCommand(
     if (existingCard && (existingCard.boardId !== command.boardId || existingCard.workItemId !== candidate.workItemId)) {
       throw boardCommandError('kanban_card_collision', `Card for work item '${plan.proposal.key}' is already owned by different work.`);
     }
+    // ADR 1137 D3 — someone deleted this work's card; a sync must not bring it back.
+    if (command.refresh && !existingCard && await workItemDismissals.get(candidate.workItemId)) continue;
     const inserted = await workItems.putIfAbsent(candidate);
     const item = inserted ? candidate : await workItems.get(candidate.workItemId);
     if (!item || !sameWorkIdentity(item, candidate)) {
       throw boardCommandError('kanban_work_item_collision', `Work item '${plan.proposal.key}' already belongs to a different source.`);
+    }
+    // ADR 1137 D3 — a refresh of known work updates its card in place, or leaves
+    // it alone. It never re-creates a card someone deleted, and never reopens one
+    // that reached a terminal lane: the board owns who and status.
+    if (!inserted && command.refresh) {
+      if (!existingCard) {
+        materializedWorkItems.push(item);
+        continue;
+      }
+      let current = existingCard;
+      const patch = isTerminalColumn(board, existingCard.columnId) ? {} : refreshPatchFor(existingCard, plan.proposal);
+      if (Object.keys(patch).length > 0) {
+        current = (await applyKanbanCardPatchCommand({
+          type: 'card.patch', tenantId: command.tenantId, boardId: command.boardId, cardId: existingCard.id, patch,
+        })).card;
+        refreshedCardIds.push(current.id);
+      }
+      materializedWorkItems.push(item);
+      materializedCards.push(current);
+      continue;
     }
     const card = await createCard({
       boardId: command.boardId,
@@ -1423,12 +1600,27 @@ export async function applyBoardCommand(
       source: 'workflow',
       ...(plan.proposal.priority ? { priority: plan.proposal.priority } : {}),
       ...(plan.proposal.dueAt ? { dueAt: plan.proposal.dueAt } : {}),
+      ...assignmentFieldsOf(plan.proposal),
       dependsOn: projectedCards[index]!.dependsOn,
       workItemId: item.workItemId,
       cardId: item.cardId,
     });
     if (card.workItemId !== item.workItemId) {
       throw boardCommandError('kanban_card_collision', `Card for work item '${plan.proposal.key}' is already owned by different work.`);
+    }
+    // ADR 1137 D2 — this call created the card, so its assignee hears about it,
+    // once: the id derives from the command's idempotency key. Best-effort, as
+    // every ADR 0049 notification is; a crash between the write and here loses
+    // this one notice (recorded in the ADR).
+    if (!existingCard && card.assigneeId) {
+      await emitAssignmentNotification({
+        tenantId: command.tenantId,
+        card,
+        assigneeId: card.assigneeId,
+        ...(card.assignmentReason ? { comment: card.assignmentReason } : {}),
+        boardName: board.name,
+        idempotencyKey: `work-items.materialize\u0000${command.idempotencyKey}`,
+      });
     }
     await recordWorkItemCommandEvent(item, 'work-item.materialized', item.createdAt, {
       sourceKind: item.source.kind,
@@ -1441,7 +1633,7 @@ export async function applyBoardCommand(
     materializedCards.push(card);
   }
   notifyBoardChanged(command.boardId);
-  return { dryRun: false, workItems: materializedWorkItems, cards: materializedCards };
+  return { dryRun: false, workItems: materializedWorkItems, cards: materializedCards, refreshedCardIds };
 }
 
 function applyKanbanCardPatch(card: KanbanCard, patch: KanbanCardPatch): KanbanCard {
@@ -1498,6 +1690,7 @@ async function applyKanbanCardPatchCommand(command: PatchKanbanCardCommand): Pro
     if (!board || board.tenantId !== command.tenantId || !card || card.boardId !== board.id) {
       throw boardCommandError('kanban_card_not_found', 'Card does not exist on this board in this tenant.');
     }
+    if (typeof command.patch.assigneeRole === 'string') assertAssigneeRoleFits(board, command.patch.assigneeRole);
     if (command.precondition && !command.precondition(card, board)) {
       throw boardCommandError('kanban_card_precondition_failed', 'The card is no longer in the state this change requires.');
     }
@@ -2074,11 +2267,29 @@ export async function listCardsAssignedToUser(
   const tenantBoards = (await boards.list()).filter((b) => b.tenantId === tenantId);
   const boardById = new Map(tenantBoards.map((b) => [b.id, b]));
   const roles = new Set(roleKeys);
+  // ADR 1137 D4 — the viewer's own role on a board's subject, resolved once per
+  // board and only for boards that carry a subject-role card.
+  const subjectRoles = new Map<string, Promise<string | null>>();
+  const heldOn = (board: KanbanBoard, kind: string): Promise<string | null> => {
+    let p = subjectRoles.get(board.id);
+    if (!p) {
+      const subject = boardSubject(board);
+      const resolver = subjectRoleResolver(kind);
+      p = subject && subject.kind === kind && resolver ? resolver.roleOf(tenantId, subject, userId) : Promise.resolve(null);
+      subjectRoles.set(board.id, p);
+    }
+    return p;
+  };
+  const roleMatches = async (board: KanbanBoard, assigneeRole: string): Promise<boolean> => {
+    const parsed = parseSubjectRole(assigneeRole);
+    if (!parsed) return roles.has(assigneeRole);
+    return (await heldOn(board, parsed.kind)) === parsed.role;
+  };
   const out: Array<KanbanCard & { boardName: string; columnName: string; terminal: boolean }> = [];
   for (const card of await cardsOnBoards(tenantId, new Set(boardById.keys()))) {
     const board = boardById.get(card.boardId);
     if (!board) continue; // cross-tenant / orphaned — never leak
-    const mine = card.assigneeId === userId || (card.assigneeRole ? roles.has(card.assigneeRole) : false);
+    const mine = card.assigneeId === userId || (card.assigneeRole ? await roleMatches(board, card.assigneeRole) : false);
     if (!mine) continue;
     const column = board.columns.find((c) => c.id === card.columnId);
     out.push({
@@ -2175,7 +2386,14 @@ export async function deleteCard(cardId: string): Promise<boolean> {
       catch (err: unknown) { log.warn('card_delete_hook_failed', { hook: h.id, cardId, error: err instanceof Error ? err.message : String(err) }); }
     }
   }
-  if (card && board && deleted) await deleteWorkItemsForCard(board.tenantId, card.id);
+  if (card && board && deleted) {
+    if (card.workItemId) {
+      await workItemDismissals.put({
+        workItemId: card.workItemId, tenantId: board.tenantId, boardId: board.id, cardId: card.id, dismissedAt: nowIso(),
+      });
+    }
+    await deleteWorkItemsForCard(board.tenantId, card.id);
+  }
   return deleted;
 }
 
@@ -2448,6 +2666,7 @@ export async function __resetKanbanStore(): Promise<void> {
   await workItemOutbox.__clear();
   await workItemRunIndex.__clear();
   await operationReceipts.__clear();
+  await workItemDismissals.__clear();
 }
 
 // ADR 0789 — this tenant's board references to a SHARED workflow follow its fork:

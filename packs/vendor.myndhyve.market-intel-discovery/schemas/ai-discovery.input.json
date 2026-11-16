@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-discovery/1.0.2/ai-discovery.input.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-discovery/1.1.0/ai-discovery.input.json",
   "title": "MarketIntelAiDiscoveryInput",
   "type": "object",
   "required": ["topic"],
@@ -11,7 +11,9 @@
     "platforms": { "type": "array", "items": { "type": "string" }, "description": "Preferred platforms (e.g., ['reddit', 'hackernews']). When omitted, the AI suggests the best mix." },
     "minUrls": { "type": "integer", "minimum": 1, "description": "Suggested floor for URL count (passed to AI as a soft target). Defaults to 10." },
     "minCommunities": { "type": "integer", "minimum": 1, "description": "Suggested floor for community count. Defaults to 5." },
-    "minQueries": { "type": "integer", "minimum": 1, "description": "Suggested floor for search-query count. Defaults to 5." }
+    "minQueries": { "type": "integer", "minimum": 1, "description": "Suggested floor for search-query count. Defaults to 5." },
+    "searchLimit": { "type": ["integer", "string"], "description": "ADR 1135: how many of the model's searchQueries to run as live searches through ctx.webResearch (5 results each). Default 2, at most 3, 0 disables. Demo/stub results are ignored." },
+    "requireFetchable": { "type": ["boolean", "string"], "description": "ADR 1135: when true, fail typed NO_FETCHABLE_SOURCES if fetchSources holds no URL on a host that allows automated reads." }
   },
   "additionalProperties": true
 }

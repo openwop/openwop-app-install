@@ -5,17 +5,19 @@
  *   - feature.crm.nodes@1.3.0 — the ten new role:"action" write nodes: declared
  *     in the manifest, runnable in index.mjs, and deterministic-id (ADR 0162)
  *     on the creation nodes.
- *   - examples/workflow-chain-packs/crm-ops — loads clean and registers its
- *     four chainIds (mirrors workflow-chain-exec-ops.test.ts).
+ *   - examples/workflow-chain-packs/crm-ops — loads clean, registers its seven
+ *     chainIds (ADR 0954 P1/P2/P4 added grade-lead, route-lead, qualify-lead), and
+ *     every node of every one of them names a real typeId.
  *
  * The pack VERSION is not pinned here: `crm-node-replay.test.ts` pins the
  * relation that matters (the crm feature's `requiredPacks` == the manifest
  * version), where a literal here only churned on every bump.
  *
- * Sabotage-witnessed (grade-tests w4): `idFor` dropping the runId, a governed
- * write (create-deal) added to an agent allowlist, an invented typeId in the
- * crm-ops chain, an unfrozen gmail-sync param, and the gmail node's
- * missing-connectors guard dropped each turn a case red.
+ * Sabotage-witnessed (grade-tests w4, re-probed w114): `idFor` dropping the runId,
+ * a governed write (create-deal) added to an agent allowlist, an invented typeId in
+ * a crm-ops chain (now any of the seven, not a hand-kept four), an unfrozen
+ * gmail-sync param, the gmail node's missing-connectors guard dropped, and the
+ * cursor's − 1 s landing dropped each turn a case red.
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -217,10 +219,12 @@ describe('feature.crm.nodes pack', () => {
     expect(typeof mod.nodes['feature.crm.nodes.gmail-sync']).toBe('function');
 
     // No ctx.connectors at all → the explicit host_capability_missing guard.
-    const noConnectorsCtx = { runId: 'run-1', nodeId: 'node-1', config: { gmailSyncId: 'gmailsync:1' }, inputs: {}, features: { crm: {} } };
+    // The CRM surface IS present, so `ensureCrm`'s own host_capability_missing
+    // (same code) cannot answer for this guard; the message is the guard's own.
+    const noConnectorsCtx = { runId: 'run-1', nodeId: 'node-1', config: { gmailSyncId: 'gmailsync:1' }, inputs: {}, features: { crm: { listCompanies: async () => ({ companies: [] }) } } };
     const noConnectors = await mod.nodes['feature.crm.nodes.gmail-sync']!(noConnectorsCtx);
     expect(noConnectors.status).toBe('failure');
-    expect((noConnectors.error as { code: string }).code).toBe('host_capability_missing');
+    expect(noConnectors.error).toEqual({ code: 'host_capability_missing', message: 'ctx.connectors is not available on this host.' });
 
     // A sync that resolves to nothing (deleted mid-run / unknown id) → a clean failure, not a throw.
     // `listCompanies` is present only to satisfy `ensureCrm`'s shared capability-presence check.
@@ -376,6 +380,8 @@ describe('examples/workflow-chain-packs/crm-ops', () => {
   });
 
   it('every DAG node references a real, known typeId (no invented typeIds)', () => {
+    const chainIds = loaded.installed.find((p) => p.packName === 'core.openwop.workflows.crm-ops')?.chainIds ?? [];
+    expect(chainIds.length, 'fixture guard: the crm-ops pack registered no chains').toBe(7);
     const nodesManifest = JSON.parse(readFileSync(join(NODES_PACK_DIR, 'pack.json'), 'utf8')) as NodesManifest;
     const known = new Set([
       ...nodesManifest.nodes.map((n) => n.typeId),
@@ -384,8 +390,12 @@ describe('examples/workflow-chain-packs/crm-ops', () => {
       // ADR 0582 Batch 1: deal-hygiene's gate now branches to a noop terminal on
       // reject so a rejected review COMPLETES the run without creating a task.
       'core.flow.noop',
+      // ADR 0954 P2: route-lead waits out each SLA rung.
+      'core.flow.wait',
     ]);
-    for (const chainId of ['crm-ops.route-new-lead', 'crm-ops.deal-hygiene', 'crm-ops.gmail-sync', 'crm-ops.triage']) {
+    // EVERY chain the pack registers (this iterated a hand-kept four, so the three
+    // ADR 0954 chains were never checked).
+    for (const chainId of chainIds) {
       const entry = getChain(chainId)!;
       for (const n of entry.chain.dag.nodes) {
         expect(known.has(n.typeId), `${chainId}:${n.id} → ${n.typeId}`).toBe(true);

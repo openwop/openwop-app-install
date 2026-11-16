@@ -11,6 +11,10 @@
  * The "no agent member" case is an honest DOUBLE guard: `selectChannelTurnTargets([])`
  * also returns `[]`, so removing the early return alone stays green (w26 probe
  * `dispatch-no-agent`); the case still pins the end-to-end outcome.
+ * Wave 112: each negative case first asserts the state that makes the guard the
+ * only thing standing (an `'all'`-policy agent member is present for the no-loop
+ * case; the owner is the only participant, and not an agent, for the no-agent
+ * case), so "not called" cannot pass on a channel that would never dispatch.
  */
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 
@@ -71,7 +75,9 @@ describe('channel agent dispatch (FU-5)', () => {
 
   it('does NOT dispatch for a system/agent path (no authorUserId) — the no-loop guard', async () => {
     const ch = await createChannel(T, 'user:owner', { name: 'ai2', visibility: 'public' }, FULL_AUTHORITY);
-    await addChannelAgent(T, ch.conversationId, 'user:owner', FULL_AUTHORITY, 'test.helper');
+    const withAgent = await addChannelAgent(T, ch.conversationId, 'user:owner', FULL_AUTHORITY, 'test.helper');
+    // The sole agent replies to every post: only the missing author can stop this turn.
+    expect(withAgent.participants.filter((p) => p.subjectRef.startsWith('agent:')).map((p) => [p.subjectRef, p.responsePolicy])).toEqual([['agent:test.helper', 'all']]);
     mock.mockClear();
 
     await dispatchChannelAgentTurns(deps, T, ch.conversationId, 'm2', 'an agent reply', undefined);
@@ -81,6 +87,8 @@ describe('channel agent dispatch (FU-5)', () => {
 
   it('does NOT dispatch when the channel has no agent member', async () => {
     const ch = await createChannel(T, 'user:owner', { name: 'humans-only', visibility: 'public' }, FULL_AUTHORITY);
+    // A participant exists (the owner), and it is a person, not an agent.
+    expect(ch.participants.map((p) => p.subjectRef)).toEqual(['user:user:owner']);
     mock.mockClear();
 
     await dispatchChannelAgentTurns(deps, T, ch.conversationId, 'm3', 'hi everyone', 'user:poster');

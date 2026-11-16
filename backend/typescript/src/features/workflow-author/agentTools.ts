@@ -89,6 +89,7 @@ function toolError(error: string, message: string, extra?: Record<string, unknow
 }
 
 import { CATALOG_SEARCH_DEFAULT_LIMIT, CATALOG_SEARCH_MAX_LIMIT, CATALOG_SEARCH_MAX_TYPE_IDS, searchAuthoringCatalog, selectExcluded } from './catalogSearch.js';
+import { workflowClientReaderForScope } from '../../host/workflowClientAccess.js'; // ADR 1132 D5
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
 
@@ -177,9 +178,9 @@ export function registerWorkflowAuthorAgentTools(): void {
       // never another tenant's — ADR 0163). By id → the IDOR read guard: a
       // foreign id is an indistinguishable miss.
       if (!workflowId) {
-        return { content: JSON.stringify({ workflows: await listAuthoredWorkflows({ tenantId: scope.tenantId }) }) };
+        return { content: JSON.stringify({ workflows: await listAuthoredWorkflows({ tenantId: scope.tenantId, mayRead: workflowClientReaderForScope(scope) }) }) };
       }
-      const got = await readAuthoredWorkflow(workflowId, { tenantId: scope.tenantId });
+      const got = await readAuthoredWorkflow(workflowId, { tenantId: scope.tenantId, mayRead: workflowClientReaderForScope(scope) });
       // ADR 0773 D8 — the revision `persist` must be given to overwrite this workflow.
       return { content: JSON.stringify(got.found ? { ...got, revision: revisionHashOf(got.definition) } : got) };
     },

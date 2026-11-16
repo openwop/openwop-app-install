@@ -1,6 +1,8 @@
 /**
  * selectStaleEmptySessions — the mount-time stale-empty sweep's selection
- * (ADR 0140 deck, TabChatDeck's once-per-mount sweep). Breaks if the empty check,
+ * (ADR 0140 deck, TabChatDeck's once-per-mount sweep). Breaks if the sweep stops
+ * calling the ADR 0978 D3 owner-alone predicate (`isAbandonedEmptyChat`, whose own
+ * rows are in `chat/lib/__tests__/abandonedChat.test.ts`), or if the empty check,
  * the plain-chat type filter, the open-tab / deck-minted exclusions or the age
  * guard (inclusive at the boundary) is dropped or weakened.
  * Pins the guards that keep the hard-delete safe: only empty chats the caller
@@ -53,11 +55,16 @@ describe('selectStaleEmptySessions', () => {
   });
 
   it('never sweeps a meta-less legacy row — every member sees it (MT2WF-2)', () => {
+    // `type`, `ownerUserId` and `participants` are optional on ChatSessionHeader, so
+    // the rows drop them outright: no cast, the shape a legacy row really has.
     const legacy = header({ sessionId: 'legacy', type: 'agent', participants: [] });
-    delete (legacy as Partial<ChatSessionHeader>).ownerUserId;
+    delete legacy.ownerUserId;
     const untyped = header({ sessionId: 'untyped', participants: [] });
-    delete (untyped as Partial<ChatSessionHeader>).type;
-    delete (untyped as Partial<ChatSessionHeader>).ownerUserId;
+    delete untyped.type;
+    delete untyped.ownerUserId;
+    // Positive control: the same rows WITH their sole-owner meta are swept, so the
+    // empty result is the meta-less guard, not some other refusal.
+    expect(select([header({ sessionId: 'legacy' }), header({ sessionId: 'untyped' })]).map((c) => c.sessionId)).toEqual(['legacy', 'untyped']);
     expect(select([legacy, untyped])).toEqual([]);
   });
 

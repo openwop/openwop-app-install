@@ -5,6 +5,10 @@
  *
  * Red if the pain-set diff, the 0.15 confidence threshold, the angle delta or the
  * summary changes; the determinism case reds on any clock/random use (replay).
+ * ADR 1116 D4 (CC-CHAIN-7): also red if a missing previous or current set reads
+ * as "no shift" instead of a typed failure, if the chain's `records` +
+ * `rankedAngles` ports stop counting as the current set, if `config.previous`
+ * stops being read, or if `snapshot` stops being the next run's `previous`.
  */
 import { describe, it, expect } from 'vitest';
 import { nodes } from '../../../packs/vendor.myndhyve.market-intel-shift-detect/index.mjs';
@@ -59,5 +63,41 @@ describe('market-intel.shift-detect', () => {
     const a = await run(prev, curr);
     const b = await run(prev, curr);
     expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+  });
+
+  // ADR 1116 D4 — the market-intel chain's shape, and no false all-clear.
+  const call = (inputs: unknown, config?: unknown) =>
+    nodes['market-intel.shift-detect']({ inputs, config }) as Promise<{ status: string; outputs?: { alert: Alert; snapshot: { records: unknown[]; angles: unknown[] } }; error?: { code: string; message: string } }>;
+
+  it('a missing current set is a typed failure, never "no shift"', async () => {
+    const out = await call({ previous: { records: [{ quote: 'a', tagType: 'pain' }] } });
+    expect(out.status).toBe('error');
+    expect(out.error!.code).toBe('INVALID_INPUTS');
+    expect(out.error!.message).toContain('current is required');
+  });
+
+  it('a missing previous set is a typed failure', async () => {
+    const out = await call({ current: { records: [] } });
+    expect(out.status).toBe('error');
+    expect(out.error!.message).toContain('previous is required');
+  });
+
+  it('records + rankedAngles (the chain ports) are the current set; score.total is the angle score', async () => {
+    const out = await call({
+      previous: JSON.stringify({ records: [{ quote: 'old pain', tagType: 'pain' }], angles: [{ id: 'own-onboarding', score: 5 }] }),
+      records: [{ quote: 'new pain', tagType: 'pain', confidence: 0.8 }],
+      rankedAngles: [{ angleId: 'own-onboarding', angleName: 'Own onboarding', score: { total: 6.4 } }],
+    });
+    expect(out.status).toBe('success');
+    expect(out.outputs!.alert.newPains.map((p) => p.quote)).toEqual(['new pain']);
+    expect(out.outputs!.alert.resolvedPains.map((p) => p.quote)).toEqual(['old pain']);
+    expect(out.outputs!.alert.angleDeltas).toEqual([{ angle: 'own-onboarding', before: 5, after: 6.4, delta: 1.4 }]);
+    expect(out.outputs!.snapshot).toEqual({ records: [{ quote: 'new pain', tagType: 'pain', confidence: 0.8 }], angles: [{ id: 'own-onboarding', score: 6.4 }] });
+  });
+
+  it('previous is still read from config when inputs lack it (back-compat)', async () => {
+    const out = await call({ current: { records: [{ quote: 'x', tagType: 'pain' }] } }, { previous: { records: [{ quote: 'x', tagType: 'pain' }] } });
+    expect(out.status).toBe('success');
+    expect(out.outputs!.alert.hasShift).toBe(false);
   });
 });

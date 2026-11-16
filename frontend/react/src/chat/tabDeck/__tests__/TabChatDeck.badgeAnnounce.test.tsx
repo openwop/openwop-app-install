@@ -1,5 +1,5 @@
 /**
- * MTCU-201 / MTCU-202 — the DECK-LEVEL wiring of the background-activity
+ * ADR 0140 P5, MTCU-201 / MTCU-202 — the DECK-LEVEL wiring of the background-activity
  * announcement.
  *
  * `useTabBadges` is already covered behaviourally by its own suite (rising edge,
@@ -95,20 +95,21 @@ function mount(): void {
 }
 
 describe('TabChatDeck — the badge announcement is actually WIRED (MTCU-201)', () => {
-  it('the deck hands useTabBadges a raise callback that is NOT the inert default', () => {
+  // The cases below read only `calls[0]`; this one also pins ONE announcement per raise
+  // (a doubled announce re-reads the same news to a screen-reader user).
+  it('the deck hands useTabBadges a raise callback that is NOT the inert default, announcing once per raise', () => {
     mount();
     expect(captured, 'the deck must pass a raise callback at all').toBeTypeOf('function');
     captured!('s-alpha', 'unread');
-    expect(announceSpy, 'the callback must reach announce() — an inert default announces nothing').toHaveBeenCalledTimes(1);
+    expect(announceSpy, 'the callback must reach announce() exactly once — an inert default announces nothing').toHaveBeenCalledTimes(1);
   });
 
   it('an unread raise announces POLITELY and NAMES the tab (MTCU-202)', () => {
     mount();
     captured!('s-alpha', 'unread');
     const [msg, opts] = announceSpy.mock.calls[0] as [string, { assertive?: boolean } | undefined];
-    expect(msg, 'the tab name is the whole point — the announcement is out of context').toContain('Quarterly report');
-    expect(msg).toBe('New reply in Quarterly report');
-    expect(opts?.assertive, 'a background reply is ambient, not an interrupt').toBeFalsy();
+    expect(msg, 'the tab name is the whole point — the announcement is out of context').toBe('New reply in Quarterly report');
+    expect(opts?.assertive, 'a background reply is ambient, not an interrupt').toBe(false);
   });
 
   it('a blocked raise announces ASSERTIVELY and names the tab (a HITL wait blocks the user)', () => {
@@ -123,7 +124,6 @@ describe('TabChatDeck — the badge announcement is actually WIRED (MTCU-201)', 
     mount();
     captured!('s-ghost', 'unread');
     const [msg] = announceSpy.mock.calls[0] as [string];
-    expect(msg).not.toContain('undefined');
     expect(msg, 'the fallback is the new-tab label').toBe('New reply in New chat');
   });
 });

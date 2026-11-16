@@ -17,12 +17,13 @@
 import { registerMemoryProposalLifecycle } from './memoryProposals.js';
 import type { BackendFeature } from '../types.js';
 import { setSubjectOrgResolver } from '../../host/subjectOrgScope.js';
-import { registerSubjectAccessResolver } from '../../host/subjectAccess.js';
+import { registerSubjectAccessResolver, registerSubjectRoleResolver } from '../../host/subjectAccess.js';
 import { registerSubjectDependent } from '../../host/subjectDependents.js';
 import { deleteCanvasForTenant, listCanvasIdsOwnedBy } from '../../host/canvasSurface.js';
 import { registerProjectsAgentTools } from './agentTools.js';
 import { registerProjectsRoutes } from './routes.js';
-import { getProject, resolveProjectAccess, registerProjectsErasure } from './projectsService.js';
+import { ADDRESSABLE_PROJECT_ROLES, getProject, listProjects, projectRoleOf, resolveProjectAccess, registerProjectsErasure } from './projectsService.js';
+import { registerPrivateProjectProbe } from '../../host/runProjectAccess.js';
 
 export const projectsFeature: BackendFeature = {
   id: 'projects',
@@ -51,6 +52,20 @@ export const projectsFeature: BackendFeature = {
     registerSubjectAccessResolver('project', async (tenantId, subject, caller) =>
       resolveProjectAccess(tenantId, subject.id, caller),
     );
+    // ADR 1133 — which of a tenant's projects are private, read once per request by
+    // the run read gate, so a tenant with none pays nothing per run.
+    registerPrivateProjectProbe(async (tenantId) =>
+      new Set((await listProjects(tenantId)).filter((p) => p.visibility === 'private').map((p) => p.id)),
+    );
+    // ADR 1137 D4 — a project board's card may be addressed to `project:lead` or
+    // `project:contributor`; kanban asks this for the viewer's ADR 1095 role.
+    registerSubjectRoleResolver('project', {
+      addressable: ADDRESSABLE_PROJECT_ROLES,
+      roleOf: async (tenantId, subject, userId) => {
+        const p = await getProject(tenantId, subject.id);
+        return p ? projectRoleOf(p, userId) ?? null : null;
+      },
+    });
     // ADR 0839 D2 — canvases a project OWNS (`ownerSubject`) go with it. The canvas
     // store is host-owned, so its registrant lives with the subject's owner; the delete
     // is the canvas's single owner (`deleteCanvasForTenant`: versions, idem row, and the

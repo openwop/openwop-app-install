@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.kanban-work-items/1.1.2/materialize.input.json",
+  "$id": "https://packs.openwop.dev/core.openwop.kanban-work-items/1.2.0/materialize.input.json",
   "title": "KanbanWorkItemsMaterializeInput",
   "type": "object",
   "required": ["boardId", "proposal"],
@@ -58,6 +58,11 @@
               "input": { "type": "object" },
               "priority": { "enum": ["low", "normal", "high"] },
               "dueAt": { "type": "string", "format": "date-time" },
+              "assigneeId": { "type": "string", "minLength": 1, "maxLength": 512, "description": "ADR 1137 D1: the one accountable person, set when the card is created. Must be a workspace member who can read the board's subject. Exclusive with assigneeRole." },
+              "assigneeRole": { "type": "string", "minLength": 1, "maxLength": 128, "description": "ADR 1137 D1/D4: a claimable role. A workspace role key, or <kind>:<role> on that subject's board (project:lead, project:contributor)." },
+              "assignmentReason": { "type": "string", "maxLength": 500 },
+              "sourceLabel": { "type": "string", "maxLength": 200 },
+              "labels": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 1, "maxLength": 64 } },
               "execution": {
                 "type": "object",
                 "properties": {

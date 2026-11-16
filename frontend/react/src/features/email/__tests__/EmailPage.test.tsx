@@ -7,12 +7,24 @@ import '@testing-library/jest-dom/vitest';
  * passes `segmentId` (not `stage`) to `createCampaign` when "By segment" is
  * selected. Also covers the campaign-row segment-name display.
  *
- * Sabotage-witnessed (/grade-tests wave 9, `w9g4-ep-*`): dropping the loading
- * guard, the not-enabled gate, the lazy segments condition, the `segmentId`
- * payload, or the segment-name lookup each turns its case red.
+ * The new-template form (ADR 0019 EMAIL-1 / ADR 0955 D8, EMAIL-TEMPLATE-VALIDATION-1):
+ * the Body is multiline and its paragraphs reach `createTemplate` unchanged; the
+ * create action is DISABLED for an empty or whitespace name, body or (email
+ * only) subject; the payload trims outer whitespace, sends no subject for SMS,
+ * and the form resets after a create. The handler's own `if (!templateReady)`
+ * is a second guard behind the disabled button and cannot be reached by a click
+ * (a disabled button fires nothing), so the cases witness the shared
+ * `templateReady` and the `disabled` binding.
+ *
+ * Sabotage-witnessed (/grade-tests wave 9 `w9g4-ep-*`, wave 112 `w112g4-ep-*`):
+ * dropping the loading guard, the not-enabled gate, the lazy segments condition,
+ * the `segmentId` payload, the segment-name lookup, the multiline Body, any
+ * `.trim()` in readiness or payload, the SMS subject exemption or its hidden
+ * Subject field, the `disabled` binding, or the post-create reset each turns
+ * its case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
+import { act, render, screen, cleanup, waitFor, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type * as EC from '../emailClient.js';
 
@@ -90,7 +102,10 @@ describe('EmailPage access gate', () => {
   it('shows the "not enabled" StateCard when the feature is off', () => {
     access.value = { enabled: false, loading: false, variant: undefined };
     renderPage();
-    expect(screen.getByText(/Email is not enabled/i)).toBeTruthy();
+    expect(screen.getByText('Email is not enabled')).toBeInTheDocument();
+    // The card INSTEAD of the page: no create form, and no workspace read.
+    expect(screen.queryByRole('button', { name: 'New template' })).toBeNull();
+    expect(listOrgs).not.toHaveBeenCalled();
   });
 });
 
@@ -134,7 +149,11 @@ describe('EmailPage audience picker (ADR 0211 §2)', () => {
       { campaignId: 'cmp1', orgId: 'o1', templateId: 'tpl1', audience: { segmentId: 'seg1' }, status: 'draft', createdAt: '', updatedAt: '' },
     ]);
     renderPage();
-    await waitFor(() => expect(screen.getByText(/segment: Qualified leads/i)).toBeTruthy());
+    // The row's segment reference is what triggers the (lazy) segments read.
+    await waitFor(() => expect(listSegments).toHaveBeenCalledTimes(1));
+    await act(async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); });
+    // The NAME, not the raw id: 'Welcome · segment: seg1' is the regression.
+    expect(screen.getByText(/· segment:/).textContent).toBe('Welcome · segment: Qualified leads');
   });
 });
 
@@ -151,7 +170,9 @@ describe('new template multiline body', () => {
     const body = 'Hello {{contact.name}},\n\nChoose one small step.\nQA SYNTHETIC — do not send.';
     fireEvent.change(screen.getByRole('textbox', { name: 'Body' }), { target: { value: body } });
     fireEvent.click(screen.getByRole('button', { name: 'New template' }));
-    await waitFor(() => expect(createTemplate).toHaveBeenCalledWith('o1', { name: 'QA multiline draft', subject: 'A small next step', body, format }));
+    // Wait for the call, then fail on the VALUE (a stripped body is still one call).
+    await waitFor(() => expect(createTemplate).toHaveBeenCalledTimes(1));
+    expect(createTemplate).toHaveBeenCalledExactlyOnceWith('o1', { name: 'QA multiline draft', subject: 'A small next step', body, format });
     const clearedBody = screen.getByRole('textbox', { name: 'Body' });
     if (!(clearedBody instanceof HTMLTextAreaElement)) throw new Error('Template body must preserve multiline input');
     expect(clearedBody.value).toBe('');
@@ -169,7 +190,7 @@ describe('new template readiness (ADR 0955 D8)', () => {
     { format: 'markdown', field: 'name', label: 'Template name' },
     { format: 'markdown', field: 'subject', label: 'Subject' },
     { format: 'markdown', field: 'body', label: 'Body' },
-  ] as const)('keeps $format creation unavailable for an empty or whitespace $field', async ({ format, label }) => {
+  ] as const)('$field: keeps $format creation unavailable when empty or whitespace', async ({ format, label }) => {
     access.value = { enabled: true, loading: false, variant: undefined };
     renderPage();
     await screen.findByLabelText('Template name');
@@ -190,7 +211,7 @@ describe('new template readiness (ADR 0955 D8)', () => {
   it.each([
     { field: 'name', label: 'Template name' },
     { field: 'body', label: 'Body' },
-  ] as const)('keeps SMS creation unavailable for an empty or whitespace $field', async ({ label }) => {
+  ] as const)('$field: keeps SMS creation unavailable when empty or whitespace', async ({ label }) => {
     access.value = { enabled: true, loading: false, variant: undefined };
     renderPage();
     await screen.findByLabelText('Template name');
@@ -220,9 +241,10 @@ describe('new template readiness (ADR 0955 D8)', () => {
     const create = screen.getByRole('button', { name: 'New template' });
     expect(create).toBeEnabled();
     fireEvent.click(create);
-    await waitFor(() => expect(createTemplate).toHaveBeenCalledExactlyOnceWith('o1', {
+    await waitFor(() => expect(createTemplate).toHaveBeenCalledTimes(1));
+    expect(createTemplate).toHaveBeenCalledExactlyOnceWith('o1', {
       name: 'QA private draft', subject: 'A private subject', body, format,
-    }));
+    });
     expect(screen.getByRole('textbox', { name: 'Body' })).toHaveValue('');
     expect(create).toBeDisabled();
   });
@@ -240,9 +262,10 @@ describe('new template readiness (ADR 0955 D8)', () => {
     const create = screen.getByRole('button', { name: 'New template' });
     expect(create).toBeEnabled();
     fireEvent.click(create);
-    await waitFor(() => expect(createTemplate).toHaveBeenCalledExactlyOnceWith('o1', {
+    await waitFor(() => expect(createTemplate).toHaveBeenCalledTimes(1));
+    expect(createTemplate).toHaveBeenCalledExactlyOnceWith('o1', {
       name: 'QA private SMS', subject: '', body, format: 'sms',
-    }));
+    });
   });
 
   it('rechecks the subject requirement when switching between SMS and email formats', async () => {

@@ -156,9 +156,10 @@ record 2). Every count below is the expanded form.
 >
 > - `MISSING_CONFIG_CEILING` = **50** (was 42; raised by ADR 0955 P5 for the
 >   campaign-journeys blueprints' required `eventName` / `from` params);
-> - `REQUIRED_INPUT_CEILING` = **7** (was 72; the 55 `notification-push` nodes were
->   retargeted and the 10 `email-send` nodes bound — the residue is market-intel ×5,
->   `storage.blob-put` and `http.webhook-verify`, re-measured 2026-10-29);
+> - `REQUIRED_INPUT_CEILING` = **2** (was 72, then 7; the 55 `notification-push` nodes
+>   were retargeted and the 10 `email-send` nodes bound. The market-intel ×5 were bound
+>   by ADR 1116 on 2026-11-13. The residue is `storage.blob-put` and
+>   `http.webhook-verify`);
 > - `UNFILLABLE_INPUT_CEILING` = **3** (the GRD-5 rule over the expanded blank copy;
 >   was 5 until the CC-CHAIN-3/6 pack fixes made two more inputs fillable, 2026-11-13).
 >

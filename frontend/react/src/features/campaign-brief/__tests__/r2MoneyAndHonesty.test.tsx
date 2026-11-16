@@ -17,24 +17,35 @@
  *
  * Wave 30 (grade-tests): CB-SP-5's "validate never ran" read now follows its
  * positive control (the save error is on screen) instead of a single flush; the
- * fixture is a full typed row (no casts). CB-MONEY-2 guards readable allocation amounts.
+ * fixture is a full typed row (no casts).
+ *  - CB-MONEY-2 (ADR 0156 Phase 4, fixed by 8824006a2; the wave-30 `it.fails` pin
+ *    is retired): per-channel allocations read in major units with the STORED
+ *    currency's exponent, a pending currency edit cannot relabel them, and a brief
+ *    with no currency gets no invented one.
+ *  - ADR 1020 D8: a kernel waiting for approval is said and linked, with no
+ *    "no kernel yet" prompt beside it; a stale kernel says what it means.
  * Sabotage-witnessed: the exponent conversions both ways, the JPY render, the
  * perChannel-preserving save, the Save&Validate abort, the orgs/personas failure
  * cards, the delete disclosure (both polarities) and the rename shape/blank/Escape.
+ * Wave 111 adds: the allocation line formatted with the stored vs the edited
+ * currency, with USD for every currency, as the raw integer, with a "minor
+ * units" label; the pending-kernel notice, its run link, the brief id it asks
+ * for, the "no kernel yet" suppression, and the stale explanation.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, act, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import type { CampaignBrief } from '../campaignBriefClient.js';
+import type { CampaignBrief, MessagingKernel } from '../campaignBriefClient.js';
 import { currencyExponent, minorToMajorString, majorToMinor } from '../budgetUnits.js';
 
-const listBriefs = vi.fn();
-const updateBrief = vi.fn();
-const validateBriefById = vi.fn();
-const listPersonas = vi.fn();
-const listOrgs = vi.fn();
-const findCampaignForBrief = vi.fn();
-const getPendingKernelRun = vi.fn();
+type Client = typeof import('../campaignBriefClient.js');
+const listBriefs = vi.fn<Client['listBriefs']>();
+const updateBrief = vi.fn<Client['updateBrief']>();
+const validateBriefById = vi.fn<Client['validateBriefById']>();
+const listPersonas = vi.fn<Client['listPersonas']>();
+const listOrgs = vi.fn<Client['listOrgs']>();
+const findCampaignForBrief = vi.fn<Client['findCampaignForBrief']>();
+const getPendingKernelRun = vi.fn<Client['getPendingKernelRun']>();
 
 // The collection selector reads the current client's KB through its own client.
 vi.mock('../../kb/kbClient.js', () => ({ listCollections: vi.fn(async () => []) }));
@@ -43,15 +54,15 @@ vi.mock('../campaignBriefClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
   return {
     ...actual,
-    listBriefs: (..._a: unknown[]) => listBriefs(),
-    updateBrief: (...a: unknown[]) => updateBrief(...a),
-    validateBriefById: (...a: unknown[]) => validateBriefById(...a),
-    listPersonas: (..._a: unknown[]) => listPersonas(),
-    listOrgs: (..._a: unknown[]) => listOrgs(),
+    listBriefs: (...a: Parameters<Client['listBriefs']>) => listBriefs(...a),
+    updateBrief: (...a: Parameters<Client['updateBrief']>) => updateBrief(...a),
+    validateBriefById: (...a: Parameters<Client['validateBriefById']>) => validateBriefById(...a),
+    listPersonas: (...a: Parameters<Client['listPersonas']>) => listPersonas(...a),
+    listOrgs: (...a: Parameters<Client['listOrgs']>) => listOrgs(...a),
     listBrands: vi.fn(async () => []),
     deleteBrief: vi.fn(async () => {}),
-    findCampaignForBrief: (...a: unknown[]) => findCampaignForBrief(...a),
-    getPendingKernelRun: (...a: unknown[]) => getPendingKernelRun(...a),
+    findCampaignForBrief: (...a: Parameters<Client['findCampaignForBrief']>) => findCampaignForBrief(...a),
+    getPendingKernelRun: (...a: Parameters<Client['getPendingKernelRun']>) => getPendingKernelRun(...a),
   };
 });
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
@@ -122,17 +133,21 @@ describe('CB-MONEY-2 — per-channel allocations render in major units', () => {
     expect(line.textContent).toBe(persistedAllocation); // a pending edit cannot relabel stored money
   });
 
+  // Amounts are bounded on both sides: the raw minor integer (150000) contains
+  // "1500", so an unbounded /1500/ passed a line that printed the stored integer.
   it.each([
-    { currency: 'JPY', amount: /150,?000/ },
-    { currency: 'KWD', amount: /150\.000/ },
-    { currency: undefined, amount: /1500/ },
+    { currency: 'JPY', amount: /150,000(?![\d.])/ },
+    { currency: 'KWD', amount: /150\.000(?!\d)/ },
+    { currency: undefined, amount: /Ad variants: 1500$/ },
   ])('uses the stored $currency exponent without inventing a currency', async ({ currency, amount }) => {
     listBriefs.mockResolvedValue([{ ...BRIEF, budget: { ...(currency ? { currency } : {}), perChannel: { ad_variants: 150000 } } }]);
     await openDetail();
     const line = screen.getByText((_c, el) => el?.tagName === 'P' && /Per-channel plan/.test(el.textContent ?? ''));
     expect(line.textContent).toMatch(amount);
+    expect(line.textContent).not.toMatch(/150000/);
     expect(line.textContent).not.toMatch(/minor units/);
-    if (!currency) expect(line.textContent).not.toMatch(/\$|USD/);
+    // None of these is USD, so no row may carry a dollar sign or the USD code.
+    expect(line.textContent).not.toMatch(/\$|USD/);
   });
 });
 
@@ -142,9 +157,9 @@ describe('CB-SP-4 — a save never wipes what the editor does not show', () => {
     await openDetail();
     fireEvent.click(screen.getByRole('button', { name: /^Save$/ }));
     await act(async () => {});
-    const patch = updateBrief.mock.calls[0]![1] as { budget: unknown };
+    const patch = updateBrief.mock.calls[0]?.[1];
     // The old code sent budget:null here — destroying the allocations.
-    expect(patch.budget).toEqual({ perChannel: { ad_variants: 1000 } });
+    expect(patch?.budget).toEqual({ perChannel: { ad_variants: 1000 } });
   });
 });
 
@@ -241,14 +256,18 @@ describe('R3 CB-G3 — the un-renameable brief gets an inline rename', () => {
   it('Escape cancels without a write', async () => {
     await openDetail();
     fireEvent.click(screen.getByRole('button', { name: /rename brief/i }));
-    fireEvent.keyDown(screen.getByRole('textbox', { name: /rename brief/i }), { key: 'Escape' });
+    // A changed draft, so an Escape that saved would have something to write.
+    const input = screen.getByRole('textbox', { name: /rename brief/i });
+    fireEvent.change(input, { target: { value: 'Autumn launch' } });
+    fireEvent.keyDown(input, { key: 'Escape' });
+    await act(async () => {});
     expect(screen.queryByRole('textbox', { name: /rename brief/i })).toBeNull();
     expect(updateBrief).not.toHaveBeenCalled();
   });
 });
 
 describe('ADR 1020 D8 — a kernel waiting for approval, and a stale one, are explained', () => {
-  const KERNEL = { headline: 'Pick faster', supportingStatement: 'Save hours', proofPoints: ['40%'], primaryCta: 'Demo', secondaryCta: '', tone: 'direct', channelTones: {}, sourceDocIds: [], generatedAt: '2026-10-31T00:00:00.000Z' };
+  const KERNEL: MessagingKernel = { headline: 'Pick faster', supportingStatement: 'Save hours', proofPoints: ['40%'], primaryCta: 'Demo', secondaryCta: '', tone: 'direct', channelTones: {}, sourceDocIds: [], generatedAt: '2026-10-31T00:00:00.000Z' };
 
   it('while a kernel run waits, the page says so, links to the run, and does not invite a second generation', async () => {
     getPendingKernelRun.mockResolvedValue('run-77');
@@ -257,6 +276,8 @@ describe('ADR 1020 D8 — a kernel waiting for approval, and a stale one, are ex
     expect(getPendingKernelRun).toHaveBeenCalledWith('brief-1');
     const link = await screen.findByRole('link', { name: /review it/i });
     expect(link.getAttribute('href')).toBe('/runs/run-77');
+    // "the page says so": the waiting notice itself, not only its link.
+    expect(screen.getByText(/is waiting for your approval/i)).toBeTruthy();
     expect(screen.queryByText(/No messaging kernel yet/i)).toBeNull();
   });
 

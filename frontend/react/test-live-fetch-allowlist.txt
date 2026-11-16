@@ -27,7 +27,8 @@
 # and that is the mechanism working, not a regression.
 # (2026-10-16, /grade-tests w50: `failedReadDecisions.test.tsx` now stubs the dashboard tile bodies
 # (LazyMount), so its line is gone — 3/3 runs green with no allowlist entry, 0 audit lines.)
-src/features/comments/__tests__/commentsDeepLink.test.tsx
+# (2026-11-13, /grade-tests w110: `commentsDeepLink.test.tsx` now mocks `loadOrgMembers`, its last
+# live call, so its line is gone.)
 src/features/dashboard/__tests__/customizeUpgrade.test.tsx
 src/features/dashboard/__tests__/uxUpgradeAug.test.tsx
 src/features/marketplace/__tests__/buyScopeGate.test.tsx

@@ -143,6 +143,7 @@ describe('never a grant', () => {
     // that claim; a reader that GRANTS on the value is the defect ADR 0832 D3 rules out.
     const READERS = new Set([
       'host/accessControlService.ts', // runOrgScopeSubject — the floors' subject
+      'host/workflowClientAccess.ts', // ADR 1132 D5: NARROWS only — a run lane's causing member is read as a `cause` (membership only) to filter another client's definitions; never a grant
       'host/featureSurfaces.ts', // the seam floor (via runOrgScopeSubject) and its resolveOne note
       'host/inMemorySurfaces.ts', // BundleScope field
       'host/agentToolProvider.ts', // forwarded into the tool BundleScope

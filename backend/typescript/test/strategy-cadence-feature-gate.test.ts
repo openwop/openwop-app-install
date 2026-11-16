@@ -17,6 +17,21 @@
  * 'strategy-approval-gate'`, whose default is `status:'off'`. An implementer reaching for
  * the exported symbol would have stopped EVERY strategy cadence job for EVERY tenant,
  * silently (one `log.info`). Leg (b) turns red on that substitution; legs (a) and (c) do not.
+ *
+ * CORRECTED 2026-11-13 (/grade-tests w110): the two paragraphs above are the ADR 0676
+ * snapshot, kept for the trail. Leg (c) was cut in wave 19. ADR 0892 then made
+ * `strategy` itself default-OFF (12bec1664), so "default-on" is no longer the safety
+ * argument: leg (b) now pins that the daemon resolves the gate PER JOB TENANT
+ * (`scheduleDaemon.ts` `fireJob`), which is what lets an opt-in tenant still fire, and
+ * that the two toggle ids stay distinct. The gate-id SUBSTITUTION in the registrar is
+ * caught by leg (d), not leg (b). Legs (b) and (d) are source pins (the ceiling: a
+ * behavioural witness needs the chain loader, registry and storage); the per-tenant
+ * gate's behaviour is witnessed generically in `insights-suite-toggle-and-resource.test.ts`.
+ *
+ * What breaks it (sabotage witnesses): renaming `STRATEGY_TOGGLE_ID` or the feature's
+ * declared toggle id (a); flipping the default, dropping `{ tenantId }` from the daemon's
+ * `resolveOne`, or colliding the two ids (b); stamping the gate id, or commenting the
+ * `featureId` line out, in `cadence.ts` (d).
  */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';

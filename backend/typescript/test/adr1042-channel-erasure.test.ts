@@ -32,6 +32,8 @@
  * rows with it (owner erasure, and the other rows of an erased writer's DM),
  * while the same writer's row in a surviving thread stays. Sabotage-witnessed
  * 2026-11-09: removing the per-thread index delete turned both (f) cases red.
+ * Wave 112: (c) names each surviving row of the kept tenant by its key instead of
+ * a truthiness chain, so a purge that rewrote a kept row would show.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { bootChannelHarness, type ChannelHarness } from './support/channelCoreHarness.js';
@@ -143,7 +145,7 @@ describe('(c) tenant teardown', () => {
     });
     expect(await state('t-er-gone')).toEqual({ sender: null, pending: [], settings: null, thread: null, reply: null, relayOwner: null, claimFree: true });
     const kept = await state('t-er-kept');
-    expect(kept.sender && kept.settings && kept.thread && kept.reply).toBeTruthy();
+    expect([kept.sender?.senderId, kept.settings?.laneKey, kept.thread?.threadKey, kept.reply?.exchangeKey]).toEqual(['s', 'conn:t-er-kept', 'tk-t-er-kept', 'ek-t-er-kept']);
     expect(kept.pending).toHaveLength(1);
     expect(kept.relayOwner).toBe('user:x');
     expect(kept.claimFree).toBe(false);

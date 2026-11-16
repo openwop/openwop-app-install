@@ -439,6 +439,20 @@ legacy id matches nothing.
 > > standing, and nothing is handed to the wrong key. The job does not depend on
 > > the rule; it derives its map from the configured keys. Removing it is TODO
 > > `CHAN-F18`, after a release has carried the upgrade note.
+>
+> > **UPDATED 2026-11-16 (CHAN-F18) — the job is removed.** Release 0.14.0
+> > (2026-11-15) carried the "run it before or after upgrading" note, so the
+> > deferral above has served its purpose. `host/legacyBearerIdRewrite.ts`, its
+> > `BACKGROUND_APP_JOBS` entry and `test/adr1045-legacy-bearer-rewrite.test.ts`
+> > are deleted; `OPENWOP_LEGACY_BEARER_REWRITE` is no longer read. An install that
+> > upgrades from before 0.14.0 without having run it must land on 0.14.0 and run
+> > it there (CHANGELOG [Unreleased] § Removed); past 0.14.0 its legacy records
+> > stay fail-closed with no rewrite tool. A stored `app_bg_job:legacy-bearer-id-rewrite`
+> > marker is inert: the runner reads markers only for jobs in the list.
+> > Kept from this job, for any future data rewrite: the ADR 0301 hash chain
+> > (`cdp:audit-chain`, `AUDIT_CHAIN_COLLECTION`) must be on its skip list, and
+> > counts logged must not use a declared PII field name. The test citation two
+> > paragraphs up names a file that no longer exists; that test's history is in git.
 
 **What a principal-id change does to stored state (inventory, nothing
 rewritten).** The id an env key presents changes once, at deploy. Rotation

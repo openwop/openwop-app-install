@@ -13,9 +13,10 @@
  * structural check alone is not enough: `else` is a legitimate verdict, so the
  * failure looked like a decision rather than a defect.
  *
- * HONEST CEILING: the executor's single-`input` unwrap (`executor.ts`, the line
- * after `buildNodeInputs` in the DAG loop) is not exported, so `ctxInputs` below
- * repeats that one rule. Everything else is the product's own code.
+ * `ctx.inputs` is built by the executor's OWN rule (`executor/nodeCtxInputs.ts`
+ * `resolveDeclaredInputs` + `buildNodeCtxInputs`, ADR 0597 §Correction 9), so
+ * nothing here re-implements the executor. (Until wave 114 this file copied the
+ * single-`input` unwrap line, from before that module was exported.)
  *
  * ROUTING is asserted for all four chains: each branch's outcome must reach the
  * node its `why` names, through the real `evaluateCondition` over its out-edges.
@@ -27,13 +28,16 @@
  *
  * TST-CCC-2. Red when: `ifNode` stops deriving `branch` from the predicate; a
  * chain's predicate edge stops landing on the `value` port; the scheduler stops
- * routing a named-port edge to that port; or a correctly-routed chain's branch
- * edges stop reaching their target (e.g. a chain's then/else edges are swapped).
+ * routing a named-port edge to that port; the executor's ctx-inputs rule stops
+ * passing the port map through; `evaluateCondition` stops honouring `eq`; or a
+ * chain's branch edges stop reaching their target (e.g. its then/else edges are
+ * swapped back).
  */
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { expandChain, getChain, loadWorkflowChainPacks, _resetChainRegistryForTest } from '../src/host/workflowChainPackLoader.js';
 import { buildGraph, buildNodeInputs, evaluateCondition, freshSnapshot, markCompleted, type EdgeCondition } from '../src/executor/scheduler.js';
+import { buildNodeCtxInputs, resolveDeclaredInputs } from '../src/executor/nodeCtxInputs.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
 
 const ROOT = join(__dirname, '..', '..', '..');
@@ -72,8 +76,9 @@ function ctxInputs(def: WorkflowDefinition, branchId: string, upstreamOutputs: R
   expect(inbound.length, `${branchId} must have an inbound edge`).toBeGreaterThan(0);
   for (const e of inbound) markCompleted(e.sourceNodeId, upstreamOutputs, snapshot);
   const byPort = buildNodeInputs(branchId, graph, snapshot, {});
-  // executor.ts: unwrap ONLY a lone port literally named `input` (the copied rule — see header).
-  return Object.keys(byPort).length === 1 && 'input' in byPort ? byPort.input : byPort;
+  // The executor's own rule (executor.ts calls exactly these two, with the run's bag).
+  const node = def.nodes.find((n) => n.nodeId === branchId)!;
+  return buildNodeCtxInputs(byPort, resolveDeclaredInputs(node.inputs, {}));
 }
 
 function configOf(def: WorkflowDefinition, nodeId: string): Record<string, unknown> {
@@ -88,8 +93,10 @@ function routedTargets(def: WorkflowDefinition, branchId: string, outputs: IfOut
     .map((e) => authored(e.targetNodeId));
 }
 
-/** chainId, branch node, upstream node's REAL output shape, a matching + a non-matching payload. */
-const CASES: { chainId: string; node: string; match: Record<string, unknown>; miss: Record<string, unknown>; why: string }[] = [
+/** chainId, branch node, upstream node's REAL output shape, a matching + a non-matching
+ *  payload, and the node each branch must land on per its `why` (TST-CCX-1/2 were
+ *  inverted before 2026-10-29). */
+const CASES: { chainId: string; node: string; match: Record<string, unknown>; miss: Record<string, unknown>; why: string; then: string; else: string }[] = [
   {
     chainId: 'marketing.ad-optimization',
     node: 'guard',
@@ -97,6 +104,8 @@ const CASES: { chainId: string; node: string; match: Record<string, unknown>; mi
     match: { content: 'Shift budget 30%.\nWITHIN GUARDRAIL: no' },
     miss: { content: 'Shift budget 5%.\nWITHIN GUARDRAIL: yes' },
     why: 'a change outside the guardrail must route to human review, one inside it must auto-apply',
+    then: 'review',
+    else: 'autoApply',
   },
   {
     chainId: 'support.kb-answer',
@@ -104,6 +113,8 @@ const CASES: { chainId: string; node: string; match: Record<string, unknown>; mi
     match: { content: 'Reset it in Settings.\nCONFIDENCE: high' },
     miss: { content: 'I am not sure.\nCONFIDENCE: low' },
     why: 'a high-confidence answer must be delivered, a low-confidence one must escalate',
+    then: 'deliver',
+    else: 'approveEscalation',
   },
   {
     chainId: 'support.sentiment-escalation',
@@ -111,6 +122,8 @@ const CASES: { chainId: string; node: string; match: Record<string, unknown>; mi
     match: { content: 'sentiment: negative\nBRAND RISK: high' },
     miss: { content: 'sentiment: positive\nBRAND RISK: none' },
     why: 'a high brand-risk message must escalate, a benign one must only be logged',
+    then: 'approveEscalation',
+    else: 'log',
   },
   {
     chainId: 'starters.verified-webhook-router',
@@ -119,42 +132,28 @@ const CASES: { chainId: string; node: string; match: Record<string, unknown>; mi
     match: { valid: true, family: 'stripe' },
     miss: { valid: false, family: 'stripe' },
     why: 'a webhook that verified must be forwarded, a forged one dropped',
+    then: 'notify',
+    else: 'drop',
   },
-];
-
-/** Where each branch must land, per its `why` (TST-CCX-1/2 were inverted before 2026-10-29). */
-const ROUTES: { chainId: string; then: string; else: string }[] = [
-  { chainId: 'marketing.ad-optimization', then: 'review', else: 'autoApply' },
-  { chainId: 'support.kb-answer', then: 'deliver', else: 'approveEscalation' },
-  { chainId: 'support.sentiment-escalation', then: 'approveEscalation', else: 'log' },
-  { chainId: 'starters.verified-webhook-router', then: 'notify', else: 'drop' },
 ];
 
 it('the chain packs load cleanly (otherwise every case below is vacuous)', () => {
   expect(loadErrors).toEqual([]);
 });
 
-describe('a shipped branch node reaches BOTH of its branches', () => {
-  it.each(CASES)('$chainId :: $node — $why', async ({ chainId, node, match, miss }) => {
+// One case per chain: the label (the branch node decides) AND the landing (its
+// out-edges route). The label alone was the pre-w67 hole: `else` is a legitimate
+// verdict, and an inverted then/else edge pair passed a label-only check.
+describe('every shipped branch node takes both branches and reaches the node its `why` names', () => {
+  it.each(CASES)('$chainId :: $node — then → $then, else → $else', async ({ chainId, node, match, miss, why, then, else: elseTarget }) => {
     const def = expanded(chainId);
     const id = nodeIdOf(def, node);
     const config = configOf(def, id);
     const hit = await ifNode({ inputs: ctxInputs(def, id, match), config });
     const skip = await ifNode({ inputs: ctxInputs(def, id, miss), config });
-    expect(hit.outputs.branch, 'the matching payload must take `then`').toBe('then');
-    expect(skip.outputs.branch, 'the non-matching payload must take `else`').toBe('else');
-  });
-});
-
-describe('every shipped branch node reaches the node its `why` names', () => {
-  it.each(ROUTES)('$chainId: then → $then, else → $else', async ({ chainId, then, else: elseTarget }) => {
-    const c = CASES.find((x) => x.chainId === chainId)!;
-    const def = expanded(chainId);
-    const id = nodeIdOf(def, c.node);
-    const config = configOf(def, id);
-    const hit = await ifNode({ inputs: ctxInputs(def, id, c.match), config });
-    const skip = await ifNode({ inputs: ctxInputs(def, id, c.miss), config });
-    expect(routedTargets(def, id, hit.outputs)).toEqual([then]);
-    expect(routedTargets(def, id, skip.outputs)).toEqual([elseTarget]);
+    expect(hit.outputs.branch, `the matching payload must take \`then\` (${why})`).toBe('then');
+    expect(skip.outputs.branch, `the non-matching payload must take \`else\` (${why})`).toBe('else');
+    expect(routedTargets(def, id, hit.outputs), why).toEqual([then]);
+    expect(routedTargets(def, id, skip.outputs), why).toEqual([elseTarget]);
   });
 });

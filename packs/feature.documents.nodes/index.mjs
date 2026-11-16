@@ -164,6 +164,31 @@ export async function generateFromTemplate(ctx) {
   return { status: 'success', outputs: { document: created.document, version: versioned.version, ...(artifact ? { artifact } : {}) } };
 }
 
+/**
+ * CC-SEO-2 — save text a step produced (e.g. an AI-written brief) as a DRAFT
+ * document, via the surface's createDraftDocument (deterministic document id and
+ * idempotency key from the run/node, so a replay converges on the same rows).
+ * Inputs: { content, orgId, title?, kind? } — `content` may also arrive as an
+ * upstream `{ content }` / `{ text }` object. Fails typed: org_required,
+ * empty_content (from the surface), host_capability_missing. Durable writer.
+ */
+export async function saveDocument(ctx) {
+  const documents = ctx.features && ctx.features.documents;
+  if (!documents || typeof documents.createDraftDocument !== 'function') {
+    return { status: 'failed', error: { code: 'host_capability_missing', message: 'ctx.features.documents.createDraftDocument unavailable — enable the Documents feature.' } };
+  }
+  const i = ctx.inputs ?? {};
+  const orgId = str(i.orgId);
+  if (!orgId) return { status: 'failed', error: { code: 'org_required', message: 'orgId is required — the organization to save the document in.' } };
+  const raw = i.content;
+  const content = typeof raw === 'string' ? raw
+    : (raw && typeof raw === 'object' ? str(raw.content) || str(raw.text) : '') || str(i.text);
+  const idemBase = `${ctx.runId ?? 'run'}:${ctx.nodeId ?? 'save-document'}`;
+  const res = await documents.createDraftDocument({ orgId, kind: str(i.kind) || 'brief', title: str(i.title) || 'Brief', content, idemBase });
+  if (res && res.error) return { status: 'failed', error: res.error };
+  return { status: 'success', outputs: { document: res.document, version: res.version } };
+}
+
 export async function renderDocument(ctx) {
   const documents = ensureDocuments(ctx);
   const i = ctx.inputs ?? {};
@@ -179,6 +204,7 @@ export const nodes = {
   'feature.documents.nodes.assemble': assemble,
   'feature.documents.nodes.generate-from-template': generateFromTemplate,
   'feature.documents.nodes.render': renderDocument,
+  'feature.documents.nodes.save-document': saveDocument,
 };
 
 export default nodes;

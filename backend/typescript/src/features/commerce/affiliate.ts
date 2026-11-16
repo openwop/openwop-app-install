@@ -39,6 +39,8 @@ import { cleanString } from '../../host/boundedStrings.js';
 import { toStripeMinorUnits, fromStripeMinorUnits } from '../billing/stripeApi.js';
 import { recordCommerceAction } from './telemetry.js';
 import { createLogger } from '../../observability/logger.js';
+import { declarePiiFields } from '../../host/dataClassification.js';
+import { ERASED } from '../../host/subjectErasureRedaction.js';
 
 const log = createLogger('features.commerce.affiliate');
 const nowIso = (): string => new Date().toISOString();
@@ -57,6 +59,9 @@ export interface Payout { payoutId: string; tenantId: string; orgId: string; aff
 
 const affiliates = new DurableCollection<Affiliate>('commerce:affiliate', (a) => a.affiliateId, undefined, (a) => a.tenantId);
 const payouts = new DurableCollection<Payout>('commerce:payout', (p) => p.payoutId, undefined, (p) => p.tenantId);
+// CHAN-F19 #5 (ADR 0464 §9) — an affiliate's name is a person's name; `redactAffiliate`
+// is how it leaves. Payouts and the ledger name the affiliate only by id.
+declarePiiFields('commerce:affiliate', ['name'], { maskGloballyByFieldName: false });
 
 const ledger = createObligationLedger({
   ns: 'commerce:affiliate-ledger',
@@ -215,6 +220,29 @@ export async function reverseCommission(order: { tenantId: string; orderId: stri
  *  accrued rows (a concurrent call finds nothing left and 409s — fail-closed
  *  by construction), confirm stamps the advisory evidence, and the legacy
  *  Payout row is written as the unchanged compat surface. */
+/**
+ * CHAN-F19 #5 (ADR 0464 §9) — an affiliate's DSAR. An affiliate is an external
+ * party, not a workspace principal, so no subject key reaches them through
+ * `eraseSubject`; the operator redacts them here instead. The name becomes
+ * `[erased]`. The code, rates, the commission ledger and payouts stay: they are
+ * money records keyed by the affiliate id, and none of them holds the name.
+ * Another tenant's or org's id reads as absent, so the 404 leaks nothing.
+ * Idempotent: an already-redacted affiliate is returned as it is.
+ */
+export async function redactAffiliate(tenantId: string, orgId: string, affiliateId: string, actor: string): Promise<Affiliate> {
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const cur = await affiliates.get(affiliateId);
+    if (!cur || cur.tenantId !== tenantId || cur.orgId !== orgId) throw new OpenwopError('not_found', 'Affiliate not found.', 404, { affiliateId });
+    if (cur.name === ERASED) return projectAffiliate(cur);
+    const next: Affiliate = { ...cur, name: ERASED, updatedAt: nowIso() };
+    if (await affiliates.compareAndSwap(cur, next)) {
+      recordCommerceAction('affiliate.redacted', next, actor, { affiliateId }); // never the old name
+      return projectAffiliate(next);
+    }
+  }
+  throw new Error('Affiliate redaction could not be confirmed.');
+}
+
 export async function recordPayout(tenantId: string, orgId: string, affiliateId: string): Promise<Payout> {
   const aff = await affiliates.get(affiliateId);
   if (!aff || aff.tenantId !== tenantId || aff.orgId !== orgId) throw new OpenwopError('not_found', 'Affiliate not found.', 404, { affiliateId });

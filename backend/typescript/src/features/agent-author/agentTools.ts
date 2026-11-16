@@ -24,6 +24,7 @@ import {
   persistAgentDraft,
 } from './agentAuthorService.js';
 import { stashAgentDraft } from './draftStash.js';
+import { workflowClientReaderForScope } from '../../host/workflowClientAccess.js'; // ADR 1132 D5
 
 export const AGENT_AUTHOR_GET_TOOL_ID = 'openwop:feature.agent-author.nodes.get';
 export const AGENT_AUTHOR_DRAFT_TOOL_ID = 'openwop:feature.agent-author.nodes.draft';
@@ -88,7 +89,7 @@ export function registerAgentAuthorAgentTools(): void {
         return { content: JSON.stringify({ agents: [], workflows: [], roster: [], autonomyLevels: [] }) };
       }
       if (!(await agentAuthorEnabled(scope))) return DISABLED();
-      return { content: JSON.stringify(await buildAgentAuthorCatalog({ tenantId: scope.tenantId })) };
+      return { content: JSON.stringify(await buildAgentAuthorCatalog({ tenantId: scope.tenantId, mayRead: workflowClientReaderForScope(scope) })) };
     },
   });
 
@@ -111,7 +112,7 @@ export function registerAgentAuthorAgentTools(): void {
     async run(input, scope: BundleScope) {
       if (!scope.actingUserId) return toolError('no_acting_user', 'Agent authoring requires a signed-in user turn.');
       if (!(await agentAuthorEnabled(scope))) return DISABLED();
-      const v = await validateAgentDraft((input as { draft?: unknown }).draft, { tenantId: scope.tenantId });
+      const v = await validateAgentDraft((input as { draft?: unknown }).draft, { tenantId: scope.tenantId, mayRead: workflowClientReaderForScope(scope) });
       return { content: JSON.stringify(v) };
     },
   });
@@ -132,7 +133,7 @@ export function registerAgentAuthorAgentTools(): void {
     async run(input, scope: BundleScope) {
       if (!scope.actingUserId) return toolError('no_acting_user', 'Agent authoring requires a signed-in user turn.');
       if (!(await agentAuthorEnabled(scope))) return DISABLED();
-      const v = await validateAgentDraft((input as { draft?: unknown }).draft, { tenantId: scope.tenantId });
+      const v = await validateAgentDraft((input as { draft?: unknown }).draft, { tenantId: scope.tenantId, mayRead: workflowClientReaderForScope(scope) });
       return { content: JSON.stringify({ ok: v.ok, errors: v.errors }) };
     },
   });
@@ -171,7 +172,7 @@ export function registerAgentAuthorAgentTools(): void {
         // Stash ONLY a closed-world-valid draft (the doctrine: model output
         // reaches durable state through validation) — invalid drafts return
         // the validator's actionable errors for the bounded repair.
-        const v = await validateAgentDraft(draft, { tenantId: scope.tenantId });
+        const v = await validateAgentDraft(draft, { tenantId: scope.tenantId, mayRead: workflowClientReaderForScope(scope) });
         if (!v.ok) return untrustedToolError('validation_error', 'The agent draft is invalid; the validator\'s reasons are below.', v.errors.join(' '));
         await stashAgentDraft(scope.tenantId, scope.actingUserId, v.draft);
         return { content: JSON.stringify({ stashed: true, persona: v.draft.persona, wizardPath: '/agents/new' }) };

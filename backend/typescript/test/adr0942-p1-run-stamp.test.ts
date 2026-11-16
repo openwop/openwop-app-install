@@ -263,7 +263,7 @@ describe('ADR 0942 D10.3 — MCP-started runs', () => {
     const principal: Principal = { principalId: 'u-mcp', tenants: [TENANT], token: '' };
     const out = await runWorkflowById({
       storage, hostSuite, principal,
-      caller: { principal, tenantId: TENANT, workspaceLaunch: false, resolveLaunch: async () => null },
+      caller: { principal, tenantId: TENANT, workspaceLaunch: false, resolveLaunch: async () => null, mayLaunchOwned: async () => true },
     }, fixtureWorkflowId, { metadata: { source: 'caller-forged', trustBoundary: 'trusted' } });
     expect(out.runId, JSON.stringify(out)).not.toBe('');
     expect(await metaOf(out.runId)).toMatchObject({ source: 'mcp-server-mount', trustBoundary: 'untrusted', actingUserId: 'u-mcp' });

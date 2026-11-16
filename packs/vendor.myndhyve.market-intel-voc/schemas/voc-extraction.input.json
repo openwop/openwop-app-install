@@ -1,17 +1,36 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-voc/1.0.2/voc-extraction.input.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-voc/1.1.0/voc-extraction.input.json",
   "title": "MarketIntelVocExtractionInput",
   "type": "object",
-  "required": ["content", "icpContext", "productContext"],
+  "required": ["icpContext", "productContext"],
+  "anyOf": [{ "required": ["content"] }, { "required": ["pages"] }],
   "properties": {
-    "content": { "type": "string", "minLength": 1, "description": "Raw content to extract VoC from (forum thread body, review text, transcript, etc.)." },
+    "content": { "type": "string", "minLength": 1, "description": "Raw content to extract VoC from (forum thread body, review text, transcript, etc.). Either this or `pages` (ADR 1116)." },
+    "pages": {
+      "type": "array",
+      "description": "The `pages` output of `core.web.fetch` (ADR 1116 D2). One AI call per readable page (2xx, no error, non-empty extractedText), up to maxPages; each record is stamped with its page. Every page body and title reaches the model inside the untrusted-content fence.",
+      "items": {
+        "type": "object",
+        "required": ["url", "status"],
+        "properties": {
+          "url": { "type": "string" },
+          "status": { "type": "integer" },
+          "title": { "type": "string" },
+          "extractedText": { "type": "string" },
+          "error": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "maxPages": { "type": ["integer", "string"], "description": "Pages lane: how many readable pages to extract from, one AI call each. Default 3, cap 5; a numeric string counts." },
     "sourceUrl": { "type": "string", "description": "URL of the content source (for traceability + cited in summary)." },
     "sourceTitle": { "type": "string", "description": "Title of the content (thread title, article title, etc.)." },
     "platform": { "type": "string", "description": "Source platform tag (reddit / quora / g2 / capterra / forum / blog / etc.)." },
     "community": { "type": "string", "description": "Community / subreddit / forum identifier within the platform." },
     "icpContext": {
-      "type": "object",
+      "description": "An object, or the same object as a JSON string (ADR 1116 D3).",
+      "type": ["object", "string"],
       "required": ["roles", "industry", "problems", "outcomes"],
       "properties": {
         "roles": { "type": "array", "items": { "type": "string" } },
@@ -22,7 +41,8 @@
       "additionalProperties": true
     },
     "productContext": {
-      "type": "object",
+      "description": "An object, or the same object as a JSON string (ADR 1116 D3).",
+      "type": ["object", "string"],
       "required": ["name", "category", "differentiators"],
       "properties": {
         "name": { "type": "string" },

@@ -15,6 +15,11 @@
  * in `ui/useOrgSelection`, the failed branch moved below the children in
  * `ui/OrgSelectionState`, the Retry dropped, and the toggle gate removed from
  * `useOrgSelection(listOrgs, access.enabled)` each turn a case below red.
+ * Re-probed at wave 115, plus: the retry not re-running the read, the zero-org
+ * branch skipped, the `if (orgId)` / `if (!org)` load gates removed together (one
+ * double guard, broken in one edit), the domains-empty branch skipped, and the
+ * toggle-off / toggle-loading branches skipped. The toggle cases assert rendered
+ * text after the render settles, so a wrong branch fails on its value.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
@@ -29,7 +34,7 @@ vi.mock('../domainsClient.js', async (orig) => ({
   ...(await orig<typeof import('../domainsClient.js')>()),
   listOrgs, listDomainPage,
   // ADR 1030 P2 — the site-brand card is not this test's subject.
-  getSiteBrand: async () => ({ brandId: null, choices: [] }),
+  getSiteBrand: async (): ReturnType<typeof import('../domainsClient.js').getSiteBrand> => ({ brandId: null, choices: [] }),
 }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', async (orig) => ({
   ...(await orig<typeof import('../../../featureToggles/FeatureAccessContext.js')>()),
@@ -96,6 +101,10 @@ describe('a failed ORGANIZATION read is neither "no organizations" nor loading',
     expect(listOrgs).toHaveBeenCalledTimes(2);
     expect(document.body.textContent).not.toContain('Could not load your organizations');
     expect(screen.getByRole('button', { name: 'Add domain' })).toBeTruthy();
+    // …and the retried read reached the rows: the org-gated domain read ran for the
+    // org it returned and its row rendered (not a skeleton that never resolves).
+    expect(listDomainPage.mock.calls).toEqual([['o1']]);
+    expect(document.body.textContent).toContain('app.example.com');
   });
 
   it('read SUCCEEDS with []: the real zero-organization state, not a failure and not a skeleton', async () => {
@@ -130,8 +139,12 @@ describe('a failed ORGANIZATION read is neither "no organizations" nor loading',
 describe('custom domains — the feature toggle gates the page', () => {
   it('toggle OFF renders the not-enabled card and reads nothing', async () => {
     useFeatureAccess.mockReturnValue(makeFeatureAccess({ enabled: false, loading: false }));
-    render(<DomainsPage />);
-    expect(await screen.findByText(/not enabled/i)).toBeTruthy();
+    await mount();
+    // Asserted on the VALUE after the render settles, so a missing card fails here,
+    // not by a `findBy` running out of time.
+    expect(document.body.textContent).toContain('Custom domains are not enabled');
+    expect(document.body.textContent).toContain('Ask an administrator to turn on the Custom domains feature');
+    expect(screen.queryByRole('button', { name: 'Add domain' })).toBeNull();
     expect(listOrgs).not.toHaveBeenCalled();
   });
 
@@ -143,11 +156,12 @@ describe('custom domains — the feature toggle gates the page', () => {
     // and use the SAME row shape the table below shows while its own read is in
     // flight, so the layout does not jump when the toggle resolves.
     useFeatureAccess.mockReturnValue(makeFeatureAccess({ enabled: false, loading: true }));
-    render(<DomainsPage />);
-    expect(await screen.findByRole('status', { name: 'Loading…' })).toBeTruthy();
+    await mount();
+    // The value checks come first, so a wrong branch fails on what it rendered.
+    expect(screen.queryByText(/not enabled/i)).toBeNull();
+    expect(screen.queryAllByRole('status', { name: 'Loading…' })).toHaveLength(1);
     // The header survives — the whole point of not using a title-only card.
     expect(screen.getByRole('heading', { name: 'Custom domains' })).toBeTruthy();
-    expect(screen.queryByText(/not enabled/i)).toBeNull();
     expect(listOrgs).not.toHaveBeenCalled();
   });
 });

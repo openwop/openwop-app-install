@@ -491,6 +491,9 @@ export const messages = {
   cardLabelClarification: 'Clarification',
   cardLabelRefinement: 'Affinage',
   cardLabelCancellation: 'Annulation',
+  cardLabelExternalEvent: 'En attente d’un événement externe',
+  externalEventWaitingBody: 'Cette étape attend des exécutions liées ou un événement externe, et continue d’elle-même. Rien à faire ici.',
+  waitingResumesOnItsOwn: 'En attente — continue d’elle-même',
 
   // — defaultCommands —
   cmdNewDescription: 'Démarrer une nouvelle session de conversation (efface le fil actuel)',
@@ -934,6 +937,7 @@ export const messages = {
   reviewRiskHigh: 'élevé',
   reviewRiskCritical: 'critique',
   composedStaleError: "Le brouillon a changé depuis votre relecture — la carte s'est actualisée ; relisez-le et approuvez à nouveau.",
+  reviewSelfApprovalRefused: 'Vous avez demandé cette étape : quelqu’un d’autre doit donc l’approuver. Demandez à un autre administrateur ou à un approbateur désigné dans la politique de cette campagne.',
   composedAgentNote: "Description de l'agent",
   composedEvidence: 'Validé · {{nodes}} nœuds · {{edges}} arêtes',
   composedEdited: 'Modifié depuis la proposition — approuver exécute la version actuelle',

@@ -48,9 +48,41 @@ upgrade is neither: list it in `breakingConfig`.
 
 ## Version log
 
+### v0.15.0 — 2026-11-16
+
+- **Required stop:** no. **Rolling-safe:** yes. From before 0.14.0, land on
+  0.14.0 first if the legacy env-key id rewrite was never run (see v0.14.0).
+- **Schema:** sqlite 53 / postgres 51 (unchanged) · **App migrations:** 26 (unchanged).
+- New setting: the optional `OPENWOP_ASSET_SIGNING_PREVIOUS_SECRET`. No setting
+  changes meaning; `OPENWOP_LEGACY_BEARER_REWRITE` is removed and ignored.
+- Run admission checks required chain parameters, shadow-first (run admission preflight P0).
+- A sole admin can approve their own autonomy gate (CC-GATE-2 G1).
+- Public-asset grants for the storefront, share links and e-sign, the asset
+  org floor and signed reads, all behind `OPENWOP_ASSET_ACCESS` (ADR 1122).
+- A client's workflow definitions and a private project's runs are read only
+  by their people (ADR 1132, ADR 1133).
+- Inbox requests name who asks and why; an open request cannot be archived
+  away; external-event waits no longer notify (ADR 1125).
+- Kanban work items can carry an assignee or a project role and be refreshed
+  (ADR 1137).
+- Campaign Studio fixes: market-intelligence digests read the pages they find,
+  SEO briefs save as documents, governed campaign launch, Strategist context.
+- [CHANGELOG §0.15.0](./CHANGELOG.md#0150--2026-11-16)
+
 ### v0.14.0 — 2026-11-15
 
-- **Required stop:** no. **Rolling-safe:** yes.
+- **Required stop:** yes (since 2026-11-16, see below). **Rolling-safe:** yes.
+
+  > **Corrected 2026-11-16 (ADR 1045, CHAN-F18; user decision).** Published as
+  > "Required stop: no". 0.14.0 turned out to be the last release that carries
+  > the one-time legacy env-key id rewrite (`OPENWOP_LEGACY_BEARER_REWRITE`),
+  > which was removed right after it. An install that used env keys and never
+  > ran the rewrite must land on 0.14.0 and run it (`report`, read the counts,
+  > then `apply`) before going past it; later releases cannot rewrite those
+  > records. An install that already ran it, or never used env keys, passes
+  > straight through. `releases.json` now records `requiredStop: true` with
+  > that reason, so `upgrade-plan.mjs` splits any upgrade that crosses 0.14.0.
+  > The released v0.14.0 artifact itself is unchanged.
 - **Schema:** sqlite 53 / postgres 51 (one index on `notifications`) · **App migrations:** 26 (unchanged).
 - New settings: `OPENWOP_COMMERCE_MAX_PRODUCTS_PER_ORG` (default 5000),
   `OPENWOP_COMMERCE_INDEX_SWEEP_MS` (default 60000) and the optional one-shot

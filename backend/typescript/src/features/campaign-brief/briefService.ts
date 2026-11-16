@@ -200,14 +200,28 @@ function sanitizeChannels(raw: unknown): BriefChannel[] {
   return CAMPAIGN_CHANNELS.map((t) => byType.get(t)!);
 }
 
+/** CC-BRIEF-2: messaging prose is the author's own guidance, so it is capped at
+ *  TEXT_MAX and an over-long value is a typed refusal naming the field. It used to
+ *  be cut silently: `toneOverride` and `ctaStrategy` at NAME_MAX (160), which lost
+ *  the end of a tone guardrail without notice. `toneOverride` also moves from the
+ *  scrubbing label lane to the content lane, so a long run in it is never rewritten. */
+function messagingProse(raw: unknown, field: 'primaryValueProp' | 'toneOverride' | 'ctaStrategy'): string {
+  const v = String(raw ?? '').trim();
+  if (v.length > TEXT_MAX) {
+    throw new OpenwopError('validation_error', `messaging.${field} is ${v.length} characters; the limit is ${TEXT_MAX}.`, 400,
+      { field: `messaging.${field}`, reason: 'too_long', max: TEXT_MAX, length: v.length });
+  }
+  return cleanContent(v, TEXT_MAX, field);
+}
+
 function sanitizeMessaging(raw: unknown): BriefMessaging {
   if (!raw || typeof raw !== 'object') return { ...EMPTY_MESSAGING };
   const m = raw as Record<string, unknown>;
   return {
-    primaryValueProp: cleanContent(m.primaryValueProp, TEXT_MAX, 'primaryValueProp'),
-    toneOverride: cleanString(m.toneOverride, NAME_MAX),
+    primaryValueProp: messagingProse(m.primaryValueProp, 'primaryValueProp'),
+    toneOverride: messagingProse(m.toneOverride, 'toneOverride'),
     proofPoints: strList(m.proofPoints),
-    ctaStrategy: cleanContent(m.ctaStrategy, NAME_MAX, 'ctaStrategy'),
+    ctaStrategy: messagingProse(m.ctaStrategy, 'ctaStrategy'),
   };
 }
 

@@ -9,9 +9,11 @@
  * the page: a toast is not evidence, and this is the one action an operator may
  * later have to demonstrate they performed.
  *
- * Sabotage-witnessed (/grade-tests w9): announcing/showing the partial receipt as a
- * success, dropping the retry guidance or the foundNothing branch, re-adding a success
- * toast, or dropping the confirm body each turn a case here red.
+ * Sabotage-witnessed (/grade-tests w9, re-probed w110): announcing/showing the partial
+ * receipt as a success, painting the partial or zero-row receipt GREEN (the Notice
+ * variant — asserted since w110; before that the "non-green" claims checked only text),
+ * dropping the retry guidance or the foundNothing branch, re-adding a success toast, or
+ * dropping the confirm body each turn a case here red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent, act } from '@testing-library/react';
@@ -86,7 +88,11 @@ describe('consent erasure — what the operator is told', () => {
     eraseResult = { ok: false, consentRecord: true, erasure: { total: 4, failed: 2, keysResolved: 1 } };
     await erase();
     // And the receipt says what is still out there, in as many words.
-    expect(await screen.findByText(/2 erasure step\(s\) failed/i)).toBeTruthy();
+    const partial = await screen.findByText(/2 erasure step\(s\) failed/i);
+    // Not dressed as a success either: the receipt is the WARNING Notice, never green.
+    const notice = partial.closest('.alert');
+    expect(notice?.classList.contains('warning')).toBe(true);
+    expect(notice?.classList.contains('success')).toBe(false);
     expect(screen.getByText(/MAY still be held/i)).toBeTruthy();
     // The green success path must NOT fire — that was the whole defect. What
     // is spoken is the partial sentence, never the completed one.
@@ -109,7 +115,11 @@ describe('consent erasure — what the operator is told', () => {
   it('a ZERO-ROW fan-out is a distinct non-green state, not the green receipt', async () => {
     eraseResult = { ok: true, consentRecord: false, erasure: { total: 4, failed: 0, keysResolved: 1, foundNothing: true, rowsTouched: 0 } };
     await erase();
-    expect(await screen.findByText(/found NOTHING to erase in this workspace/i)).toBeTruthy();
+    const zero = await screen.findByText(/found NOTHING to erase in this workspace/i);
+    // "Non-green" is the claim: the receipt is the WARNING Notice, not the success one.
+    const notice = zero.closest('.alert');
+    expect(notice?.classList.contains('warning')).toBe(true);
+    expect(notice?.classList.contains('success')).toBe(false);
     expect(screen.getByText(/home workspace/i)).toBeTruthy();
     // The green path must NOT fire — that is the lie this branch removes.
     expect(toastSuccess).not.toHaveBeenCalled();
@@ -122,7 +132,9 @@ describe('consent erasure — what the operator is told', () => {
   it('a clean erasure with rows touched still reads green (the branch did not eat the receipt)', async () => {
     eraseResult = { ok: true, consentRecord: true, erasure: { total: 4, failed: 0, keysResolved: 2, foundNothing: false, rowsTouched: 7 } };
     await erase();
-    expect(await screen.findByText(/reported success/i)).toBeTruthy();
+    const ok = await screen.findByText(/reported success/i);
+    // …and it is still the green (success) Notice.
+    expect(ok.closest('.alert')?.classList.contains('success')).toBe(true);
     // foundNothing:false must not route to the zero-row branch.
     expect(screen.queryByText(/found NOTHING/i)).toBeNull();
     await waitFor(() => expect(currentAnnouncements().polite).toMatch(/erasure completed/i));

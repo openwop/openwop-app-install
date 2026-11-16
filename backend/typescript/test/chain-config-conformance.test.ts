@@ -452,8 +452,14 @@ describe('core.flow.if nodes branch for real', () => {
  * from the drafting node's `content` port. The remaining 62 are dominated by
  * `notification-push` x55, which is a CONTRACT defect — see the ADR: it wants a
  * host-owned in-app notification node, not per-chain bindings.
+ *
+ * 7 -> 2 (2026-11-13, ADR 1116 / CC-CHAIN-7): the two market-intel chains' voc
+ * and scoring nodes (5 of the 7) now get every required input: discovery's pages
+ * through `core.web.fetch` into `voc.pages`, the ICP/product context params on
+ * voc, and named edges into scoring's `vocRecords`, `communities` and both
+ * contexts.
  */
-const REQUIRED_INPUT_CEILING = 7;
+const REQUIRED_INPUT_CEILING = 2;
 /**
  * See the GRD-5 docblock in the describe block below (measured on the EXPANDED blank copy).
  * Was 5; the CC-CHAIN-3/6 pack fixes made two more required inputs fillable

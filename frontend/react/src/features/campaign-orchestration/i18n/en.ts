@@ -13,6 +13,7 @@ export const messages = {
   emptyTitle: 'No campaigns yet',
   emptyBody: 'Finalize a confirmed brief into a campaign, or run one end-to-end with the Campaign Strategist.',
   runWithStrategist: 'Run with the Strategist',
+  strategistRunDraft: 'Check whether campaign “{{name}}” ({{campaignId}}, brief {{briefId}}, organization {{orgId}}) is ready with campaign-orchestration.status, and tell me what will run before you start anything.',
   designFunnelWithArchitect: 'Design a funnel with the Funnel Architect',
   designJourney: 'Design a journey',
   finalizeBrief: 'Finalize a brief',

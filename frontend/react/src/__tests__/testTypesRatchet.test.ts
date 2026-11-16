@@ -9,6 +9,12 @@
  * The committed FILE_BASELINE moves every time a test type error is fixed, so no
  * case pins today's number; they pass an explicit file baseline (181) and assert
  * the decision logic. Types: `scripts/testTypesRatchet.d.mts`.
+ *
+ * What breaks it (sabotage witnesses, /grade-tests w110): dropping the HIGHER refusal,
+ * the negative / non-integer refusals or the empty-string fallback in `resolveBaseline`;
+ * a nonzero round FILE_BASELINE; dropping the spawn-failed, project-level or unparseable
+ * arms of `classifyTscResult`; classifying by code range (TS6133); counting
+ * related-information lines.
  */
 import { describe, it, expect } from 'vitest';
 import { resolveBaseline, classifyTscResult, FILE_BASELINE } from '../../scripts/testTypesRatchet.mjs';
@@ -42,7 +48,8 @@ describe('resolveBaseline — the override may tighten, never loosen (GATE-3)', 
     expect(Number.isInteger(FILE_BASELINE)).toBe(true);
     // 0 is the one round number that cannot be padded: there is no slack below it.
     // Any other multiple of 10 is refused (wave 52 drove the real count to 0).
-    if (FILE_BASELINE !== 0) expect(FILE_BASELINE % 10).not.toBe(0);
+    // Unconditional on purpose: at 0 an `if` around the modulo check asserted nothing.
+    expect(FILE_BASELINE === 0 || FILE_BASELINE % 10 !== 0, `FILE_BASELINE ${FILE_BASELINE} is a padded round number`).toBe(true);
     expect(FILE_BASELINE).toBeGreaterThanOrEqual(0);
   });
 });

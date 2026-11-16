@@ -12,9 +12,13 @@
  * These legs go through the REAL route (an OIDC caller as the auth middleware stamps one) and the
  * REAL lane, never a hand-filed key, so a key-form drift on either side reds them.
  *
- * Witnessed (row 57 sabotage, see the PR): keying the route on `callerSubject`, keying the lane
- * on `actingUserId`, or moving the note scope each red BORN RED; honouring a revoked grant reds
- * FAIL-CLOSED; a subject-tolerant grant read reds ANOTHER person.
+ * Sabotage witnesses (grade-tests wave 111 g1, `w111g1-gk-*`): filing the PUT in the ACTIVE
+ * workspace (route-active) or on the principal (route-principal), keying the lane's grant read on
+ * `actingUserId` (lane-key), or moving the note scope (note-scope) each red BORN RED; the GET
+ * reading another key (get-read) or the DELETE filing `true` (delete) red GET/DELETE; honouring a
+ * revoked grant (revoked) reds FAIL-CLOSED; a subject-tolerant grant read (tolerant) reds ANOTHER
+ * person; `available` true for a non-`user:` home (available), the PUT not refusing it (put-409)
+ * or the DELETE refusing it (delete-allowed) red the no-personal-workspace case.
  */
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import express from 'express';
@@ -52,7 +56,10 @@ beforeAll(async () => {
     next();
   });
   registerMemoryExtractRoutes({ app } as never);
-  app.use((err: { httpStatus?: number }, _req: unknown, res: express.Response, _next: unknown) => { res.status(err.httpStatus ?? 500).json({}); });
+  // Echo the refusal's code and reason, so a case can tell WHICH guard answered.
+  app.use((err: { httpStatus?: number; code?: string; details?: { reason?: unknown } }, _req: unknown, res: express.Response, _next: unknown) => {
+    res.status(err.httpStatus ?? 500).json({ error: err.code ?? null, reason: err.details?.reason ?? null });
+  });
   server = await new Promise<Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/host/openwop-app/profiles/me/memory-extraction`;
 });
@@ -70,7 +77,7 @@ describe('ADR 0982 D2 — the route files the grant where the lane reads it', ()
 
     // The chat is stamped with the unbound principal, as `POST /runs` stamps it before a bind.
     const r = await extractConversationMemory(await p.run({ acting: p.principal }), ['I keep bees'], facts('Keeps bees'));
-    expect(r).toMatchObject({ status: 'written', written: 1 });
+    expect(r).toEqual({ status: 'written', written: 1, duplicates: 0, rejected: 0, suppressed: 0, failedWrites: 0, budgetFull: false });
     const listed = await listSubjectNotes(p.home, personSubject(p.userId));
     expect(listed.map((n) => n.content)).toEqual(['Keeps bees']);
     expect(await countSubjectNotes(p.home, personSubject(p.principal))).toBe(0);
@@ -78,17 +85,23 @@ describe('ADR 0982 D2 — the route files the grant where the lane reads it', ()
 
   it('GET reports the grant the lane reads; DELETE revokes it', async () => {
     const p = await personalChat('gk-get');
-    await fetch(base, { method: 'PUT', headers: { 'x-sub': 'gk-get' } });
+    expect((await fetch(base, { method: 'PUT', headers: { 'x-sub': 'gk-get' } })).status).toBe(200);
     expect(await (await fetch(base, { headers: { 'x-sub': 'gk-get' } })).json()).toMatchObject({ granted: true, available: true });
     expect((await fetch(base, { method: 'DELETE', headers: { 'x-sub': 'gk-get' } })).status).toBe(204);
     expect(await getExtractionGrant(p.home, p.userId)).toMatchObject({ granted: false });
+    expect(await (await fetch(base, { headers: { 'x-sub': 'gk-get' } })).json()).toMatchObject({ granted: false, available: true });
+    // The lane reads the same row: revoked through the route, it no longer extracts.
+    expect(await extractConversationMemory(await p.run(), ['x'], facts('should not land'))).toEqual({ status: 'skipped', reason: 'no-consent' });
+    expect(await countSubjectNotes(p.home, personSubject(p.userId))).toBe(0);
   });
 
   it('an account with no personal workspace is told so: GET available:false, PUT refused 409, DELETE allowed', async () => {
     // A SAML-style deployment tenant as the home tenant: it can never extract (ADR 0982 D1/D2).
     const headers = { 'x-sub': 'gk-saml', 'x-home': 'host-saml' };
-    expect(await (await fetch(base, { headers })).json()).toMatchObject({ granted: false, available: false });
-    expect((await fetch(base, { method: 'PUT', headers })).status).toBe(409);
+    expect(await (await fetch(base, { headers })).json()).toEqual({ granted: false, updatedAt: null, available: false });
+    const put = await fetch(base, { method: 'PUT', headers });
+    expect(put.status).toBe(409);
+    expect(await put.json()).toEqual({ error: 'conflict', reason: 'memory_extraction_unavailable' });
     expect((await fetch(base, { method: 'DELETE', headers })).status).toBe(204);
   });
 

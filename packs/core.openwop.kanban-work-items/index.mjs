@@ -88,6 +88,8 @@ export async function materializeWorkItems(ctx) {
     items,
     idempotencyKey: deliveryKey(ctx, boardId, proposal),
     ...(config.dryRun === true ? { dryRun: true } : {}),
+    // ADR 1137 D3 — a sync chain refreshes what its source owns on known work.
+    ...(config.refresh === true ? { refresh: true } : {}),
   });
   return { status: 'success', outputs: result };
 }

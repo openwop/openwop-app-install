@@ -19,6 +19,7 @@ import { OpenwopError } from '../types.js';
 import { tenantOf } from '../host/requestSubject.js';
 import { getOwned } from '../host/workflowOwnership.js';
 import { getRegisteredWorkflowAsync } from '../host/workflowsRegistry.js';
+import { workflowClientReader } from '../host/workflowClientAccess.js';
 import {
   clearWorkflowBudget, getTodaySpendUsd, getWorkflowBudget, putWorkflowBudget,
 } from '../host/workflowBudgets.js';
@@ -27,6 +28,8 @@ async function loadOwnedHead(req: Request, workflowId: string): Promise<Workflow
   const owned = workflowId ? await getOwned(tenantOf(req), workflowId) : null;
   const def = owned ? await getRegisteredWorkflowAsync(workflowId) : null;
   if (!owned || !def) throw new OpenwopError('workflow_not_found', 'Workflow not found in this catalog.', 404, { workflowId });
+  // ADR 1132 — a client's definition, for people who may read that client.
+  if (!(await workflowClientReader(req)(owned))) throw new OpenwopError('workflow_not_found', 'Workflow not found in this catalog.', 404, { workflowId });
   return def;
 }
 

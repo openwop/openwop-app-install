@@ -9,7 +9,13 @@
  *    page is workspace-tier are workspace. The TIER_BY_TILE table below pins the
  *    verified page-tier mapping instead.)
  *  - Pin 4: the to-dos tile is admin-tier (its rows link to the admin-gated /boards).
- *  - Ids, order, and i18n keys are unique/consistent.
+ *  - Ids and default orders are unique.
+ *
+ * Sabotage-witnessed (grade-tests w116): a duplicated defaultOrder, a tile tier
+ * flipped, a host tile dropped while its pin stays, an opt-in tile shipped on,
+ * a toggle tile's `defaultEnabled` removed, a Business tile's toggle removed,
+ * `todos` re-tiered or toggled, and `defaultLayoutFrom` ignoring a field each
+ * red a case.
  */
 import { describe, it, expect } from 'vitest';
 import { ALL_DASHBOARD_TILES, HOST_DASHBOARD_TILES, defaultLayoutFrom } from '../allTiles.js';
@@ -68,6 +74,11 @@ describe('dashboard catalog invariants', () => {
       expect(TIER_BY_TILE[t.id], `${t.id} missing from TIER_BY_TILE — add it with the linked page's tier`).toBeDefined();
       expect(t.requiredTier, `${t.id} tier must match its page`).toBe(TIER_BY_TILE[t.id]);
     }
+    // TWO-SIDED (grade-tests w116): the pin names exactly the host tiles. A host
+    // tile that is deleted or renamed must leave the table too, or a stale pin
+    // reads as a live guarantee; it also proves the loop above was not over an
+    // empty list (55 host tiles at 63e4c73654).
+    expect(Object.keys(TIER_BY_TILE).sort()).toEqual(HOST_DASHBOARD_TILES.map((t) => t.id).sort());
   });
 
   it('the default-ON set is EXACTLY the pinned launchpad (everything else opt-in)', () => {

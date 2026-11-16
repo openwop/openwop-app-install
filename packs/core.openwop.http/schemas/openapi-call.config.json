@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.http/2.1.2/openapi-call.config.json",
+  "$id": "https://packs.openwop.dev/core.openwop.http/2.1.3/openapi-call.config.json",
   "title": "OpenapiCallConfig",
   "type": "object",
   "required": [
@@ -16,7 +16,7 @@
     },
     "connectionRef": {
       "type": "string",
-      "description": "Connection this call requires. Read by the chain loader for pre-flight requirements (chainRequirements) and rendered as a Connect chip in the builder \u2014 so the key IS honoured, just not by the node itself. Declared per ADR 0525 (GRD-8)."
+      "description": "Connection this call requires. Read by the chain loader for pre-flight requirements (chainRequirements) and rendered as a Connect chip in the builder \u2014 so the key IS honoured, just not by the node itself. Declared per ADR 0525 (GRD-8). It does not supply an API description: with no wired inputs.openapi the node fails openapi_document_missing (ADR 1111)."
     }
   },
   "additionalProperties": false

@@ -387,6 +387,19 @@ function CancellationCard({ payload, onAction, isLoading, context }: CardProps):
   );
 }
 
+/** CC-ORCH-3 — a step waiting on linked runs or an outside event. It needs no
+ *  answer, so it shows a status and no buttons (it used to render the "No card
+ *  registered" developer placeholder to the user). */
+function ExternalEventCard({ context }: CardProps): JSX.Element {
+  const { t } = useTranslation('chat');
+  return (
+    <div className="card u-bg-surface-2">
+      <GateEyebrow name={context?.nodeName} />
+      <div role="status" className="alert">{t('externalEventWaitingBody')}</div>
+    </div>
+  );
+}
+
 // ── canonical resolver: bubbles up the action to the openwop interrupt API ──
 
 async function resolveInterrupt(actionPayload: unknown, ctx: { runId: string; nodeId?: string }): Promise<boolean> {
@@ -424,6 +437,12 @@ export function registerDefaultCards(): void {
     label: i18n.t('chat:cardLabelCancellation'),
     Component: CancellationCard,
     actionHandlers: { resolve: resolveInterrupt },
+  });
+  registerCard({
+    cardType: 'interrupt.external-event',
+    label: i18n.t('chat:cardLabelExternalEvent'),
+    Component: ExternalEventCard,
+    actionHandlers: {},
   });
   registered = true;
 }

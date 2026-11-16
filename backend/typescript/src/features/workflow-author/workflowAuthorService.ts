@@ -34,6 +34,7 @@ import {
   isAuthoredByOtherTenant,
   authoredWorkflowIds,
   isSharedWorkflowId,
+  type WorkflowOwnershipRecord,
 } from '../../host/workflowOwnership.js';
 import { isServerMintedWorkflowId, workflowIdOrigin } from '../../host/workflowId.js';
 import { createLogger } from '../../observability/logger.js';
@@ -634,6 +635,9 @@ async function disclosureOf(before: WorkflowDefinition, after: WorkflowDefinitio
   };
 }
 
+/** ADR 1132 D5 — may the caller read this tenant's owned definition (the client floor)? */
+export type ClientRowPredicate = (row: Pick<WorkflowOwnershipRecord, 'clientOrgId'>) => Promise<boolean>;
+
 /**
  * Read an EXISTING registered workflow BY ID, tenant-scoped (ADR 0163 IDOR read
  * guard — the same posture as `GET /v1/workflows/{id}` / `isForeignOwned`).
@@ -643,11 +647,13 @@ async function disclosureOf(before: WorkflowDefinition, after: WorkflowDefinitio
  */
 export async function readAuthoredWorkflow(
   workflowId: string,
-  opts: { tenantId: string },
+  opts: { tenantId: string; mayRead?: ClientRowPredicate },
 ): Promise<{ found: true; definition: WorkflowDefinition } | { found: false }> {
   const def = await getRegisteredWorkflowAsync(workflowId);
   if (!def) return { found: false };
-  if (await getOwned(opts.tenantId, workflowId)) return { found: true, definition: def };
+  const own = await getOwned(opts.tenantId, workflowId);
+  // ADR 1132 D5 — another client's definition is the same miss as another tenant's.
+  if (own) return opts.mayRead && !(await opts.mayRead(own)) ? { found: false } : { found: true, definition: def };
   // Not owned by the caller: readable only if it is NOT another tenant's
   // authored workflow (i.e. it is a built-in / tenant-unowned host def).
   if (await isAuthoredByOtherTenant(opts.tenantId, workflowId)) return { found: false };
@@ -659,8 +665,12 @@ export async function readAuthoredWorkflow(
  * OWN authored workflows + BUILT-IN host/template defs, and NEVER another
  * tenant's authored workflow (which the unscoped registry listing would leak).
  */
-export async function listAuthoredWorkflows(opts: { tenantId: string }): Promise<WorkflowIndexEntry[]> {
-  const owned = new Set((await listOwned(opts.tenantId)).map((r) => r.workflowId));
+export async function listAuthoredWorkflows(opts: { tenantId: string; mayRead?: ClientRowPredicate }): Promise<WorkflowIndexEntry[]> {
+  const rows = await listOwned(opts.tenantId);
+  const owned = new Set(rows.map((r) => r.workflowId));
+  // ADR 1132 D5 — this tenant's definitions for a client the caller may not read are dropped.
+  const hidden = new Set<string>();
+  if (opts.mayRead) for (const r of rows) if (!(await opts.mayRead(r))) hidden.add(r.workflowId);
   const authored = await authoredWorkflowIds();
   const out: WorkflowIndexEntry[] = [];
   // ADR 0595 — authored definitions are now born TRANSIENT (ADR 0369 §5), which
@@ -672,6 +682,7 @@ export async function listAuthoredWorkflows(opts: { tenantId: string }): Promise
   // list the workflow it had just authored, breaking read-before-write on the
   // very next turn — a fix that reintroduces the family it closes.
   for (const w of listRegisteredWorkflows({ includeTransient: true })) {
+    if (hidden.has(w.workflowId)) continue;
     const isOwn = owned.has(w.workflowId);
     const isBuiltin = !authored.has(w.workflowId); // registered + no tenant owns it
     if (!isOwn && !isBuiltin) continue; // another tenant's authored workflow — hide

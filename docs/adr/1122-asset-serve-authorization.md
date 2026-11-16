@@ -16,7 +16,7 @@ else: no session and no tenant compare. `resolveMediaAsset` (`host/inMemorySurfa
 says request-bound callers MUST compare the entry's tenant; this one does not.
 
 Durable tokens carry a ~100-year expiry (`features/media/mediaStorage.ts:23`, `put` and
-PROF-1 `promoteToDurable`). That TTL is a storage backstop (ADR 0579 owns the lifecycle),
+PROF-1 `promoteToDurable`). That time-to-live (TTL) is a storage backstop (ADR 0579 owns the lifecycle),
 but because the token is also the credential, a URL handed out once works for as long as
 the bytes exist. Removing a member, or unpublishing a page, revokes nothing.
 
@@ -69,7 +69,7 @@ Nothing stored is rewritten, nothing replayed changes, and no minted URL changes
    ADR 1110 whole-catalog ratchet would catch a scan if one were added.
 3. **Signed arm.** `?exp=<unix>&sig=<hmac>` (and `kid`) for consumers that carry no
    cookie: export files, headless film and slide renderers, and provider fetches (an
-   image sent to a video model). It reuses `presentRemote.ts`'s HMAC recipe with
+   image sent to a video model). It reuses `presentRemote.ts`'s HMAC (hash-based message authentication code) recipe with
    `interruptToken.ts`'s key-id rotation, minted only by server code that has already
    authorized the read, and it lasts minutes. `assetServeUrl(token, { signedFor:
    seconds })` is the one minting call, so signing lives in `assetServePath.ts` beside
@@ -147,7 +147,7 @@ would need its own durable public-grant provider, which D2 already allows.
 > |---|---|
 > | P1a | The provider seam and the reconcile (`host/assetGrants.ts`), the CMS page and SEO providers and their hooks, and the hub-picture walker fix |
 > | P1b | Commerce storefront, share links (and document renders) and e-sign certificates |
-> | P1c | The token→media-row index for the D2.1 org floor (was "P1a") |
+> | P1c | The D2.1 org floor, over the existing `media:token-idx` (was "P1a"); implemented, see the record below |
 >
 > **Design (option B).**
 > - Each public surface registers `registerPublicAssetRefProvider`, which answers which
@@ -240,6 +240,109 @@ would need its own durable public-grant provider, which D2 already allows.
   sabotage-witnessed: removing the decision or the refusal fall-through reddens six.
   `asset:grant` is exempted in `subject-erasure-coverage.test.ts` (no subject data;
   tenant-indexed for teardown).
+
+## Implementation record (P1b)
+- **Commerce** (`features/commerce/assetGrantProvider.ts`):
+  - The grantor `commerce-product:<productId>` grants `imageAssetTokens` while
+    `isPubliclyListed` (ADR 1098). One provider covers the storefront, discovery,
+    recommendations, UCP and the ad feed.
+  - It returns nothing when `checkOwnerPublicAccess('commerce', tenant)` refuses (the
+    toggle is off, or the owner is lapsed past grace): the same check the storefront
+    route applies. Download tokens are never granted.
+  - Hooks: `createProduct`, `updateProduct` and `deleteProduct`.
+  - Backfill: tenants that hold `commerce.product`, via
+    `entities.systemTypeTenantsPage`, then each tenant's name-index family on its own
+    cursor (`listIndexPage` gains `allOrgs`; an undefined org alone means the no-org
+    segment).
+- **Share links** (`features/sharing/assetGrantProvider.ts`):
+  - The grantor `share-link:<tokenHash>` grants every asset token the link's anonymous
+    projection exposes (`RESOLVERS[type].load`, which `resolveShared` serves), as a bare
+    43-character token or inside a served URL (`assetTokensInValue`).
+  - Nothing is granted once the link is revoked, expired, view-capped, of another
+    tenant, or its owning feature is off.
+  - A share exposes a page in any status, so this is not the published-only CMS
+    helper.
+  - Hooks: create, revoke and purge. Expiry and an edit to the shared resource are
+    unhooked (≤ 1 h + 60 s).
+- **E-sign** (`features/crm/assetGrantProvider.ts`):
+  - The grantor `esign:<signRequestId>` grants the asset URLs in the rendered target
+    (`assetTokensInText`). That is the signer's anonymous view before completion, and
+    a completed request stays viewable. It also grants the certificate once completed.
+  - Nothing is granted when voided or declined. Sign requests do not expire.
+  - Hooks: `createSignRequest`, `putSignRequest`, and `casSignRequest` on a swap.
+- **Tests:** `adr1122-p1b-asset-grants.test.ts` has five cases:
+  - listed, unlisted, relisted, deleted;
+  - commerce off grants nothing;
+  - a share of a draft page, then revoke;
+  - the signer before completion, then void;
+  - the value walker.
+
+  Sabotage-witnessed: removing the commerce, share-revoke or e-sign hook fails its
+  case. 65 commerce, sharing and e-sign files: 463/463.
+
+## Implementation record (P1c)
+- **Seam:** `registerAssetOrgResolver` (`host/assetAccess.ts`), implemented by the media
+  feature over its existing `media:token-idx`. That index is ADR 0945's SHA-256-keyed
+  token→asset index, so no new index was needed.
+  - `orgOf` is index-only (`orgOfServeTokenIndexed`). It is deliberately NOT the
+    tenant-slice heal in `getAssetByServeTokenForTenant`, which would scan the library
+    for every token that isn't a library asset.
+  - Rows that predate the index are filled by `backfillServeTokenIndexStep`, driven by
+    the asset-grant reconcile on its own cursor.
+- **The floor:** a session read of an org-owned library asset also needs
+  `workspace:read` in that org. These pass without it:
+  - a personal tenant;
+  - a non-library or root-owned asset;
+  - a workspace admin (`host:members:manage` on a membership-rooted root, the #5930
+    exit).
+
+  Public and signed arms are unaffected.
+- **A failed org lookup is retried once, then FAILS CLOSED** (the uniform 404,
+  `asset_org_floor_lookup_failed`). This was the release coordinator's call: falling back
+  to the tenant floor would reopen the cross-client read on every store blip. Published
+  pages keep loading through the public arm.
+- **Tests:** `adr1122-p1c-org-floor.test.ts`, 5 cases:
+  - A-member reads A, not B;
+  - an admin reads both;
+  - root-owned and non-library tokens stay at the tenant floor;
+  - a public grant still admits;
+  - a failing lookup returns 404 for a session read while a public grant is served;
+  - the backfill fills a pre-index row.
+
+  Sabotage-witnessed: a floor that always passes, or a lookup that falls back to the
+  tenant floor, fails a case. 20 media files: 141/141.
+- **Cost to measure under `report` (P3):** up to two point reads per admitted session
+  read of a library asset, plus one access resolve when the asset is org-owned.
+
+## Implementation record (P2)
+- **`host/assetSigning.ts`:** `signedAssetUrl(token, seconds)` produces
+  `<serve url>?asig=v1.<kid>.<exp>.<sig>`.
+  - `sig` is an HMAC-SHA256 over `asset-read:v1:<kid>:<token>:<exp>`, keyed by
+    `readSessionSecret`.
+  - `exp` is at most 15 minutes ahead, with 30 seconds of skew grace on verify and a
+    timing-safe compare.
+  - A signature claiming more than 15 minutes ahead is refused.
+- **Rotation (`interruptToken` precedent):** `kid` is derived from the key, so rotating
+  the session secret rotates it. During a rotation an operator sets
+  `OPENWOP_ASSET_SIGNING_PREVIOUS_SECRET` to the old secret, and in-flight signed URLs
+  keep verifying for their remaining lifetime. An unknown `kid` refuses.
+- **The serve route:** a valid signature for exactly this token admits as arm `signed`,
+  with no store read and no session. A bad signature is ignored, so the other arms still
+  decide and a refusal stays the uniform 404. A signed read is
+  `private, max-age=min(300, remaining)`.
+- **The 15-minute cap excludes email ON PURPOSE.** Email and newsletter pictures are
+  opened days later; they ride the public-grant arm (D2.2), never a signature. Do not
+  raise the cap to serve them.
+- **Adoption:** per call site, as each consumer appears in `report` would-deny logs:
+  exports, headless film and slide renderers, model-provider media fetches. None is
+  adopted in this phase; the arm and its minting function ship first.
+- **Tests:** `adr1122-p2-signed-arm.test.ts`, four cases:
+  - a fresh signature serves, private and bounded;
+  - a tampered, foreign or expired signature gets the uniform 404 with `no-store`;
+  - the cap;
+  - a URL signed under the previous key verifies during a rotation and not without it.
+
+  Sabotage-witnessed: removing the arm, or ignoring the previous key, fails a case.
 
 ## Open questions
 - [ ] Do co-tenant profile views (`TEAM_VIEW_FIELDS` exposes raw tokens) need more than

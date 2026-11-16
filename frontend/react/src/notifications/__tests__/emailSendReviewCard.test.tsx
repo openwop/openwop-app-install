@@ -19,7 +19,11 @@
  *
  * Sabotage (NYI-EMAIL-1): not sending `reviewHash` or not rendering `EmailSendReviewContext`
  * reds each digest case; dropping `approveDisabled` or the out-of-date line reds both
- * no-digest cases; dropping the email arm of the decide bar reds the note case.
+ * no-digest cases on that surface; dropping the email arm of the decide bar reds the note
+ * case and the no-digest cases; not re-reading after a 409 reds the /inbox repin case;
+ * not refetching on a review signal reds the refresh case. Each no-digest case also
+ * rejects through the reason step, so "Reject still works" is a sent reject, not an
+ * enabled button.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor, act } from '@testing-library/react';
@@ -50,6 +54,12 @@ import { ApprovalsInbox } from '../ApprovalsInbox.js';
 import { NeedsYouInbox } from '../NeedsYouInbox.js';
 import { publishReviewSignal } from '../signalBus.js';
 import type { Notification } from '../types.js';
+
+/** A real review-signal frame (ADR 0074): NeedsYouInbox refetches on ANY frame. */
+const DECIDED_FRAME: Notification = {
+  notificationId: 'n-decided', type: 'openwop-app.workflow.approval-needed', priority: 'normal', status: 'unread',
+  title: 'Review decided', message: 'An approval was decided on another surface.', createdAt: '2026-10-17T00:00:01Z',
+};
 
 const EMAIL_SEND: NonNullable<PendingApproval['emailSend']> = {
   reviewHash: 'full-review-digest',
@@ -99,6 +109,8 @@ describe('ADR 0905 D3 — email send review card', () => {
     claimApproval.mockRejectedValueOnce(STALE()).mockResolvedValue({});
     render(<MemoryRouter><ApprovalsInbox /></MemoryRouter>);
     fireEvent.click(await screen.findByRole('button', approveButton));
+    // The 409 is followed by a re-read of the pending list (mount + the re-read).
+    await waitFor(() => expect(listApprovals).toHaveBeenCalledTimes(2));
     expect(await screen.findByText(t('notifications:emailReviewFrom', { sender: 'other@agency.test' }))).toBeTruthy();
     fireEvent.click(screen.getByRole('button', approveButton));
     await waitFor(() => expect(claimApproval).toHaveBeenCalledTimes(2));
@@ -114,12 +126,18 @@ describe('ADR 0905 D3 — email send review card', () => {
     listApprovals.mockResolvedValue([row]);
     rejectApproval.mockResolvedValue(undefined);
     render(<MemoryRouter><ApprovalsInbox /></MemoryRouter>);
-    const approve = await screen.findByRole('button', approveButton) as HTMLButtonElement;
+    const approve = await screen.findByRole('button', approveButton);
+    if (!(approve instanceof HTMLButtonElement)) throw new Error('Approve is not a button');
     expect(approve.disabled).toBe(true);
     fireEvent.click(approve);
     expect(claimApproval).not.toHaveBeenCalled();
     expect(screen.getByText(t('notifications:emailReviewMissing'))).toBeTruthy();
-    expect((screen.getByRole('button', { name: t('notifications:rejectLabel') }) as HTMLButtonElement).disabled).toBe(false);
+    // Reject goes through: the reason step opens and the reject is SENT with the note.
+    fireEvent.click(screen.getByRole('button', { name: t('notifications:rejectLabel') }));
+    fireEvent.change(await screen.findByRole('textbox', { name: t('notifications:rejectReasonLabel') }), { target: { value: 'Resubmit the review' } });
+    fireEvent.click(screen.getByRole('button', { name: t('notifications:rejectSendLabel') }));
+    await waitFor(() => expect(rejectApproval).toHaveBeenCalledWith('e1', 'Resubmit the review'));
+    expect(claimApproval).not.toHaveBeenCalled();
   });
 });
 
@@ -134,6 +152,7 @@ describe('NYI-EMAIL-1 — the same review on /inbox', () => {
     expect(screen.getByText('Hello {{contact.name}}')).toBeTruthy();
     expect(screen.getByText('Template v3')).toBeTruthy();
     expect(screen.getByText('From news@agency.test')).toBeTruthy();
+    expect(screen.getByText(t('notifications:emailReviewAudience', { audience: 'stage: lead' }))).toBeTruthy();
     expect(screen.getByText(/About 42 recipients \(estimate\)/)).toBeTruthy();
     fireEvent.click(approve);
     await waitFor(() => expect(claimApproval).toHaveBeenCalledWith('e1', undefined, 'full-review-digest'));
@@ -146,6 +165,8 @@ describe('NYI-EMAIL-1 — the same review on /inbox', () => {
     claimApproval.mockRejectedValueOnce(new ApprovalApiError('changed', 'conflict', 409, { reason: 'stale_review', campaignId: 'cmp-1' })).mockResolvedValue({});
     render(<MemoryRouter><NeedsYouInbox /></MemoryRouter>);
     fireEvent.click(await screen.findByRole('button', { name: /^Approve$/ }));
+    // The 409 is followed by a re-read of the pending list (mount + the re-read).
+    await waitFor(() => expect(listApprovals).toHaveBeenCalledTimes(2));
     expect(await screen.findByText('Repinned subject')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: /^Approve$/ }));
     await waitFor(() => expect(claimApproval).toHaveBeenCalledTimes(2));
@@ -158,7 +179,7 @@ describe('NYI-EMAIL-1 — the same review on /inbox', () => {
     claimApproval.mockResolvedValue({});
     render(<MemoryRouter><NeedsYouInbox /></MemoryRouter>);
     expect(await screen.findByText('Big launch news')).toBeTruthy();
-    act(() => { publishReviewSignal({} as Notification); });
+    act(() => { publishReviewSignal(DECIDED_FRAME); });
     expect(await screen.findByText('Refreshed subject')).toBeTruthy();
     expect(screen.queryByText('Big launch news')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /^Approve$/ }));
@@ -180,15 +201,20 @@ describe('NYI-EMAIL-1 — the same review on /inbox', () => {
   it.each([
     ['no emailSend', (() => { const { emailSend: _dropped, ...row } = ROW; return row; })()],
     ['no reviewHash', (() => { const { reviewHash: _dropped, ...emailSend } = EMAIL_SEND; return { ...ROW, emailSend }; })()],
-  ])('%s: Approve is dead and posts nothing, and Reject still works', async (_name, row) => {
+  ])('%s on /inbox: Approve is dead and posts nothing, and Reject still works', async (_name, row) => {
     listApprovals.mockResolvedValue([row]);
     rejectApproval.mockResolvedValue(undefined);
     render(<MemoryRouter><NeedsYouInbox /></MemoryRouter>);
-    const approve = await screen.findByRole('button', { name: /^Approve$/ }) as HTMLButtonElement;
+    const approve = await screen.findByRole('button', { name: /^Approve$/ });
+    if (!(approve instanceof HTMLButtonElement)) throw new Error('Approve is not a button');
     expect(approve.disabled).toBe(true);
     fireEvent.click(approve);
     expect(claimApproval).not.toHaveBeenCalled();
-    expect(screen.getByText(/out of date and can.t be approved/)).toBeTruthy();
-    expect((screen.getByRole('button', { name: /^Reject$/ }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByText(t('notifications:emailReviewMissing'))).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /^Reject$/ }));
+    fireEvent.change(await screen.findByRole('textbox', { name: t('notifications:rejectReasonLabel') }), { target: { value: 'Resubmit the review' } });
+    fireEvent.click(screen.getByRole('button', { name: t('notifications:rejectSendLabel') }));
+    await waitFor(() => expect(rejectApproval).toHaveBeenCalledWith('e1', 'Resubmit the review'));
+    expect(claimApproval).not.toHaveBeenCalled();
   });
 });

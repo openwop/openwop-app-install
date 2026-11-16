@@ -8,19 +8,28 @@
  * description, or toolAllowlist to the real tool universe:
  *   1. every pack-declared node typeId (packs/&#42;/pack.json nodes[]),
  *   2. every host-registered node typeId (bootstrap/nodes.ts),
- *   3. every host agent tool (agentToolProvider.ts + features/&#42;/agentTools.ts,
- *      and the ADR 1031 adopter root adopter/features/&#42;/agentTools.ts, which an
- *      adopter checkout populates and this repo never does).
+ *   3. every host agent tool, read from the RUNTIME registry
+ *      (`builtinAgentToolIds()` after `createApp`, so every feature, adopter
+ *      features included, has registered).
  * A prompt that names a tool the model cannot call is a lie to the model; a new
  * one fails here instead of shipping.
+ *
+ * #5992: step 3 used to scan files named `agentTools.ts`. A tool registered from
+ * any other module (`askUserTool.ts`, `walkthroughAuthorTool.ts`, an adopter's
+ * `offers.ts`) read as a phantom, and every `openwop:` string in a scanned file
+ * counted as registered, comments included. The registry is the truth on both
+ * counts, the same instrument as schema-read-exemption-completeness.
  *
  * TST-BLS-2. Red when: any agent-pack prompt/README/manifest names a phantom
  * `openwop:` id (w65 probe: `openwop:knowledge.search-phantom` in kb-researcher).
  */
-import { describe, expect, it } from 'vitest';
+import type http from 'node:http';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
+import { createApp } from '../src/index.js';
+import { builtinAgentToolIds } from '../src/host/agentToolProvider.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(here, '../../..');
@@ -44,29 +53,8 @@ function collectUniverse(): Set<string> {
   //    voice-tool-parity source pins)
   const bootstrap = readFileSync(join(SRC_DIR, 'bootstrap/nodes.ts'), 'utf8');
   for (const m of bootstrap.matchAll(/typeId:\s*'([^']+)'/g)) universe.add(m[1]!);
-  // 3. host agent tools: static builtins + every registerFeatureAgentTool site
-  //    (+ the core composition-lane tools, ADR 0369/0473 — declared in
-  //    host/workflowComposeTool.ts, the one core module outside the two scan
-  //    patterns whose tool ids appear in pack manifests/prompts)
-  const toolSources = [join(SRC_DIR, 'host/agentToolProvider.ts'), join(SRC_DIR, 'host/workflowComposeTool.ts')];
-  for (const featuresDir of [join(SRC_DIR, 'features'), join(SRC_DIR, 'adopter/features')]) {
-    if (!existsSync(featuresDir)) continue; // the adopter root exists only downstream
-    for (const feature of readdirSync(featuresDir)) {
-      const agentTools = join(featuresDir, feature, 'agentTools.ts');
-      if (existsSync(agentTools)) toolSources.push(agentTools);
-    }
-  }
-  // Host subsystems that register their own chat tools from `host/<sub>/agentTools.ts`
-  // (ADR 0889 D8: `host/evals/agentTools.ts`, allowlisted by the Agent Author pack).
-  const hostDir = join(SRC_DIR, 'host');
-  for (const sub of readdirSync(hostDir, { withFileTypes: true })) {
-    const agentTools = join(hostDir, sub.name, 'agentTools.ts');
-    if (sub.isDirectory() && existsSync(agentTools)) toolSources.push(agentTools);
-  }
-  for (const source of toolSources) {
-    const text = readFileSync(source, 'utf8');
-    for (const m of text.matchAll(ID_RE)) universe.add(trim(m[0]));
-  }
+  // 3. host agent tools, from the runtime registry (the caller booted the app)
+  for (const id of builtinAgentToolIds()) universe.add(trim(id));
   return universe;
 }
 
@@ -81,40 +69,70 @@ function resolves(mention: string, universe: Set<string>): boolean {
   return false;
 }
 
+/** The `openwop:` mentions in `text` that resolve to nothing. */
+function phantomMentions(text: string, universe: Set<string>): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(ID_RE)) {
+    const mention = trim(m[0]);
+    if (mention.length === 0) continue; // `openwop:...` placeholder prose
+    if (!resolves(mention, universe)) out.push(`openwop:${mention}`);
+  }
+  return out;
+}
+
 describe('every openwop:-prefixed tool id in agent packs resolves (XCH-AGT-1)', () => {
-  const universe = collectUniverse();
+  let server: http.Server | undefined;
+  let universe = new Set<string>();
+  beforeAll(async () => {
+    process.env.OPENWOP_STORAGE_DSN = 'memory://';
+    process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
+    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+    await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', res); });
+    universe = collectUniverse();
+  });
+  afterAll(async () => {
+    await new Promise<void>((res) => (server ? server.close(() => res()) : res()));
+  });
+
   it('collected a plausible universe', () => {
-    // MEASURED 2026-10-24: 982 (757 pack node typeIds, 37 bootstrap, the rest
-    // tool-source ids). A near-truth floor, so a universe that silently shrinks
-    // (a scan path that stops matching) reds instead of passing every mention.
+    // MEASURED 2026-11-16: 966 with the runtime registry (982 on 2026-10-24
+    // under the file scan, which also counted every `openwop:` string in a
+    // scanned file). A near-truth floor, so a universe that silently shrinks
+    // (a registration path that stops running) reds instead of passing every mention.
     expect(universe.size).toBeGreaterThan(951);
     expect(universe.has('core.files.read')).toBe(true);
     expect(universe.has('core.files.fs-read')).toBe(false);
   });
 
-  const offenders: string[] = [];
-  for (const dir of readdirSync(PACKS_DIR)) {
-    const packDir = join(PACKS_DIR, dir);
-    const manifestPath = join(packDir, 'pack.json');
-    if (!existsSync(manifestPath)) continue;
-    let manifest: { agents?: unknown[] };
-    try { manifest = JSON.parse(readFileSync(manifestPath, 'utf8')); } catch { continue; }
-    if (!Array.isArray(manifest.agents) || manifest.agents.length === 0) continue;
-    const files = [manifestPath, join(packDir, 'README.md')];
-    const promptsDir = join(packDir, 'prompts');
-    if (existsSync(promptsDir)) for (const f of readdirSync(promptsDir)) files.push(join(promptsDir, f));
-    for (const file of files) {
-      if (!existsSync(file)) continue;
-      const text = readFileSync(file, 'utf8');
-      for (const m of text.matchAll(ID_RE)) {
-        const mention = trim(m[0]);
-        if (mention.length === 0) continue; // `openwop:...` placeholder prose
-        if (!resolves(mention, universe)) offenders.push(`${dir}/${file.split('/').pop()}: openwop:${mention}`);
-      }
-    }
-  }
+  it('counts a tool registered outside an agentTools.ts file (#5992)', () => {
+    // Both register from modules the old filename scan never read.
+    expect(universe.has('walkthroughs.register-draft')).toBe(true);
+    expect(universe.has('runs.diagnose')).toBe(true);
+  });
+
+  it('still refuses an id that no module registers (sabotage witness, #5992)', () => {
+    expect(resolves('phantom.never-registered', universe)).toBe(false);
+    expect(phantomMentions('see openwop:phantom.never-registered and openwop:core.files.read', universe))
+      .toEqual(['openwop:phantom.never-registered']);
+  });
 
   it('finds zero phantom tool ids across all agent packs', () => {
+    const offenders: string[] = [];
+    for (const dir of readdirSync(PACKS_DIR)) {
+      const packDir = join(PACKS_DIR, dir);
+      const manifestPath = join(packDir, 'pack.json');
+      if (!existsSync(manifestPath)) continue;
+      let manifest: { agents?: unknown[] };
+      try { manifest = JSON.parse(readFileSync(manifestPath, 'utf8')); } catch { continue; }
+      if (!Array.isArray(manifest.agents) || manifest.agents.length === 0) continue;
+      const files = [manifestPath, join(packDir, 'README.md')];
+      const promptsDir = join(packDir, 'prompts');
+      if (existsSync(promptsDir)) for (const f of readdirSync(promptsDir)) files.push(join(promptsDir, f));
+      for (const file of files) {
+        if (!existsSync(file)) continue;
+        for (const m of phantomMentions(readFileSync(file, 'utf8'), universe)) offenders.push(`${dir}/${file.split('/').pop()}: ${m}`);
+      }
+    }
     expect(offenders, `phantom tool ids mentioned to models:\n${offenders.join('\n')}`).toEqual([]);
   });
 });

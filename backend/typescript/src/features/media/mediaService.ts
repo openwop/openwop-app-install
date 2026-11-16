@@ -9,7 +9,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { DurableCollection, hostExtStorage } from '../../host/hostExtPersistence.js';
 import { fireMediaAssetDeleted } from '../../host/mediaAssetLifecycle.js';
 import { OpenwopError } from '../../types.js';
 import { resolveHeadlessAi } from '../../host/headlessAi.js';
@@ -797,6 +797,39 @@ export async function getAssetByServeTokenForTenant(tenantId: string, token: str
   if (!hit) return null;
   await tokenIndex.put({ key, tenantId, assetId: hit.assetId }).catch(() => undefined);
   return hit;
+}
+
+/** ADR 1122 P1c — the org that owns a library asset served by `token`: the index
+ *  ONLY, never the tenant-slice heal above. On the asset serve path most tokens are
+ *  not library assets, and the heal would scan the tenant's library on every read of
+ *  one. Rows that predate the index are filled by `backfillServeTokenIndexStep`. */
+export async function orgOfServeTokenIndexed(tenantId: string, token: string): Promise<string | undefined> {
+  if (!token) return undefined;
+  const idx = await tokenIndex.get(tokenKey(tenantId, token));
+  if (!idx || idx.tenantId !== tenantId) return undefined;
+  const a = await assets.get(idx.assetId);
+  return a && a.tenantId === tenantId && a.serveToken === token ? a.orgId : undefined;
+}
+
+/** ADR 1122 P1c — one bounded step of filling the serve-token index for library rows
+ *  written before it existed. Pages the `media:asset` rows by key; the shape guard
+ *  skips the legacy byte rows that share the prefix. `next` absent = complete. */
+export async function backfillServeTokenIndexStep(cursor: string | undefined, limit = 200): Promise<{ next?: string }> {
+  const storage = hostExtStorage();
+  const prefix = 'hostext:media:asset:';
+  const rows = storage.kvListPage
+    ? await storage.kvListPage(prefix, { ...(cursor ? { after: cursor } : {}), limit })
+    : (await storage.kvList(prefix)).filter((r) => !cursor || r.key > cursor).slice(0, limit);
+  for (const { value } of rows) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(value); } catch { continue; }
+    const a = isLibraryAsset(parsed);
+    if (!a || !a.serveToken) continue;
+    const key = tokenKey(a.tenantId, a.serveToken);
+    if (!(await tokenIndex.get(key))) await tokenIndex.put({ key, tenantId: a.tenantId, assetId: a.assetId });
+  }
+  const last = rows[rows.length - 1]?.key;
+  return rows.length >= limit && last ? { next: last } : {};
 }
 
 /** ADR 0352 P2 — deterministic filename→tags: strip the extension, split on

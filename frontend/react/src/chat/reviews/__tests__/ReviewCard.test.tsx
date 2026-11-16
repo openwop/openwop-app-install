@@ -4,7 +4,7 @@ vi.mock('../ReviewHandoff.js', () => ({ ReviewHandoff: () => null })); // own te
 import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { ReviewCard } from '../ReviewCard.js';
-import type { ReviewRequest } from '../reviewClient.js';
+import { ReviewRequestError, type ReviewRequest } from '../reviewClient.js';
 import { confirm } from '../../../ui/confirm.js';
 import { useReviewStatusStore } from '../reviewStatusStore.js';
 
@@ -220,6 +220,27 @@ describe('ReviewCard', () => {
     first.unmount();
     render(<ReviewCard review={base} onDecide={vi.fn()} />);
     expect(screen.queryByText(/permission to do that/i)).toBeNull();
+  });
+});
+
+/**
+ * CC-GATE-2 (sole-admin self-approval ADR, D3) — the requester of an autonomy step tried to approve it
+ * themselves. The server answered 403 forbidden_scope with the typed reason
+ * `autonomy_self_approval_refused`, and the card replaced it with the generic
+ * "You don't have permission to do that here. Ask an admin" line (casavoga-f8, run
+ * e0bbd33f). Red before the fix: the generic line rendered.
+ */
+describe('CC-GATE-2 — a refused self-approval says why, and who can approve', () => {
+  it('shows the self-approval sentence, not the generic permission line', async () => {
+    const refused = new ReviewRequestError('forbidden_scope: You requested this step, so someone else has to approve it.', 'forbidden_scope', 403, 'autonomy_self_approval_refused');
+    render(<ReviewCard review={base} onDecide={vi.fn(async () => { throw refused; })} />);
+    fireEvent.click(screen.getByRole('button', { name: /Approve & run/ }));
+    // Wait for the failure line to render at all, THEN read what it says, so the
+    // red is a wrong sentence, not a wait that expired.
+    await waitFor(() => expect(screen.queryByText(/permission to do that|someone else has to approve/i)).toBeTruthy());
+    expect(screen.queryByText(/permission to do that/i)).toBeNull();
+    expect(screen.getByText(/You requested this step, so someone else has to approve it/)).toBeTruthy();
+    expect(screen.getByText(/Ask another admin, or an approver named in this campaign/)).toBeTruthy();
   });
 });
 

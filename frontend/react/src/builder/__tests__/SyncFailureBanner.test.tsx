@@ -12,6 +12,13 @@
  * The expected announcement is the en COPY as a literal — never read back from
  * the rendered banner, which would agree with a wrong-but-consistent key (a 401
  * spoken AND shown as the server copy would pass).
+ *
+ * Re-graded (grade-tests w116): the ADR 0440 / 0523 editor-metadata refusal
+ * (`builder_editor_metadata_conflict`, no status) shows and speaks its own copy,
+ * once; every error case also asserts what is SHOWN. Sabotage-witnessed: the
+ * metadata branch removed, the room-live banner made an error or unannounced, a
+ * 401 routed to the server copy, the server copy swapped, the error `announce`
+ * dropped or its title dropped, and a non-failed state rendering, each red a case.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup } from '@testing-library/react';
@@ -50,7 +57,9 @@ describe('SyncFailureBanner — screen-reader announcement (WFMU-1 + sibling)', 
     setSync('failed', undefined, 'builder_editor_metadata_conflict');
     const { container } = render(<SyncFailureBanner />);
     const detail = 'Existing workflow editor metadata has an incompatible format. Your local draft is retained; correct the imported metadata before saving.';
+    expect(container.querySelector('strong')?.textContent).toBe(TITLE);
     expect(container.querySelector('p')?.textContent).toBe(detail);
+    expect(vi.mocked(announce)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(announce)).toHaveBeenCalledWith(`${TITLE} ${detail}`, { assertive: true });
   });
 
@@ -76,7 +85,10 @@ describe('SyncFailureBanner — screen-reader announcement (WFMU-1 + sibling)', 
 
   it('a 500 server error also announces assertively (every error status, not just 401)', () => {
     setSync('failed', 500);
-    render(<SyncFailureBanner />);
+    const { container } = render(<SyncFailureBanner />);
+    // What is SHOWN matches what is spoken (not only the announce mock).
+    expect(container.querySelector('strong')?.textContent).toBe(TITLE);
+    expect(container.querySelector('p')?.textContent).toBe(SERVER);
     expect(vi.mocked(announce)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(announce)).toHaveBeenCalledWith(`${TITLE} ${SERVER}`, { assertive: true });
   });

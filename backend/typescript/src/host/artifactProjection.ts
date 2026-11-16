@@ -41,6 +41,7 @@ import { getRunArtifact, listRunArtifactsForTenant, type RunArtifactRecord, list
 import type { Subject } from './subject.js';
 import { canReadChatArtifact, chatArtifactRunId, type ChatArtifactLane } from './chatArtifactScope.js';
 import { hostExtStorage } from './hostExtPersistence.js';
+import { runProjectReader } from './runProjectAccess.js';
 
 export type ArtifactSource = 'document' | 'media' | 'run-event';
 
@@ -244,7 +245,30 @@ async function resolveRunArtifact(tenantId: string, subject: string | undefined,
   const access = await resolveEffectiveAccess(tenantId, { ...(subject ? { subject } : {}), orgId: row.orgId });
   if (!access.scopes.includes('workspace:read')) return null;
   // ADR 0996 — a chat-tool artifact is as private as its conversation.
-  return (await canReadChatArtifact(row, subject)) ? row : null;
+  if (!(await canReadChatArtifact(row, subject))) return null;
+  // ADR 1133 — and a run's output is as private as the project the run worked on.
+  return (await runOutputProjectReadable(tenantId, subject)(row)) ? row : null;
+}
+
+/** ADR 1133 — the run-event lane's project check, the same reader the run doors
+ *  use (`runProjectReader`). The run's metadata is read once per run; a row whose
+ *  run is gone (or a chat tool's synthetic run) has no project attribution. */
+function runOutputProjectReadable(tenantId: string, subject: string | undefined): (row: Pick<RunArtifactRecord, 'runId'>) => Promise<boolean> {
+  const read = runProjectReader(tenantId, subject);
+  const byRun = new Map<string, Promise<boolean>>();
+  return (row) => {
+    let p = byRun.get(row.runId);
+    if (!p) {
+      // No private project in the tenant: nothing can be refused, so the run is never loaded.
+      p = read.mayRefuse().then(async (may) => {
+        if (!may) return true;
+        const run = await hostExtStorage().getRun(row.runId);
+        return read(run && run.tenantId === tenantId ? (run.metadata as Record<string, unknown> | undefined) : undefined);
+      });
+      byRun.set(row.runId, p);
+    }
+    return p;
+  };
 }
 
 // ── authorization + composition ─────────────────────────────────────────
@@ -471,7 +495,8 @@ export async function listArtifacts(tenantId: string, subject: string | undefine
   // door-pair whose single-GET (`authorizeDocument`) is project-gated; without
   // this it enumerates a private project's docs to a non-member org viewer. A
   // project-owned doc is membership-scoped: consult the ONE subjectAccess seam
-  // (null ⇒ org gate stands). Media/run rows carry no project owner.
+  // (null ⇒ org gate stands). Media rows carry no project owner; run rows are
+  // project-gated below through the run their output came from (ADR 1133).
   const visibleDocs = (await Promise.all(docs.map(async (d) => {
     if (!canRead.get(d.orgId)) return null;
     // ADR 0838 D3 — THE document read predicate (was a second copy).
@@ -482,10 +507,13 @@ export async function listArtifacts(tenantId: string, subject: string | undefine
   // tenant, so the org gate alone listed a private chat's output to every member.
   // Each conversation is asked once. Fail-closed per row, logged (as ART-3).
   const chatMemo = new Map<string, Promise<boolean>>();
+  const projectReadable = runOutputProjectReadable(tenantId, subject);
   const visibleRuns = (await Promise.all(runs.map(async (r) => {
     if (!canRead.get(r.orgId)) return null;
     try {
-      return (await canReadChatArtifact(r, subject, chatMemo)) ? r : null;
+      if (!(await canReadChatArtifact(r, subject, chatMemo))) return null;
+      // ADR 1133 — the GET's project check, so the list cannot enumerate what the GET refuses.
+      return (await projectReadable(r)) ? r : null;
     } catch (err) {
       log.warn('artifact_library_chat_access_failed', { tenantId, error: err instanceof Error ? err.message : String(err) });
       return null;

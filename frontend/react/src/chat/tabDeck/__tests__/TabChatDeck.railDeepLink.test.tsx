@@ -78,10 +78,11 @@ async function renderAt(url: string): Promise<void> {
 
 /** The RAIL's tablist exposes which rail tab is selected; read it rather than
  *  internals. Scoped to the rail: the chat-tab strip always has a selected tab too,
- *  so an unscoped query could never come back empty. */
+ *  so an unscoped query could never come back empty. Returns the selected tab's DOM
+ *  id (`left-rail-tab-<rail>`), exact, rather than a loose text match. */
 function selectedRailTab(): string | null {
   const selected = within(screen.getByRole('tablist', { name: 'Chat tool tabs' })).queryAllByRole('tab', { selected: true });
-  return selected.length > 0 ? (selected[0]!.textContent?.trim() ?? null) : null;
+  return selected.length === 1 ? selected[0]!.id : null;
 }
 
 describe('TabChatDeck — ?rail= deep link (ENG-14)', () => {
@@ -89,15 +90,17 @@ describe('TabChatDeck — ?rail= deep link (ENG-14)', () => {
     // The deck opens on Conversations by default, so a pass requires the deep link
     // to actually move the selection.
     await renderAt('/chat?rail=reviews');
-    expect(selectedRailTab()).toMatch(/review/i);
+    expect(selectedRailTab()).toBe('left-rail-tab-reviews');
   });
 
   it('treats ?rail=progress as the Workbench Run tab (ADR 0768 P2 alias)', async () => {
     // Runs moved out of the rail; the old deep link must still land somewhere
     // real — the right-hand Workbench, on Run — not be silently dropped.
     await renderAt('/chat?rail=progress');
-    screen.getByRole('complementary', { name: /workbench/i }); // throws if the Workbench is not open
-    expect(screen.getByRole('tab', { name: /^run/i }).getAttribute('aria-selected')).toBe('true');
+    // Scoped to the Workbench aside (it is absent until opened), so the Run tab read is
+    // the Workbench's own, not a same-named tab elsewhere on the page.
+    const workbench = screen.getByRole('complementary', { name: /workbench/i });
+    expect(within(workbench).getByRole('tab', { name: /^run/i }).getAttribute('aria-selected')).toBe('true');
   });
 
   it('ignores an unknown rail value rather than selecting nothing', async () => {
@@ -105,7 +108,7 @@ describe('TabChatDeck — ?rail= deep link (ENG-14)', () => {
     // The guard only accepts the deck's own LeftRailTab union, so an unknown
     // value must leave the existing selection (the Conversations default) intact —
     // not blank the rail.
-    expect(selectedRailTab()).toMatch(/conversations/i);
+    expect(selectedRailTab()).toBe('left-rail-tab-conversations');
   });
 
   it('strips the param so reload/back/share does not re-trigger', async () => {

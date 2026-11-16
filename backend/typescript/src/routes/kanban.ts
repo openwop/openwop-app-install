@@ -51,6 +51,7 @@ import {
   isPreconditionFailure,
   listCards,
   listCardsAssignedToUser,
+  assertAssigneeRoleFits,
   listWorkItemProjectionsForBoard,
   notifyBoardChanged,
   renameBoard,
@@ -82,6 +83,7 @@ import {
 import { startKanbanTriggerRun } from '../host/kanbanTriggerDelivery.js';
 import { deliverReservedWorkItem } from '../host/kanbanWorkItemDelivery.js';
 import { recordKanbanWorkItemDelivery } from '../observability/metricSeams.js';
+import { assertWorkflowClientAccess } from '../host/workflowClientAccess.js';
 
 interface Deps {
   storage: Storage;
@@ -113,7 +115,7 @@ function parseCardPriority(input: unknown): 'low' | 'normal' | 'high' | undefine
  * the same command without inheriting REST-shaped exceptions. */
 function rethrowCardCommandError(err: unknown): never {
   const code = err && typeof err === 'object' ? (err as { code?: unknown }).code : undefined;
-  if (code === 'kanban_card_invalid' || code === 'kanban_command_invalid' || code === 'kanban_column_not_found') {
+  if (code === 'kanban_card_invalid' || code === 'kanban_command_invalid' || code === 'kanban_column_not_found' || code === 'kanban_assignee_invalid') {
     throw new OpenwopError('validation_error', err instanceof Error ? err.message : 'Invalid card update.', 400);
   }
   if (code === 'kanban_card_not_found') throw new OpenwopError('not_found', 'Card not found.', 404);
@@ -330,6 +332,8 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
           field: 'triggerWorkflowId',
         });
       }
+      // ADR 1132 D5 — a board whose column launches a client's workflow needs launch authority there.
+      if (typeof body.triggerWorkflowId === 'string') await assertWorkflowClientAccess(req, body.triggerWorkflowId, 'runs:create');
       // Optional RFCS/0086 roster binding: the named agent that owns this
       // board. When bound and no explicit trigger workflow is given, the
       // To Do column defaults to the member's first portfolio workflow —
@@ -621,6 +625,8 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
           field: 'columnId',
         });
       }
+      // ADR 1132 D5 — a card that launches a client's workflow needs launch authority there.
+      if (typeof body.workflowId === 'string') await assertWorkflowClientAccess(req, body.workflowId, 'runs:create');
       const card = await createCard({
         boardId: board.id,
         columnId,
@@ -698,6 +704,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
 
       // One CAS-backed command validates the whole intent BEFORE persisting it:
       // a bad lane can no longer leave a valid title/metadata edit behind.
+      if (typeof body.workflowId === 'string') await assertWorkflowClientAccess(req, body.workflowId, 'runs:create'); // ADR 1132 D5
       let mutation;
       try {
         mutation = await applyBoardCommand({
@@ -826,6 +833,8 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
       // Role-addressed (unclaimed) — surfaces in every role-holder's mirror;
       // the first to claim becomes the accountable assignee (ADR 0049 D2).
       if (typeof body.assigneeRole === 'string' && body.assigneeRole.trim().length > 0) {
+        // ADR 1137 D4 — a project role addresses only its own project's board.
+        try { assertAssigneeRoleFits(board, body.assigneeRole); } catch (err) { rethrowCardCommandError(err); }
         await updateCardFields(cardId, { assigneeId: null, assigneeRole: body.assigneeRole.trim(), assignmentReason: comment, ...handoffPatch });
         await announceNote();
         if (prev) await withdrawAssignmentNotification({ tenantId: board.tenantId, cardId, recipientUserId: prev });

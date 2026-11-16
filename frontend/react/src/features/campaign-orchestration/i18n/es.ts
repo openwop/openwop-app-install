@@ -12,6 +12,7 @@ export const messages = {
   emptyTitle: 'Aún no hay campañas',
   emptyBody: 'Finaliza un brief confirmado en una campaña, o ejecuta una de principio a fin con el Estratega de campañas.',
   runWithStrategist: 'Ejecutar con el Estratega',
+  strategistRunDraft: 'Comprueba con campaign-orchestration.status si la campaña «{{name}}» ({{campaignId}}, brief {{briefId}}, organización {{orgId}}) está lista, y dime qué se ejecutará antes de iniciar nada.',
   designFunnelWithArchitect: 'Diseñar un embudo con el Arquitecto de embudos',
   designJourney: 'Diseñar un recorrido',
   finalizeBrief: 'Finalizar un brief',

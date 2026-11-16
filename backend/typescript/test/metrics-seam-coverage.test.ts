@@ -393,7 +393,7 @@ describe('ADR 0556 P1 — MCP request outcomes', () => {
     storage,
     hostSuite: createHostAdapterSuite({ storage }),
     principal: { principalId: 'metrics-probe', tenants: ['default'], token: 'dev-token' },
-    caller: { principal: undefined, tenantId: 'default', workspaceLaunch: false, async resolveLaunch() { return null; } },
+    caller: { principal: undefined, tenantId: 'default', workspaceLaunch: false, async resolveLaunch() { return null; }, async mayLaunchOwned() { return true; } },
   });
 
   it('counts an inbound served method', async () => {

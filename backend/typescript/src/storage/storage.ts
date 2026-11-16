@@ -1425,6 +1425,14 @@ export interface Storage {
    * a storage without it leaves the job pending. Idempotent.
    */
   resolveRequestNotificationsOfKind?(kind: string, resolution: RequestResolution): Promise<number>;
+  /**
+   * ADR 1124 D2 — host-wide, one page of the request rows ADR 1114 has not
+   * stamped: non-archived, naming an interrupt, no `metadata.resolution`. Ordered
+   * and paged by `(tenantId, runId, notificationId)`, the leading columns of the
+   * ADR 1114 partial index, so no page scans the whole table. Ids only. Optional
+   * so a storage without it leaves the `stale-request-reconcile` job pending.
+   */
+  listUnstampedRequestRows?(opts: { after?: { tenantId: string; runId: string; notificationId: string }; limit: number }): Promise<Array<{ notificationId: string; tenantId: string; runId: string; interruptId: string }>>;
   deleteNotification(notificationId: string): Promise<boolean>;
   /** Drop every notification owned by a tenant (used by account-delete). */
   deleteAllTenantNotifications(tenantId: string): Promise<number>;

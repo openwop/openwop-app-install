@@ -91,6 +91,12 @@ first time someone uses it. It removes no one's access today.
 - Replay and fork are unaffected. Visibility is a read-time filter and is never stamped on
   a run (ADR 0054 D5).
 
+  > **CORRECTED 2026-11-15 (ADR 1133, #5970):** runs were not in this list, so a private
+  > project's runs, their events and their `run-event:*` artifacts stayed readable to a
+  > non-member org viewer. ADR 1133 applies this rule to them through the same subject
+  > seam, derived from the run's host-written attribution. Still read-time only, and
+  > still never stamped on a run.
+
 ## Verification
 
 - `projects-route.test.ts`, new case "ADR 1118". A non-member org editor reads and writes

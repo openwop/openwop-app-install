@@ -18,6 +18,93 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-11-16
+
+A MINOR release under ADR 0052. Run admission now checks a chain's required
+parameters before a run starts (shadow-first: it logs, it does not refuse). A
+sole admin can approve their own autonomy gate. Public-asset grants cover the
+storefront, share links and e-sign, and the asset serve route gains its org
+floor and signed reads, all behind `OPENWOP_ASSET_ACCESS` (off by default). A
+client org's workflow definitions, and a private project's runs, are read only
+by that client's or project's people. Kanban work items can carry an assignee or
+a project role and be refreshed. Inbox requests name who asks and why, and
+an open request cannot be archived away. Campaign Studio fixes land across market
+intelligence, SEO briefs, campaign launch, the Strategist and approval waits.
+The one-time legacy env-key id rewrite is removed, so **0.14.0 is now a required
+stop** for an install that used env keys and never ran it. No schema or app
+migration (sqlite 53 / postgres 51, app 26). It is rolling-safe. **New setting:**
+`OPENWOP_ASSET_SIGNING_PREVIOUS_SECRET` (optional).
+
+### Added
+
+- **Run admission preflight (run admission preflight P0, #6005).** Before a run starts, the host checks that the chain's required parameters are supplied. P0 is shadow-first: a missing parameter is logged and the run proceeds, so nothing is refused yet.
+- **A sole admin can approve their own autonomy gate (CC-GATE-2 G1, #6022).** When the person who would approve a gate is the only admin who could, they may approve it themselves. "A person" is read from the signed-in subject only, and the escape fails closed. A refused self-approval now says why and who can approve (CC-GATE-2 G0, #5996).
+- Public-asset grants now also follow the commerce storefront, share links and e-sign (ADR 1122 P1b, #5952). With `OPENWOP_ASSET_ACCESS` on, a publicly listed product grants its images (not its downloads), a live share link grants every picture it shows (including on a draft page), and an open e-sign request grants the pictures in the signer's document and, once completed, the certificate. Unlisting, deleting, revoking or voiding takes them back. Nothing changes while the switch is `off`, the default.
+- Signed asset reads (ADR 1122 P2, #5966): `signedAssetUrl(token, seconds)` mints a read of one asset that needs no session and lasts at most 15 minutes, for exports, renderers and model-provider fetches. The serve route admits a valid signature for exactly that asset, caches it no longer than it lives, and answers a bad or expired one with the same 404 as an unknown asset. Rotating the session secret keeps in-flight signed URLs working while `OPENWOP_ASSET_SIGNING_PREVIOUS_SECRET` holds the old one. Email pictures use public grants, not signatures.
+- The asset serve route's org floor (ADR 1122 P1c, #5956). With `OPENWOP_ASSET_ACCESS` on, a signed-in read of a media-library asset owned by a client org also needs access in that org, so a workspace member outside client org X no longer sees org X's library. Workspace admins, personal workspaces, root-owned assets and assets a public page shows are unaffected. A lookup that cannot be read is refused rather than allowed. Nothing changes while the switch is `off`, the default.
+- An operator can redact an affiliate's records for that affiliate's data-subject request (ADR 0464 §9, CHAN-F19 #5, #5978).
+- **Inbox requests name who asks and why (ADR 1125 P1, #5922, #5958).** A request carries the asking automation's name (never its id, and never a person) and a host-composed reason; with no gate title the host writes one per kind. Only kinds a person can answer notify: an external-event wait no longer files a request. A credential request's Connect button opens the host's own connect route, never a link a pack supplied. An unknown request kind now tells the person to ask whoever runs the workspace to update the app.
+- **An Inbox card names the ask and cannot silence an open request (ADR 1125 P2, #6001).** Unread is a labelled dot, priority shows only for high and urgent, and the second line reads "from {asker}" and the reason. A "…" menu holds Mark read/unread, Archive, Delete and View activity log. An open request offers no Archive or Delete, and "Archive read" leaves open requests alone (`:archive-read` takes an optional `keep` list of up to 500 ids). Repeated news with the same type, title and asker collapses into one card that expands in place; requests never collapse.
+- **Kanban work items carry an assignee and can be refreshed (ADR 1137 P1–P3, #5985, #5987, #5988).** A work-item proposal may name an assignee (`assigneeId`) or a role (`assigneeRole`), with a reason, a source label and labels, all written only when the card is created. An assignee must be a workspace member who can read the board's subject, checked before any write (`kanban_assignee_invalid`), and is notified once. On a project's own board, `project:lead` and `project:contributor` address the card to that project's people; a role routes the card to "Assigned to me" and never grants access. `refresh` updates the title, description, due date and source label of existing work, and never touches the assignee, column, order or labels, a card in a terminal column, or a card a person deleted. `core.openwop.kanban-work-items` 1.2.0 carries all of this to workflow chains (`vendor.openwop.app-builder.workflows` 1.4.3).
+- Groundwork for computer-use browser executors (ADR 1136 P1, #5997, #6000): an executor protocol, a closed-world tier table built from the executor's element report (credential fields are refused, unknown elements count as commit) and a host-run loop adapter. Nothing in production constructs the new adapter, so behaviour is unchanged.
+
+### Changed
+
+- **Market-intelligence digests read the pages they find (ADR 1116, ADR 1135; CC-CHAIN-7 #5900, CC-CHAIN-8 #5984).** `core.openwop.workflows.market-intel` 1.3.1: both chains fetch the discovered pages (`core.web.fetch`) and extract voice-of-customer per page. Discovery (`vendor.myndhyve.market-intel-discovery` 1.1.0) runs up to two live web searches and orders the fetch list so hosts that block automated reads go last; a run with no readable source fails typed `NO_FETCHABLE_SOURCES` at discover. The chains need a host that exposes `ctx.webResearch`.
+- `seo.keyword-brief` saves its brief as a draft Document and searches its topic (CC-SEO-2, #5941); `feature.documents.nodes` 1.5.0.
+- `core.openwop.ai` 1.5.2: chat nodes keep upstream fields after a port-less edge (CC-SEO-3, #5979).
+- `marketing.campaign-launch` launches through the governed ad step, and `openapi-call` names a missing document (CC-CHAIN-1, ADR 1111, #5947).
+- The host opts out of the `family.budget` and `family.production` conformance families at major 2 (#5977).
+- The Meta Marketing API pin is re-read; its next review is due 2027-02-01 (ADR 0907 D0, #5982).
+
+### Removed
+
+- **The one-time legacy bearer-id rewrite job is gone (ADR 1045, CHAN-F18, #6006, #6021).** The `legacy-bearer-id-rewrite` background job and `OPENWOP_LEGACY_BEARER_REWRITE` no longer exist; 0.14.0 is the last release that carries them. **If you upgrade from before 0.14.0 and have not run the rewrite, upgrade to 0.14.0 first and run it there** (`OPENWOP_LEGACY_BEARER_REWRITE=report`, read the `legacy_bearer_rewrite` log line, then `apply`), then continue. Skipping it leaves records carrying a legacy `bearer:<8>` id (delegations an env key minted, run actors, scheduled jobs, env-key-created org members) without operator standing, with no tool left to rewrite them; they fail closed and nothing moves to the wrong key. An install that already ran the rewrite, or never used env keys, has nothing to do. A leftover `OPENWOP_LEGACY_BEARER_REWRITE` setting is ignored. `releases.json` now marks 0.14.0 a required stop for this, so `node scripts/upgrade-plan.mjs <from>` lands on 0.14.0 before going past it (RELEASES.md v0.14.0, corrected 2026-11-16).
+
+### Fixed
+
+- Campaign Studio: the Strategist opens with the campaign named (CC-HUB-2, #5994); personas are reachable in the hub and messaging prose is never cut (CC-HUB-1, CC-BRIEF-2, #5975); the creative-briefs step skips when its feature is off (CC-CHAN-3, #5981; `feature.campaign-channels.nodes` 1.19.2).
+- Chat: an agent is told which runs in its history it started (CC-STRAT-2, #5986); run digests say a run waiting on an external event continues on its own (CC-STRAT-3, #6004); an external-event wait never asks for input (CC-ORCH-3, #5976).
+- Inbox: a request about a deleted run is over too (ADR 1124, #5955).
+- Crawlers get the pricing page's preview at `/pricing` (ADR 0391, ADR 0384, #6026). The shipped `firebase.json` gains a rewrite for it.
+
+### Security
+
+- **A private project's runs are read only by its people (ADR 1133, #5970, #5971).** An org viewer outside a private project could open and list its runs, read their events, and read what they delivered in the artifact library. A run a private project is working on now needs read on that project. The project is worked out from where the run came from (a card on the project's board, a project schedule, or a campaign) and is never stamped on the run, so a fork follows the same rule. A refused run or artifact reads as not found and drops out of lists. Runs with no project, or in an org-visible project, are unchanged.
+- **A client's workflow definitions are read only by that client's people (ADR 1132, #5969, #5973, #5980).** Child runs inherit the client and carry no client content, the builder's template client choice reads orgs through the shared org selection, and the model-facing lanes apply the same client floor (`mayLaunchOwned` is required, so a caller without it does not compile).
+- A person's settings preferences and BYOK counters are erased with them on a data-subject request (ADR 0464 §9, CHAN-F19 #4, #5948).
+- **A campaign step's requester can no longer approve it themselves through the plan exemption (CC-GATE-3).** Campaign autonomy gates fell back to a plain approval when a plan-exempt operator ran a campaign in a workspace whose plan lacks the marketing bundle. The frozen policy now applies there too, so the person who requested a kernel, creative, spend or experiment-promote step cannot approve it, unless they are the only admin (the sole-admin rule above).
+
+#### Upgrading from 0.14.0
+
+- **No required stop at 0.15.0; rolling-safe.** `node scripts/upgrade-plan.mjs 0.14.0`
+  gives one step. No schema or app migration (sqlite 53 / postgres 51, app 26).
+- **From before 0.14.0, 0.14.0 is a required stop.** An install that used env
+  keys (`OPENWOP_API_KEYS`) and never ran the legacy bearer-id rewrite must land
+  on 0.14.0 and run it there (`OPENWOP_LEGACY_BEARER_REWRITE=report`, read the
+  `legacy_bearer_rewrite` log line, then `apply`). `upgrade-plan.mjs <from>`
+  plans that stop. A leftover `OPENWOP_LEGACY_BEARER_REWRITE` is ignored on 0.15.0.
+- **Deploy the backend before the frontend.**
+- **Client-scoped workflows:** a member who reads workflows only through one
+  client org no longer sees other clients' definitions. Grant tenant admin to
+  anyone who still needs them all.
+- **Private projects:** a run a private project is working on, and what it
+  delivered, need read on that project.
+- **Run admission:** P0 only logs a missing required parameter; nothing is
+  refused in this release. Check the logs before a later release enforces it.
+- **Hosting:** if you forked `firebase.json`, carry the new `/pricing` rewrite.
+- **Asset access:** `OPENWOP_ASSET_ACCESS` is still `off` by default. With P1b,
+  P1c and P2 present, `report` now covers every public surface; set
+  `OPENWOP_ASSET_SIGNING_PREVIOUS_SECRET` when you rotate the session secret.
+- **Market intelligence:** the digest chains need a web-search provider
+  (`ctx.webResearch`); without one, discovery fails typed.
+- **Inbox:** external-event waits no longer file Inbox requests, and
+  `POST …/notifications:archive-read` accepts an optional `keep` id list
+  (without it the route is unchanged). The Inbox UI no longer archives open
+  requests.
+- Back up the database before upgrading. After the upgrade, check that
+  `/readiness` reports `version: 0.15.0`.
+
 ## [0.14.0] — 2026-11-15
 
 A MINOR release under ADR 0052. It adds readable Inbox requests that close
@@ -31,6 +118,11 @@ postgres 51); app migrations stay at 26. It is rolling-safe, with no required
 stop. **New settings:** `OPENWOP_COMMERCE_MAX_PRODUCTS_PER_ORG`,
 `OPENWOP_COMMERCE_INDEX_SWEEP_MS` and `OPENWOP_CMS_OVERLAY_REALIGN`, plus two
 default-off flags, `OPENWOP_BOUNDED_LOOPBACK` and `OPENWOP_INTERRUPT_RESOLVED_VIA`.
+
+> **Corrected 2026-11-16.** Three Added entries (ADR 1122 P1b, P1c and P2) were
+> filed here after the v0.14.0 tag (8a2fcb0fbb). Their PRs (#5952, #5956 and
+> #5966) merged after it, so the v0.14.0 bundle does not have them; they ship in
+> 0.15.0 and moved to that section. The released v0.14.0 artifact is unchanged.
 
 ### Added
 

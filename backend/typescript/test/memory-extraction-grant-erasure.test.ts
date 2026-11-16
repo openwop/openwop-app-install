@@ -16,16 +16,19 @@
  * is the spelling this whole lane standardised on. The matcher widening is a
  * separate commit (the class); this file pins the instance.
  *
- * Witnessed (wave 12 probes): `if (forms.has(g.subject))` → `if (false)` reds the topic cases;
- * exact-match instead of `subjectKeyForms` reds the bare-id cases; disabling or deleting the
- * `grantedBy` re-attribution reds ACTOR; widening the scan past `${tenantId}:` (with the row
- * re-check) reds ANTI-ROT; deleting `registerSubjectEraser(...)` reds WIRING.
+ * Sabotage witnesses (grade-tests wave 111 g1, `w111g1-ge-*`): `if (forms.has(g.subject))` →
+ * `if (false)` (topic) reds the topic cases; exact-match instead of `subjectKeyForms` (forms) reds
+ * the bare-id case; disabling the `grantedBy` re-attribution (actor) reds ACTOR; widening the scan
+ * past `${tenantId}:` AND dropping the row re-check in one edit (tenant-both) reds ANTI-ROT;
+ * deleting `registerSubjectEraser(...)` (wiring) reds WIRING; keeping the notes (notes) reds THE
+ * DEFECT; keeping the forget tombstones (tombstones) reds the D6 case; a falsy input that acts as
+ * a wildcard (falsy-wildcard) reds the idempotent case.
  *
- * DOUBLE GUARDS (recorded, not assertable): the per-row `g.tenantId !== tenantId` re-check is
- * shadowed by the `${tenantId}:` prefix scan, and the falsy-input early return is shadowed by
- * that scan (`''` scans `':'`) and by `subjectKeyForms('')` (which can match no real grant).
- * Removing either alone leaves every case green, so this file claims only that falsy input
- * does not throw and does not erase.
+ * DOUBLE GUARDS (recorded, not assertable one at a time): the per-row `g.tenantId !== tenantId`
+ * re-check is shadowed by the `${tenantId}:` prefix scan (hence the one-edit break-both probe),
+ * and the falsy-input early return is shadowed by that scan (`''` scans `':'`) and by
+ * `subjectKeyForms('')` (which can match no real grant). Removing the early return alone leaves
+ * every case green, so this file claims only that falsy input does not throw and erases nothing.
  */
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -76,7 +79,7 @@ describe('AGMEM-4 — eraseExtractionGrants', () => {
     await extractConversationMemory(await p.run(), ['I live in Berlin'], facts('Lives in Berlin'));
     expect(await countSubjectNotes(p.home, personSubject(p.userId))).toBe(1);
 
-    // A DSAR: the host eraser fan-out reaches BOTH the memory and the grant.
+    // A DSAR runs BOTH erasers (the fan-out that reaches them is the WIRING case below).
     await eraseSubjectMemory(p.home, p.userId);
     await eraseExtractionGrants(p.home, p.userId);
 
@@ -113,10 +116,8 @@ describe('AGMEM-4 — eraseExtractionGrants', () => {
     // not the DSAR subject\'s data to destroy.
     await setExtractionGrant(T, 'user:carol', true, 'alice');
     await eraseExtractionGrants(T, 'user:alice');
-    const g = await getExtractionGrant(T, 'user:carol');
-    expect(g).not.toBeNull();
-    expect(g!.granted).toBe(true); // carol\'s consent survives
-    expect(g!.grantedBy).toBe('erased:subject'); // alice\'s id does not
+    // carol's consent survives; alice's id does not.
+    expect(await getExtractionGrant(T, 'user:carol')).toMatchObject({ tenantId: T, subject: 'user:carol', granted: true, grantedBy: 'erased:subject' });
   });
 
   it('ANTI-ROT: it is not "delete everything" — other subjects and other tenants are untouched', async () => {

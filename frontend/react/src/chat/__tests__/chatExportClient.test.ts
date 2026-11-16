@@ -12,7 +12,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   exportConversation, importConversation, detectImportFormat, isChatGptArchive, listArchiveConversations,
-  fileNameFromDisposition, fileDigest, ChatImportError,
+  fileNameFromDisposition, fileDigest, ChatImportError, type ImportResult,
 } from '../../client/chatExportClient.js';
 import { config } from '../../client/config.js';
 
@@ -53,10 +53,25 @@ describe('exportConversation', () => {
     expect(document.body.querySelector('a[download]')).toBeNull();
   });
 
-  it('names the download from the server (Content-Disposition); refuses an unsafe name', () => {
+  it('names the download from the server (Content-Disposition); refuses an unsafe name', async () => {
     expect(fileNameFromDisposition('attachment; filename="launch-plan.md"')).toBe('launch-plan.md');
     expect(fileNameFromDisposition('attachment; filename="../../etc/passwd"')).toBeNull();
     expect(fileNameFromDisposition(null)).toBeNull();
+    // …and the export actually USES it: the server's name becomes the download name.
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response('{"version":"openwop-v1"}', {
+      status: 200, headers: { 'content-disposition': 'attachment; filename="launch-plan.json"' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const createObjectURL = vi.fn<typeof URL.createObjectURL>(() => 'blob:y');
+    URL.createObjectURL = createObjectURL;
+    URL.revokeObjectURL = vi.fn<typeof URL.revokeObjectURL>();
+    const names: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) { names.push(this.download); });
+    await exportConversation('s-9', 'json');
+    expect(names).toEqual(['launch-plan.json']);
+    const blob = createObjectURL.mock.calls[0]![0];
+    if (!(blob instanceof Blob)) throw new Error('createObjectURL was not given a Blob');
+    expect(blob.type).toBe('application/json');
   });
 
   it('throws on a non-OK response (so the caller can surface it)', async () => {
@@ -75,12 +90,13 @@ describe('detectImportFormat', () => {
 
 describe('importConversation', () => {
   it('POSTs {format, data} to the import route + returns the new session', async () => {
-    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ sessionId: 's2', imported: 3 }), {
+    const result: ImportResult = { sessionId: 's2', imported: 3, skipped: 1, truncated: 0, replayed: false };
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(result), {
       status: 200, headers: { 'content-type': 'application/json' },
     }));
     vi.stubGlobal('fetch', fetchMock);
     const out = await importConversation('openwop', { version: 'openwop-v1' });
-    expect(out).toEqual({ sessionId: 's2', imported: 3 });
+    expect(out).toEqual({ sessionId: 's2', imported: 3, skipped: 1, truncated: 0, replayed: false });
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(String(url)).toBe(`${config.baseUrl}/host/openwop-app/chat-export/import`);
     expect(init?.method).toBe('POST');
@@ -101,8 +117,9 @@ describe('importConversation', () => {
   ] as const)('ADR 0992 D9 — a %i (%j) is a typed %s failure', async (status, body, failure) => {
     vi.stubGlobal('fetch', vi.fn<typeof fetch>(async () => new Response(body ? JSON.stringify(body) : null, { status })));
     const err = await importConversation('openwop', {}).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(ChatImportError);
-    expect((err as ChatImportError).failure).toBe(failure);
+    if (!(err instanceof ChatImportError)) throw new Error(`expected a ChatImportError, got ${String(err)}`);
+    expect(err.failure).toBe(failure);
+    expect(err.status).toBe(status);
   });
 });
 
@@ -122,6 +139,8 @@ describe('ADR 0992 D9 — ChatGPT archives', () => {
       a: { message: { author: { role: 'system' }, content: { parts: ['sys'] } } },
       b: { message: { author: { role: 'tool' }, content: { parts: ['tool out'] } } },
       c: { message: { author: { role: 'user' }, content: { parts: ['q'] } } },
+      // A whitespace-only reply stores nothing, so it is not counted either.
+      d: { message: { author: { role: 'assistant' }, content: { parts: ['  ', ''] } } },
     } }]);
     expect(entry!.messageCount).toBe(1);
   });
@@ -129,11 +148,13 @@ describe('ADR 0992 D9 — ChatGPT archives', () => {
     const entries = listArchiveConversations(archive);
     expect(entries.map((e) => e.index)).toEqual([1, 0]);
     expect(entries[0]).toMatchObject({ title: '', messageCount: 2 });
-    expect(entries[1]).toMatchObject({ title: 'Older', messageCount: 1, createdAt: new Date(1_600_000_000_000).toISOString() });
+    expect(entries[0]).toMatchObject({ createdAt: '2023-11-14T22:13:20.000Z' });
+    expect(entries[1]).toMatchObject({ title: 'Older', messageCount: 1, createdAt: '2020-09-13T12:26:40.000Z' });
   });
   it('digests the file deterministically for the idempotency key', async () => {
     const a = await fileDigest('same');
-    expect(a).toMatch(/^[0-9a-f]{64}$/);
+    // SHA-256 of "same", computed outside the subject (`printf same | shasum -a 256`).
+    expect(a).toBe('0967115f2813a3541eaef77de9d9d5773f1c0c04314b0bbfe4ff3b3b1c55b5d5');
     expect(await fileDigest('same')).toBe(a);
     expect(await fileDigest('other')).not.toBe(a);
   });

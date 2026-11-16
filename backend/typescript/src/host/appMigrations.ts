@@ -950,20 +950,6 @@ export const BACKGROUND_APP_JOBS: readonly BackgroundAppJob[] = [
     },
   },
   {
-    // ADR 1045 CHAN-F14 — rewrite stored legacy env-key ids (`bearer:<8>`) to the
-    // id the same key presents today. Off unless OPENWOP_LEGACY_BEARER_REWRITE is
-    // `report` (counts only, stays pending) or `apply` (rewrites; done when no row
-    // conflicted and nothing failed). See `legacyBearerIdRewrite.ts`.
-    id: 'legacy-bearer-id-rewrite',
-    async run(storage: Storage): Promise<{ complete: boolean }> {
-      const { legacyBearerRewriteMode, runLegacyBearerIdRewrite } = await import('./legacyBearerIdRewrite.js');
-      const mode = legacyBearerRewriteMode();
-      if (mode === null) return { complete: false };
-      const r = await runLegacyBearerIdRewrite(storage, mode);
-      return { complete: mode === 'apply' && r.conflicts === 0 && r.failures === 0 };
-    },
-  },
-  {
     // ADR 1112 DG-1112-6 / RI-1112-1 — a stored locale overlay whose item states differ
     // from its base (written before ADR 1038 D8 / ADR 1112 D6 aligned them) keeps serving
     // its own numbers until someone saves the page; a serve-time restore would break the
@@ -995,6 +981,25 @@ export const BACKGROUND_APP_JOBS: readonly BackgroundAppJob[] = [
       const retired = await retireConversationRequests(storage);
       log.info('app_bg_job_retire_conversation_requests', { retired });
       return { complete: retired !== null };
+    },
+  },
+  {
+    // ADR 1124 D2 (#5933) — stamp the request rows ADR 1114 never stamped (filed
+    // before its subscriber, or whose run was deleted before ADR 1124 D1). A prod
+    // data write, so OFF unless OPENWOP_NOTIF_STALE_RECONCILE is `report` (counts
+    // per tenant, writes nothing, stays pending) or `apply` (stamps; done when the
+    // scan finishes). The operator runs report, reads the counts, then apply.
+    // Idempotent: a stamped row no longer matches the page predicate.
+    id: 'stale-request-reconcile',
+    async run(storage: Storage): Promise<{ complete: boolean }> {
+      const { reconcileStaleRequests, staleReconcileMode } = await import('../notifications/retireRequests.js');
+      const mode = staleReconcileMode();
+      if (mode === null) return { complete: false };
+      const r = await reconcileStaleRequests(storage, mode);
+      if (r === null) return { complete: false };
+      log.info('app_bg_job_stale_request_reconcile', { mode, scanned: r.scanned, stamped: r.stamped, tenants: Object.keys(r.byTenant).length });
+      for (const [tenantId, counts] of Object.entries(r.byTenant)) log.info('app_bg_job_stale_request_reconcile_tenant', { mode, tenantId, ...counts });
+      return { complete: mode === 'apply' };
     },
   },
 ];

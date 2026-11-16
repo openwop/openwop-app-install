@@ -454,21 +454,35 @@ export async function createCreativeBriefs(ctx) {
     return { status: 'failed', error: { code: 'validation_error', message: 'This workflow did not pass an approved creative-briefs draft to create.' } };
   }
   const cbSurface = ctx.features && ctx.features['creative-briefs'];
-  if (!cbSurface || typeof cbSurface.create !== 'function') {
-    return { status: 'success', outputs: { skipped: true, summary: 'No creative briefs were added: Creative Briefs is turned off for this workspace.' } };
-  }
+  // CC-CHAN-3: the host ALWAYS provides the surface; a tenant with Creative Briefs
+  // off gets `host_capability_disabled` from every call (host/featureSurfaces.ts
+  // `gate`). Testing `typeof create === 'function'` was always true, so the off
+  // case fell through to the create loop, every call was counted as an error, and
+  // the step failed `creative_briefs_not_created` AFTER the person approved the
+  // draft. Off now skips cleanly with the reason, wherever the refusal surfaces.
+  const turnedOff = { status: 'success', outputs: { skipped: true, reason: 'feature_disabled', summary: 'No creative briefs were added: Creative Briefs is turned off for this workspace.' } };
+  const isDisabled = (err) => !!err && err.code === 'host_capability_disabled';
+  if (!cbSurface || typeof cbSurface.create !== 'function') return turnedOff;
   const asm = await cb.assembleContext({ briefId });
   if (!asm.found) return { status: 'failed', error: { code: 'brief_not_found', message: `Brief not found: ${briefId}` } };
   const brief = asm.brief ?? {};
   const orgId = str(brief.orgId);
   const createdBriefIds = [];
   let briefCreateErrors = 0;
+  // CC-CHAN-3: errors used to be counted and dropped, so no log or card named the
+  // cause. Keep the distinct error codes and say them in the failure.
+  const causes = new Set();
+  const noteCause = (err) => { causes.add(str(err && err.code) || 'unknown_error'); };
   let existing = [];
   if (typeof cbSurface.list === 'function') {
     try {
       const l = await cbSurface.list({ orgId });
       existing = Array.isArray(l && l.briefs) ? l.briefs : [];
-    } catch { briefCreateErrors += 1; /* dedupe read failed — creates below still counted */ }
+    } catch (err) {
+      if (isDisabled(err)) return turnedOff;
+      briefCreateErrors += 1; /* dedupe read failed — creates below still counted */
+      noteCause(err);
+    }
   }
   for (const vb of draft.briefs.slice(0, 6)) {
     const title = typeof vb.format === 'string' ? `${str(brief.productName) || 'Asset'} — ${vb.format}` : (str(brief.productName) || 'Visual brief');
@@ -496,13 +510,16 @@ export async function createCreativeBriefs(ctx) {
       if (err && err.code === 'forbidden_scope') {
         return { status: 'failed', error: { code: 'forbidden_scope', message: 'The person this workflow runs for cannot add creative briefs in this workspace. Someone with edit access can run it, or add the briefs by hand.' } };
       }
+      if (isDisabled(err)) return turnedOff;
       briefCreateErrors += 1; /* entity creation is additive — the draft flow still works */
+      noteCause(err);
     }
   }
   // Grade-ux H1 — the run card says what happened and where to find it; a step
   // that created nothing at all is a failure, not a quiet "completed".
   if (createdBriefIds.length === 0 && briefCreateErrors > 0) {
-    return { status: 'failed', error: { code: 'creative_briefs_not_created', message: 'The approved creative briefs could not be added to the Creative Briefs page. Try approving the draft again, or add them by hand.' } };
+    const why = [...causes].join(', ');
+    return { status: 'failed', error: { code: 'creative_briefs_not_created', message: `The approved creative briefs could not be added to the Creative Briefs page (${why}). Try approving the draft again, or add them by hand.`, details: { causes: [...causes] } } };
   }
   const n = createdBriefIds.length;
   const summary = `${n === 1 ? '1 creative brief is' : `${n} creative briefs are`} on the Creative Briefs page${briefCreateErrors > 0 ? ` (${briefCreateErrors} could not be added)` : ''}.`;

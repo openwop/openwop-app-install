@@ -1,6 +1,7 @@
 /**
- * `identity.md` §5 — every key the v2 schemas type as a `runId` must be
- * projected to the tenant-bound wire form.
+ * `identity.md` §5 / ADR 0723 — every key the v2 schemas type as a tenant-bound
+ * id must be projected to the tenant-bound wire form; RFC 0252 `fixtureRuns` (a
+ * map of run ids under caller-chosen keys) binds no key and is echoed verbatim.
  *
  * WHY THIS FILE EXISTS. The key set was a hand-written
  * `new Set(['runId', 'parentRunId'])` — two of the NINE keys the corpus types as
@@ -12,6 +13,10 @@
  * A hand-list is correct only until the corpus adds a tenth key, and its failure
  * mode is silent. The set is now derived from the vendored schemas; this file is
  * what keeps the derivation honest.
+ *
+ * Red when: the schema walk stops recording keys; arrays of ids stay raw; an
+ * already-bound or foreign-grammar value is re-prefixed (double guard, see case
+ * 3); a map's value schema records `additionalProperties` or the map's own key.
  */
 import { describe, expect, it } from 'vitest';
 
@@ -23,13 +28,14 @@ const WIRE = `${TENANT}/${RAW}`;
 
 describe('v2 run-id projection key coverage', () => {
   it('projects EVERY key the v2 schemas declare as a runId', () => {
-    // The seven SCALAR keys of the nine read off `schemas/v2/**` at the time of
-    // writing (the two plural keys are the next case). Listed here as
-    // a deliberate snapshot so a corpus addition shows up as a red test rather
-    // than as a silently unprojected field.
+    // The SCALAR run-id keys read off `schemas/v2/**` (the two plural keys are the
+    // next case). A snapshot: a corpus addition does NOT red this case (the
+    // derivation projects it anyway; `transitionRunId`, RFC 0254, arrived that way
+    // and was added here by hand). It pins that every key known at writing stays
+    // projected.
     const KEYS = [
       'runId', 'parentRunId', 'sourceRunId', 'baselineRunId', 'childRunId',
-      'enqueuedRunId', 'evalRunId',
+      'enqueuedRunId', 'evalRunId', 'transitionRunId',
     ];
     for (const key of KEYS) {
       const out = projectV2RunIds({ [key]: RAW }, TENANT) as Record<string, unknown>;
@@ -75,7 +81,10 @@ describe('v2 run-id projection key coverage', () => {
     // `fixtureRuns` is `additionalProperties: {$ref: runId}`: its ids sit under
     // task-id keys. The walk must not record the container word as a field name.
     expect(V2_BOUND_ID_KEYS.has('additionalProperties')).toBe(false);
-    expect(V2_BOUND_ID_KEYS.has('patternProperties')).toBe(false);
+    // …nor record the map's OWN key: `fixtureRuns` holds no id itself. (A
+    // `patternProperties` check here could never fail: its children are keyed by
+    // patterns, so the walk could only ever record a pattern string.)
+    expect(V2_BOUND_ID_KEYS.has('fixtureRuns')).toBe(false);
     // The host accepts only bound ids there (routes/runs.ts readSourceRun) and
     // echoes them verbatim (RFC 0252 §E), so projection leaves the map alone.
     expect(projectV2RunIds({ fixtureRuns: { record: WIRE } }, TENANT)).toEqual({ fixtureRuns: { record: WIRE } });

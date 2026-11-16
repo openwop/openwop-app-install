@@ -27,8 +27,7 @@ import { applyRamp, assertPromotionRun, finalize, minStageMs, rollback, stagePct
 import { observeExperiment } from '../../host/experiments/observe.js';
 import { evaluateStageCheck } from '../../host/experiments/stageCheck.js';
 import { MIN_SESSIONS_PER_VARIANT } from '../../host/variantAssignment.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
-import { AUTONOMY_TOGGLE, decideGate } from '../../host/autonomyPolicy/index.js';
+import { autonomyToggleOn, decideGate } from '../../host/autonomyPolicy/index.js';
 import { promotionRead } from '../../host/experiments/promotionRead.js';
 import { PROMOTE_CHAIN_ID } from './promotionService.js';
 
@@ -64,9 +63,10 @@ export function buildExperimentsSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
   // ADR 0942's toggle contract: the policy applies only with Campaign Studio
   // orchestration AND its autonomy sub-toggle ON; otherwise `legacy`.
-  const autonomyOn = async (): Promise<boolean> =>
-    Boolean((await resolveOne('campaign-orchestration', { tenantId }).catch(() => null))?.enabled)
-    && Boolean((await resolveOne(AUTONOMY_TOGGLE, { tenantId }).catch(() => null))?.enabled);
+  // CC-GATE-3: the one shared access read (toggle AND plan), with the run's ADR 1108
+  // exemption re-checked, so an exempt operator's promote run is not `legacy`. A
+  // read error now fails the step instead of being swallowed into a legacy gate.
+  const autonomyOn = (): Promise<boolean> => autonomyToggleOn(tenantId, scope);
   const read = async (orgIdArg: unknown): Promise<string> => { const o = required(orgIdArg, 'orgId'); await assertRunScopeOrg(scope, o, 'workspace:read'); return o; };
   const write = async (orgIdArg: unknown): Promise<string> => { const o = required(orgIdArg, 'orgId'); await assertRunScopeOrg(scope, o, 'workspace:write'); return o; };
   return {

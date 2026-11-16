@@ -14,8 +14,11 @@
  * the hand-copied posture block cannot come back.
  *
  * Tracker TST-DCC-1. Red when a lane stops calling `buildLaneFirewall`, stops
- * handing `firewall` to its decision point, or `laneFirewall.ts` stops being the
- * one `buildFirewallHook(` caller (grade-tests w70 probes `fw-*`).
+ * handing `firewall` to its decision point (deleting it OR commenting it out —
+ * comments are stripped by the shared token scanner, #5422), a new executor
+ * constructor appears unadjudicated, or `laneFirewall.ts` stops being the one
+ * `buildFirewallHook(` caller (grade-tests w70 probes `fw-*`, re-witnessed at
+ * d5b98aafaa by w115 `w115g2-fw-*`).
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -87,6 +90,10 @@ describe('firewall lane census (ADR 0834 D1)', () => {
   });
 
   it('every lane HANDS its firewall to the decision point (not merely builds it)', () => {
+    // Every census row that builds a lane firewall has a hand-off row, so a new
+    // lane cannot be adjudicated above while its hand-off goes unchecked here.
+    const lanes = Object.entries(CENSUS).filter(([, [, l]]) => l > 0).map(([k]) => k).sort();
+    expect(Object.keys(HANDOFF).sort()).toEqual(lanes);
     for (const [file, patterns] of Object.entries(HANDOFF)) {
       const c = code(join(SRC, file));
       for (const re of patterns) expect(re.test(c), `${file} must match ${re}`).toBe(true);

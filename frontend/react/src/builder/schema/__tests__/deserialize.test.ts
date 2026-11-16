@@ -4,6 +4,23 @@
  * inherits default ports, normalizes default inputs, and MUST fail loudly
  * (aggregate error naming the offending typeIds) rather than silently dropping
  * nodes. Pure functions; high-value coverage.
+ *
+ * BUILDER-PORT-1 (ADR 0440 / ADR 0773, b84d0299f): an edge that omits
+ * `sourceOutput` keeps that omission (`canonicalSourceOutput: null`, the `out`
+ * placeholder, no `sourceOutput` on save, a separate "Default output" handle),
+ * while an explicit name stays exact; the target port still inherits the
+ * catalog's first input. The shipped-pack round trip and handle encoding are
+ * pinned in sourceOutputPreservation.test.ts; this file pins the import half.
+ *
+ * Sabotage that turns it red (wave 111): the kind taken from the typeId; the
+ * metadata.name fallback or the top-level-name precedence dropped; the `nodeId`
+ * alias dropped; the grid step changed; any trigger rule kept; object default
+ * inputs not stringified; the `@x.y.z` pin kept; a node with no id accepted;
+ * unknown typeIds not deduped; looksCanonical's `typeId` and `kind` tests
+ * together (on a builder node each alone is masked by the other); omission
+ * stored as `out`; the source placeholder taken from the catalog; the target
+ * port not inherited; omission serialized; the default handle reusing a real
+ * port's id.
  */
 import { describe, it, expect } from 'vitest';
 import { serializeWorkflow } from '../serialize.js';
@@ -184,7 +201,7 @@ describe('fromCanonicalDefinition — failure modes', () => {
       err = e;
     }
     expect(err).toBeInstanceOf(CanonicalParseError);
-    const msg = (err as Error).message;
+    const msg = err instanceof Error ? err.message : '';
     expect(msg).toContain('vendor.unknown.alpha');
     expect(msg).toContain('vendor.unknown.beta');
     // Deduped: alpha appears once even though two nodes use it.

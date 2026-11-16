@@ -6,6 +6,7 @@
  * @see docs/adr/0402-crm-booking-and-esign.md §b
  */
 
+import { schedulePublicAssetResync } from '../../../host/assetGrants.js';
 import { randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../../types.js';
@@ -166,6 +167,7 @@ export async function createSignRequest(input: {
     updatedAt: ts,
   };
   await requests.put(req);
+  schedulePublicAssetResync('esign', req.tenantId, req.signRequestId); // ADR 1122 P1b — the signer reads it anonymously
   return req;
 }
 
@@ -174,13 +176,16 @@ export async function putSignRequest(next: SignRequest): Promise<void> {
   // every persist (pre-fix rows shed theirs on their next write).
   const signers = next.signers.map((s) => { const { token: _raw, ...rest } = s; return rest; });
   await requests.put({ ...next, signers, updatedAt: nowIso() });
+  schedulePublicAssetResync('esign', next.tenantId, next.signRequestId); // ADR 1122 P1b
 }
 
 /** Atomic compare-and-swap on a sign request (the concurrency gate for
  *  multi-signer status transitions — a blind put loses updates when two signers
  *  respond at once). `expected` MUST be the exact object last read. */
 export async function casSignRequest(expected: SignRequest, next: SignRequest): Promise<boolean> {
-  return requests.compareAndSwap(expected, { ...next, updatedAt: nowIso() });
+  const swapped = await requests.compareAndSwap(expected, { ...next, updatedAt: nowIso() });
+  if (swapped) schedulePublicAssetResync('esign', next.tenantId, next.signRequestId); // ADR 1122 P1b — void, decline, complete
+  return swapped;
 }
 
 /** Append (idempotent by `${signRequestId}:${signerId}`) a signature audit row. */

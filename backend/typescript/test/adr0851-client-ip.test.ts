@@ -13,7 +13,11 @@
  * returns the leftmost entry (unit cases AND the #4516 burst), when an untrusted socket
  * peer is treated as a proxy, when K_SERVICE is ignored, when a Google front-end range
  * is dropped or a GCP customer range is added, when the `private` defaults knob is
- * ignored, when a forged custom-domain LB entry is skipped past the real caller, when `ip:port` is not normalised, or when another module reads `req.ip`.
+ * ignored, when a forged custom-domain LB entry is skipped past the real caller (e.g.
+ * the LB is trusted as a wider range than its one address), when `ip:port` is not
+ * normalised, or when another module reads `req.ip`. Wave 115: also red when the
+ * all-trusted fallback returns the nearest hop instead of the farthest, and the
+ * separate-buckets case proves the first bucket was spent before reading the second.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import express, { type Request } from 'express';
@@ -118,6 +122,8 @@ describe('ADR 0851 — clientIp', () => {
 
   it('every hop trusted → the farthest one (a Google crawler on the direct door)', () => {
     expect(clientIp(fakeReq('66.249.93.203'))).toBe('66.249.93.203');
+    // Two trusted hops: one hop cannot tell the farthest from the nearest.
+    expect(clientIp(fakeReq(`66.249.93.203, ${HOSTING_EGRESS}`))).toBe('66.249.93.203');
   });
 
   it('operator knobs: extra CIDRs, and dropping the Google defaults', () => {
@@ -190,9 +196,13 @@ describe('ADR 0851 — spoofed leftmost entries share ONE bucket (the #4516 witn
   });
 
   it('two real clients behind the Firebase door keep separate buckets (no global bucket on the egress)', async () => {
-    await burst((spoof) => `${spoof}, ${CLIENT}, ${HOSTING_EGRESS}`);
+    // The first client's bucket is spent (positive control), so a 200 for the second
+    // client can only come from a bucket of its own.
+    const first = await burst((spoof) => `${spoof}, ${CLIENT}, ${HOSTING_EGRESS}`);
+    expect(first.slice(5)).toEqual([429, 429, 429]);
     const other = await fetch(`${base}/write`, { method: 'POST', headers: { 'x-forwarded-for': `198.51.100.99, ${HOSTING_EGRESS}` } });
-    expect(other.status).toBe(200);
+    const body: unknown = await other.json();
+    expect({ status: other.status, body }).toEqual({ status: 200, body: { ok: true } });
   });
 });
 

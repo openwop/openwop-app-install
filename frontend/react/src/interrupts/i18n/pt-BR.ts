@@ -6,8 +6,13 @@ export const messages = {
   // ADR 0755 D3 — the resume token is projected only to an approvals:respond holder.
   noRespondPermission: 'Você pode ver esta etapa, mas não tem permissão para respondê-la.',
   // RenderInterrupt fallback — neutral copy; never instructs users to edit source (DEMO-14)
-  unknownKindBody: 'Este aplicativo ainda não consegue responder a este tipo de etapa ({{kind}}), então ela não pode ser concluída aqui.',
+  unknownKindBody: 'Esta solicitação não pode ser respondida aqui. Peça a quem administra este espaço de trabalho para atualizar o aplicativo.',
+  credentialTitle: 'Conectar {{provider}}',
+  credentialAnAccount: 'uma conta',
+  credentialBody: 'É preciso acesso a {{provider}} para continuar.',
+  credentialConnect: 'Conectar',
   timerWaits: 'Esta execução está aguardando um temporizador e retoma sozinha.',
+  externalEventWaits: 'Esta execução aguarda execuções vinculadas ou um evento externo e continua sozinha. Não há nada a fazer aqui.',
   timerWaitsUntil: 'Esta execução está aguardando um temporizador e retoma sozinha em {{when}}.',
   walkthroughStepBody: 'Esta execução é uma etapa de um walkthrough guiado; ela continua quando alguém reproduz o walkthrough.',
   walkthroughStepLink: 'Abrir Walkthroughs guiados',

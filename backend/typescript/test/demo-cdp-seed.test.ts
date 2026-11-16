@@ -28,6 +28,8 @@ import { listEnrollments, resolveSegment } from '../src/features/campaign-journe
 import { demoCrmSegmentId } from '../src/host/seed-data/solsticeDemo.js';
 import { holdoutArm } from '../src/features/campaign-journeys/surface.js';
 import { listApiKeys } from '../src/features/developer-keys/apiKeyService.js';
+import { createOrg } from '../src/host/accessControlService.js';
+import { createClient } from '../src/features/campaign-ops/clientService.js';
 
 const analyticsStore = new DurableCollection<{ eventId: string; tenantId: string }>('analytics:event', (e) => e.eventId, undefined, (e) => e.tenantId);
 const identityStore = new DurableCollection<{ key: string; tenantId: string; sessionKey: string }>('analytics:identity-link', (l) => l.key, undefined, (l) => l.tenantId);
@@ -94,6 +96,12 @@ describe('demo-cdp seeder', () => {
     expect(second.created).toBe(0);
     expect(await countDemoCdp(tenantId)).toBe(before);
 
+    // A demo-session link with NO consent record (the seed links sessions 0–39, which all
+    // carry consent; analytics sessions run to 399). The clear's consent loop erases its
+    // 40 subjects, and that DSAR fan-out (`eraseSubjectLinks`) also removes their links, so
+    // only this row shows that the clear's own identity-link delete runs (w113 ds-clearlinks).
+    await identityStore.put({ key: `${tenantId}::demo-cdp-sess-399`, tenantId, sessionKey: 'demo-cdp-sess-399' });
+
     // Clear — everything demo-scoped removed.
     await clearDemoCdp(tenantId);
     expect(await countDemoCdp(tenantId)).toBe(0);
@@ -115,17 +123,22 @@ describe('demo-cdp seeder', () => {
 // ADR 0955 D1 — the demo provisions campaign-ops (with agency clients) AND campaign-journeys
 // into the same workspace. A client-less enroll is refused `client_required` there, so the
 // demo journey names the workspace root (the agency's house account).
+// Sabotage that reds it: the seed naming no org (refused `client_required`) or the
+// demo-people org (refused `not_found`), and the root org resolving to itself instead
+// of the workspace level (the rows would carry an orgId).
 describe('demo-cdp seeder in a workspace that has clients', () => {
   it('still enrolls the demo journey, and clears it', async () => {
-    const { createOrg } = await import('../src/host/accessControlService.js');
-    const { createClient } = await import('../src/features/campaign-ops/clientService.js');
     const tenantId = 'demo-cdp-t-agency';
     await seedDemoPeople(tenantId);
     await seedDemoCrm(tenantId);
     const org = (await createOrg({ tenantId, createdBy: 'seed', name: 'Client (synthetic)' })).orgId;
     await createClient({ tenantId, orgId: org, name: 'Client (synthetic)', createdBy: 'seed' });
     await seedDemoCdp(tenantId);
-    expect((await listEnrollments(tenantId, 'demo-cdp-welcome-series')).length).toBeGreaterThan(0);
+    const enrolled = await listEnrollments(tenantId, 'demo-cdp-welcome-series');
+    expect(enrolled.length).toBeGreaterThan(0);
+    // The house account is the workspace level: no row is filed under an org (not the
+    // client's, and not the root org's id).
+    expect(enrolled.filter((e) => (e.orgId ?? '') !== '')).toEqual([]);
     await clearDemoCdp(tenantId);
     expect(await listEnrollments(tenantId, 'demo-cdp-welcome-series')).toHaveLength(0);
   });

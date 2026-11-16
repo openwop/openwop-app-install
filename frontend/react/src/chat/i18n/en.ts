@@ -495,6 +495,9 @@ export const messages = {
   cardLabelClarification: 'Clarification',
   cardLabelRefinement: 'Refinement',
   cardLabelCancellation: 'Cancellation',
+  cardLabelExternalEvent: 'Waiting for an outside event',
+  externalEventWaitingBody: 'This step is waiting for linked runs or an outside event, and continues on its own. There is nothing to do here.',
+  waitingResumesOnItsOwn: 'Waiting — continues on its own',
 
   // — defaultCommands —
   cmdNewDescription: 'Start a new chat session (wipes the current thread)',
@@ -949,6 +952,7 @@ export const messages = {
   reviewRiskHigh: 'high',
   reviewRiskCritical: 'critical',
   composedStaleError: 'The draft changed since you reviewed it — the card has refreshed; review it and approve again.',
+  reviewSelfApprovalRefused: 'You requested this step, so someone else has to approve it. Ask another admin, or an approver named in this campaign’s policy.',
   composedAgentNote: "Agent's description",
   composedEvidence: 'Validated · {{nodes}} nodes · {{edges}} edges',
   composedEdited: 'Edited since proposed — approving runs the current version',

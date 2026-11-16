@@ -407,6 +407,8 @@ async function runWorkflow(input: {
     if (err instanceof WorkflowFeatureRefusedError) return { kind: 'failed', runId: '', text: err.message };
     throw err;
   }
+  // ADR 1132 D5 — another client's definition is unknown to this caller, like a foreign one.
+  if (wf && !(await deps.caller.mayLaunchOwned(workflowId))) wf = null;
   if (!wf) {
     return { kind: 'failed', runId: '', text: `workflowId ${workflowId} unknown` };
   }

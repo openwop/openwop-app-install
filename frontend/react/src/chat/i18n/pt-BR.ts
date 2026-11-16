@@ -491,6 +491,9 @@ export const messages = {
   cardLabelClarification: 'Esclarecimento',
   cardLabelRefinement: 'Refinamento',
   cardLabelCancellation: 'Cancelamento',
+  cardLabelExternalEvent: 'Aguardando um evento externo',
+  externalEventWaitingBody: 'Esta etapa aguarda execuções vinculadas ou um evento externo e continua sozinha. Não há nada a fazer aqui.',
+  waitingResumesOnItsOwn: 'Aguardando — continua sozinha',
 
   // — defaultCommands —
   cmdNewDescription: 'Iniciar uma nova sessão de chat (apaga a thread atual)',
@@ -934,6 +937,7 @@ export const messages = {
   reviewRiskHigh: 'alto',
   reviewRiskCritical: 'crítico',
   composedStaleError: 'O rascunho mudou desde a sua revisão — o cartão foi atualizado; revise e aprove novamente.',
+  reviewSelfApprovalRefused: 'Você solicitou esta etapa, então outra pessoa precisa aprová-la. Peça a outro administrador ou a um aprovador indicado na política desta campanha.',
   composedAgentNote: 'Descrição do agente',
   composedEvidence: 'Validado · {{nodes}} nós · {{edges}} arestas',
   composedEdited: 'Editado desde a proposta — aprovar executa a versão atual',

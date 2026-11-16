@@ -56,6 +56,38 @@ export function assetTokenFromUrl(url: unknown): string | null {
   try { return decodeURIComponent(m[1]!); } catch { return null; }
 }
 
+/** Every capability token served from inside `text` (markdown, HTML, JSON), any
+ *  major, de-duplicated. ADR 1122 P1b: what a rendered document makes public. */
+export function assetTokensInText(text: string): string[] {
+  const re = new RegExp(EMBEDDED_RE.source, 'g');
+  const out = new Set<string>();
+  for (const m of text.matchAll(re)) {
+    try { out.add(decodeURIComponent(m[1] ?? '')); } catch { /* a malformed escape names no token */ }
+  }
+  out.delete('');
+  return [...out];
+}
+
+/** A bare capability token as `storeMediaAsset` mints it: 32 random bytes, base64url. */
+const BARE_TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
+
+/** Every asset token a JSON value exposes, as a bare token field (`imageToken`,
+ *  `token`) or inside a served URL. ADR 1122 P1b: what an anonymous projection makes
+ *  reachable. A string of the bare shape that is not an asset token grants nothing,
+ *  since a grant only counts for a token that resolves in its own tenant. */
+export function assetTokensInValue(value: unknown, out: Set<string> = new Set(), depth = 0): string[] {
+  if (depth > 40) return [...out];
+  if (typeof value === 'string') {
+    if (BARE_TOKEN_RE.test(value)) out.add(value);
+    else if (value.includes(ASSET_SERVE_PATH)) for (const t of assetTokensInText(value)) out.add(t);
+  } else if (Array.isArray(value)) {
+    for (const v of value) assetTokensInValue(v, out, depth + 1);
+  } else if (value !== null && typeof value === 'object') {
+    for (const v of Object.values(value)) assetTokensInValue(v, out, depth + 1);
+  }
+  return [...out];
+}
+
 /**
  * Rewrite every versioned serve path inside `text` (a URL, JSON, markdown or
  * HTML) to its unversioned form. Idempotent: canonical text is returned

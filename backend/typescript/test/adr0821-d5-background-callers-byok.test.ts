@@ -14,10 +14,17 @@
  *   3. opt-in ON but the key no longer resolves: falls through to managed, metered
  *      (the resolver's existing step-0 posture);
  *   4. opt-in ON and the tenant's provider ERRORS: the background task is skipped
- *      (title → null placeholder, extraction → no facts) and managed is NOT tried —
- *      the tenant chose its own key; a silent managed retry would bill it anyway.
+ *      (title → null placeholder, extraction → the typed ADR 0982 D5 failure
+ *      `{status:'failed', reason:'provider-error'}`, never the "no facts" result) and
+ *      managed is NOT tried — the tenant chose its own key; a silent managed retry
+ *      would bill it anyway.
  *   5. auto-title runs on the provider's catalog `quick` class model, not on the
- *      binding's (possibly adaptive-thinking, 24-token-starved) chat model.
+ *      binding's (possibly adaptive-thinking, 24-token-starved) chat model; extraction
+ *      runs on the binding's own model.
+ *
+ * The title cases drive a conversation the MANAGED tier served (ADR 1019 D3: a title
+ * rides its conversation's credential, and only a managed conversation takes this
+ * ladder; the BYOK-direct and subscription lanes are not claimed here).
  *
  * RED witness: pins 2, 4 and 5 fail against the pre-change callers (they always
  * called `dispatchManagedChat`). Wave 25 probes: dropping `modelClass:'quick'`, the
@@ -66,7 +73,10 @@ beforeEach(async () => {
   urls = [];
   googleStatus = 200;
   googleText = 'Trip Planning';
-  vi.mocked(dispatchManagedChat).mockClear();
+  // mockReset, not mockClear: a `mockResolvedValueOnce` a case queued but never consumed
+  // (a sabotaged lane that skips managed) must not answer the next case.
+  vi.mocked(dispatchManagedChat).mockReset();
+  vi.mocked(dispatchManagedChat).mockImplementation(async () => ({ provider: 'openwop-free', model: 'openwop-free', completion: 'Managed Title' }));
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
     urls.push(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
     if (googleStatus !== 200) {
@@ -91,7 +101,7 @@ const bind = (preferForText?: boolean) => setHeadlessAiDefault(
 const googleCalls = () => urls.filter((u) => u.includes('generativelanguage.googleapis.com'));
 
 describe('ADR 0821 D5 — chat auto-title honours the BYOK text opt-in', () => {
-  it('opt-in OFF (default): stays on managed, attributed to chat-autotitle', async () => {
+  it('auto-title: opt-in OFF (default): stays on managed, attributed to chat-autotitle', async () => {
     await bind();
     expect(await generateTitle(managedConv(T), 'plan a trip', 'sure')).toBe('Managed Title');
     expect(vi.mocked(dispatchManagedChat)).toHaveBeenCalledTimes(1);
@@ -101,14 +111,14 @@ describe('ADR 0821 D5 — chat auto-title honours the BYOK text opt-in', () => {
     expect(googleCalls()).toEqual([]);
   });
 
-  it('no BYOK binding at all: managed, attributed (the common tenant)', async () => {
+  it('auto-title: no BYOK binding at all: managed, attributed (the common tenant)', async () => {
     expect(await generateTitle(managedConv(T), 'plan a trip', 'sure')).toBe('Managed Title');
     expect(vi.mocked(dispatchManagedChat)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(dispatchManagedChat).mock.calls[0]![0]).toMatchObject({ featureId: 'chat-autotitle' });
     expect(googleCalls()).toEqual([]);
   });
 
-  it('opt-in ON + usable key: the tenant key is called on its quick model, managed is never reached', async () => {
+  it('auto-title: opt-in ON + usable key: the tenant key is called on its quick model, managed is never reached', async () => {
     await bind(true);
     expect(await generateTitle(managedConv(T), 'plan a trip', 'sure')).toBe('Trip Planning');
     expect(vi.mocked(dispatchManagedChat), 'a managed dispatch = a managed draw + usage increment on a tenant that opted out of it').not.toHaveBeenCalled();
@@ -119,7 +129,7 @@ describe('ADR 0821 D5 — chat auto-title honours the BYOK text opt-in', () => {
     expect(googleCalls()[0]).not.toContain(BOUND_MODEL);
   });
 
-  it('opt-in ON but the key no longer resolves: falls back to managed, metered', async () => {
+  it('auto-title: opt-in ON but the key no longer resolves: falls back to managed, metered', async () => {
     await bind(true);
     await removeSecret('gem', { tenantId: T });
     expect(await generateTitle(managedConv(T), 'plan a trip', 'sure')).toBe('Managed Title');
@@ -127,7 +137,7 @@ describe('ADR 0821 D5 — chat auto-title honours the BYOK text opt-in', () => {
     expect(googleCalls()).toEqual([]);
   });
 
-  it('opt-in ON and the tenant provider errors: no title (placeholder), never throws, managed NOT tried', async () => {
+  it('auto-title: opt-in ON and the tenant provider errors: no title (placeholder), never throws, managed NOT tried', async () => {
     await bind(true);
     googleStatus = 401;
     await expect(generateTitle(managedConv(T), 'plan a trip', 'sure')).resolves.toBeNull();
@@ -137,7 +147,7 @@ describe('ADR 0821 D5 — chat auto-title honours the BYOK text opt-in', () => {
 });
 
 describe('ADR 0821 D5 — memory extraction honours the BYOK text opt-in', () => {
-  it('opt-in OFF (default): stays on managed, attributed + metered to the acting subject', async () => {
+  it('extraction: opt-in OFF (default): stays on managed, attributed + metered to the acting subject', async () => {
     await bind(false);
     vi.mocked(dispatchManagedChat).mockResolvedValueOnce({ provider: 'openwop-free', model: 'openwop-free', completion: '{"facts":[{"fact":"Prefers dark mode","category":"preference","evidence":"I like dark mode"}]}' });
     expect(await llmExtractFacts(T, ['I like dark mode'], { actingSubject: 'user:alice' })).toEqual({ status: 'ok', facts: [{ fact: 'Prefers dark mode', category: 'preference' }], rejected: 0 });
@@ -146,7 +156,7 @@ describe('ADR 0821 D5 — memory extraction honours the BYOK text opt-in', () =>
     expect(googleCalls()).toEqual([]);
   });
 
-  it('opt-in ON + usable key: the tenant key is called on its bound model, managed is never reached', async () => {
+  it('extraction: opt-in ON + usable key: the tenant key is called on its bound model, managed is never reached', async () => {
     await bind(true);
     googleText = '{"facts":[{"fact":"Prefers dark mode","category":"preference","evidence":"I like dark mode"},{"fact":"Works at Acme","category":"role","evidence":"I work at Acme"}]}';
     expect(await llmExtractFacts(T, ['I like dark mode, I work at Acme'], { actingSubject: 'user:alice' })).toEqual({ status: 'ok', facts: [{ fact: 'Prefers dark mode', category: 'preference' }, { fact: 'Works at Acme', category: 'role' }], rejected: 0 });
@@ -155,7 +165,7 @@ describe('ADR 0821 D5 — memory extraction honours the BYOK text opt-in', () =>
     expect(googleCalls()[0]).toContain(`/models/${BOUND_MODEL}:`);
   });
 
-  it('opt-in ON but the key no longer resolves: falls back to managed, metered to the subject', async () => {
+  it('extraction: opt-in ON but the key no longer resolves: falls back to managed, metered to the subject', async () => {
     await bind(true);
     await removeSecret('gem', { tenantId: T });
     // A REAL fact, so the managed completion is shown to flow through — 'NONE' → [] was
@@ -166,7 +176,7 @@ describe('ADR 0821 D5 — memory extraction honours the BYOK text opt-in', () =>
     expect(vi.mocked(dispatchManagedChat).mock.calls[0]![0]).toMatchObject({ featureId: 'memory-auto-extract', actingSubject: 'user:alice' });
   });
 
-  it('opt-in ON and the tenant provider errors: a typed failure, never throws, managed NOT tried', async () => {
+  it('extraction: opt-in ON and the tenant provider errors: a typed failure, never throws, managed NOT tried', async () => {
     await bind(true);
     googleStatus = 401;
     // ADR 0982 D5 — the failure is typed; before, it was [] (the same as "no facts").

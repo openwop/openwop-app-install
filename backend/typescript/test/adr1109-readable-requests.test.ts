@@ -116,20 +116,21 @@ describe('the notification a customer sees (D2, D3, D4 together)', () => {
   it('a dispatcher-stamped workflowName still wins over the definition', async () => {
     setNotificationWorkflowNameResolver(async () => 'Decision reminders');
     const n = await emitted(run('r-stamp', 't-stamp', { workflowName: 'Weekly check-in' }), null);
-    expect(n.message).toBe('Weekly check-in needs your input');
-    expect(n.title).toBe('Approval needed');
+    expect(n.message).toBe('From Weekly check-in');
+    expect(n.title).toBe('Approval needed: Weekly check-in');
     expect(n.metadata?.subject).toBeUndefined();
   });
 
-  it('a failed name lookup falls back to the id and still notifies', async () => {
+  // ADR 1125 D2 — an unknown name never falls back to the id.
+  it('a failed name lookup names no id and still notifies', async () => {
     setNotificationWorkflowNameResolver(async () => { throw new Error('catalog down'); });
     const n = await emitted(run('r-fail', 't-fail', {}), { prompt: 'Sign off the invoice' });
-    expect(n.message).toBe('wf.copy.cv-decision-reminders.4b50 — Sign off the invoice');
+    expect(n.message).toBe('Sign off the invoice');
   });
 
   // casavoga-prod: "wf.copy.cv-lead-intake.969031f3… needs your input". The real
   // boot resolver, not a stub: a tenant's copy carries the name chainInstantiation
-  // stamped on its definition, and an unknown id leaves the id.
+  // stamped on its definition, and an unknown id names no one (ADR 1125 D2).
   it('the boot resolver names a tenant-owned copy by its stamped name', async () => {
     const copyId = 'wf.copy.cv-decision-reminders.4b50';
     const catalog = {
@@ -139,8 +140,9 @@ describe('the notification a customer sees (D2, D3, D4 together)', () => {
     };
     setNotificationWorkflowNameResolver(catalogWorkflowNameResolver(catalog));
     const named = await emitted(run('r-copy', 't-copy', {}), null);
-    expect(named.message).toBe('CV decision reminders needs your input');
+    expect(named.message).toBe('From CV decision reminders');
     const unknown = await emitted({ ...run('r-gone', 't-copy', {}), workflowId: 'wf.copy.deleted.0000' }, null);
-    expect(unknown.message).toBe('wf.copy.deleted.0000 needs your input');
+    expect(unknown.message).toBe('From an automation');
+    expect(unknown.metadata?.asker).toBeUndefined();
   });
 });

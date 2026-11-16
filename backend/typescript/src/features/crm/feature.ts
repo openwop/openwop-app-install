@@ -32,6 +32,7 @@ import { registerCrmRoutes } from './routes.js';
 import { registerCrmOrgRoutes } from './orgRoutes.js';
 import { registerCrmBookingRoutes } from './bookingRoutes.js';
 import { registerCrmSignRoutes } from './signRoutes.js';
+import { registerEsignAssetGrantProvider } from './assetGrantProvider.js';
 import { registerGmailSyncRoutes } from './gmailSyncRoutes.js';
 import { buildCrmSurface, CRM_SURFACE_POLICY } from './surface.js';
 import { registerCrmApprovalHandlers } from './contactMergeApproval.js';
@@ -76,6 +77,7 @@ export const crmFeature: BackendFeature = {
     registerCrmOrgRoutes(deps); // org-scoped companies/deals/pipelines + RBAC (ADR 0008)
     registerCrmBookingRoutes(deps); // public booking links + slot claim (ADR 0402 §a)
     registerCrmSignRoutes(deps); // native click-to-sign e-signature (ADR 0402 §b)
+    registerEsignAssetGrantProvider(); // ADR 1122 P1b — signers read envelopes anonymously
     registerGmailSyncRoutes(deps); // Gmail inbox → CRM activity sync opt-in (ADR 0252 P1)
     registerCrmApprovalHandlers(); // ADR 0264 / CDP-B — steward contact-merge decide hook
     registerCrmFormsSink(); // ADR 0330 §D1 — the `crm-contact` forms submission sink (crm → forms)

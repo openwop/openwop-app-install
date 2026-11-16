@@ -1,3 +1,13 @@
+/**
+ * The interrupt→A2UI bridge (ADR 0051 Phase 3): a surface-bearing interrupt
+ * renders as the ui.a2ui-surface card; everything else falls back to the
+ * default interrupt.<kind> card (returns null). The bridge is kind-agnostic by
+ * design — it keys on the data shape, never `kind`. Breaks if a surface-bearing
+ * interrupt falls back to the free-text textarea, the carried surface is altered,
+ * or a malformed one (no catalogVersion / no surface object) mounts the A2UI card.
+ * ADR 1013 D5: the form lives only under `data.form`; a surface at the root of
+ * `data` is not read.
+ */
 import { describe, it, expect } from 'vitest';
 import { a2uiInterruptCard } from '../interruptBridge.js';
 import { A2UI_CATALOG_VERSION, parseSurface } from '../catalog.js';
@@ -6,15 +16,6 @@ import type { OpenInterrupt } from '../../../client/interruptsClient.js';
 /** A typed interrupt fixture: the bridge reads only `data`, but callers hand it a
  *  real interrupt, so the fixture carries its `kind` too. */
 const interrupt = (kind: OpenInterrupt['kind'], data: unknown): Pick<OpenInterrupt, 'kind' | 'data'> => ({ kind, data });
-
-/**
- * The interrupt→A2UI bridge (ADR 0051 Phase 3): a surface-bearing interrupt
- * renders as the ui.a2ui-surface card; everything else falls back to the
- * default interrupt.<kind> card (returns null). The bridge is kind-agnostic by
- * design — it keys on the data shape, never `kind`. Breaks if a surface-bearing
- * interrupt falls back to the free-text textarea, the carried surface is altered,
- * or a malformed one (no catalogVersion / no surface object) mounts the A2UI card.
- */
 
 const surfaceInterrupt: Pick<OpenInterrupt, 'kind' | 'nodeId' | 'data'> = {
   kind: 'clarification',

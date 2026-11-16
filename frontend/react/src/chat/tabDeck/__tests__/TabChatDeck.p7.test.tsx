@@ -7,10 +7,12 @@ import type { ChatSessionHeader } from '../../../client/chatSessionsClient.js';
 import type { BYOKActiveConfig } from '../../../byok/lib/useBYOKConfig.js';
 
 /**
- * ADR 0140 P7 (+ G3, amend) — deep links (`?conversation=` opens or focuses without
- * duplicating; `?agent=` opens a NEW tab scoped to that agent, and the scope follows
- * a re-key), the Alt-based deck shortcuts, and opening a rail row as a tab. Breaks if
- * a deep link is dropped, the scope is lost on re-key, or a shortcut/row is unwired.
+ * ADR 0140 P7 (+ G3, amend) + ADR 0896 IL2UX-2 — deep links (`?conversation=` opens or
+ * focuses without duplicating; `?agent=` opens a NEW tab scoped to that agent, and the
+ * scope follows a re-key; `?conversation=` + `?agent=` scopes THAT tab), the Alt-based
+ * deck shortcuts, and opening a rail row as a tab. Breaks if a deep link is dropped,
+ * a restore is lost, the scope lands on the wrong tab or is lost on re-key, or a
+ * shortcut/row is unwired.
  */
 
 // `rekeyOnMount` stands in for useSessionPersistence's mount-404 recovery: a
@@ -96,10 +98,16 @@ describe('TabChatDeck P7 — deep-link', () => {
     expect(tabSids()).toContain('b');
   });
 
+  // The no-duplicate half is a DOUBLE GUARD: useTabDeck's openTab focuses an open id
+  // AND the reducer's openTab dedupes too (two files; the reducer copy is witnessed by
+  // tabDeckModel.test.ts "open on an already-open id dedupes"). The restore half is
+  // asserted exactly: the deck holds ONLY the restored 'b' (no bootstrap tab), so a
+  // restore that silently failed would show two tabs (w114 probe w114g3-p7-restore).
   it('does NOT duplicate when the deep-linked conversation is already a restored tab', async () => {
-    saveTabDeck({ tabs: [{ sessionId: 'b', pinned: false, lastActiveSeq: 1 }], activeSessionId: 'b', seq: 1 }, 'u1');
+    // ADR 0978 D4 — the current per-workspace subject (uid@workspace; ws-test is mocked).
+    saveTabDeck({ tabs: [{ sessionId: 'b', pinned: false, lastActiveSeq: 1 }], activeSessionId: 'b', seq: 1 }, 'u1@ws-test');
     await act(async () => { renderDeck('/?conversation=b'); });
-    expect(tabSids().filter((s) => s === 'b')).toHaveLength(1); // focus, not duplicate
+    expect(tabSids()).toEqual(['b']); // restored, focused, not duplicated
   });
 
   it('?agent=<id> opens a NEW tab scoped to that agent (ADR 0140 G3)', async () => {
@@ -124,28 +132,32 @@ describe('TabChatDeck P7 — deep-link', () => {
 
 describe('TabChatDeck — ?conversation= + ?agent= scopes THAT tab (ADR 0896 IL2UX-2)', () => {
   it('scopes the named conversation\'s tab to the agent and opens no new tab', async () => {
-    await act(async () => { renderDeck('/?conversation=b'); });
-    const baseline = tabSids().length; // the deck's own tabs + b
-    cleanup(); localStorage.clear();
     await act(async () => { renderDeck('/?conversation=b&agent=chief-of-staff'); });
     const scoped = screen.getAllByTestId('tabsession').filter((el) => el.getAttribute('data-scope') === 'chief-of-staff');
     expect(scoped.map((el) => el.getAttribute('data-sid'))).toEqual(['b']);
-    expect(tabSids()).toHaveLength(baseline); // no extra tab was minted for the agent
+    // Exactly the bootstrapped tab + 'b': no extra tab was minted for the agent
+    // (`?conversation=b` alone yields the same two).
+    const sids = tabSids();
+    expect(sids).toHaveLength(2);
+    expect(sids.filter((s) => s === 'b')).toHaveLength(1);
   });
 });
 
 describe('TabChatDeck P7 — keyboard shortcuts (Alt-based)', () => {
   it('Alt+N opens a new tab', async () => {
     await act(async () => { renderDeck(); });
-    const before = tabSids().length;
+    expect(tabSids()).toHaveLength(1); // the bootstrapped tab
     await act(async () => { fireEvent.keyDown(window, { altKey: true, code: 'KeyN' }); });
-    expect(tabSids().length).toBe(before + 1);
+    expect(tabSids()).toHaveLength(2);
   });
 
   it('Alt+Digit focuses the Nth tab', async () => {
     await act(async () => { renderDeck(); });
     await act(async () => { fireEvent.keyDown(window, { altKey: true, code: 'KeyN' }); }); // 2 tabs now
     const sids = tabSids();
+    expect(sids).toHaveLength(2);
+    // Precondition: the NEW (second) tab is active, so landing on the first is a move.
+    expect(convTabs().find((el) => el.getAttribute('aria-selected') === 'true')?.getAttribute('data-sid')).toBe(sids[1]);
     await act(async () => { fireEvent.keyDown(window, { altKey: true, code: 'Digit1' }); });
     const active = convTabs().find((el) => el.getAttribute('aria-selected') === 'true');
     expect(active?.getAttribute('data-sid')).toBe(sids[0]);

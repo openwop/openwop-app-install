@@ -9,6 +9,7 @@
  *
  * @see docs/adr/0177-e-commerce.md
  */
+import { schedulePublicAssetResync } from '../../host/assetGrants.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { registerRetentionPurger, purgeRowsByAge } from '../../host/retentionPurger.js';
@@ -458,6 +459,15 @@ export const quantizeMoney = (amount: number, currency: string): number => fromS
  *  a page (`listProductsPage`), by id (`getProduct`, `getProducts`), or, for a job that
  *  needs every product, `iterateCatalog` / `collectCatalog`. `test/adr1110-no-whole-catalog-read`
  *  fails if a whole-catalog read comes back. */
+/** ADR 1122 P1b — the asset tokens a product makes public: its images while it is
+ *  publicly listed (the ADR 1098 predicate every storefront lane reads), else none.
+ *  Download tokens are never public: they are delivered after purchase. */
+export async function publicAssetTokensForProduct(tenantId: string, productId: string): Promise<string[]> {
+  const p = await products.get(tenantId, productId);
+  if (!p || p.tenantId !== tenantId || !isPubliclyListed(p)) return [];
+  return [...(p.imageAssetTokens ?? [])];
+}
+
 export async function getProduct(tenantId: string, orgId: string, productId: string): Promise<Product | null> {
   const p = await products.get(tenantId, productId);
   return p && p.tenantId === tenantId && p.orgId === orgId ? p : null;
@@ -904,6 +914,7 @@ export async function createProduct(input: { tenantId: string; orgId: string; cr
   };
   await products.put(p);
   recordCommerceAction('product.created', p, input.createdBy, { productId: p.productId, name: p.name, type: p.type });
+  schedulePublicAssetResync('commerce-product', p.tenantId, p.productId); // ADR 1122 P1b
   return p;
 }
 export interface ProductPatch { name?: string; description?: string | null; price?: number; cost?: number | null; kind?: unknown; components?: unknown; subscription?: unknown; currency?: string; imageAssetTokens?: unknown; downloadAssetTokens?: unknown; inventory?: number | null; lowStockThreshold?: number | null; variants?: unknown; categories?: unknown; tags?: unknown; attributes?: unknown; weightGrams?: number | null; dims?: unknown; customFields?: unknown; active?: boolean; unlisted?: unknown }
@@ -984,6 +995,7 @@ export async function updateProduct(tenantId: string, orgId: string, productId: 
     }
   }
   recordCommerceAction('product.updated', saved, opts.actor ?? 'system', { productId: saved.productId, fields: Object.keys(patch) });
+  schedulePublicAssetResync('commerce-product', tenantId, productId); // ADR 1122 P1b — images or listing may have changed
   return manualInventoryTarget !== undefined ? await getProduct(tenantId, orgId, productId) : saved;
 }
 export async function deleteProduct(tenantId: string, orgId: string, productId: string, opts: { actor?: string } = {}): Promise<boolean> {
@@ -996,6 +1008,7 @@ export async function deleteProduct(tenantId: string, orgId: string, productId: 
   // the fan-out observable.
   const cleanupHandlers = await fireProductDeleted({ tenantId, orgId, productId });
   recordCommerceAction('product.deleted', p, opts.actor ?? 'system', { productId: p.productId, name: p.name, cleanupHandlers });
+  schedulePublicAssetResync('commerce-product', tenantId, productId); // ADR 1122 P1b — a deleted product shows nothing
   return true;
 }
 

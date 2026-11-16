@@ -11,14 +11,25 @@
  *   - releaseDownstream + skip propagation, and ADR 0208 edge conditions as
  *     control flow (a false condition folds to `skipped`; skipReasonFor names
  *     condition vs upstream — ECR-2 / ECR-4)
- *   - inspectDisposition (terminal completed / failed / waiting) and popReady's
+ *   - inspectDisposition (terminal completed / failed / waiting; a failed node
+ *     behind skipped terminals still fails the run, RFC 0257 §A) and popReady's
  *     concurrency cap
+ *   - conditional tail joins (ADR 0954 P3): a skip that sits behind a FAILURE
+ *     (`failedBehindSkip`) is not an untaken branch, so `all_success` /
+ *     `none_failed` cannot launder a failed producer through a skipped approval;
+ *     a COMPLETED error handler ends that provenance; and releaseDownstream
+ *     re-evaluates a join that was waiting when a later branch in the same pass
+ *     skipped (it once kept a `visited` set, so the join hung pending).
  *
- * What breaks it: any change that runs a not-taken branch, floods a merge, or
- * reports a legal graph as a cycle. Sabotage witnesses (grade-tests 8f w2):
- * ex-cycle, ex-dispatch-loop, ex-parallel, ex-allsuccess-skip, ex-anyfailed,
- * ex-cond-fold, ex-falsy, ex-contains-arr, ex-popready, ex-waiting,
- * ex-skipreason, ex-skip-propagate, ex-input-port.
+ * What breaks it: any change that runs a not-taken branch, floods a merge,
+ * reports a legal graph as a cycle, lets a failure through an approval barrier,
+ * or strands a join. Sabotage witnesses (grade-tests wave 111 g1, `w111g1-sch-*`):
+ * cycle, dispatch-loop, parallel, toposort, allsuccess-wait, allsuccess-skip,
+ * anysuccess, anysuccess-skip, allcomplete, nonefailed, nonefailed-skip,
+ * anyfailed, anyfailed-skip, cond-fold, eq, truthy, falsy, exists, contains-arr,
+ * nested, source-input, port, input-failed, waiting, failed-disp, popready,
+ * popready-mark, skipreason, skip-propagate, launder, recovery, reconsider,
+ * dup-skip.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -37,11 +48,17 @@ import {
   skipReasonFor,
   topologicalOrder,
 } from '../src/executor/scheduler.js';
-import type { WorkflowDefinition } from '../src/executor/types.js';
+import type { EdgeDef, WorkflowDefinition } from '../src/executor/types.js';
 
 function defOf(
   nodes: ReadonlyArray<{ nodeId: string; typeId: string }>,
-  edges: ReadonlyArray<{ from: string; to: string; rule?: 'all_success' | 'any_success' | 'all_complete' | 'none_failed' | 'any_failed' }>,
+  edges: ReadonlyArray<{
+    from: string;
+    to: string;
+    rule?: 'all_success' | 'any_success' | 'all_complete' | 'none_failed' | 'any_failed';
+    condition?: EdgeDef['condition'];
+    targetInput?: string;
+  }>,
 ): WorkflowDefinition {
   return {
     workflowId: 'test',
@@ -51,6 +68,8 @@ function defOf(
       sourceNodeId: e.from,
       targetNodeId: e.to,
       ...(e.rule ? { triggerRule: e.rule } : {}),
+      ...(e.condition ? { condition: e.condition } : {}),
+      ...(e.targetInput ? { targetInput: e.targetInput } : {}),
     })),
   };
 }
@@ -160,27 +179,35 @@ describe('conditional tail joins', () => {
     expect(snapshot.nodeState.get('done')).toBe('ready');
   });
 
-  it.each(['completed', 'failed'] as const)('reconsiders a waiting join after skip propagation from a %s source', (state) => {
-    const d = defOf(['source', 'branch', 'tail', 'join'].map((nodeId) => ({ nodeId, typeId: 't' })), [
-      { from: 'source', to: 'branch' }, { from: 'source', to: 'join', rule: 'none_failed' },
-      { from: 'branch', to: 'tail' }, { from: 'branch', to: 'join', rule: 'none_failed' },
-      { from: 'tail', to: 'join', rule: 'none_failed' },
-    ]);
-    const first = d.edges?.[0];
-    if (!first) throw new Error('The conditional source edge is required');
-    first.condition = { path: 'go', op: 'truthy' };
+  // source →(go truthy) branch → tail, with source, branch and tail all joining
+  // `join` (none_failed). The queue reaches `join` BEFORE `tail` has skipped, so
+  // `join` first reads `wait`; it must be evaluated again once `tail` skips.
+  const joinAfterBranch = (): WorkflowDefinition => defOf(['source', 'branch', 'tail', 'join'].map((nodeId) => ({ nodeId, typeId: 't' })), [
+    { from: 'source', to: 'branch', condition: { path: 'go', op: 'truthy' } }, { from: 'source', to: 'join', rule: 'none_failed' },
+    { from: 'branch', to: 'tail' }, { from: 'branch', to: 'join', rule: 'none_failed' },
+    { from: 'tail', to: 'join', rule: 'none_failed' },
+  ]);
+
+  it('completed source: a waiting join is reconsidered after skip propagation in the same pass', () => {
+    const d = joinAfterBranch();
     const graph = buildGraph(d); const snapshot = freshSnapshot(d);
-    if (state === 'completed') markCompleted('source', { go: false }, snapshot);
-    else markFailed('source', { code: 'source_failed', message: 'Real predecessor failure' }, snapshot);
+    markCompleted('source', { go: false }, snapshot);
     const skipped: string[] = [];
     releaseDownstream('source', graph, snapshot, (id) => skipped.push(id));
-    expect(snapshot.nodeState.get('branch')).toBe('skipped'); expect(snapshot.nodeState.get('tail')).toBe('skipped');
-    expect(snapshot.nodeState.get('join')).toBe(state === 'completed' ? 'ready' : 'skipped');
-    expect(new Set(skipped).size).toBe(skipped.length);
-    if (state === 'completed') {
-      markCompleted('join', { output: 'finished' }, snapshot);
-      expect(inspectDisposition(snapshot, graph, 0)).toMatchObject({ done: true, status: 'completed' });
-    } else expect(inspectDisposition(snapshot, graph, 0)).toMatchObject({ done: true, status: 'failed' });
+    expect(skipped).toEqual(['branch', 'tail']);
+    expect(snapshot.nodeState.get('join')).toBe('ready');
+    markCompleted('join', { output: 'finished' }, snapshot);
+    expect(inspectDisposition(snapshot, graph, 0)).toEqual({ done: true, status: 'completed' });
+  });
+
+  it('failed source: the join skips exactly once and the run fails on the source', () => {
+    const d = joinAfterBranch();
+    const graph = buildGraph(d); const snapshot = freshSnapshot(d);
+    markFailed('source', { code: 'source_failed', message: 'Real predecessor failure' }, snapshot);
+    const skipped: string[] = [];
+    releaseDownstream('source', graph, snapshot, (id) => skipped.push(id));
+    expect(skipped).toEqual(['branch', 'join', 'tail']);
+    expect(inspectDisposition(snapshot, graph, 0)).toEqual({ done: true, status: 'failed', failedNodeId: 'source' });
   });
 });
 
@@ -267,7 +294,9 @@ describe('evaluateCondition', () => {
   });
   it('truthy / falsy work', () => {
     expect(evaluateCondition({ path: 'k', op: 'truthy' }, { k: 1 })).toBe(true);
+    expect(evaluateCondition({ path: 'k', op: 'truthy' }, { k: 0 })).toBe(false);
     expect(evaluateCondition({ path: 'k', op: 'falsy' }, { k: 0 })).toBe(true);
+    expect(evaluateCondition({ path: 'k', op: 'falsy' }, { k: 1 })).toBe(false);
   });
   it('exists vs absent', () => {
     expect(evaluateCondition({ path: 'k', op: 'exists' }, { k: '' })).toBe(true);
@@ -276,9 +305,12 @@ describe('evaluateCondition', () => {
   it('contains: string + array', () => {
     expect(evaluateCondition({ path: 'k', op: 'contains', value: 'foo' }, { k: 'foobar' })).toBe(true);
     expect(evaluateCondition({ path: 'k', op: 'contains', value: 2 }, { k: [1, 2, 3] })).toBe(true);
+    expect(evaluateCondition({ path: 'k', op: 'contains', value: 'baz' }, { k: 'foobar' })).toBe(false);
+    expect(evaluateCondition({ path: 'k', op: 'contains', value: 2 }, { k: [1, 3] })).toBe(false);
   });
   it('resolves nested paths', () => {
     expect(evaluateCondition({ path: 'a.b.c', op: 'eq', value: 7 }, { a: { b: { c: 7 } } })).toBe(true);
+    expect(evaluateCondition({ path: 'a.b.c', op: 'eq', value: 7 }, { a: { c: 7 } })).toBe(false);
   });
 });
 
@@ -305,8 +337,8 @@ describe('buildNodeInputs', () => {
     const d = defOf(
       [{ nodeId: 'a', typeId: 't' }, { nodeId: 'b', typeId: 't' }, { nodeId: 'c', typeId: 't' }],
       [
-        { from: 'a', to: 'c', rule: 'all_complete' },
-        { from: 'b', to: 'c', rule: 'all_complete' },
+        { from: 'a', to: 'c', rule: 'all_complete', targetInput: 'fromA' },
+        { from: 'b', to: 'c', rule: 'all_complete', targetInput: 'fromB' },
       ],
     );
     const graph = buildGraph(d);
@@ -314,8 +346,11 @@ describe('buildNodeInputs', () => {
     markCompleted('a', { output: 1 }, snapshot);
     markFailed('b', { code: 'x', message: 'boom' }, snapshot);
     const inputs = buildNodeInputs('c', graph, snapshot, null);
-    // Single completed upstream contributes; failed upstream's port is absent.
-    expect(Object.keys(inputs)).toEqual(['input']);
+    // Single completed upstream contributes; the failed upstream's port is
+    // ABSENT (not present-as-undefined). Distinct ports, so the failed edge
+    // cannot hide behind the completed one writing the same key.
+    expect(Object.keys(inputs)).toEqual(['fromA']);
+    expect(inputs.fromA).toBe(1);
   });
 });
 
@@ -528,9 +563,7 @@ describe('inspectDisposition', () => {
     snapshot.nodeState.set('b', 'ready');
     markSuspended('b', snapshot);
     const disp = inspectDisposition(snapshot, graph, 0);
-    expect(disp.done).toBe(true);
-    expect(disp.status).toBe('waiting');
-    expect(disp.suspendedNodeId).toBe('b');
+    expect(disp).toEqual({ done: true, status: 'waiting', suspendedNodeId: 'b' });
   });
 
   it('reports done:failed when a node fails and no all_complete rescues', () => {
@@ -542,9 +575,10 @@ describe('inspectDisposition', () => {
     const snapshot = freshSnapshot(d);
     markFailed('a', { code: 'x', message: 'boom' }, snapshot);
     releaseDownstream('a', graph, snapshot);
-    const disp = inspectDisposition(snapshot, graph, 0);
-    expect(disp.done).toBe(true);
-    expect(disp.status).toBe('failed');
+    expect(snapshot.nodeState.get('b')).toBe('skipped');
+    // A failed node behind a skipped terminal is a FAILED run, never the
+    // RFC 0257 "every terminal skipped" completion.
+    expect(inspectDisposition(snapshot, graph, 0)).toEqual({ done: true, status: 'failed', failedNodeId: 'a' });
   });
 });
 
@@ -569,10 +603,11 @@ describe('popReady — concurrency cap honored', () => {
     releaseDownstream('a', graph, snapshot);
     // All three of b, c, d are now ready.
     const batch1 = popReady(2, snapshot);
-    expect(batch1).toHaveLength(2);
-    expect(snapshot.nodeState.get(batch1[0]!)).toBe('running');
+    expect(batch1).toEqual(['b', 'c']);
+    expect(batch1.map((id) => snapshot.nodeState.get(id))).toEqual(['running', 'running']);
+    expect(snapshot.nodeState.get('d')).toBe('ready');
     const batch2 = popReady(2, snapshot);
-    expect(batch2).toHaveLength(1);
+    expect(batch2).toEqual(['d']);
   });
 });
 

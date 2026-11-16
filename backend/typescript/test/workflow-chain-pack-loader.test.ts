@@ -41,7 +41,7 @@ describe('workflow-chain pack loader — discovery', () => {
     const entry = getChain('market-intel.digest');
     expect(entry).not.toBeNull();
     expect(entry!.packName).toBe('core.openwop.workflows.market-intel');
-    expect(entry!.chain.dag.nodes.length).toBe(4);
+    expect(entry!.chain.dag.nodes.length).toBe(5); // + the ADR 1116 fetch step
     expect(listChains().some((c) => c.chain.chainId === 'market-intel.digest')).toBe(true);
   });
 
@@ -58,10 +58,11 @@ describe('workflow-chain pack loader — expansion (RFC 0013 §expansion)', () =
     // workflowId carries the deterministic expansion id (now folds canonical params)
     expect(def.workflowId).toMatch(/^market-intel\.digest:[0-9a-f]{12}$/);
     // node ids are rewritten with the collision-free prefix; published typeIds preserved
-    expect(def.nodes).toHaveLength(4);
+    expect(def.nodes).toHaveLength(5);
     for (const n of def.nodes) expect(n.nodeId.startsWith('market-intel_digest_')).toBe(true);
     expect(def.nodes.map((n) => n.typeId)).toEqual([
       'market-intel.ai-discovery',
+      'core.web.fetch', // ADR 1116: the chain reads the pages discovery finds
       'market-intel.voc-extraction',
       'market-intel.opportunity-scoring',
       'core.ai.chatCompletion',
@@ -86,7 +87,7 @@ describe('workflow-chain pack loader — expansion (RFC 0013 §expansion)', () =
     });
     expect((def.metadata?.expandedFrom as { params: Record<string, unknown> }).params.topic).toBe('AI ops tooling');
     // edges mapped with rewritten ids; terminal node is primary; provenance kept
-    expect(def.edges).toHaveLength(3);
+    expect(def.edges).toHaveLength(7); // ADR 1116: fetch + named ports into voc and scoring
     expect(def.nodes.filter((n) => n.outputRole === 'primary')).toHaveLength(1);
     expect(synth.outputRole).toBe('primary');
     expect(def.metadata?.source).toBe('workflow-chain-pack');

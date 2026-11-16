@@ -12,6 +12,14 @@
  * return, the 404 mask → off, an ownerless fallback, the owner-removal guard,
  * the archived filter, and the public/private access branches each red the
  * matching case.
+ * Wave 112 (ADR 0879 D1/D4 signatures): refusals now assert the refusing guard's
+ * own message (a `forbidden` code is also thrown by the posting and presence
+ * gates), the rename and member writes are read back through `getChannel`, the
+ * `type !== 'channel'` half of the 404 is exercised with a real non-channel
+ * conversation, and the owner participant ref is a literal. "An undefined viewer
+ * on a private channel" is a DOUBLE guard in `assertChannelAccess` (the
+ * `canAccessChannel` refusal, then the `userId === undefined` refusal): only an
+ * edit removing both lines can red it.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -20,7 +28,7 @@ import { join } from 'node:path';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
-import { userRef } from '../src/host/conversationStore.js';
+import { ensureConversationMeta } from '../src/host/conversationStore.js';
 import { createMember } from '../src/host/accessControlService.js';
 import { createChannel, listChannelsForViewer, getChannel, renameChannel, archiveChannel, addChannelMember, removeChannelMember, assertChannelAccess } from '../src/features/channels/channelService.js';
 
@@ -48,7 +56,7 @@ describe('channel service', () => {
   });
 
   it('requires a name', async () => {
-    await expect(createChannel(T, OWNER, { visibility: 'public' }, FULL_AUTHORITY)).rejects.toMatchObject({ code: 'validation_error' });
+    await expect(createChannel(T, OWNER, { visibility: 'public' }, FULL_AUTHORITY)).rejects.toMatchObject({ code: 'validation_error', message: '`name` is required.' });
   });
 
   it('lists non-archived channels; archive hides it', async () => {
@@ -62,18 +70,25 @@ describe('channel service', () => {
     const ch = await createChannel(T, OWNER, { name: 'old' }, FULL_AUTHORITY);
     const renamed = await renameChannel(T, ch.conversationId, OWNER, FULL_AUTHORITY, 'new-name');
     expect(renamed.channel!.name).toBe('new-name');
+    // Persisted, not only returned.
+    expect((await getChannel(T, ch.conversationId, OWNER)).channel!.name).toBe('new-name');
   });
 
   it('adds + removes a member', async () => {
     const ch = await createChannel(T, OWNER, { name: 'members' }, FULL_AUTHORITY);
     const withMember = await addChannelMember(T, ch.conversationId, OWNER, FULL_AUTHORITY, 'bob');
     expect(withMember.participants.some((p) => p.subjectRef === 'user:bob')).toBe(true);
+    expect((await getChannel(T, ch.conversationId, OWNER)).participants.map((p) => p.subjectRef).sort()).toEqual(['user:bob', 'user:user:owner']);
     const without = await removeChannelMember(T, ch.conversationId, OWNER, FULL_AUTHORITY, 'bob');
     expect(without.participants.some((p) => p.subjectRef === 'user:bob')).toBe(false);
+    expect((await getChannel(T, ch.conversationId, OWNER)).participants.map((p) => p.subjectRef)).toEqual(['user:user:owner']);
   });
 
   it('404s a non-channel / missing id', async () => {
-    await expect(getChannel(T, 'does-not-exist', OWNER)).rejects.toMatchObject({ code: 'not_found' });
+    await expect(getChannel(T, 'does-not-exist', OWNER)).rejects.toMatchObject({ code: 'not_found', message: 'Channel not found.' });
+    // A real conversation the caller OWNS that is not a channel: only the type check refuses it.
+    await ensureConversationMeta(T, 'cs-group-not-channel', { type: 'group', ownerUserId: OWNER });
+    await expect(getChannel(T, 'cs-group-not-channel', OWNER)).rejects.toMatchObject({ code: 'not_found', message: 'Channel not found.' });
   });
 });
 
@@ -84,17 +99,18 @@ describe('channel management authorization (CHN-1/CHN-2)', () => {
     // ensureConversationMeta records the owner as an owner-role participant
     // under the RFC 0041 ref of the raw caller id (`user:` + 'user:owner').
     expect(ch.ownerUserId).toBe(OWNER);
-    expect(ch.participants.filter((p) => p.role === 'owner').map((p) => p.subjectRef)).toEqual([userRef(OWNER)]);
-    await expect(renameChannel(T, ch.conversationId, OWNER, FULL_AUTHORITY, 'owned2')).resolves.toBeTruthy();
-    await expect(getChannel(T, ch.conversationId, OWNER)).resolves.toBeTruthy();
+    expect(ch.participants.filter((p) => p.role === 'owner').map((p) => p.subjectRef)).toEqual(['user:user:owner']);
+    expect((await renameChannel(T, ch.conversationId, OWNER, FULL_AUTHORITY, 'owned2')).channel!.name).toBe('owned2');
+    expect((await getChannel(T, ch.conversationId, OWNER)).conversationId).toBe(ch.conversationId);
   });
 
   it('a member who is not the owner is 403 on manage (knows it exists)', async () => {
     const ch = await createChannel(T, OWNER, { name: 'mem-not-owner', visibility: 'private' }, FULL_AUTHORITY);
     await addChannelMember(T, ch.conversationId, OWNER, FULL_AUTHORITY, 'mallory'); // mallory is a member (participant user:mallory)
     // The caller id is the RAW principal id; the service applies userRef() internally.
-    await expect(renameChannel(T, ch.conversationId, 'mallory', FULL_AUTHORITY, 'x')).rejects.toMatchObject({ code: 'forbidden' });
-    await expect(addChannelMember(T, ch.conversationId, 'mallory', FULL_AUTHORITY, 'evil')).rejects.toMatchObject({ code: 'forbidden' });
+    const notManager = { code: 'forbidden', message: 'Only the channel owner or a workspace admin can manage this channel.' };
+    await expect(renameChannel(T, ch.conversationId, 'mallory', FULL_AUTHORITY, 'x')).rejects.toMatchObject(notManager);
+    await expect(addChannelMember(T, ch.conversationId, 'mallory', FULL_AUTHORITY, 'evil')).rejects.toMatchObject(notManager);
   });
 
   it('a non-member is 404-masked on manage AND read of a private channel (no existence leak)', async () => {
@@ -107,13 +123,13 @@ describe('channel management authorization (CHN-1/CHN-2)', () => {
   it('an ownerless legacy channel denies management to everyone (fail-closed, no membership fallback)', async () => {
     const ch = await createChannel(T, undefined, { name: 'ownerless', visibility: 'public' }, FULL_AUTHORITY);
     expect(ch.ownerUserId).toBeUndefined();
-    await expect(renameChannel(T, ch.conversationId, 'user:anyone', FULL_AUTHORITY, 'x')).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(renameChannel(T, ch.conversationId, 'user:anyone', FULL_AUTHORITY, 'x')).rejects.toMatchObject({ code: 'forbidden', message: 'Only the channel owner or a workspace admin can manage this channel.' });
   });
 
   it('the owner cannot be removed (would orphan the channel)', async () => {
     const ch = await createChannel(T, OWNER, { name: 'no-orphan', visibility: 'public' }, FULL_AUTHORITY);
     await addChannelMember(T, ch.conversationId, OWNER, FULL_AUTHORITY, 'user:owner'); // owner self-joins for messaging
-    await expect(removeChannelMember(T, ch.conversationId, OWNER, FULL_AUTHORITY, OWNER)).rejects.toMatchObject({ code: 'validation_error' });
+    await expect(removeChannelMember(T, ch.conversationId, OWNER, FULL_AUTHORITY, OWNER)).rejects.toMatchObject({ code: 'validation_error', message: 'Cannot remove the channel owner; archive the channel instead.' });
   });
 
   it('an undefined caller cannot read a channel (CHN-3, no anon)', async () => {
@@ -129,7 +145,7 @@ describe('assertChannelAccess (ADR 0126 Phase 4 presence gate)', () => {
   });
   it('a private channel denies a non-member (403, DEFAULT-DENY) and admits after add', async () => {
     const ch = await createChannel(T, 'owner', { name: 'priv', visibility: 'private' }, FULL_AUTHORITY);
-    await expect(assertChannelAccess(T, ch.conversationId, 'stranger')).rejects.toMatchObject({ code: 'forbidden' });
+    await expect(assertChannelAccess(T, ch.conversationId, 'stranger')).rejects.toMatchObject({ code: 'forbidden', message: 'Not a member of this channel.' });
     await addChannelMember(T, ch.conversationId, 'owner', FULL_AUTHORITY, 'friend'); // owner adds the member
     await expect(assertChannelAccess(T, ch.conversationId, 'friend')).resolves.toEqual({ ref: 'user:friend' });
   });

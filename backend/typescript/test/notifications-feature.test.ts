@@ -204,4 +204,41 @@ describe('R3 IB-R2-2 — scoped bulk verbs (:archive-read / :bulk-read), one req
       expect(r.body.error).toBe('validation_error');
     }
   });
+
+  // ADR 1125 D3 — the inbox passes its open requests as `keep`, so a bulk sweep
+  // cannot silence a step that still waits.
+  it('archive-read leaves the ids in `keep` alone and rejects a malformed list', async () => {
+    const { getNotificationEmitter } = await import('../src/notifications/emitter.js');
+    const tenantId = `org:keep-${Date.now()}-${n++}`;
+    const c = client();
+    const login = await c.post('/host/openwop-app/test/login', { email: `keep-${Date.now()}@acme.test`, tenantId });
+    expect(login.status, JSON.stringify(login.body)).toBe(201);
+    const me = login.body.user!.userId;
+    const emit = (title: string) => getNotificationEmitter().emit({
+      tenantId, recipientUserId: me, status: 'read', type: 'system', priority: 'normal', title, message: title, metadata: {},
+    });
+    const other = client();
+    const olog = await other.post('/host/openwop-app/test/login', { email: `keep-o-${Date.now()}@acme.test`, tenantId });
+    expect(olog.status, JSON.stringify(olog.body)).toBe(201);
+    const theirs = await getNotificationEmitter().emit({
+      tenantId, recipientUserId: olog.body.user!.userId, status: 'read', type: 'system', priority: 'normal', title: 'theirs', message: 'theirs', metadata: {},
+    });
+    const open = await emit('an open request');
+    const news = await emit('old news');
+    // A foreign id and an unknown id only narrow: same 200, no hint either exists.
+    const ar = await c.post(`${BASE_PATH}:archive-read`, { keep: [open.notificationId, theirs.notificationId, 'no-such-id'] });
+    expect(ar.status).toBe(200);
+    expect(ar.body).toEqual({ updated: 1 });
+    const byId = new Map(rowsOf(await c.get(`${BASE_PATH}?includeArchived=true`)).map((r) => [r.notificationId, r.status]));
+    expect(byId.get(open.notificationId)).toBe('read');
+    expect(byId.get(news.notificationId)).toBe('archived');
+    expect(byId.has(theirs.notificationId)).toBe(false);
+    const tById = new Map(rowsOf(await other.get(`${BASE_PATH}?includeArchived=true`)).map((r) => [r.notificationId, r.status]));
+    expect(tById.get(theirs.notificationId)).toBe('read');
+    for (const body of [{ keep: 'x' }, { keep: [1] }, { keep: Array.from({ length: 501 }, (_, i) => `id-${i}`) }]) {
+      const r = await c.post(`${BASE_PATH}:archive-read`, body);
+      expect(r.status).toBe(400);
+      expect(r.body.error).toBe('validation_error');
+    }
+  });
 });

@@ -31,6 +31,7 @@ import {
 } from '../host/workflowEvalSets.js';
 import { startEvalRun } from '../host/workflowEvalRunner.js';
 import { tenantEvalJudge } from '../host/workflowEvalJudge.js';
+import { workflowClientReader } from '../host/workflowClientAccess.js';
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
@@ -38,6 +39,8 @@ async function loadOwnedHead(req: Request, workflowId: string): Promise<Workflow
   const owned = workflowId ? await getOwned(tenantOf(req), workflowId) : null;
   const def = owned ? await getRegisteredWorkflowAsync(workflowId) : null;
   if (!owned || !def) throw new OpenwopError('workflow_not_found', 'Workflow not found in this catalog.', 404, { workflowId });
+  // ADR 1132 — a client's definition, for people who may read that client.
+  if (!(await workflowClientReader(req)(owned))) throw new OpenwopError('workflow_not_found', 'Workflow not found in this catalog.', 404, { workflowId });
   return def;
 }
 

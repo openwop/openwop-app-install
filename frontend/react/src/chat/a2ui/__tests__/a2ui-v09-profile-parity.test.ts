@@ -9,8 +9,17 @@ import { PROFILE, PROFILE_COMPONENTS, A2UI_V09_CATALOG_IDS, parseV09Payload, A2U
  * properties per component, the same required set and enums, the same pinned
  * catalog. A renderer that admits more than the host admits is a second,
  * looser gate; one that admits less refuses surfaces the host recorded.
+ *
+ * RFC 0209 §B / ADR 0749 define the profile; RFC 0255 §E / ADR 1007 moved it to
+ * `interrupt-form.schema.json` and dropped the `exchange` event, so `resume` is
+ * the only action a Button may carry. Breaks if the profile admits a component,
+ * property, enum value, event name or catalog the schema does not (or refuses
+ * one it does), or if it stops refusing what upstream A2UI admits: functionCall
+ * actions, the obscured field, Image, formatString, extra properties,
+ * theme.iconUrl, a foreign catalog, or a message for another surface.
  */
-type Def = { properties?: Record<string, { enum?: string[]; $ref?: string }>; required?: string[]; anyOf?: Array<{ $ref: string }> ; enum?: string[] };
+type PropDef = { enum?: string[]; $ref?: string; properties?: Record<string, PropDef> };
+type Def = { properties?: Record<string, PropDef>; required?: string[]; anyOf?: Array<{ $ref: string }> ; enum?: string[] };
 const schema = JSON.parse(readFileSync(join(process.cwd(), '..', '..', 'schemas', 'v2', 'interrupt-form.schema.json'), 'utf8')) as { $defs: Record<string, Def> };
 const defs = schema.$defs;
 const refName = (r: string) => r.replace('#/$defs/', '');
@@ -43,7 +52,7 @@ describe('A2UI v0.9 render profile ⇔ schemas/v2 formV2', () => {
     expect([...A2UI_V09_CATALOG_IDS]).toEqual(defs.catalogId!.enum);
   });
   it('the action event names are the schema\'s', () => {
-    const ev = (defs.action!.properties!.event as unknown as { properties: { name: { enum: string[] } } }).properties.name.enum;
+    const ev = [...(defs.action!.properties!.event!.properties!.name!.enum ?? [])];
     expect(ev.sort()).toEqual(['resume']);
     // …and the profile admits exactly those on a Button.
     for (const n of ev) expect(parseV09Payload(wrap({ id: 'b', component: 'Button', child: 'b', action: { event: { name: n } } })).ok, n).toBe(true);

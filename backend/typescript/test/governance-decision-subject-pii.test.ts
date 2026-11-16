@@ -24,10 +24,12 @@
  * "it happens to hold a non-PII value today" is exactly the reasoning that
  * shipped the defect.
  *
- * TST-DEF-2 — red when a `subject:` argument becomes a bare identifier or a
- * non-hashing call (`String(subjectKey)`), the consent lane's five hashed sites
- * change, or the scan stops seeing a production call site (the floor equals the
- * measured eight, so losing ONE site reds it).
+ * TST-DEF-2 — red when a `subject:` argument becomes a bare identifier, a
+ * shorthand `{ subject }`, or a non-hashing call (`String(subjectKey)`), the consent lane's five hashed sites
+ * change, or the scan stops seeing the consent lane. The liveness floor is 8;
+ * MEASURED on f85608fd55 there are 13 sites (cdp collectService x2, cdp routes
+ * x2, analytics replayStore x1 joined since), so losing one site no longer
+ * reds it. Raising the floor is a human decision (TST-NZV-2).
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -66,7 +68,12 @@ function callSites(): Site[] {
       if (end < 0) continue;
       const body = src.slice(open, end + 1);
       const sub = /(?:^|[{,\s])subject\s*:\s*([^,\n}]+)/.exec(body);
-      out.push({ file: file.slice(SRC.length + 1), subject: (sub?.[1] ?? '').trim() });
+      // Property SHORTHAND (`{ tenantId, subject }`) writes the variable
+      // verbatim, so it is a bare identifier, not an omitted field. Without
+      // this, it read as `''` and the allowlist's "omits subject" entry let it
+      // through (TST-NZV-3).
+      const shorthand = /(?:^|[{,\s])subject\s*(?=[,}\n])/.test(body);
+      out.push({ file: file.slice(SRC.length + 1), subject: sub ? sub[1]!.trim() : shorthand ? 'subject' : '' });
     }
   }
   return out;

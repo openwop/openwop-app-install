@@ -22,7 +22,7 @@ import { agentVisibleToTenant } from '../../host/agentVisibility.js';
 import { createRosterEntry, listRoster } from '../../host/rosterService.js';
 import { credentialScopesIn } from '../../host/protocolAuthorization.js';
 import { isPersonalTenantId } from '../../host/requestSubject.js';
-import { listAuthoredWorkflows } from '../workflow-author/workflowAuthorService.js';
+import { listAuthoredWorkflows , type ClientRowPredicate } from '../workflow-author/workflowAuthorService.js';
 
 export const AUTONOMY_LEVELS = ['auto', 'guided', 'review'] as const;
 export type AutonomyLevel = (typeof AUTONOMY_LEVELS)[number];
@@ -52,7 +52,7 @@ export interface DraftValidation {
   errors: string[];
 }
 
-export async function buildAgentAuthorCatalog(opts: { tenantId: string }): Promise<AgentAuthorCatalog> {
+export async function buildAgentAuthorCatalog(opts: { tenantId: string; mayRead?: ClientRowPredicate }): Promise<AgentAuthorCatalog> {
   const reg = getAgentRegistry();
   const agents = reg.list()
     .filter((a) => agentVisibleToTenant(a, opts.tenantId))
@@ -61,7 +61,7 @@ export async function buildAgentAuthorCatalog(opts: { tenantId: string }): Promi
       ...(a.label ? { label: a.label } : {}),
       ...(a.description ? { description: a.description } : {}),
     }));
-  const workflows = (await listAuthoredWorkflows({ tenantId: opts.tenantId })).map((w) => ({
+  const workflows = (await listAuthoredWorkflows({ tenantId: opts.tenantId, ...(opts.mayRead ? { mayRead: opts.mayRead } : {}) })).map((w) => ({
     workflowId: w.workflowId,
     ...(w.name ? { name: w.name } : {}),
     ...(w.description ? { description: w.description } : {}),
@@ -102,7 +102,7 @@ function coerceDraft(value: unknown, errors: string[]): AgentDraft {
 }
 
 /** Closed-world validation. Every error is actionable model-facing text. */
-export async function validateAgentDraft(value: unknown, opts: { tenantId: string }): Promise<DraftValidation & { draft: AgentDraft }> {
+export async function validateAgentDraft(value: unknown, opts: { tenantId: string; mayRead?: ClientRowPredicate }): Promise<DraftValidation & { draft: AgentDraft }> {
   const errors: string[] = [];
   const draft = coerceDraft(value, errors);
   if (draft.agentId) {
@@ -112,7 +112,7 @@ export async function validateAgentDraft(value: unknown, opts: { tenantId: strin
     }
   }
   if (draft.workflows && draft.workflows.length > 0) {
-    const known = new Set((await listAuthoredWorkflows({ tenantId: opts.tenantId })).map((w) => w.workflowId));
+    const known = new Set((await listAuthoredWorkflows({ tenantId: opts.tenantId, ...(opts.mayRead ? { mayRead: opts.mayRead } : {}) })).map((w) => w.workflowId));
     for (const w of draft.workflows) {
       if (!known.has(w)) errors.push(`workflow "${w}" does not resolve in this workspace — use ids from the catalog’s \`workflows\` list.`);
     }

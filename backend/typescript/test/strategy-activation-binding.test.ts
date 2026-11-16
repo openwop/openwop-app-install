@@ -24,7 +24,14 @@
  * leg by sabotage: e.g. reducing the run surface's `canRead` to `isShared` reds STR3WF-1
  * and the D1 sweep; returning `null` from `canonicalDecider` reds the via-key leg (its
  * issuer assertion), not just the unit case; dropping the stale-card reject in
- * `queueStrategyActivationIfGated` reds the re-submit leg.
+ * `queueStrategyActivationIfGated` reds the re-submit leg. Wave 110 re-probed every leg at
+ * the current sha, including #4507: admitting a digest-less row, or answering it with the
+ * `content_changed` reason, reds the legacy leg.
+ *
+ * Double guard (recorded): the decide exit checks the binding TWICE, once before the CAS
+ * (closes the card, `content_changed`) and again as the CAS precondition (re-opens it). The
+ * D2 leg asserts the first one's code and the closed card, so it tells them apart; the
+ * precondition alone is a race guard no case here claims.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -167,6 +174,7 @@ describe('STR3WF-4 — the submitter cannot clear their own gate when another ap
       expect(appr).toBeTruthy();
       const self = await owner.post(`${APPROVALS}/${appr.approvalId}/claim`);
       expect(self.status, `self-approval cleared the gate: ${JSON.stringify(self.body)}`).toBe(403);
+      expect(JSON.stringify(self.body), 'refused for the wrong reason').toContain('separation-of-duties');
       expect((await owner.get(`${S}/${s.id}`)).body.status).toBe('draft');
       // Positive control: a DIFFERENT approver clears it.
       const other = await admin.post(`${APPROVALS}/${appr.approvalId}/claim`);
@@ -213,13 +221,16 @@ describe('STR3WF-1 — a human-started run is held to its starter\'s access', ()
     expect(health).not.toContain(b.id);
   });
 
-  it('cannot write a check-in into a strategy the starter cannot write', async () => {
+  // An agent check-in is a PROPOSAL, so its bar is READ (ADR 0845 D1): org B is unreadable
+  // to this member, and the refusal is the uniform `not_found` (no existence oracle).
+  it('cannot write a check-in into a strategy the starter cannot read (uniform not_found)', async () => {
     const { tenantId, memberId, a, b } = await twoOrgs();
     const surface = buildStrategySurface({ tenantId, actingUserId: memberId });
     const ok = (await surface.checkIn({ strategyId: a.id, krId: a.objectives[0].keyResults[0].id, value: 3 })) as CheckInOut;
     expect(ok.checkIn, 'positive control: org-A check-in').toBeTruthy();
     const denied = (await surface.checkIn({ strategyId: b.id, krId: b.objectives[0].keyResults[0].id, value: 3 })) as CheckInOut;
     expect(denied.checkIn, 'org-A-only run wrote a check-in into org B').toBeNull();
+    expect(denied.reason).toBe('not_found');
   });
 
   it('MATCHED CONTROL — an actorless (scheduled) run keeps the tenant-trusted shared view', async () => {
@@ -263,6 +274,9 @@ describe('ADR 0845 D2 — the approval binds to the content shown, at the decide
       await updateStrategy(appr.tenantId, s.id, { objectives: [{ title: 'Swapped in', keyResults: [] }] }, 'test');
       const claim = await owner.post(`${APPROVALS}/${appr.approvalId}/claim`);
       expect(claim.status, JSON.stringify(claim.body)).toBe(409);
+      // The pre-CAS binding check's own code: the CAS precondition also answers 409 but
+      // re-opens the card, and the legacy arm answers `unbound_legacy`.
+      expect(JSON.stringify(claim.body)).toContain('content_changed');
       expect((await owner.get(`${S}/${s.id}`)).body.status, 'unseen objectives went live').toBe('draft');
       expect(await pendingActivation(owner, s.id), 'the stale card stays open').toBeUndefined();
     });
@@ -471,6 +485,7 @@ describe('ADR 0845 D8 / STR3CD-6 — a metric source must be an org the writer c
     const kr = (src: string) => ({ title: 'Pipeline', measure: { kind: 'currency', source: { kind: 'crm-deal-total', orgId: src } } });
     const denied = await m.post(S, { orgId: orgA, title: 'Leak', objectives: [{ title: 'o', keyResults: [kr(orgB)] }] });
     expect(denied.status, 'org-B data wired into an org-A KR by someone who cannot read B').toBe(403);
+    expect(JSON.stringify(denied.body), 'refused for the wrong reason').toContain('metric source must be an organization you can read');
     const own = await m.post(S, { orgId: orgA, title: 'Own', objectives: [{ title: 'o', keyResults: [kr(orgA)] }] });
     expect(own.status, JSON.stringify(own.body)).toBe(201);
     const byOwner = await owner.post(S, { orgId: orgA, title: 'Cross', objectives: [{ title: 'o', keyResults: [kr(orgB)] }] });

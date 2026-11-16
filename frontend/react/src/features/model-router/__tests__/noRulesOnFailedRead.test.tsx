@@ -22,10 +22,11 @@
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act } from '@testing-library/react';
-import type { StoredRouterConfig } from '../modelRouterClient.js';
+import type { RouterConfigView, StoredRouterConfig, ModelRouterConfig } from '../modelRouterClient.js';
 
 const { getRouterConfig, setRouterConfig } = vi.hoisted(() => ({
-  getRouterConfig: vi.fn(), setRouterConfig: vi.fn(),
+  getRouterConfig: vi.fn<() => Promise<RouterConfigView>>(),
+  setRouterConfig: vi.fn<(cfg: ModelRouterConfig) => Promise<StoredRouterConfig>>(),
 }));
 vi.mock('../modelRouterClient.js', async (orig) => ({
   ...(await orig<typeof import('../modelRouterClient.js')>()),
@@ -39,12 +40,16 @@ const NO_RULES: StoredRouterConfig = {
   config: { rules: [], fallback: { provider: 'openai', model: 'gpt-5.5' } },
 };
 
-/** Render and wait until the config read was issued and settled (not one fixed
- *  flush: the pre-load page ALSO shows "No rules", so a case must prove the read
- *  arrived before trusting that line). */
+const ZERO_RULES_READ: RouterConfigView = { stored: NO_RULES, canManage: true };
+
+/** Render and wait until the config read SETTLED. Before it settles the page is
+ *  a skeleton with no Rules section, so the section's heading appearing is the
+ *  settle signal for both the success and the failure branch; every assertion
+ *  after it is synchronous and fails on the value, not on a timeout. */
 const mount = async (): Promise<void> => {
   render(<ModelRouterPage />);
-  await vi.waitFor(() => expect(getRouterConfig).toHaveBeenCalled());
+  await vi.waitFor(() => expect(getRouterConfig).toHaveBeenCalledTimes(1));
+  await screen.findByRole('heading', { name: 'Rules, checked in order' });
   await act(async () => {});
 };
 
@@ -55,7 +60,9 @@ const NO_RULES_LINE = /No rules yet\. Until you add one, every message uses its 
 
 afterEach(cleanup);
 beforeEach(() => {
-  vi.clearAllMocks();
+  // mockReset, not clearAllMocks: each case sets its own read outcome.
+  getRouterConfig.mockReset();
+  setRouterConfig.mockReset();
   setRouterConfig.mockResolvedValue(NO_RULES);
 });
 
@@ -65,21 +72,23 @@ describe('MR-R2-1 — "no rules" is a claim, and a failed read may not make it',
     await mount();
 
     // The honest signal stays — the guard sentence specifically.
-    expect(await screen.findByText(/Editing is disabled because the current routing config could not be read/)).toBeTruthy();
+    expect(screen.getByText(/Editing is disabled because the current routing config could not be read/)).toBeTruthy();
     // THE DEFECT: this sentence rendered underneath that warning.
     expect(screen.queryByText(NO_RULES_LINE)).toBeNull();
   });
 
   it('read SUCCEEDS with zero rules: the claim is TRUE and survives (other polarity)', async () => {
-    getRouterConfig.mockResolvedValue({ stored: NO_RULES, canManage: true });
+    getRouterConfig.mockResolvedValue(ZERO_RULES_READ);
     await mount();
 
-    // The "not configured" chip goes away only once a non-null read LANDS, so this
-    // proves the line below reflects the read and not the pre-load state.
-    await vi.waitFor(() => expect(screen.queryByText('not configured')).toBeNull());
-    expect(screen.getByText(NO_RULES_LINE)).toBeTruthy();
+    // The read landed with a stored config: no "not configured" chip, and the
+    // zero-rule sentence is the Rules section's own text.
+    expect(screen.queryByText('not configured')).toBeNull();
+    const section = document.querySelector('section[aria-labelledby="mr-rules-h"]');
+    expect(section?.textContent).toMatch(NO_RULES_LINE);
     // Nothing failed, so nothing may say it did.
     expect(screen.queryByText(/rules could not be read/i)).toBeNull();
+    expect(screen.queryByText(/Editing is disabled because/)).toBeNull();
   });
 
   it('the failed read leaves no BLANK section — the heading is explained', async () => {
@@ -91,10 +100,9 @@ describe('MR-R2-1 — "no rules" is a claim, and a failed read may not make it',
     // CreatorInsightsPage: a failed read gets a sentence, not a blank.
     getRouterConfig.mockRejectedValue(new Error('503 upstream'));
     await mount();
-    expect(await screen.findByText(/rules could not be read/i)).toBeTruthy();
 
     const section = document.querySelector('section[aria-labelledby="mr-rules-h"]');
     expect(section).not.toBeNull();
-    expect(section?.textContent).toMatch(/could not be read/i);
+    expect(section?.textContent).toMatch(/The current rules could not be read, so what routing is doing right now is unknown\./);
   });
 });

@@ -23,6 +23,9 @@
  * (`-s3b-cap-declared-r2`), the buffer check removed (`-s3b-cap-buffer`), the
  * content-type dropped (`-s3b-content-type`), the boot guard removed
  * (`-s3b-boot-guard`), and the adapter left unregistered (`-s3b-register-r2`).
+ * Re-graded in wave 114: also red when `put` drops the caller's AbortSignal
+ * (ADR 0951 P2.5) or the presigned URL is signed for a TTL other than the one
+ * requested (`X-Amz-Expires`).
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import type { BlobSurface } from '../src/host/inMemorySurfaces.js';
@@ -111,7 +114,10 @@ describe('S3 blob surface', () => {
     await blob.put({ key: 'real', contentBase64: Buffer.from('x').toString('base64') });
     const pre = await blob.presign({ key: 'real', expiresInSeconds: 120 });
     expect(pre.url).toMatch(/X-Amz-Signature=[0-9a-f]{64}/);
-    expect(pre.url).toContain('/test-bucket/tenants/t1/real');
+    const signed = new URL(String(pre.url));
+    expect(signed.origin + signed.pathname).toBe('http://localhost:9000/test-bucket/tenants/t1/real');
+    // The TTL the URL is SIGNED for, not only the one the result reports.
+    expect(signed.searchParams.get('X-Amz-Expires')).toBe('120');
     expect(pre.expiresInSeconds).toBe(120);
     expect(pre.expiresAtMs).toBe(new Date('2024-01-01T00:00:00Z').getTime() + 120_000);
   });

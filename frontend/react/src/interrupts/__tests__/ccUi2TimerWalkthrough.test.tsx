@@ -9,7 +9,8 @@
  *
  * Pins: a timer shows when it resumes (absolute `until`, or createdAt + seconds);
  * a walkthrough/tour step points to Guided walkthroughs; neither shows the
- * "update the app" fallback; an unknown kind still does (control). Provenance
+ * "update the app" fallback; an unknown kind still does, without naming the
+ * kind (control, ADR 1125 D1). Provenance
  * labels an open timer as waiting on a timer, an open approval as awaiting human.
  *
  * Red when: the two RenderInterrupt cases or the provenance timer branch are removed.
@@ -51,7 +52,10 @@ describe('CC-UI-2 — timer and walkthrough-step interrupts', () => {
 
   it('control: an unknown kind still shows the generic fallback', () => {
     renderIt(mk('something-new', {}));
-    expect(screen.getByRole('status').textContent).toMatch(/something-new/);
+    const text = screen.getByRole('status').textContent ?? '';
+    // ADR 1125 D1 — the fallback tells the person what to do, and never names the kind.
+    expect(text).toMatch(/update the app/i);
+    expect(text).not.toMatch(/something-new/);
   });
 });
 

@@ -8,11 +8,14 @@
  * - Everything else is `coverage.unattributed` — never dropped silently, never
  *   read from client message meta.
  *
- * Sabotage witnesses: skipping the legacy lookup reds "a legacy row…"; dropping the
- * conversation check in `resolveRatingAttribution` reds "…another conversation";
- * replacing the bound-run arm with `true` reds "a run bound WITHOUT a session
- * stamp…"; dropping the `attributionChecked` filter reds "…never looked up again";
- * not counting unattributed rows reds the coverage case.
+ * Sabotage witnesses (grade-tests wave 111 g1, `w111g1-lbs-*`): skipping the legacy
+ * lookup (lookup) reds "a legacy row…" and the bound-run case; dropping the
+ * conversation check in `resolveRatingAttribution` (conv) reds "…another
+ * conversation"; replacing the bound-run arm with `true` (bound) reds "a run bound
+ * WITHOUT a session stamp…"; dropping the `attributionChecked` filter (checked) reds
+ * "…never looked up again"; not counting unattributed rows (count) reds the coverage
+ * cases; a model-blind stamp read (stamp) reds the ranking case; an unscoped
+ * feedback scan (tenant) reds the no-feedback tenant case.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -37,8 +40,9 @@ beforeAll(async () => {
 describe('buildTenantLeaderboard', () => {
   it('ranks stamped ratings by model and counts the unattributable one', async () => {
     const { leaderboard, coverage } = await buildTenantLeaderboard(T);
-    expect(leaderboard.map((r) => r.model)).toEqual(['model-A', 'model-B']);
+    expect(leaderboard.map((r) => r.key)).toEqual(['openai/model-A', 'openai/model-B']);
     expect(leaderboard[0]).toMatchObject({ up: 2, down: 0, raters: 2 });
+    expect(leaderboard[1]).toMatchObject({ up: 0, down: 1, raters: 1 });
     expect(coverage).toEqual({ attributed: 3, unattributed: 1 });
   });
 

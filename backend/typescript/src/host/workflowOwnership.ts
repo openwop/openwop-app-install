@@ -24,6 +24,7 @@
 
 import { DurableCollection, isHostExtPersistenceInitialized } from './hostExtPersistence.js';
 import { createLogger } from '../observability/logger.js';
+import { OpenwopError } from '../types.js';
 import { getRegisteredWorkflowAsync, getRegisteredWorkflow } from './workflowsRegistry.js';
 import { registerCredentialRefConsumer } from './credentialRefRegistry.js';
 // NOTE: this is a CYCLE — `chainBackedWorkflows` imports `recordOwnership` from here.
@@ -74,6 +75,11 @@ export interface WorkflowOwnershipRecord {
    *  the workflows (and through them the runs) it created for one subject.
    *  STICKY like `authoredVia`: a later save omits it and MUST NOT erase it. */
   subject?: string;
+  /** ADR 1132 — the CLIENT org this definition is for (a non-root org of the
+   *  tenant). Set by the instantiate lane, or once by a root admin (D6).
+   *  STICKY and SET-ONCE: a later save omits it and MUST NOT erase it, and no
+   *  path changes it. Read through `host/workflowClientAccess.ts` only. */
+  clientOrgId?: string;
   /** ADR 0770 D3 — for a sub-chain child co-registered by `from-chain`: the
    *  revision hash of the definition the HOST minted. A later instantiation
    *  compares the head against it — equal ⇒ pristine, safe to refresh with a
@@ -111,6 +117,9 @@ export interface OwnershipMeta {
   forkedFrom?: string;
   /** ADR 0913 — set by `from-chain` when the caller names a subject; omitted meta preserves it. */
   subject?: string;
+  /** ADR 1132 — set by the instantiate lane; omitted meta preserves it, and an
+   *  existing stamp is never replaced. */
+  clientOrgId?: string;
 }
 
 const store = new DurableCollection<WorkflowOwnershipRecord>(
@@ -168,6 +177,10 @@ export async function recordOwnership(
       ...((meta.subject ?? existing?.subject) !== undefined
         ? { subject: meta.subject ?? existing?.subject }
         : {}),
+      // ADR 1132 — set-once: an existing stamp wins over anything a caller passes.
+      ...((existing?.clientOrgId ?? meta.clientOrgId) !== undefined
+        ? { clientOrgId: existing?.clientOrgId ?? meta.clientOrgId }
+        : {}),
       ...(existing?.forkedTo !== undefined ? { forkedTo: existing.forkedTo } : {}),
       ...(existing?.repointPending !== undefined ? { repointPending: existing.repointPending } : {}),
       nodeCount: meta.nodeCount,
@@ -198,6 +211,9 @@ export async function recordOwnership(
       : {}),
     ...((meta.subject ?? existing?.subject) !== undefined
       ? { subject: meta.subject ?? existing?.subject }
+      : {}),
+    ...((existing?.clientOrgId ?? meta.clientOrgId) !== undefined
+      ? { clientOrgId: existing?.clientOrgId ?? meta.clientOrgId }
       : {}),
     ...(existing?.forkedTo !== undefined ? { forkedTo: existing.forkedTo } : {}),
     ...(existing?.repointPending !== undefined ? { repointPending: existing.repointPending } : {}),
@@ -266,6 +282,19 @@ export async function setRepointPending(tenantId: string, workflowId: string, pe
 }
 
 /** The workflows owned by one tenant (newest first) — list-metadata only. */
+/** ADR 1132 D6 — stamp an EXISTING, unstamped ownership row with its client,
+ *  once (compare-and-swap). `missing` when the tenant owns no such workflow;
+ *  `already` when it carries a stamp (the same org or another: never replaced). */
+export async function stampOwnershipClientOnce(tenantId: string, workflowId: string, clientOrgId: string): Promise<'stamped' | 'missing' | 'already'> {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const existing = await store.get(ownKey(tenantId, workflowId));
+    if (!existing) return 'missing';
+    if (existing.clientOrgId !== undefined) return 'already';
+    if (await store.compareAndSwap(existing, { ...existing, clientOrgId })) return 'stamped';
+  }
+  throw new OpenwopError('conflict', 'The workflow changed while it was being stamped; try again.', 409, { workflowId });
+}
+
 export async function listOwned(tenantId: string): Promise<WorkflowOwnershipRecord[]> {
   const rows = await store.listByPrefix(tenantPrefix(tenantId));
   return rows.sort((a, b) => b.createdAt.localeCompare(a.createdAt));

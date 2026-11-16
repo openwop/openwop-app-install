@@ -90,6 +90,23 @@ function annotateCacheUsage(usage: { cachedReadTokens?: number; cacheWriteTokens
   });
 }
 
+/**
+ * CC-STRAT-2 — the host's one-line account of where a `workflow_run` turn came
+ * from, placed OUTSIDE the digest's fence. Host-authored and closed-vocabulary:
+ * it reads only who the turn names, never run-derived text, so it cannot carry
+ * an injection. A tool-dispatched run names the agent that started it
+ * (`buildRunDispatchTurns`); a `/slug` session run is a host pseudo-turn with no
+ * agent (`mergeSessionRunTurns`).
+ */
+export function runOriginNote(turn: ConversationTurn, answeringAgentId: string | undefined): string {
+  const starter = turn.agent?.agentId;
+  if (starter && answeringAgentId && starter === answeringAgentId) {
+    return '[Host note — you started this run with a tool call earlier in this conversation. The host read its status for you; nobody pasted it in.]';
+  }
+  if (starter) return '[Host note — another agent in this conversation started this run with a tool call. The host read its status.]';
+  return '[Host note — this run was started from this chat (a workflow the user ran). The host read its status.]';
+}
+
 /** Build the provider messages: the answering agent's scaffold as the single
  *  system message, then the prior turns. A prior `agent` turn written by a
  *  DIFFERENT agent than the one now answering is narrative-cast `[Persona]: …`
@@ -118,7 +135,11 @@ export function turnsToMessages(
     // per-prompt cap, or no resolver) ⇒ say it was not re-read; never guess a status.
     const runRef = workflowRunRefOf(t);
     if (runRef) {
-      const text = runDigestById?.get(runRef.runId) ?? notReReadLine(runRef.runId);
+      // CC-STRAT-2 — say where the run came from, OUTSIDE any fence. Without it an
+      // agent read its own tool-started run as an anonymous fenced block with no
+      // tool call to explain it, and told the user it "was pasted into your
+      // messages". Host-authored and closed-vocabulary: no run-derived text here.
+      const text = `${runOriginNote(t, answeringAgentId)}\n${runDigestById?.get(runRef.runId) ?? notReReadLine(runRef.runId)}`;
       // A run the user started BEFORE their first message (a `/slug` run on a fresh
       // chat) would otherwise open the transcript with an assistant message, which
       // some providers reject. Before any user turn, carry it as a user-role HOST

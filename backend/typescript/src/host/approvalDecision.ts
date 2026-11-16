@@ -82,6 +82,9 @@ export interface ApprovalDecisionCtx {
    *  org-scoped decision matches the member row however it is keyed. Absent ⇒
    *  `[decidedBy]`. */
   decidedBySpellings?: string[];
+  /** The sole-admin self-approval ADR (D1) — set by the decide routes from the request's
+   *  auth Subject only (`isHumanSignInSubject(requestSubjectV2(req))`). */
+  decidedByHumanSession?: boolean;
   /** UX_UPGRADE-assistant R2 — the two REQUEST-level facts a kind's eligibility
    *  check cannot derive from `(tenantId, decidedBy)`, threaded from the HTTP
    *  boundary the same way `decidedBySuperadmin` is:
@@ -585,6 +588,7 @@ export async function claimApproval(
     isOperator: ctx.decidedByWildcardOperator === true,
     isPersonalOwner: ctx.decidedByPersonalOwner === true,
     ...(ctx.decidedBySpellings ? { spellings: ctx.decidedBySpellings } : {}),
+    ...(ctx.decidedByHumanSession ? { humanSession: true } : {}),
     outcome: 'approved',
   });
 
@@ -835,6 +839,7 @@ export async function rejectApproval(
     isOperator: ctx.decidedByWildcardOperator === true,
     isPersonalOwner: ctx.decidedByPersonalOwner === true,
     ...(ctx.decidedBySpellings ? { spellings: ctx.decidedBySpellings } : {}),
+    ...(ctx.decidedByHumanSession ? { humanSession: true } : {}),
     outcome: 'rejected',
   });
 

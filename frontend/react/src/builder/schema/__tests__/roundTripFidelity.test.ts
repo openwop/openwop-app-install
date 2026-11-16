@@ -22,6 +22,12 @@
  * fields on POST and `serialize` omits the display name by design, so the
  * literal identity can never hold and asserting it would force the test to be
  * weakened later.
+ *
+ * ADR 1005 adds the RFC 0082 §B node `agent` binding to the carried fields
+ * (dropping it on either side, or inventing an empty one, reds its case).
+ * `inputs` is emitted by TWO identical spreads in `serialize.ts` and read by
+ * TWO in `deserialize.ts` (TST-NZX-1), so an edit that removes one copy cannot
+ * red the inputs cases: only removing both copies in one file does.
  */
 import { describe, it, expect } from 'vitest';
 import { serializeWorkflow } from '../serialize.js';
@@ -389,7 +395,8 @@ describe('ADR 0524 Phase E — an edited preset input survives serialize→deser
     // The ADR 0440 §Correction above exists because this fixture ONCE carried no
     // `inputs` at all, which made the fixed-point assertion unable to observe a
     // deletion. If that ever regresses, every assertion below is vacuous.
-    expect(inputsById(save(open(STORED_WALKTHROUGH))).t1).toBeTruthy();
+    expect(STORED_WALKTHROUGH.nodes.find((n) => n.nodeId === 't1')?.inputs).toEqual({ subject: 'a pinned input the round-trip must not eat' });
+    expect(inputsById(save(open(STORED_WALKTHROUGH))).t1).toEqual({ subject: 'a pinned input the round-trip must not eat' });
   });
 
   it('an edited value reaches the persisted definition verbatim', () => {

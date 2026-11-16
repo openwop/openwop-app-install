@@ -59,8 +59,11 @@ function envKeyIndex(): EnvKeyIndex {
  * key's first 8 raw characters) used to match when exactly one configured key
  * had that prefix. That rule is deleted: it let a same-prefix rotation hand the
  * old key's records to the new one. A legacy id now matches nothing (fails
- * closed). Stored legacy ids are rewritten by the `legacy-bearer-id-rewrite`
- * job (`host/legacyBearerIdRewrite.ts`), which openwop-dev ran on 2026-11-12.
+ * closed). Stored legacy ids were rewritten by the one-time
+ * `legacy-bearer-id-rewrite` background job, which openwop-dev ran on
+ * 2026-11-12. Release 0.14.0 was the last to carry it; the job was removed
+ * after that (CHAN-F18), so an install upgrading from before 0.14.0 runs it on
+ * 0.14.0 first.
  */
 export function isConfiguredEnvKeyIssuer(issuer: string, tenantId?: string): boolean {
   if (!NEW_FORM.test(issuer)) return false;

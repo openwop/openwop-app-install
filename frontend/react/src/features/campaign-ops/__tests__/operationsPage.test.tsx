@@ -9,7 +9,15 @@
  *   - the change is shown before → after, with step reasons in plain words;
  *   - a failed clients read is said, never shown as "no clients";
  *   - ADR 0924 D5: under client approval the in-review card sends links instead of
- *     approving; the approvers panel shows only while the portal is on.
+ *     approving; the approvers panel shows only while the portal is on;
+ *   - ADR 0962 D7: the outside-agents level is staged behind Apply, saves once, is
+ *     dropped on a client switch, and is never shown to a non-admin;
+ *   - ADR 0943 P4: the Team view is not loaded until its tab is opened;
+ *   - ADR 0926 (identity refresh, 5e4ed736c): a workspace change clears the old
+ *     workspace's data at once, and no late answer for the old workspace (its
+ *     clients, its org lists, a pending submit's "Sent.") paints the new one, even
+ *     when the org ids match. A not-enabled answer recovers on the auth signal and
+ *     on Try again.
  *
  * Sabotage-witnessed (wave 55/56 probes, each red here): the mode switch shown
  * to non-admins; the banner shown for a live client; a failed read rendered as
@@ -17,6 +25,13 @@
  * set's id approved instead of its hash; the server's words replaced by our
  * fallback on a 403 or on a 409; unknown step reasons not mapped; splitChange's
  * prefix scan disabled, or its suffix scan allowed to overlap the prefix.
+ * Wave 111 adds: each Outside-agents change saving at once, Apply's value, the
+ * ClientBar remount key, the admin check on the agents control; the default view,
+ * and an eagerly mounted Team panel; the portal flag; the client-policy switch to
+ * Send to client; the auth listener's reload and its `setClients(null)`; the
+ * load's identity-generation check; clientStatus's generation check; Try again.
+ * A late old-workspace clients answer is held by TWO checks (the effect's
+ * `cancelled` flag and the identity generation); the probes break both at once.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, render as rtlRender, cleanup, screen, fireEvent, waitFor, within } from '@testing-library/react';
@@ -119,8 +134,13 @@ describe('OperationsPage', () => {
   it('the Team tab loads the client team on demand (ADR 0943 P4)', async () => {
     h.getTeam.mockResolvedValue({ canEdit: false, evals: { available: true }, members: [] });
     render(<OperationsPage />);
+    // Settle the Requests view first (an empty check right after render ran
+    // before the page had loaded anything, so it could not fail). Then load the
+    // Team chunk and drain, so a Team panel mounted early would have asked.
+    await screen.findByLabelText('Home page');
+    await act(async () => { await import('../TeamPanel.js'); await new Promise((r) => setTimeout(r, 0)); });
     expect(h.getTeam).not.toHaveBeenCalled();
-    fireEvent.click(await screen.findByRole('tab', { name: 'Team' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'Team' }));
     expect(await screen.findByText('Campaign team for Acme')).toBeTruthy();
     expect(h.getTeam).toHaveBeenCalledWith('o1');
   });
@@ -206,6 +226,8 @@ describe('helpers', () => {
       render(<OperationsPage />);
       await screen.findByRole('button', { name: 'Switch back to preview' });
       await waitFor(() => expect(h.listApprovers).toHaveBeenCalledWith('o1'));
+      // The off state renders nothing, so settle the approvers read itself first.
+      await act(async () => { await h.listApprovers.mock.results[0]?.value; });
       expect(screen.queryByText('Client approvers')).toBeNull();
     });
 
@@ -291,7 +313,7 @@ describe('Operations identity refresh', () => {
 });
 
 describe('Operations explicit recovery and stale action status', () => {
-  it('retries a transient not-enabled read without changing workspace settings', async () => {
+  it('Try again re-reads a transient not-enabled answer and shows the real client list', async () => {
     h.listClients.mockRejectedValueOnce(new CampaignOpsError('Campaign operations is not enabled for this tenant.', 404)).mockResolvedValueOnce({ clients: [], agencyAdmin: false });
     render(<OperationsPage />);
     await screen.findByText('Operations is not enabled');

@@ -126,10 +126,17 @@ describe('ADR 0440 — no shipped pack node carries a field the validator drops'
     // CORRECTED 2026-10-30 (ADR 1005 D5): `agent` is KEPT now (RFC 0082 channel
     // binding), validated; the ADR 0440 deferral stands for the rest.
     expect(DROPPED_BY_VALIDATOR).not.toContain('agent');
+    // The derivation reads a field the validator THROWS on as kept, and the `{}`
+    // dummy is refused (`agentId is required`), so the line above would still hold
+    // for a validator that checked `agent` and then dropped it. Assert the keep
+    // itself with a valid ref.
+    const withAgent = validateWorkflowDefinition({ workflowId: 'tripwire.agent', nodes: [{ nodeId: 'n', typeId: 'core.noop', agent: { agentId: 'tripwire.agent' } }], edges: [] });
+    expect(withAgent.nodes[0]?.agent).toEqual({ agentId: 'tripwire.agent' });
     expect(DROPPED_BY_VALIDATOR).toContain('credentialsRef');
     expect(DROPPED_BY_VALIDATOR).not.toContain('config');
-    // MEASURED at 19d13e682: the ten fields the header names (not pinned: a widened
-    // validator is meant to shrink this list by itself).
+    // MEASURED at f85608fd55 (wave 114): the nine fields the header names (ten at
+    // 19d13e682, before ADR 1005 D5 kept `agent`). Not pinned: a widened validator
+    // is meant to shrink this list by itself.
     expect(DROPPED_BY_VALIDATOR.length).toBeGreaterThan(1);
   });
 

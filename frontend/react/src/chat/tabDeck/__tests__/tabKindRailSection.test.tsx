@@ -9,6 +9,9 @@
  *   - `focusTab` focuses an existing tab; `openTabIds` lists this kind's tabs.
  * And the layering it relies on: core `chat/` never imports the excludable
  * claude-code feature, and the deck + rail import no feature at all.
+ * Breaks if: the rail drops the visibility filter or the section slot, the seed
+ * runs after the open, the title or `openTabIds` is not passed, `focusTab` is
+ * not wired, or a chat/ file gains a feature import.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, fireEvent, act, cleanup } from '@testing-library/react';
@@ -20,7 +23,9 @@ import type { UseChatSessionsResult } from '../../hooks/useChatSessions.js';
 import type { ChatSessionHeader } from '../../../client/chatSessionsClient.js';
 import type { BYOKActiveConfig } from '../../../byok/lib/useBYOKConfig.js';
 
-// ADR 0978 D4 — the deck resolves the active workspace before it restores.
+// ADR 0978 D4 — a SIGNED-IN deck resolves the active workspace before it restores.
+// This file renders signed out (`useAuth` → no user), so the deck skips that read;
+// the stub stays so a signed-in fixture can never reach the live client.
 vi.mock('../../../client/workspaceClient.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../client/workspaceClient.js')>()),
   listMyWorkspaces: async () => ({ workspaces: [], active: 'ws-test', personal: 'ws-test' }),
@@ -108,6 +113,9 @@ async function renderDeck(): Promise<void> {
 describe('deck tab kind rail sections', () => {
   it('renders nothing for a kind whose feature is NOT visible', async () => {
     await renderDeck();
+    // Positive control: the rail itself rendered, so the absence below is the
+    // visibility rule and not a deck that never got that far.
+    expect(document.querySelector('.conversations-rail')).not.toBeNull();
     expect(screen.queryByRole('region', { name: 'Fake tools' })).toBeNull();
     expect(screen.queryByText('open seeded')).toBeNull();
   });

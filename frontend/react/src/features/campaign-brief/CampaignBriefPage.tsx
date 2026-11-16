@@ -21,6 +21,7 @@ import { Modal } from '../../ui/Modal.js';
 import { ConfirmDialog } from '../../ui/ConfirmDialog.js';
 import { TextField, TextareaField, SelectField, CheckboxField } from '../../ui/Field.js';
 import { Tabs, TabPanel, useUrlTab } from '../../ui/Tabs.js';
+import { useHub } from '../../chrome/hubContext.js';
 import { IntelWorkspace, type StrategistIntent } from './IntelWorkspace.js';
 import { stageComposerDraft } from '../../chat/composerSeed.js';
 import { BriefKnowledgeField } from './BriefKnowledgeField.js';
@@ -55,6 +56,9 @@ function ClientBrandSelect({ t, brands, orgId, brandId, onChange }: {
   </>;
 }
 
+/** CC-BRIEF-2: the server's TEXT_MAX for messaging prose (briefService.ts), so the input stops where the server would refuse. */
+const MESSAGING_PROSE_MAX = 2000;
+
 const splitLines = (s: string): string[] => s.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
 const joinLines = (a: string[]): string => a.join('\n');
 
@@ -62,7 +66,12 @@ export function CampaignBriefPage(): JSX.Element {
   const { t } = useTranslation('campaign-brief');
   // CMPUX-14: shared <Tabs> + URL-bound tab (deep-linkable) — was a hand-rolled
   // roving tablist without tab↔panel wiring.
-  const [tab, setTab] = useUrlTab<'briefs' | 'personas'>('tab', ['briefs', 'personas'], 'briefs');
+  // CC-HUB-1: inside the Campaign Studio hub, `?tab` is the HUB's tab (it names
+  // this page, `campaign-brief`). Writing `tab=personas` replaced it, so the hub
+  // fell back to its first tab and personas were unreachable. Embedded, this
+  // page's own tab rides `section`. Standalone, `?tab=personas` deep links still work.
+  const { embedded } = useHub();
+  const [tab, setTab] = useUrlTab<'briefs' | 'personas'>(embedded ? 'section' : 'tab', ['briefs', 'personas'], 'briefs');
   // CBC-11: the brief detail replaces the page (Campaign Studio parity) — hide
   // the tab strip while a detail is open.
   const [detailOpen, setDetailOpen] = useState(false);
@@ -685,10 +694,10 @@ function BriefDetail({ t, brief, brands, brandsFailed, personas, personasReadFai
 
       <section className="surface-card u-mb-4" ref={sectionRefs.messaging} tabIndex={-1}>
         <h3 className="u-mt-0">{t('secMessaging')}</h3>
-        <TextareaField label={t('fieldValueProp')} value={valueProp} rows={2} onChange={(e) => setValueProp(e.target.value)} />
+        <TextareaField label={t('fieldValueProp')} value={valueProp} rows={2} maxLength={MESSAGING_PROSE_MAX} onChange={(e) => setValueProp(e.target.value)} />
         <TextareaField label={t('fieldProofPoints')} help={t('fieldProofPointsHelp')} value={proofPoints} rows={3} onChange={(e) => setProofPoints(e.target.value)} />
-        <TextField label={t('fieldCtaStrategy')} value={ctaStrategy} onChange={(e) => setCtaStrategy(e.target.value)} />
-        <TextField label={t('fieldToneOverride')} help={t('fieldToneOverrideHelp')} value={toneOverride} onChange={(e) => setToneOverride(e.target.value)} />
+        <TextField label={t('fieldCtaStrategy')} value={ctaStrategy} maxLength={MESSAGING_PROSE_MAX} onChange={(e) => setCtaStrategy(e.target.value)} />
+        <TextField label={t('fieldToneOverride')} help={t('fieldToneOverrideHelp')} value={toneOverride} maxLength={MESSAGING_PROSE_MAX} onChange={(e) => setToneOverride(e.target.value)} />
       </section>
 
       <section className="surface-card u-mb-4">

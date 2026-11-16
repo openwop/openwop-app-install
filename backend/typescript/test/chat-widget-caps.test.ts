@@ -1,13 +1,16 @@
 /**
  * ADR 0127 Phase 2c — public-widget abuse caps (+ ADR 0707 secure defaults, PUB-3
- * concurrency). Breaks if a visitor can exceed the per-session turn cap or the
- * per-day new-session cap, if an UNSET cap is unbounded, or if concurrent first
- * turns double-count a session.
+ * concurrency, ADR 1018 D4 day-slot claim and its turn ceiling). Breaks if a visitor
+ * can exceed the per-session turn cap or the per-day new-session cap, if an UNSET cap
+ * is unbounded, if a stored value, an explicit Infinity or the env default lifts turns
+ * per session above the 100-turn ceiling, if concurrent first turns of ONE session
+ * double-count it, or if concurrent first turns of DIFFERENT sessions overshoot the
+ * day cap (CW68WF-4).
  */
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
-import { checkWidgetTurn, MAX_TURNS_PER_SESSION } from '../src/features/chat-widget/capsTracker.js';
+import { checkWidgetTurn, MAX_TURNS_PER_SESSION, type CapDecision } from '../src/features/chat-widget/capsTracker.js';
 import type { WidgetConfig } from '../src/features/chat-widget/widgetService.js';
 
 function widget(id: string, caps: WidgetConfig['caps']): WidgetConfig {
@@ -89,11 +92,12 @@ describe('checkWidgetTurn', () => {
       (await import('../src/host/hostExtPersistence.js')).initHostExtPersistence(await (await import('../src/storage/index.js')).openStorage('memory://'));
       const fresh = await import('../src/features/chat-widget/capsTracker.js');
       // The default itself is held (the read clamp below would otherwise mask this one).
-      expect(fresh.DEFAULT_TURNS_PER_SESSION).toBe(fresh.MAX_TURNS_PER_SESSION);
+      // Literals, not the product constant: the ceiling is pinned at 100 above.
+      expect(fresh.DEFAULT_TURNS_PER_SESSION).toBe(100);
       const w = widget('w-env-ceiling', {});
       let allowed = 0;
-      for (let i = 0; i < fresh.MAX_TURNS_PER_SESSION + 3; i++) if ((await fresh.checkWidgetTurn(w, 's', '2026-06-28')).allowed) allowed += 1;
-      expect(allowed).toBe(fresh.MAX_TURNS_PER_SESSION);
+      for (let i = 0; i < 103; i++) if ((await fresh.checkWidgetTurn(w, 's', '2026-06-28')).allowed) allowed += 1;
+      expect(allowed).toBe(100);
     } finally {
       if (prev === undefined) delete process.env.OPENWOP_WIDGET_TURNS_DEFAULT_PER_SESSION; else process.env.OPENWOP_WIDGET_TURNS_DEFAULT_PER_SESSION = prev;
       vi.resetModules();
@@ -105,15 +109,11 @@ describe('checkWidgetTurn', () => {
     // limit. With the old `?? Infinity` that was true only of a CONFIGURED widget; this
     // pins it for the DEFAULT one, which is the configuration most widgets run.
     const w = widget('w3-rotate', {});
-    let allowed = 0;
-    let denied = 0;
-    for (let i = 0; i < 205; i++) {
-      const r = await checkWidgetTurn(w, `rotated-${i}`, '2026-06-26'); // a fresh session each time
-      if (r.allowed) allowed += 1; else { denied += 1; expect(r.reason).toBe('session_cap'); }
-    }
-    // EXACTLY the default (200), not merely "some" denial.
-    expect(allowed, 'the per-day session default admits exactly 200').toBe(200);
-    expect(denied, 'rotation runs into the per-day session default').toBe(5);
+    const results: CapDecision[] = [];
+    for (let i = 0; i < 205; i++) results.push(await checkWidgetTurn(w, `rotated-${i}`, '2026-06-26')); // a fresh session each time
+    // EXACTLY the default (200), not merely "some" denial — and the first 200 are the ones admitted.
+    expect(results.slice(0, 200).every((r) => r.allowed), 'the per-day session default admits exactly 200').toBe(true);
+    expect(results.slice(200), 'rotation runs into the per-day session default').toEqual(Array.from({ length: 5 }, () => ({ allowed: false, reason: 'session_cap' })));
   });
 
   it('PUB-3: concurrent first-turns of the SAME session count ONE session (no double-count)', async () => {

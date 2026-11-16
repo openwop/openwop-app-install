@@ -14,11 +14,20 @@
  * EMAIL to a real prospect.
  *
  * Two ways to satisfy this, both legitimate:
- *   - PROMPT-GUARDED: a downstream node's prompt names the `demo`/`stub` engine
- *     and refuses to treat those results as findings.
+ *   - PROMPT-GUARDED: a node DOWNSTREAM of the search (reachable over the chain's
+ *     edges) has a prompt that names the `demo`/`stub` engine and refuses to treat
+ *     those results as findings. A guard on a node the results never reach
+ *     guards nothing, so reachability is checked, not assumed (wave 116).
  *   - CODE-GUARDED: the chain feeds a persistence path that fails closed on
  *     non-durable engines (`engineIsDurable`), e.g. a feature's evidence dossier. This is
  *     the STRONGER form — it does not depend on a model obeying an instruction.
+ *     In openwop-app no feature declares a `webSearch.codeGuarded` row (the
+ *     KickTodo rows left with it, ADR 1031 P3), so that branch runs only in an
+ *     adopter tree that declares one (TST-OAC-1).
+ *
+ * Red when (wave 116 probes): a guarding prompt drops `'stub'`; the guarding
+ * node is cut off from the search node's edges; a search chain stops being
+ * found by the sweep.
  */
 import { describe, expect, it } from 'vitest';
 import { readdirSync, existsSync } from 'node:fs';
@@ -39,7 +48,26 @@ const CODE_GUARDED: Record<string, { reason: string; feederTypeId: string }> = {
 };
 
 interface ChainNode { id: string; typeId: string; config?: Record<string, unknown> }
-interface Chain { chainId: string; dag?: { nodes?: ChainNode[] } }
+interface ChainEdge { from: string; to: string }
+interface Chain { chainId: string; dag?: { nodes?: ChainNode[]; edges?: ChainEdge[] } }
+
+/** Node ids reachable over the chain's edges from any `core.web.search` node
+ *  (an edge end `draft.content` names node `draft`). The search node itself is
+ *  not counted: its own config is not the model that reads the results. */
+function downstreamOfSearch(chain: Chain): Set<string> {
+  const nodeOf = (ref: string): string => ref.split('.')[0] ?? ref;
+  const next = new Map<string, string[]>();
+  for (const e of chain.dag?.edges ?? []) next.set(nodeOf(e.from), [...(next.get(nodeOf(e.from)) ?? []), nodeOf(e.to)]);
+  const queue = (chain.dag?.nodes ?? []).filter((n) => n.typeId === 'core.web.search').map((n) => n.id);
+  const seen = new Set<string>();
+  while (queue.length > 0) {
+    const id = queue.shift() ?? '';
+    for (const to of next.get(id) ?? []) {
+      if (!seen.has(to)) { seen.add(to); queue.push(to); }
+    }
+  }
+  return seen;
+}
 
 function loadChains(): Array<{ pack: string; chain: Chain }> {
   const out: Array<{ pack: string; chain: Chain }> = [];
@@ -60,9 +88,10 @@ describe('chains consuming core.web.search handle the not-configured case', () =
   it('the sweep finds chains at all (guards against a silently-empty ratchet)', () => {
     // Without this, a broken path or a renamed node type would make every
     // assertion below vacuously pass.
-    // MEASURED 6 at 6a852d799: 4 host chains, all prompt-guarded (research.web-brief,
-    // outreach.researched-firsttouch, seo.keyword-brief, digest.topic-watch), plus
-    // each feature's declared code-guarded chains (ADR 1031 P2). The floor is the truth.
+    // MEASURED 4 at 63e4c73654 (wave 116): 4 host chains, all prompt-guarded
+    // (research.web-brief, outreach.researched-firsttouch, seo.keyword-brief,
+    // digest.topic-watch), plus each feature's declared code-guarded chains
+    // (ADR 1031 P2; zero declared in openwop-app). The floor is the truth.
     expect(searchChains.length).toBeGreaterThanOrEqual(4 + Object.keys(CODE_GUARDED).length);
   });
 
@@ -80,10 +109,13 @@ describe('chains consuming core.web.search handle the not-configured case', () =
         expect(engineIsDurable('stub'), 'stub results must never be durable evidence').toBe(false);
         return;
       }
-      // Prompt-guarded: some downstream node must name BOTH placeholder engines,
-      // so the model is told exactly what to look for.
-      const configs = (chain.dag?.nodes ?? []).map((n) => JSON.stringify(n.config ?? {}));
-      const guarded = configs.some((c) => c.includes("'demo'") && c.includes("'stub'"));
+      // Prompt-guarded: a node the search results REACH must name BOTH
+      // placeholder engines, so the model is told exactly what to look for.
+      const reached = downstreamOfSearch(chain);
+      const guarded = (chain.dag?.nodes ?? []).some((n) => {
+        const c = JSON.stringify(n.config ?? {});
+        return reached.has(n.id) && c.includes("'demo'") && c.includes("'stub'");
+      });
       expect(
         guarded,
         `Chain "${chainId}" feeds core.web.search results into its nodes without handling the `

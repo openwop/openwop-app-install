@@ -39,6 +39,7 @@ import { subjectScope, type Subject } from '../../host/subject.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { purgeSubjectDependents } from '../../host/subjectDependents.js';
 import { subjectKeyForms, ERASED_USER_REF } from '../../host/subjectErasureRedaction.js';
+import { invalidatePrivateProjects } from '../../host/runProjectAccess.js';
 
 
 const log = createLogger('features.projects');
@@ -106,6 +107,18 @@ export interface Project {
 }
 
 const PROJECT_ROLES: ProjectRole[] = ['lead', 'contributor', 'observer'];
+
+/** ADR 1137 D4 — the project roles a kanban card may be addressed to. An observer
+ *  can't write the board, so it can't claim; a client is never a member role
+ *  (ADR 1099 decides separately whether a client may be an assignee). */
+export const ADDRESSABLE_PROJECT_ROLES: readonly ProjectRole[] = ['lead', 'contributor'];
+
+/** ADR 1095 — a person's own role on a project, if they are a people-member. A
+ *  label, never a scope (ADR 0054 D2). The one lookup the single-project read's
+ *  `myRole` and the kanban role seam (ADR 1137 D4) share. */
+export function projectRoleOf(p: Pick<Project, 'members'>, userId: string): ProjectRole | undefined {
+  return (p.members ?? []).find((m) => m.ref === `user:${userId}`)?.role;
+}
 const MAX_MEMBERS = 100;
 
 /**
@@ -625,6 +638,7 @@ export async function setProjectVisibility(tenantId: string, projectId: string, 
   // and only when the value actually moved. Fault-isolated inside the seam: a
   // visibility flip must land even if a board is unreachable.
   if ((before.visibility ?? 'org') !== visibility) {
+    invalidatePrivateProjects(tenantId); // ADR 1133 — the run read gate's cache
     await notifyShareableKbSourceChanged(tenantId, before.orgId, 'project');
     const addedLead = (next.members ?? []).length > (before.members ?? []).length && actor !== undefined ? userMemberRef(actor) : undefined;
     await auditProjectAccess(tenantId, 'security.project.visibility-changed', {
@@ -640,6 +654,7 @@ export async function setProjectVisibility(tenantId: string, projectId: string, 
 export async function deleteProject(tenantId: string, id: string): Promise<{ deleted: boolean; memoryEntriesCleared: number; schedulesCleared: number; dependentsDeleted: Record<string, number> }> {
   const current = await getProject(tenantId, id);
   if (!current) return { deleted: false, memoryEntriesCleared: 0, schedulesCleared: 0, dependentsDeleted: {} };
+  invalidatePrivateProjects(tenantId); // ADR 1133 — a deleted project is no longer private
   // `PRJWF-1` — assert the retention hold BEFORE anything is destroyed.
   //
   // This cascade destroys NINE kinds of durable state: the kanban board and its cards, every

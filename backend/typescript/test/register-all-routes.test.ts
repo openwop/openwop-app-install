@@ -1,24 +1,33 @@
 /**
- * Centralized-registration guard (white-label PRD §3).
+ * Centralized-registration guard (white-label PRD §3; ADR 0001 §1.2 / §2.2,
+ * introduced by #578).
  *
  * The CoLabCare fork shipped a route file that 404'd in production because
  * its `registerXRoutes(app)` call was forgotten in index.ts. This test makes
  * that bug impossible: every `register*Route(s)` export under `src/routes/`
- * MUST be referenced by `src/routes/registerAllRoutes.ts` (the one ordered
- * module list index.ts mounts). Add the module to the list — or, for a
- * deliberately unmounted module, add it to the documented allowlist below.
+ * MUST be CALLED by `src/routes/registerAllRoutes.ts` (the one ordered module
+ * list index.ts mounts) or by a feature module (ADR 0001 §2.2), and index.ts
+ * must mount that list exactly once and hand-mount nothing. Add the module to
+ * the list — or, for a deliberately unmounted module, add it to the documented
+ * allowlist below.
  *
- * "Referenced" means CALLED: `fn(` in code, after import statements and
- * comments are stripped. A plain substring check was satisfied by the IMPORT
- * line, so deleting the `registerHealthRoutes(…)` call itself stayed green
- * (8fw1g3-rr-call-removed, vacuous in round 1) — the exact CoLabCare bug. The
- * registrar count is floored at the measured truth so an empty scan cannot read
- * as clean. Sabotage-witnessed: the removed call (rr-call-removed-r2), a stray
- * hand-mount in index.ts (rr-stray), a new unmounted registrar (rr-unmounted-new).
+ * "Called" means: a binding IMPORTED FROM that routes/ module is invoked as
+ * `local(` in code, with comments and import statements stripped. Two weaker
+ * readings each passed a real omission: a plain substring check was satisfied
+ * by the import line (8fw1g3-rr-call-removed, vacuous), and a by-NAME call
+ * check is satisfied by a different function of the same name —
+ * `features/discovery/routes.ts` defines and calls its own
+ * `registerDiscoveryRoutes`, which would hide a dropped mount of
+ * `routes/discovery.ts`'s. Feature test files are not a mounting surface.
+ *
+ * Red when a registrar's call is removed or only commented out, when the call
+ * is bound to another module, when a new registrar is left unmounted, when
+ * index.ts hand-mounts a module, or when index.ts stops calling
+ * `registerAllRoutes(` (grade-tests w115 probes `w115g2-rr-*`).
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { stripComments } from './helpers/stripComments.js';
 
 const ROUTES_DIR = join(__dirname, '..', 'src', 'routes');
@@ -39,29 +48,47 @@ function tsFilesUnder(dir: string): string[] {
   return out;
 }
 
-/** The mounting surface: registerAllRoutes.ts PLUS every feature module
- *  (ADR §2.2 — a feature mounts its routes through its BackendFeature, which
- *  registerAllRoutes composes via registerBackendFeatures). A registrar
- *  referenced from either site counts as mounted. */
-function mountingSurface(): string {
-  let src = stripImportsAndComments(readFileSync(REGISTRAR, 'utf8'));
-  for (const file of tsFilesUnder(FEATURES_DIR)) src += '\n' + stripImportsAndComments(readFileSync(file, 'utf8'));
-  return src;
-}
-
-/** Code only: drop import/re-export statements (single- or multi-line), block
- *  comments and line comments, so a NAME that is merely imported or mentioned
- *  does not count as a mount. */
+/** Code only: comments (the shared token scanner, so a `/*` inside a string or a
+ *  line comment cannot swallow code), then import/re-export statements (single-
+ *  or multi-line), so a NAME that is merely imported or mentioned is not a call. */
 function stripImportsAndComments(src: string): string {
-  // Order matters: line comments go FIRST, so a `/*` inside one (a route glob in
-  // prose, e.g. "`/v1/content/*`") cannot open a block comment that swallows code.
-  // Block comments are stripped only where they open a line (JSDoc / banner style).
   return stripComments(src)
     .replace(/^\s*(?:import|export)\s[^;]*?\sfrom\s+['"][^'"]+['"];?/gm, '')
     .replace(/^\s*import\s+['"][^'"]+['"];?/gm, '');
 }
 
-/** Measured at 7321e3612: 88 `register*Route(s)` exports under src/routes/. */
+/** The mounting surface: registerAllRoutes.ts PLUS every non-test feature module
+ *  (ADR 0001 §2.2 — a feature mounts its routes through its BackendFeature, which
+ *  registerAllRoutes composes via registerBackendFeatures). Returns the registrars
+ *  it CALLS, keyed `<routes file>:<export name>`: a call counts only through a
+ *  value binding imported from that exact routes/ module (aliases followed). */
+function mountedRegistrars(): Set<string> {
+  const mounted = new Set<string>();
+  const surface = [
+    REGISTRAR,
+    ...tsFilesUnder(FEATURES_DIR).filter((f) => !f.includes('__tests__') && !f.endsWith('.test.ts')),
+  ];
+  for (const file of surface) {
+    const raw = readFileSync(file, 'utf8');
+    const code = stripComments(raw);
+    const body = stripImportsAndComments(raw);
+    for (const m of code.matchAll(/\bimport\s+(?!type\b)\{([^}]*)\}\s*from\s*['"](\.[^'"]+)['"]/g)) {
+      const target = resolve(dirname(file), m[2]!.replace(/\.js$/, '.ts'));
+      if (dirname(target) !== ROUTES_DIR) continue;
+      for (const part of m[1]!.split(',')) {
+        const spec = part.trim();
+        if (!spec || spec.startsWith('type ')) continue;
+        const [imported = '', alias] = spec.split(/\s+as\s+/).map((s) => s.trim());
+        const local = alias ?? imported;
+        if (new RegExp(`\\b${local}\\(`).test(body)) mounted.add(`${basename(target)}:${imported}`);
+      }
+    }
+  }
+  return mounted;
+}
+
+/** Measured at 7321e3612: 88 `register*Route(s)` exports under src/routes/;
+ *  91 at d5b98aafaa (w115). The floor is a liveness bound, not the ratchet. */
 const REGISTRAR_FLOOR = 86;
 
 /** Modules deliberately NOT mounted by registerAllRoutes (document why). */
@@ -71,7 +98,7 @@ const UNMOUNTED_ALLOWLIST = new Set<string>([
 
 describe('registerAllRoutes — every routes/ module is mounted', () => {
   it('lists every register* export from src/routes/', () => {
-    const registrarSource = mountingSurface();
+    const mounted = mountedRegistrars();
     const missing: string[] = [];
     let seen = 0;
     for (const file of readdirSync(ROUTES_DIR)) {
@@ -81,8 +108,8 @@ describe('registerAllRoutes — every routes/ module is mounted', () => {
         const fn = m[1]!;
         seen++;
         if (UNMOUNTED_ALLOWLIST.has(fn)) continue;
-        // A CALL site, not a mention: the import line and comments were stripped.
-        if (!new RegExp(`\\b${fn}\\(`).test(registrarSource)) missing.push(`${fn} (${file})`);
+        // A CALL of THIS module's export, not a mention and not a same-named function.
+        if (!mounted.has(`${file}:${fn}`)) missing.push(`${fn} (${file})`);
       }
     }
     expect(seen, 'the registrar scan found the routes/ exports').toBeGreaterThanOrEqual(REGISTRAR_FLOOR);
@@ -93,7 +120,7 @@ describe('registerAllRoutes — every routes/ module is mounted', () => {
   });
 
   it('index.ts mounts through registerAllRoutes only (no stray register calls)', () => {
-    const indexSource = readFileSync(join(__dirname, '..', 'src', 'index.ts'), 'utf8');
+    const indexSource = stripComments(readFileSync(join(__dirname, '..', 'src', 'index.ts'), 'utf8'));
     const strays = [...indexSource.matchAll(/\bregister\w+Routes?\(/g)]
       .map((m) => m[0])
       .filter((c) => c !== 'registerAllRoutes(');
@@ -101,5 +128,11 @@ describe('registerAllRoutes — every routes/ module is mounted', () => {
       strays,
       `index.ts must not hand-mount route modules — move these into routes/registerAllRoutes.ts: ${strays.join(', ')}`,
     ).toEqual([]);
+    // "Through registerAllRoutes": with no call at all there are no strays either,
+    // and nothing is mounted.
+    expect(
+      (indexSource.match(/\bregisterAllRoutes\(/g) ?? []).length,
+      'index.ts must mount the route list by calling registerAllRoutes( exactly once',
+    ).toBe(1);
   });
 });

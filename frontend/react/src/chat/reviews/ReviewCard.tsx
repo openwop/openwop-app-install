@@ -158,6 +158,10 @@ export function ReviewCard({ review, onDecide, onOpenArtifact, compact }: Props)
     // ADR 0862 — the namespace is loaded by the AssistantActionFields this card renders.
     if (reason === 'action_changed') return t('assistantAction:actionChanged');
     if (reason === 'content_hash_required') return t('assistantAction:cardOutOfDate');
+    // CC-GATE-2 (sole-admin self-approval ADR, D3) — the requester of an autonomy step cannot approve it
+    // themselves. The server says so with a typed reason; the generic 403 line told
+    // them to "ask an admin" for a permission they already had.
+    if (reason === 'autonomy_self_approval_refused') return t('reviewSelfApprovalRefused');
     return decideErrorMessage(t, err);
   }
 

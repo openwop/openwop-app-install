@@ -53,12 +53,15 @@ describe('KEYS-REF-1 — which provider a credential ref names', () => {
     expect(parseCredentialRef('my-key', PROVIDERS)).toEqual({ ref: 'my-key', providerId: null, label: null });
   });
 
-  it('only the web-search, subscription, managed and Challenge Factory refs are card-owned', () => {
+  it('only the web-search, subscription, managed and feature-declared refs are card-owned', () => {
     expect(['web-search', 'subscription:github.copilot', 'managed:openwop-free'].map((r) => isCardOwnedRef(r))).toEqual([true, true, true]);
-    // ADR 1031 P2 — a feature-owned card's prefix comes from the feature (KickTodo's
-    // Factory key: features/kicktodo/__tests__/featureHostDeclarations.test.ts).
+    // ADR 1031 P2 — a feature-owned card's prefix comes from the feature
+    // (`FrontendFeature.cardOwnedCredentialRefPrefixes`, features/registry.ts). The
+    // prefix is matched at the START of the ref only: a ref that merely CONTAINS it is
+    // an ordinary key and must stay listed, or a key would be counted and shown nowhere.
     expect(isCardOwnedRef('feature-card:x', ['feature-card:'])).toBe(true);
     expect(isCardOwnedRef('feature-card:x')).toBe(false);
+    expect(isCardOwnedRef('byok:feature-card:x', ['feature-card:'])).toBe(false);
     expect(['my-key', 'byok:minimax', 'byok:google', 'web-search-2'].map((r) => isCardOwnedRef(r))).toEqual([false, false, false, false]);
   });
 });

@@ -18,7 +18,8 @@ import { registerApprovalEligibility } from '../approvalService.js';
 import { isEligibleApprover } from '../approverResolution.js';
 import { canonicalDecider } from '../delegatedSubject.js';
 import type { Storage } from '../../storage/storage.js';
-import { isAutonomyRequester } from './selfApproval.js';
+import { isAutonomyRequester, soleAdminSelfApproval } from './selfApproval.js';
+import { policyApproverRefs } from '../approverResolution.js';
 import { approvalWaiterRunIds } from './waiters.js';
 
 export function registerAutonomySpendEligibility(storage: Pick<Storage, 'getRun'>): void {
@@ -48,7 +49,8 @@ function policyRowEligibility(storage: Pick<Storage, 'getRun'>, required: boolea
     if (!decidedBy) {
       throw new OpenwopError('forbidden_scope', 'This spend needs a named approver from the campaign\'s autonomy policy.', 403, { reason: 'autonomy_approver_required' });
     }
-    const decider = (await canonicalDecider(tenantId, decidedBy)) ?? decidedBy;
+    const voterId: string = decidedBy;
+    const decider = (await canonicalDecider(tenantId, voterId)) ?? voterId;
     const mine = new Set([decidedBy, decider, ...(opts?.spellings ?? [])]);
     const source = approval.autonomySourceRunId ? await storage.getRun(approval.autonomySourceRunId) : null;
     // A missing or cross-tenant origin cannot authorize spending. Legacy rows
@@ -59,13 +61,30 @@ function policyRowEligibility(storage: Pick<Storage, 'getRun'>, required: boolea
     }
     const voters = [...mine];
     let requested = source ? await isAutonomyRequester(source, voters) : false;
+    // Runs the escape must clear (their MCP / attended-fork floors). An unreadable
+    // waiter can never be cleared, so it pins the refusal.
+    const matchedRuns: Array<NonNullable<typeof source>> = source && requested ? [source] : [];
+    let unreadableWaiter = false;
     for (const runId of await approvalWaiterRunIds(tenantId, approval.approvalId)) {
       if (runId === approval.autonomySourceRunId) continue;
       const waiting = await storage.getRun(runId);
-      if (!waiting || waiting.tenantId !== tenantId || await isAutonomyRequester(waiting, voters)) requested = true;
+      if (!waiting || waiting.tenantId !== tenantId) { requested = true; unreadableWaiter = true; continue; }
+      if (await isAutonomyRequester(waiting, voters)) { requested = true; matchedRuns.push(waiting); }
     }
-    for (const requester of [...(approval.submitters ?? []), ...(approval.submitterCauses ?? [])]) {
+    const submitters = [...(approval.submitters ?? []), ...(approval.submitterCauses ?? [])];
+    for (const requester of submitters) {
       if (await isAutonomyRequester({ tenantId, metadata: { actingUserId: requester } }, voters)) requested = true;
+    }
+    // the sole-admin self-approval ADR (D1) — approving only; a reject by a requester keeps today's refusal.
+    if (requested && !unreadableWaiter && opts?.outcome === 'approved') {
+      const verdict = await soleAdminSelfApproval({
+        tenantId, ...(approval.orgId ? { orgId: approval.orgId } : {}), gateId: approval.approvalId, voter: voterId,
+        // Threaded from the decide route's auth Subject (`decidedByHumanSession`).
+        humanSession: opts.humanSession === true && opts.isOperator !== true,
+        runs: matchedRuns, submitters, refs: policyApproverRefs(policy),
+        quorum: (policy?.requiredApprovals ?? 1) > 1, surface: approval.kind ?? 'approval',
+      });
+      if (verdict.allowed) requested = false;
     }
     if (requested) {
       throw new OpenwopError('forbidden_scope', 'You requested this spend, so someone else has to decide it.', 403, { reason: 'autonomy_self_approval_refused' });

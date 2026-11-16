@@ -1,6 +1,6 @@
 {
   "name": "feature.documents.nodes",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "kind": "node",
   "description": "Documents & Templates feature node pack — read + agentic-write nodes over the ctx.features.documents surface. list-documents reads an org's documents; assemble renders a template into an augmentedPrompt; generate-from-template assembles → ctx.callAI → creates a document + immutable version with a deterministic run/node-derived document id and idempotency key (a resume/crash-replay of the same run converges on the same rows; a :fork mints a fresh runId and deliberately creates its own document — the fork-backstop posture). Output is validated against the template-owned outputSchema; when the template binds a registered host artifact type, a typed artifact.created run event is emitted (RFC 0071 / ADR 0055). generate-from-template and render are role:side-effect durable writers.",
   "author": "OpenWOP App",
@@ -78,6 +78,15 @@
       "version": "1.2.0",
       "label": "Documents: Render / Export",
       "description": "Renders a document's current version to one of seven formats (deterministic — no provider). Inputs: { orgId, documentId, format? } — format is one of: pdf (default), slides, sheet, docx, epub, odt, latex (ADR 0057 + ADR 0400). pdf/slides/sheet store durable Media library assets, idempotent per version+format — a re-render or replay converges on the SAME stored asset and token instead of minting duplicates or rewriting the immutable version's renderedMediaToken; docx/epub/odt/latex are REGENERABLE editable exports (latex = source-only .tex, no compile; math is faithful) stored as ~1-hour scratch Media (download-and-go — re-render to get a fresh link). Output: { versionId, format, renderedMediaToken, url, sizeBytes }. Fails typed: not_found (document), validation_error (unknown format, no content, >25 MiB export). Durable writer.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.documents.nodes.save-document",
+      "version": "1.0.0",
+      "label": "Documents: Save as document",
+      "description": "Saves text a step produced (for example an AI-written brief) as a DRAFT document via ctx.features.documents.createDraftDocument, with a deterministic run/node-derived document id and idempotency key, so a resume or replay converges on the same document and version. Inputs: { content, orgId, title?, kind? } (content may be an upstream { content } or { text } object). Output: { document, version }. Fails typed: org_required, empty_content, host_capability_missing. Durable writer (CC-SEO-2).",
       "category": "integration",
       "role": "side-effect",
       "capabilities": []

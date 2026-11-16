@@ -28,21 +28,24 @@ import { gateRequiresSession } from '../host/approvalGateDecide.js';
 import { gateApproverRefs, resolveNotificationRecipients } from '../host/approverResolution.js';
 import { resolveTenantWorkflow } from '../host/resolveLaunchDefinition.js';
 
-const KIND_LABEL: Record<InterruptRecord['kind'], string> = {
-  approval: 'Approval needed',
-  clarification: 'Clarification needed',
-  refinement: 'Refinement requested',
-  cancellation: 'Cancellation confirmation needed',
-  'external-event': 'Waiting on external event',
-  conversation: 'Conversation in progress',
-  // ADR 0267 — a timer self-resolves; it never emits a notification (guarded in
-  // suspendManager). Present only to keep the map total.
-  timer: 'Timed wait',
-  // ADR 0368 — the tour player resolves these live; suppressed like timer.
-  'tour-step': 'Tour step',
-  'walkthrough-step': 'Walkthrough step',
-  // RFC 0199 §C — the user must authorize a provider out of band (ADR 0753 D8).
-  credential: 'Authorization needed',
+/**
+ * ADR 1125 D2 — the title a request gets when its gate supplies none: a sentence
+ * about who asks, never a kind name. `asker` is the workflow's name when the host
+ * knows it. The kinds in `NEVER_NOTIFY_KINDS` (suspendManager) never reach here;
+ * they keep the map total.
+ */
+const COMPOSED_TITLE: Record<InterruptRecord['kind'], (asker: string | undefined, data: Record<string, unknown>) => string> = {
+  approval: (a) => (a ? `Approval needed: ${a}` : 'Approval needed'),
+  clarification: (a) => (a ? `${a} has a question for you` : 'A question for you'),
+  refinement: (a) => (a ? `${a} asks you to review a draft` : 'A draft to review'),
+  cancellation: (a) => (a ? `Confirm cancelling ${a}` : 'Confirm a cancellation'),
+  // RFC 0199 §C — the person authorizes a provider out of band (ADR 0753 D8).
+  credential: (a, d) => `Connect ${nonBlank(d.provider)?.slice(0, 60) ?? 'an account'}${a ? ` so ${a} can continue` : ' to continue'}`,
+  'external-event': () => 'Action needed',
+  conversation: () => 'Action needed',
+  timer: () => 'Action needed',
+  'tour-step': () => 'Action needed',
+  'walkthrough-step': () => 'Action needed',
 };
 
 const KIND_TYPE: Record<InterruptRecord['kind'], NotificationRecord['type']> = {
@@ -103,17 +106,23 @@ export function catalogWorkflowNameResolver(
 }
 
 /** `workflowName` (dispatcher-stamped), then the definition's name (a chain's
- *  `label`), then the id. A failed lookup never blocks the notification. */
-async function workflowLabelOf(run: RunRecord): Promise<string> {
+ *  `label`). ADR 1125 D2: never the id, which means nothing to a person;
+ *  undefined when neither is known. A failed lookup never blocks the notification. */
+export async function workflowNameOf(run: RunRecord): Promise<string | undefined> {
   const stamped = nonBlank(run.metadata?.workflowName);
-  if (stamped) return stamped;
+  if (stamped) return sanitizeForNotification(stamped);
   if (workflowNameResolver) {
     try {
       const name = nonBlank(await workflowNameResolver(run.tenantId, run.workflowId));
-      if (name) return name;
-    } catch { /* fall through to the id */ }
+      if (name) return sanitizeForNotification(name);
+    } catch { /* unknown */ }
   }
-  return run.workflowId;
+  return undefined;
+}
+
+/** The asker as a sentence subject: the workflow's name, else a generic noun. */
+async function workflowLabelOf(run: RunRecord): Promise<string> {
+  return (await workflowNameOf(run)) ?? 'An automation';
 }
 
 /**
@@ -138,17 +147,20 @@ export async function emitInterruptNotification(
     const run = await storage.getRun(interrupt.runId);
     if (!run) return;
     // Workflow names from `run.metadata` can themselves contain
-    // user-supplied text — run through redaction. `workflowId` is
-    // engine-controlled so it's safe.
-    const workflowLabel = sanitizeForNotification(await workflowLabelOf(run));
+    // user-supplied text — `workflowNameOf` runs them through redaction.
+    const asker = await workflowNameOf(run);
     // ADR 1109 D2 — the gate's own words, through the one reader. Far more useful
     // to a reviewer than the opaque node id. Bounded + redacted (user-supplied).
     const words = requestWordsOf(interrupt.data);
-    const title = words.title ? sanitizeForNotification(words.title.slice(0, 140)) : (KIND_LABEL[interrupt.kind] ?? 'Action needed');
+    const data = (interrupt.data && typeof interrupt.data === 'object' && !Array.isArray(interrupt.data) ? interrupt.data : {}) as Record<string, unknown>;
+    // ADR 1125 D2 — no gate title: a composed sentence about who asks.
+    const title = words.title
+      ? sanitizeForNotification(words.title.slice(0, 140))
+      : sanitizeForNotification((COMPOSED_TITLE[interrupt.kind] ?? (() => 'Action needed'))(asker, data));
     const text = words.text ? sanitizeForNotification(words.text.slice(0, 140)) : undefined;
     const message = text
-      ? `${workflowLabel} — ${text}`
-      : `${workflowLabel} needs your input`;
+      ? (asker ? `${asker} — ${text}` : text)
+      : `From ${asker ?? 'an automation'}`;
     const subject = runSubjectOf(run);
     const base = {
       tenantId: run.tenantId,
@@ -161,7 +173,9 @@ export async function emitInterruptNotification(
       nodeId: interrupt.nodeId,
       interruptId: interrupt.interruptId,
       actionUrl: `/inbox`,
-      metadata: stripSecretsFromPersisted({ kind: interrupt.kind, ...(subject ? { subject } : {}) }),
+      // ADR 1125 D2/D5 — `asker` is the WORKFLOW's name (not a person), host-read;
+      // `reason` (below) is host-composed and never carries an id or free text.
+      metadata: stripSecretsFromPersisted({ kind: interrupt.kind, ...(subject ? { subject } : {}), ...(asker ? { asker } : {}) }),
     };
     // ADR 0075 §D6 — when the gate NAMES approvers, address the notification to
     // each of them (recipientUserId) instead of broadcasting to the whole tenant.
@@ -182,7 +196,7 @@ export async function emitInterruptNotification(
       : null;
     if (recipients && recipients.length > 0) {
       for (const recipientUserId of recipients) {
-        const rec = await getNotificationEmitter().emit({ ...base, recipientUserId });
+        const rec = await getNotificationEmitter().emit({ ...base, recipientUserId, metadata: { ...base.metadata, reason: { kind: 'named' } } });
         // ADR 0478 §2 — decide-by-email for ADDRESSED approval gates: the
         // RFC 0093 token rides as an ARGUMENT (never persisted into the
         // record — inbox reads must not hand out decide capability).
@@ -209,7 +223,9 @@ export async function emitInterruptNotification(
       const gateAudience = runNoticeAudience({ tenantId: run.tenantId, metadata: run.metadata });
       await getNotificationEmitter().emit({
         ...base,
-        ...(gateAudience.recipientRole ? { recipientRole: gateAudience.recipientRole } : {}),
+        ...(gateAudience.recipientRole
+          ? { recipientRole: gateAudience.recipientRole, metadata: { ...base.metadata, reason: { kind: 'role', role: gateAudience.recipientRole } } }
+          : {}),
       });
     }
   } catch {

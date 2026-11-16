@@ -17,7 +17,9 @@
  * Tracker TST-CXC-7. Red when a guarded call site is missing from
  * SEAM_CALL_SITES or a listed file holds none; a call site names a seam with
  * no row or a row is not guarded; or the served body stops validating against
- * the vendored schema or changes its manifest version.
+ * the vendored schema or changes its manifest version. Comments are stripped by
+ * the shared token scanner (#5422), so a commented-out call is not a call site.
+ * Re-witnessed at d5b98aafaa (grade-tests w115 probes `w115g2-esm-*`).
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -59,7 +61,8 @@ describe('effect-seam manifest (RFC 0173 §C.1)', () => {
     // Non-vacuity: if this probe finds nothing, it is broken, and a broken probe
     // would report a perfectly clean manifest for a host with no rows at all.
     // Liveness floor, not the ratchet: measured 19 call-site files on
-    // 2026-10-29 (w69). The two-sided equality below is the real check.
+    // 2026-10-29 (w69); 20 at d5b98aafaa (w115). The two-sided equality below is
+    // the real check.
     expect(actual.size).toBeGreaterThanOrEqual(18);
 
     const declared = new Set(SEAM_CALL_SITES.map((c) => c.file));
@@ -96,9 +99,11 @@ describe('effect-seam manifest (RFC 0173 §C.1)', () => {
       seams: unknown[];
     };
     expect(body.manifestVersion).toBe('1');
+    expect(body.host.name).toBe('openwop-app');
     expect(body.host.build.kind).toBe('commit');
     expect(typeof body.host.build.id).toBe('string');
-    expect(body.seams.length).toBe(SEAM_ROWS.length);
+    // The served rows ARE the manifest rows, not merely as many of them.
+    expect(body.seams).toEqual(SEAM_ROWS);
   });
 
   /**

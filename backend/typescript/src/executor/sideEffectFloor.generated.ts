@@ -29,15 +29,15 @@
  * ADR 0572, not here: a build-only invariant forbids `src/` from referencing
  * it, and that guard matches the filename in ANY spelling, comments included.)
  *
- * Manifest census at generation time (765 distinct typeIds):
- *    314  side-effect
+ * Manifest census at generation time (766 distinct typeIds):
+ *    315  side-effect
  *    273  action
  *    114  pure
  *     38  read
  *     16  streaming-output
  *     10  gate
  *
- * Floor 390 = served 322 + held 68:
+ * Floor 391 = served 323 + held 68:
  *     34  held: ai-invocation-log
  *      9  held: ai-opaque-not-logged
  *     24  held: deferred-role-semantics
@@ -366,6 +366,7 @@ export const MANIFEST_SIDE_EFFECT_FLOOR: ReadonlySet<string> = new Set([
   'feature.discovery.nodes.merch-rule-upsert',
   'feature.documents.nodes.generate-from-template',
   'feature.documents.nodes.render',
+  'feature.documents.nodes.save-document',
   'feature.email.nodes.submit-for-review',
   'feature.evals.nodes.run-suite',
   'feature.experiments.nodes.apply-ramp',
@@ -712,6 +713,7 @@ export const MANIFEST_FAST_PATH_SERVED: ReadonlySet<string> = new Set([
   'feature.discovery.nodes.collection-upsert',
   'feature.discovery.nodes.merch-rule-upsert',
   'feature.documents.nodes.render',
+  'feature.documents.nodes.save-document',
   'feature.email.nodes.submit-for-review',
   'feature.evals.nodes.run-suite',
   'feature.experiments.nodes.apply-ramp',
@@ -1358,6 +1360,7 @@ export const MANIFEST_DECLARED_TYPE_IDS: ReadonlySet<string> = new Set([
   'feature.documents.nodes.list-documents',
   'feature.documents.nodes.list-templates',
   'feature.documents.nodes.render',
+  'feature.documents.nodes.save-document',
   'feature.drawings.nodes.render',
   'feature.email.nodes.get-template',
   'feature.email.nodes.list-templates',

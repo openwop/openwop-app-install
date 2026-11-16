@@ -35,6 +35,7 @@ import { OpenwopError } from '../../types.js';
 import { createLogger } from '../../observability/logger.js';
 import type { BackendFeature } from '../../features/types.js';
 import type { WorkflowDefinition } from '../../executor/types.js';
+import { workflowClientReader } from '../workflowClientAccess.js';
 
 const log = createLogger('host.collab.workflow');
 
@@ -205,6 +206,10 @@ async function requireWorkflowCollabAccess(req: Request): Promise<{ tenantId: st
   const assignment = await resolveOne(WORKFLOW_COLLAB_TOGGLE_ID, toggleSubjectOf(req));
   if (!assignment?.enabled) throw new OpenwopError('not_found', 'workflow not found', 404, {});
   if (!(await workflowCollabEligible(tenantId, workflowId))) {
+    throw new OpenwopError('not_found', 'workflow not found', 404, {});
+  }
+  // ADR 1132 — a ticket is a write, so a client's definition needs write in that client.
+  if (!(await workflowClientReader(req, tenantId, 'workspace:write')(await getOwned(tenantId, workflowId)))) {
     throw new OpenwopError('not_found', 'workflow not found', 404, {});
   }
   return { tenantId, workflowId };

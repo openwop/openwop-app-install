@@ -237,8 +237,19 @@ export function registerNotificationRoutes(app: Express, deps: Deps): void {
   // `:archive-read` archives every READ row in the caller's recipient scope —
   // `read` is a SERVER concept, so no client tab predicate is duplicated
   // server-side (the promptCatalogParity drift lesson).
+  //
+  // ADR 1125 D3 — an optional `keep` id list is left alone: the inbox passes its
+  // open requests, so a bulk sweep cannot silence a step that still waits. The
+  // client owns "open" (it knows the composed features' action types), as it
+  // owns the tab for `:bulk-read`. Without `keep` the route is unchanged.
   app.post(new RegExp(`^${BASE.replace(/\//g, '\\/')}:archive-read$`), async (req, res, next) => {
     try {
+      const body = (req.body ?? {}) as { keep?: unknown };
+      if (body.keep !== undefined && (!Array.isArray(body.keep) || body.keep.length > 500
+        || !body.keep.every((i) => typeof i === 'string'))) {
+        throw new OpenwopError('validation_error', 'Field `keep` must be at most 500 notification ids.', 400, {});
+      }
+      const keep = new Set((body.keep as string[] | undefined) ?? []);
       const tenantId = resolveTenantFromReq(req);
       if (!tenantId) {
         res.json({ updated: 0 });
@@ -255,6 +266,7 @@ export function registerNotificationRoutes(app: Express, deps: Deps): void {
       const now = new Date().toISOString();
       let updated = 0;
       for (const n of rows) {
+        if (keep.has(n.notificationId)) continue;
         if (await storage.updateNotificationStatus(n.notificationId, 'archived', now)) updated++;
       }
       res.json({ updated });

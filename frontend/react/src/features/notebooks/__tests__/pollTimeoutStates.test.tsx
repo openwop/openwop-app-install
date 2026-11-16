@@ -34,13 +34,23 @@
  * predicate, run link, liveRef reset, onSettled at the cap, a toast at the cap).
  * Double guard (recorded): removing `clearStall` from the "recheck landed" branch stays green —
  * the M3a auto-clear effect re-derives the same verdict from the `setSources(fresh)` the recheck
- * already made (probe w20g5-poll-recheck-landed); the M3a case witnesses that effect.
+ * already made (probe w20g5-poll-recheck-landed); the M3a case witnesses that effect. Both
+ * read `stallSatisfied`, so one edit there breaks both (w110g3-poll-satisfied-both).
+ *
+ * ADR 1103 D9 (the run decides): probes `w110g3-poll-*` cover a failed run turning into a
+ * failure card with its reason spoken last, the completed-but-empty rule (two answered list
+ * reads, never a failed one), "Check again" asking the run, a failure that only Dismiss clears,
+ * a re-summarize that the existing summary cannot settle but its completed run does (the poll's
+ * `runDecides` and `stallSatisfied`'s re-summarize guard), and a settled transform disarming
+ * its template choice. `getRun` answers typed `RunSnapshot`s (`runAs`).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { StrictMode } from 'react';
 import { render, screen, cleanup, fireEvent, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type * as Client from '../notebooksClient.js';
+import type * as Runs from '../../../client/runsClient.js';
+import type { RunSnapshot } from '@openwop/openwop';
 
 const listSources = vi.fn<typeof Client.listSources>();
 const listNotes = vi.fn<typeof Client.listNotes>();
@@ -50,8 +60,14 @@ const applyTransformation = vi.fn<typeof Client.applyTransformation>();
 const summarizeSource = vi.fn<typeof Client.summarizeSource>();
 /** ADR 1103 D9 — the poller asks the run whether waiting is still honest. Default:
  *  still running, so the NBU-6 give-up cases below keep exercising the give-up. */
-const getRun = vi.fn();
-vi.mock('../../../client/runsClient.js', () => ({ getRun: (...a: unknown[]) => getRun(...a) }));
+const getRun = vi.fn<typeof Runs.getRun>();
+vi.mock('../../../client/runsClient.js', () => ({ getRun: (...a: Parameters<typeof Runs.getRun>) => getRun(...a) }));
+/** A run as `getRun` really answers: a `RunSnapshot`, owner and era key included. */
+const runAs = (status: RunSnapshot['status'], error?: { code: string; message: string }): RunSnapshot => ({
+  runId: 'run-sum-1', workflowId: 'notebooks.summarize', status, eventLogSchemaVersion: 3,
+  owner: { tenant: 't1', subject: { issuer: 'urn:openwop:test', subjectId: 'u1', tenant: 't1', lane: 'session', kind: 'user' } },
+  ...(error ? { error } : {}),
+});
 const toastError = vi.fn();
 const toastSuccess = vi.fn();
 const toastInfo = vi.fn();
@@ -115,7 +131,7 @@ beforeEach(() => {
   // `mockReset`, not just `clearAllMocks`: an unconsumed `mockResolvedValueOnce` must not leak
   // into the next case (clearAllMocks keeps implementations, Once queue included).
   for (const m of [listSources, listNotes, listTransformations, addYoutubeSource, applyTransformation, summarizeSource, toastError, toastSuccess, toastInfo, getRun]) m.mockReset();
-  getRun.mockResolvedValue({ runId: 'r', workflowId: 'w', status: 'running' });
+  getRun.mockResolvedValue(runAs('running'));
   vi.useFakeTimers({ shouldAdvanceTime: true });
   listSources.mockResolvedValue([]);
   listNotes.mockResolvedValue([]);
@@ -440,7 +456,7 @@ describe('ADR 0602 correction round — L7, the liveRef that never reset', () =>
 describe('ADR 1103 D9 — a run that ENDED without the item is a failure, not a stall', () => {
   it('a failed summarize run says it failed, names why, links the run, and offers no "Check again"', async () => {
     listSources.mockResolvedValue([source('d1')]);
-    getRun.mockResolvedValue({ runId: 'run-sum-1', workflowId: 'notebooks.summarize', status: 'failed', error: { code: 'notebook_write_forbidden', message: 'x' } });
+    getRun.mockResolvedValue(runAs('failed', { code: 'notebook_write_forbidden', message: 'x' }));
     await renderWorkspace();
     fireEvent.click(await screen.findByRole('button', { name: /^summarize\b/i }));
     await runOutThePoll();
@@ -462,7 +478,7 @@ describe('ADR 1103 D9 — a run that ENDED without the item is a failure, not a 
 
   it('a run that COMPLETED but wrote nothing is a failure too (the success-with-nothing shape)', async () => {
     listSources.mockResolvedValue([source('d1')]);
-    getRun.mockResolvedValue({ runId: 'run-sum-1', workflowId: 'notebooks.summarize', status: 'completed' });
+    getRun.mockResolvedValue(runAs('completed'));
     await renderWorkspace();
     fireEvent.click(await screen.findByRole('button', { name: /^summarize\b/i }));
     await runOutThePoll();
@@ -472,13 +488,34 @@ describe('ADR 1103 D9 — a run that ENDED without the item is a failure, not a 
   });
 
   it('a RE-summarize is judged by its run, not by the summary the source already had (UX re-grade #2)', async () => {
+    // w110 (/grade-tests): this case used to start from a FAILED run, and the poller
+    // checks a failed run before it ever reads the list, so the old summary was never
+    // consulted and dropping the re-summarize rule stayed green. A run still RUNNING is
+    // where the rule decides: the list already shows a summary, and that must not
+    // settle the poll as landed.
     listSources.mockResolvedValue([source('d1', { hasSummary: true })]);
-    getRun.mockResolvedValue({ runId: 'run-sum-1', workflowId: 'notebooks.summarize', status: 'failed', error: { code: 'source_changed', message: 'x' } });
     await renderWorkspace();
     fireEvent.click(await screen.findByRole('button', { name: /^re-summarize\b/i }));
     await runOutThePoll();
+    expect(screen.getByText('Still waiting for that summary')).toBeTruthy();
+    // Then the run fails: "Check again" asks the run, and its code names why.
+    getRun.mockResolvedValue(runAs('failed', { code: 'source_changed', message: 'x' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
     expect(screen.getByText('The summary of “Source d1” was not saved')).toBeTruthy();
     expect(screen.getByText('The source changed while it was being summarized. Summarize it again.')).toBeTruthy();
+
+    // …and the other half of "judged by its run": a run that COMPLETES settles the
+    // re-summarize at once, with neither card and no spinner left behind.
+    cleanup();
+    __clearNotebookStalls();
+    getRun.mockResolvedValue(runAs('completed'));
+    await renderWorkspace();
+    fireEvent.click(await screen.findByRole('button', { name: /^re-summarize\b/i }));
+    await runOutThePoll();
+    expect(screen.queryByText('Still waiting for that summary')).toBeNull();
+    expect(screen.queryByText('The summary of “Source d1” was not saved')).toBeNull();
+    expect(screen.queryByRole('button', { name: /^summarizing/i })).toBeNull();
   });
 
   it('CONTROL: a run still running gives up as before (the stall card, with "Check again")', async () => {
@@ -495,7 +532,7 @@ describe('ADR 1103 D9 — a run that ENDED without the item is a failure, not a 
 describe('ADR 1103 D9 — round-2 UX folds', () => {
   it('two FAILED list reads after a completed run are not "nothing was saved" (the M1 rule)', async () => {
     listSources.mockResolvedValue([source('d1')]);
-    getRun.mockResolvedValue({ runId: 'run-sum-1', workflowId: 'notebooks.summarize', status: 'completed' });
+    getRun.mockResolvedValue(runAs('completed'));
     await renderWorkspace();
     fireEvent.click(await screen.findByRole('button', { name: /^summarize\b/i }));
     listSources.mockRejectedValue(new Error('read down'));
@@ -511,7 +548,7 @@ describe('ADR 1103 D9 — round-2 UX folds', () => {
     fireEvent.click(await screen.findByRole('button', { name: /^summarize\b/i }));
     await runOutThePoll();
     expect(screen.getByText('Still waiting for that summary')).toBeTruthy();
-    getRun.mockResolvedValue({ runId: 'run-sum-1', workflowId: 'notebooks.summarize', status: 'failed', error: { code: 'source_empty', message: 'x' } });
+    getRun.mockResolvedValue(runAs('failed', { code: 'source_empty', message: 'x' }));
     fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
     await act(async () => { await vi.advanceTimersByTimeAsync(100); });
     expect(screen.getByText('The summary of “Source d1” was not saved')).toBeTruthy();
@@ -520,7 +557,7 @@ describe('ADR 1103 D9 — round-2 UX folds', () => {
 
   it('an unrelated arrival does not clear a FAILED card', async () => {
     listSources.mockResolvedValue([source('d1')]);
-    getRun.mockResolvedValue({ runId: 'run-sum-1', workflowId: 'notebooks.summarize', status: 'failed', error: { code: 'notebook_unavailable', message: 'x' } });
+    getRun.mockResolvedValue(runAs('failed', { code: 'notebook_unavailable', message: 'x' }));
     await renderWorkspace();
     fireEvent.click(await screen.findByRole('button', { name: /^summarize\b/i }));
     await runOutThePoll();
@@ -545,7 +582,7 @@ describe('ADR 1103 D9 — round-3 UX folds', () => {
     fireEvent.click(await screen.findByRole('button', { name: /^summarize\b/i }));
     await runOutThePoll();
     expect(screen.getByText('Still waiting for that summary')).toBeTruthy();
-    getRun.mockResolvedValue({ runId: 'run-sum-1', workflowId: 'notebooks.summarize', status: 'completed' });
+    getRun.mockResolvedValue(runAs('completed'));
     fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
     await act(async () => { await vi.advanceTimersByTimeAsync(100); });
     expect(screen.getByText('The summary of “Source d1” was not saved')).toBeTruthy();

@@ -59,6 +59,28 @@ export async function resolveSubjectAccess(tenantId: string, subject: Subject, c
   return fn(tenantId, subject, callerSubject);
 }
 
+// ── ADR 1137 D4 — a subject's own roles, for role-addressed kanban cards ─────
+
+/** A subject kind's roles: which may address a card, and the one a person holds.
+ *  A role is a LABEL (ADR 0054 D2): it routes a card to a person's mirror and never
+ *  grants access; every read and write still goes through the access resolver. */
+export interface SubjectRoleResolver {
+  addressable: readonly string[];
+  roleOf: (tenantId: string, subject: Subject, userId: string) => Promise<string | null>;
+}
+
+const roleResolvers = new Map<string, SubjectRoleResolver>();
+
+/** Register a kind's roles (called once at boot by the owning feature). */
+export function registerSubjectRoleResolver(kind: string, resolver: SubjectRoleResolver): void {
+  roleResolvers.set(kind, resolver);
+}
+
+/** The registered role resolver for a subject kind, if any. */
+export function subjectRoleResolver(kind: string): SubjectRoleResolver | undefined {
+  return roleResolvers.get(kind);
+}
+
 /** True when `have` satisfies the `need` (read is satisfied by write). */
 export function levelSatisfies(have: AccessLevel, need: 'read' | 'write'): boolean {
   return need === 'read' ? have === 'read' || have === 'write' : have === 'write';

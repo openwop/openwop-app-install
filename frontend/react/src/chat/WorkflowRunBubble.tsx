@@ -25,6 +25,7 @@ import { formatElapsed } from './workflowProgress/formatters.js';
 import { formatNumber } from '../i18n/format.js';
 import { Notice } from '../ui/Notice.js';
 import type { ChatMessage } from './hooks/useChatSession.js';
+import { needsPersonInput } from './interruptKinds.js';
 
 interface Props {
   message: ChatMessage;
@@ -93,6 +94,8 @@ export function WorkflowRunBubble({ message, onOpenProgress, isFocusedInPanel }:
     ? `${formatNumber(completed)}/${formatNumber(total)}`
     : t('steps', { count: completed });
   const isSuspended = (message.activeInterrupts?.length ?? 0) > 0;
+  // CC-ORCH-3 — suspended on an outside event or timer is not "awaiting your input".
+  const needsInput = (message.activeInterrupts ?? []).some((i) => needsPersonInput(i.kind));
 
   return (
     <div className="u-flex u-justify-start u-mb-3">
@@ -115,7 +118,7 @@ export function WorkflowRunBubble({ message, onOpenProgress, isFocusedInPanel }:
           <span className="muted u-fs-11">{progressHint}</span>
           {isSuspended && (
             <span className="wfrunbubble-awaiting">
-              {t('awaitingYourInput')}
+              {needsInput ? t('awaitingYourInput') : t('waitingResumesOnItsOwn')}
             </span>
           )}
           <span className="u-ml-auto">

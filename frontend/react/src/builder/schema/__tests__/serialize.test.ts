@@ -7,7 +7,14 @@
  * What breaks without it: a cyclic or dangling graph reaching the server as if
  * runnable; edges re-wired to the wrong endpoints; the run overlay painting the
  * wrong node (a wrong builder↔backend id map); a half-typed run-input schema
- * published over a working one.
+ * published over a working one; ADR 0440's parallel port edges between two
+ * nodes read as a false cycle (or a real cycle hidden by distinct-upstream counting).
+ *
+ * Sabotage-witnessed (grade-tests w116): an array draft published, the schema
+ * dropped, a non-pretty deserialize, an inverted id map, a fallback id off by
+ * one, swapped edge endpoints, indegree counted per EDGE, self-loops skipped,
+ * condition or trigger rule dropped, the empty-graph message swapped, the cycle
+ * naming the wrong node, and the unknown-target check removed each red a case.
  */
 import { describe, it, expect } from 'vitest';
 import { serializeWithIdMap, serializeWorkflow, SerializeError } from '../serialize.js';
@@ -34,12 +41,10 @@ describe('inputSchema publishing (ADR 0197 / Deferred Phase E.2)', () => {
   });
 
   it('omits a half-typed / non-object draft (never publishes a broken schema)', () => {
-    const a = node('noop', 'Start');
     for (const draft of ['{"type":', '[1,2]', '"just a string"', '', '   ']) {
       const out = serializeWorkflow({ ...wf([node('noop')], []), inputSchema: draft });
       expect(out.inputSchema, `draft=${draft}`).toBeUndefined();
     }
-    void a;
   });
 
   it('round-trips through the canonical deserializer as a pretty JSON string', () => {
@@ -86,10 +91,13 @@ describe('serializeWithIdMap', () => {
     ];
     const result = serializeWorkflow(wf([a, b], edges));
     expect(result.nodes.map(n => n.nodeId)).toEqual([a.id, b.id]);
-    expect(result.edges.map(e => [e.sourceNodeId, e.sourceOutput, e.targetNodeId, e.targetInput])).toEqual([
-      [a.id, 'artifact', b.id, 'artifact'], [a.id, 'warning', b.id, 'warning'],
+    // Both edges, EXACTLY: ids, ports, and the second edge's condition + trigger
+    // rule, with nothing extra (a parallel edge must not be merged or dropped).
+    expect(result.edges).toEqual([
+      { edgeId: 'artifact-edge', sourceNodeId: a.id, sourceOutput: 'artifact', targetNodeId: b.id, targetInput: 'artifact' },
+      { edgeId: 'warning-edge', sourceNodeId: a.id, sourceOutput: 'warning', targetNodeId: b.id, targetInput: 'warning', triggerRule: 'all_complete', condition: { path: 'warning', op: 'truthy' } },
     ]);
-    expect(result.edges[1]).toMatchObject({ condition: { path: 'warning', op: 'truthy' }, triggerRule: 'all_complete' });
+    // Distinct-upstream counting must not hide a REAL cycle: a back edge, and a self-loop.
     expect(() => serializeWorkflow(wf([a, b], [...edges, edge(b.id, a.id)]))).toThrow(/cycle/i);
     expect(() => serializeWorkflow(wf([a], [edge(a.id, a.id)]))).toThrow(/cycle/i);
   });
@@ -97,7 +105,8 @@ describe('serializeWithIdMap', () => {
   // DOUBLE GUARD (recorded, grade-tests w47): `serializeWithIdMap` and
   // `serializeExecutable` both refuse an empty graph with the same message, so
   // removing either one alone stays green here. The probe aims at the first
-  // guard's MESSAGE instead, which proves this case reaches it.
+  // guard's MESSAGE instead, which proves this case reaches it, and a w116 probe
+  // removes BOTH guards in one edit (an empty definition is then returned).
   it('throws on an empty workflow', () => {
     expect(() => serializeWorkflow(wf([], []))).toThrow(SerializeError);
     expect(() => serializeWorkflow(wf([], []))).toThrow(/no nodes/i);

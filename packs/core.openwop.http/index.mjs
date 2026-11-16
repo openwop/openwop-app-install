@@ -450,7 +450,18 @@ async function bareFetch(url, init, hostFetch = null) {
 
 export async function openapiCall(ctx) {
   const { operationId } = ctx.config;
-  const doc = ctx.inputs.openapi;
+  const doc = ctx.inputs?.openapi;
+  // CC-CHAIN-1 / ADR 1111 — a `connectionRef` names the account a call needs; it
+  // does NOT supply an API description, and this node never resolves one from a
+  // connection (that would be an RFC 0095 change). So a step that names a
+  // connection but has no wired document can never run, linked or not. Say so by
+  // name instead of the opaque "missing paths".
+  if (!doc?.paths && typeof ctx.config?.connectionRef === 'string' && ctx.config.connectionRef) {
+    throw makeError(
+      'openapi_document_missing',
+      `this step needs a wired OpenAPI document (inputs.openapi); the connection "${ctx.config.connectionRef}" does not provide one`,
+    );
+  }
   if (!doc?.paths) throw Object.assign(new Error('openapi doc missing paths'), { code: 'CONFIG_INVALID' });
   let route = null, method = null;
   for (const [p, methods] of Object.entries(doc.paths)) {

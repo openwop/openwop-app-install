@@ -10,6 +10,18 @@
  * id remap, the delete confirm (asked AND honoured), jump-selects-without-
  * opening, Apply vs Discard on an AI proposal, `typedSlug`, the SEO-only save.
  *
+ * Since (each probed in /grade-tests w112, `w112g4-ws-*`):
+ *  - CMS-HERO-AUTOSAVE-1 (ADR 0828, `12e8a02b1f`): a newly inserted Hero with no
+ *    heading stays local (the `incompleteHero` autosave gate and its status
+ *    note) and saves once with the loaded version when a heading is typed; an
+ *    explicit Save still submits it and shows the server's refusal without
+ *    claiming it saved. The two insert cases type a heading for that reason.
+ *  - UXG-1112-14 / DG-1112-12 (ADR 1112, `348b8a676d`, `0c76098ad3`): History
+ *    lists summaries and Compare reads ONE capture (`getVersion` with that
+ *    version's id); closing the diff returns focus to Compare; a capture that
+ *    cannot be read toasts the catalog line, opens no dialog and re-enables
+ *    Compare.
+ *
  * Timing: every autosave case runs the 1.5 s `AUTOSAVE_MS` debounce on fake
  * time (`runAutosave`), so none waits on the wall clock; the live-page case
  * advances 10 s of fake time to prove no save ever fires. "Publish is last"
@@ -425,7 +437,8 @@ describe('incomplete Hero draft autosave', () => {
     await runAutosave();
     await waitFor(() => expect(ui.savePage).toHaveBeenCalledTimes(1));
     expect(ui.savePage).toHaveBeenCalledWith('o1', 'p1', expect.objectContaining({ expectedVersion: 1, sections: expect.arrayContaining([expect.objectContaining({ type: 'hero', data: expect.objectContaining({ heading: 'One small next step' }) })]) }));
-    expect(screen.getByText('All changes saved')).toBeTruthy();
+    // Await the status the save's resolution writes, rather than racing it.
+    expect(await screen.findByText('All changes saved')).toBeTruthy();
     expect(screen.queryByText('Add a heading to each Hero section to enable autosave. Your changes are not saved yet.')).toBeNull();
     expect(toast.error).not.toHaveBeenCalled();
   });

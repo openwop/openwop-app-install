@@ -23,6 +23,7 @@ import {
 } from './store.js';
 import { ACTION_CLASSES, PRESET_IDS, REVIEW_STAGES, type ActionClass, type ActionRule, type AutonomyBinding, type Decision, type PresetId, type ResolvedPolicy, type ReviewStage } from './types.js';
 import { findRule } from './resolve.js';
+import type { PlanExemptScope } from '../operatorPlanExemption.js';
 import { DEFAULT_APPROVER, presetPolicy } from './presets.js';
 
 const log = createLogger('autonomy-policy');
@@ -34,10 +35,24 @@ const AUTONOMY_PARENT_TOGGLE = 'campaign-orchestration';
 
 /** Whether new runs freeze a policy: the parent AND the sub-toggle ON for the
  *  tenant (ADR 0941 D5 AND-gate). OFF ⇒ no stamp ⇒ today's posture. One helper
- *  for both freezing contributors (campaign-bound and client-bound). */
-export async function autonomyToggleOn(tenantId: string): Promise<boolean> {
+ *  for both freezing contributors (campaign-bound and client-bound).
+ *
+ *  A frozen policy is a paid capability (bounded auto-approval), so this is the
+ *  ACCESS read (`resolveOne`: toggle AND the workspace plan, ADR 0819 §1).
+ *
+ *  CC-GATE-3 (2026-11-16): callers that hold a run pass its ADR 1108 exemption
+ *  scope (`planExemptScopeOfRun`), re-checked here against the allowlist
+ *  (`operatorPlanExempt`). Before, every caller passed only the tenant, so a listed
+ *  operator in a workspace whose plan lacks `marketing` could start a campaign run
+ *  (the chat tool carries the exemption) while this read said OFF: the run froze no
+ *  policy and every autonomy gate decided `legacy`, a plain approval the requester
+ *  approved themselves (MEASURED on prod, run b34a112d). A non-exempt customer, or a
+ *  run whose stamp no longer re-checks, still resolves through the plan. */
+export async function autonomyToggleOn(tenantId: string, exemption?: PlanExemptScope): Promise<boolean> {
   const { resolveOne } = await import('../featureToggles/service.js');
-  return Boolean((await resolveOne(AUTONOMY_PARENT_TOGGLE, { tenantId }))?.enabled) && Boolean((await resolveOne(AUTONOMY_TOGGLE, { tenantId }))?.enabled);
+  const { operatorPlanExempt } = await import('../operatorPlanExemption.js');
+  const subject = { tenantId, ...(exemption && operatorPlanExempt({ ...exemption, tenantId }) ? { planExempt: true } : {}) };
+  return Boolean((await resolveOne(AUTONOMY_PARENT_TOGGLE, subject))?.enabled) && Boolean((await resolveOne(AUTONOMY_TOGGLE, subject))?.enabled);
 }
 
 const BODY_KEYS = ['preset', 'name', 'basePreset', 'rules', 'ifMatch'] as const;

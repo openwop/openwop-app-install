@@ -24,7 +24,7 @@
  */
 import { runUnderWorkerContract } from '../storage/eventEraAdapter.js';
 import { DurableCollection, hostExtStorage } from './hostExtPersistence.js';
-import { assetAccessMode, grantPublicAsset, purgeLegacyGrantRows, revokePublicAsset } from './assetAccess.js';
+import { assetAccessMode, assetOrgResolver, grantPublicAsset, purgeLegacyGrantRows, revokePublicAsset } from './assetAccess.js';
 import { getInstanceId } from './instanceId.js';
 import { createLogger } from '../observability/logger.js';
 
@@ -117,6 +117,7 @@ export const RECONCILE_TICK_MS = 2 * 60_000;
 const TICKS_PER_HOUR = 30;
 const ROWS_PREFIX = 'hostext:asset:grantor:';
 const CURSOR_ROWS = 'assetgrant:cursor:rows';
+const CURSOR_ORG_INDEX = 'assetgrant:cursor:org-index';
 const cursorBackfill = (surface: string): string => `assetgrant:cursor:backfill:${surface}`;
 const LEASE = (slot: number): string => `assetgrant:lease:${slot}`;
 
@@ -169,6 +170,19 @@ export async function reconcilePublicAssetGrantsOnce(): Promise<ReconcileReport>
     }
     if (step.next) await storage.kvSet(cursorBackfill(provider.surface), step.next);
     else await storage.kvDelete(cursorBackfill(provider.surface));
+  }
+  // 3. ADR 1122 P1c — one bounded step of the org-floor index backfill (rows that
+  // predate the media token index), on its own cursor.
+  const orgResolver = assetOrgResolver();
+  if (orgResolver) {
+    try {
+      const cur = (await storage.kvGet(CURSOR_ORG_INDEX)) ?? undefined;
+      const step = await withTimeout(orgResolver.backfillStep(cur), PROVIDER_TIMEOUT_MS);
+      if (step.next) await storage.kvSet(CURSOR_ORG_INDEX, step.next);
+      else await storage.kvDelete(CURSOR_ORG_INDEX);
+    } catch (err) {
+      log.warn('asset_org_index_backfill_failed', { error: err instanceof Error ? err.message : String(err) });
+    }
   }
   report.ms = Date.now() - started;
   return report;

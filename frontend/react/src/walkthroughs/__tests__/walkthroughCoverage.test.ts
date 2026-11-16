@@ -14,6 +14,10 @@
  * campaign and chat cases now READ the shipped definitions
  * (`backend/typescript/src/host/demoWalkthroughsSeed.ts`) and pin the FE canonical
  * lists to the ids those definitions reference.
+ *
+ * Re-probed w110 (`w110g3-wc-*`): a renamed or missing registration, an orphan registration,
+ * a checkpoint gone, a shipped definition's id changed (cross-tree), an FE canonical id dropped,
+ * a core pack's action or checkpoint gone, and a registry reset that stops clearing.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -85,7 +89,8 @@ describe('chat walkthrough coverage (ADR 0378 P4)', () => {
 
 describe('core-page walkthrough packs coverage (ADR 0378 P4)', () => {
   it('each pack resolves its canonical action', async () => {
-    const packs = [
+    /** A pack's registration and its canonical ids (checkpoints only where it ships some). */
+    const packs: { reg: () => void; ids: readonly string[]; checkpoints?: readonly string[] }[] = [
       { reg: (await import('../../agents/walkthroughActions.js')).registerAgentsWalkthroughActions, ids: (await import('../../agents/walkthroughActions.js')).AGENTS_WALKTHROUGH_ACTION_IDS },
       { reg: (await import('../../builder/walkthroughActions.js')).registerWorkflowsWalkthroughActions, ids: (await import('../../builder/walkthroughActions.js')).WORKFLOWS_WALKTHROUGH_ACTION_IDS },
       { reg: (await import('../../runs/walkthroughActions.js')).registerRunsWalkthroughActions, ids: (await import('../../runs/walkthroughActions.js')).RUNS_WALKTHROUGH_ACTION_IDS },
@@ -100,7 +105,7 @@ describe('core-page walkthrough packs coverage (ADR 0378 P4)', () => {
     ];
     for (const pack of packs) {
       const { reg, ids } = pack;
-      const checkpoints = (pack as { checkpoints?: readonly string[] }).checkpoints ?? [];
+      const checkpoints = pack.checkpoints ?? [];
       __resetWalkthroughRegistryForTests();
       reg();
       expect(ids.length).toBeGreaterThan(0);

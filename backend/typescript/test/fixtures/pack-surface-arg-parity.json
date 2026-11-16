@@ -1,6 +1,6 @@
 {
   "callSites": {
-    "literalNoSpread": 280,
+    "literalNoSpread": 281,
     "spread": 99,
     "nonLiteral": 19
   },
@@ -8,7 +8,7 @@
     "readable": 362,
     "opaque": 16
   },
-  "assertedPairs": 268,
+  "assertedPairs": 269,
   "opaqueMethods": [
     "accessibility.checkContent",
     "bi.runMetric",
@@ -52,9 +52,9 @@
     "feature.campaign-brief.nodes/index.mjs:823 spread → campaign-brief.listHooks",
     "feature.campaign-channels.nodes/index.mjs:236 spread → brand.resolveVoice",
     "feature.campaign-channels.nodes/index.mjs:257 spread → kb.rag",
-    "feature.campaign-channels.nodes/index.mjs:481 spread → creative-briefs.create",
-    "feature.campaign-channels.nodes/index.mjs:718 spread → email.createDraftCampaign",
-    "feature.campaign-channels.nodes/index.mjs:879 spread → campaign-brief.trackedUrl",
+    "feature.campaign-channels.nodes/index.mjs:495 spread → creative-briefs.create",
+    "feature.campaign-channels.nodes/index.mjs:735 spread → email.createDraftCampaign",
+    "feature.campaign-channels.nodes/index.mjs:896 spread → campaign-brief.trackedUrl",
     "feature.campaign-connectors.nodes/index.mjs:31 spread → campaign-connectors.importCsv",
     "feature.campaign-intel.nodes/index.mjs:100 spread → campaign-intel.adMap",
     "feature.campaign-intel.nodes/index.mjs:165 spread → campaign-intel.proposeReallocation",

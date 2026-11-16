@@ -21,18 +21,20 @@
  * serves and logs each read that would be refused, and `enforce` refuses with the
  * same 404 an unknown token gets.
  */
+import { ASSET_SIGNATURE_PARAM, assetSignatureRemaining } from './assetSigning.js';
 import { createLogger } from '../observability/logger.js';
 import type { Request } from 'express';
 import { DurableCollection } from './hostExtPersistence.js';
-import { resolveTenantLevelScopes } from './accessControlService.js';
+import { isMembershipRootedWorkspace, resolveEffectiveAccess, resolveTenantLevelScopes } from './accessControlService.js';
 import { callerSubject, isPersonalTenantId, personalTenantOf } from './requestSubject.js';
 import { isSuperadmin } from './superadmin.js';
 
 const log = createLogger('host.assetAccess');
 
 export type AssetAccessMode = 'off' | 'report' | 'enforce';
-export type AssetAccessArm = 'operator' | 'session' | 'public';
-export type AssetAccessDecision = { allowed: true; arm: AssetAccessArm } | { allowed: false; arm: null };
+export type AssetAccessArm = 'operator' | 'session' | 'public' | 'signed';
+/** `remaining` (seconds) is set for a signed read, so its cache lifetime never outlives the signature. */
+export type AssetAccessDecision = { allowed: true; arm: AssetAccessArm; remaining?: number } | { allowed: false; arm: null };
 
 export function assetAccessMode(): AssetAccessMode {
   const v = process.env.OPENWOP_ASSET_ACCESS?.trim().toLowerCase();
@@ -113,11 +115,66 @@ async function presentInTenant(req: Request, tenantId: string): Promise<boolean>
   return (await resolveTenantLevelScopes(tenantId, subject)).basis !== 'none';
 }
 
+/**
+ * ADR 1122 D2.1 / P1c — the org that owns an asset, when the asset is a media-library
+ * row that names one. A host seam (the host never imports a feature): the media
+ * feature registers a point lookup over its own token index, plus one bounded step of
+ * a backfill that fills index rows for assets created before the index existed. The
+ * asset-grant reconcile drives that backfill.
+ */
+export interface AssetOrgResolver {
+  /** The owning org, or undefined when the token is not a library asset (or is not
+   *  indexed yet). A point read only: never a scan on the serve path. */
+  orgOf(tenantId: string, token: string): Promise<string | undefined>;
+  /** One bounded backfill step. `next` absent means the walk is complete. */
+  backfillStep(cursor: string | undefined): Promise<{ next?: string }>;
+}
+let orgResolver: AssetOrgResolver | null = null;
+export function registerAssetOrgResolver(r: AssetOrgResolver): void { orgResolver = r; }
+export function assetOrgResolver(): AssetOrgResolver | null { return orgResolver; }
+
+/**
+ * D2.1 — a session read of an org-owned library asset also needs the caller's access
+ * in that org (`workspace:read`), so a workspace member outside client org X does not
+ * see org X's library. These pass without it:
+ *  - a personal tenant (one principal);
+ *  - an asset that is not a library row, or that belongs to the workspace root;
+ *  - a workspace admin (`host:members:manage` on the root of a membership-rooted
+ *    workspace, the #5930 org-list exit).
+ * A failed index read is retried once, then FAILS CLOSED (the uniform 404) and is
+ * logged. Falling back to the tenant floor would reopen, on every store blip, the
+ * cross-client read this floor closes. Public-grant reads are unaffected, so
+ * published pages keep loading.
+ */
+async function passesOrgFloor(req: Request, tenantId: string, token: string): Promise<boolean> {
+  if (isPersonalTenantId(tenantId) || !orgResolver) return true;
+  let orgId: string | undefined;
+  try {
+    orgId = await orgResolver.orgOf(tenantId, token);
+  } catch {
+    try {
+      orgId = await orgResolver.orgOf(tenantId, token); // one quick retry
+    } catch (err) {
+      log.error('asset_org_floor_lookup_failed', { tenantId, error: err instanceof Error ? err.message : String(err) });
+      return false;
+    }
+  }
+  if (!orgId || orgId === tenantId) return true;
+  const subject = callerSubject(req);
+  if (!subject) return false;
+  if (isMembershipRootedWorkspace(tenantId) && (await resolveTenantLevelScopes(tenantId, subject)).scopes.includes('host:members:manage')) return true;
+  return (await resolveEffectiveAccess(tenantId, { subject, orgId })).scopes.includes('workspace:read');
+}
+
 /** Decide one read of `token`, owned by `tenantId`. Never throws for a refusal; a
  *  store error propagates (an unreadable member store is not "you may not"). */
 export async function decideAssetRead(req: Request, token: string, tenantId: string): Promise<AssetAccessDecision> {
+  // D2.3 / P2 — a valid signature for exactly this token admits, with no session and no
+  // store read. A bad one is ignored here, never an error: the other arms still decide.
+  const remaining = assetSignatureRemaining(token, req.query[ASSET_SIGNATURE_PARAM]);
+  if (remaining !== null) return { allowed: true, arm: 'signed', remaining };
   if (isOperatorFor(req, tenantId)) return { allowed: true, arm: 'operator' };
-  if (await presentInTenant(req, tenantId)) return { allowed: true, arm: 'session' };
+  if (await presentInTenant(req, tenantId) && (await passesOrgFloor(req, tenantId, token))) return { allowed: true, arm: 'session' };
   if (await hasPublicGrant(token, tenantId)) return { allowed: true, arm: 'public' };
   return { allowed: false, arm: null };
 }
@@ -135,5 +192,8 @@ export function assetReadConsumer(req: Request): { referrerOrigin?: string; dest
 
 /** D4 — the Cache-Control a served read carries, by the arm that admitted it. */
 export function assetCacheControl(decision: AssetAccessDecision): string {
-  return decision.allowed && decision.arm === 'public' ? 'public, max-age=60' : 'private, max-age=300';
+  if (decision.allowed && decision.arm === 'public') return 'public, max-age=60';
+  // A signed read is cached no longer than its signature lives.
+  if (decision.allowed && decision.arm === 'signed') return `private, max-age=${Math.min(300, decision.remaining ?? 0)}`;
+  return 'private, max-age=300';
 }

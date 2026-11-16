@@ -28,6 +28,8 @@ import { requireWorkflowWrite } from './workflowWriteAuthority.js';
 import { keyDeclarationPermits } from './protocolAuthorization.js';
 import { resolveLaunchWorkflow, type LaunchResolvedWorkflow } from './resolveLaunchDefinition.js';
 import { WorkflowFeatureRefusedError } from './workflowFeatureGate.js';
+import { workflowClientReader } from './workflowClientAccess.js';
+import { getOwned } from './workflowOwnership.js';
 
 export interface McpCaller {
   principal: Principal | undefined;
@@ -35,8 +37,14 @@ export interface McpCaller {
   tenantId: string;
   /** May this caller launch the tenant's OWN (workspace-owned) MCP workflows? */
   workspaceLaunch: boolean;
-  /** The launch resolution a call would run (published-when-present). */
+  /** The launch resolution a call would run (published-when-present). `null`
+   *  for a definition this caller may not launch, including ADR 1132's client
+   *  floor (another client's definition is not a tool for them). */
   resolveLaunch(workflowId: string): Promise<LaunchResolvedWorkflow | null>;
+  /** ADR 1132 D5 — may this caller launch this tenant's definition under the
+   *  client floor? REQUIRED, so a caller built without the floor does not
+   *  compile: production builds it only through `mcpCallerFor`. */
+  mayLaunchOwned(workflowId: string): Promise<boolean>;
 }
 
 type Catalog = { getWorkflow(workflowId: string): Promise<{ workflowId: string; definition: WorkflowDefinition } | null> };
@@ -57,15 +65,24 @@ export async function workspaceLaunchAllowed(req: Request): Promise<boolean> {
 
 export async function mcpCallerFor(req: Request, principal: Principal | undefined, catalog: Catalog): Promise<McpCaller> {
   const tenantId = tenantOf(req);
+  const mayLaunch = workflowClientReader(req, tenantId, 'runs:create');
+  // An ownership read that fails refuses: a client's definition must not become a tool by accident.
+  const mayLaunchOwned = async (workflowId: string): Promise<boolean> => mayLaunch(await getOwned(tenantId, workflowId).catch(() => ({ clientOrgId: '\u0000unreadable' })));
   return {
     principal,
     tenantId,
     workspaceLaunch: principal ? await workspaceLaunchAllowed(req) : false,
     // ADR 0820 §7 / G6 — a workflow whose owning feature the tenant may not use
     // is not a tool for it: the enumeration skips it (null), it never throws.
-    resolveLaunch: (workflowId) => resolveLaunchWorkflow(catalog, tenantId, workflowId).catch((err: unknown) => {
-      if (err instanceof WorkflowFeatureRefusedError) return null;
-      throw err;
-    }),
+    resolveLaunch: async (workflowId) => {
+      const wf = await resolveLaunchWorkflow(catalog, tenantId, workflowId).catch((err: unknown) => {
+        if (err instanceof WorkflowFeatureRefusedError) return null;
+        throw err;
+      });
+      // ADR 1132 D5 — a client's definition launches only for people who may launch in that client.
+      if (wf && !(await mayLaunchOwned(workflowId))) return null;
+      return wf;
+    },
+    mayLaunchOwned: (workflowId) => mayLaunchOwned(workflowId),
   };
 }

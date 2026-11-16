@@ -314,6 +314,10 @@ describe('SSE — one transport, major 2, this app\'s auth', () => {
     expect(headerOf(call.init, 'Accept')).toBe('text/event-stream');
     expect(headerOf(call.init, 'authorization')).toMatch(/^Bearer /);
     expect(u.searchParams.get('streamToken')).toBeNull();
+    // ADR 0975 D5 — a SAME-origin bearer stream never mints one either (the
+    // stub would answer a mint with a non-JSON body, so the URL check alone
+    // cannot see a mint that was attempted).
+    expect(calls.some((c) => c.url.includes('/events/token')), 'a same-origin bearer stream mints no token').toBe(false);
     expect(got).toEqual([BARE, BARE]);
     expect(u.searchParams.get('resumable'), 'ADR 0897 / RFC 0247 — this reader opts in to a bounded close').toBe('true');
   });
@@ -368,11 +372,16 @@ describe('SSE — one transport, major 2, this app\'s auth', () => {
       sub.close();
       expect(closed, 'the stream settled (not a waitFor timeout)').toBe(true);
       const token = calls.find((c) => c.url.includes('/events/token'))!;
-      expect(new URL(token.url, 'http://localhost').origin, 'minted on the API base, where the cookie is sent').not.toBe('https://backend-abc123-uc.a.run.app');
+      const minted = new URL(token.url, 'http://localhost');
+      expect(minted.origin, 'minted on the API base, where the cookie is sent').toBe(new URL(config.baseUrl, 'http://localhost').origin);
+      expect(minted.origin).not.toBe('https://backend-abc123-uc.a.run.app');
+      expect(minted.pathname).toBe(`/host/openwop-app/runs/${BARE}/events/token`);
       const stream = calls.find((c) => c.url.includes('/events') && !c.url.includes('/token'))!;
       const u = new URL(stream.url);
       expect(u.origin).toBe('https://backend-abc123-uc.a.run.app');
       expect(u.searchParams.get('streamToken')).toBe('tok-x');
+      // "still": the token rides BESIDE the bearer, it does not replace it.
+      expect(headerOf(stream.init, 'authorization')).toMatch(/^Bearer /);
     } finally {
       config.sseBaseUrl = saved;
     }

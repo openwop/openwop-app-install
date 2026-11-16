@@ -304,6 +304,14 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
   // docs OFF, when that canonical 404s.
   app.get('/p/:slug', platformDocumentDoor((req) => req.params.slug as string, { admit: admitPublicPage }));
 
+  // ADR 0391 (b) — `/pricing` is the SPA's pricing route, and it renders the
+  // `pricing` CMS page. It had no door, so Hosting answered a crawler with the bare
+  // shell: no title, description or og:* tags (MEASURED on casavoga.com, 2026-11-16,
+  // ISS-061), while `/p/pricing` rendered them all. Never a 301 to `/p/pricing`: sign-in
+  // returns to `/pricing` to continue checkout (`auth/signInReturn.ts`). A bound
+  // custom domain already prerenders `/pricing` (`middleware/customDomain.ts`).
+  app.get('/pricing', platformDocumentDoor(() => 'pricing', { admit: admitPublicPage }));
+
   // ── ADR 0824 D4 — the ROOT robots.txt + sitemap.xml doors ──
   // Crawlers only ever ask the origin root. Hosting used to fall these through
   // to the SPA catch-all (`index.html` as text/html), so the real generators

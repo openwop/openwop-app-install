@@ -12,12 +12,16 @@
  *     to sign with the signer's public key, TTL clamped to 7 days, absent →
  *     `{found:false}`;
  *   - the metadata token is fetched once and reused;
+ *   - a caller's deadline (`signal`) reaches the upload request, and a put
+ *     without one sends none (ADR 0951 P2.5);
  *   - the boot round trip (put/get/list/presign-fetch/delete) passes and cleans up.
  *
  * Tracker TST-BFB-3. Red when: the object name drops the tenant root; the TTL
  * is not clamped; presign of an absent object throws; a 404 delete throws; the
  * boot check skips its cleanup; the string to sign or the credential scope
- * changes. The signature is checked against a string to sign built HERE from
+ * changes; put drops the caller's signal. The list is pinned twice (the
+ * request prefix and a client-side `startsWith` filter); the fake honours the
+ * prefix, so only the prefix half is witnessed here. The signature is checked against a string to sign built HERE from
  * literals (the GCS V4 recipe), not by the module's own `gcsV4StringToSign`.
  */
 import { describe, expect, it } from 'vitest';

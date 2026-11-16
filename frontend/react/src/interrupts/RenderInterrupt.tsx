@@ -15,6 +15,7 @@ import { ClarificationDialog } from './ClarificationDialog.js';
 import { ConnectionRequiredDialog } from './ConnectionRequiredDialog.js';
 import { RefinementForm } from './RefinementForm.js';
 import { CancellationBanner } from './CancellationBanner.js';
+import { CredentialRequestCard } from './CredentialRequestCard.js';
 import { requestWords } from './requestWords.js';
 
 /** CC-UI-2 — when a `timer` interrupt resumes, mirroring the backend's
@@ -67,6 +68,9 @@ export function RenderInterrupt({ runId, active, onResolved }: Props) {
       return <RefinementForm {...props} />;
     case 'cancellation':
       return <CancellationBanner {...props} />;
+    // ADR 1125 D1 — connect a provider, through the host's own connect route.
+    case 'credential':
+      return <CredentialRequestCard runId={runId} nodeId={active.nodeId} data={active.data} />;
     // CC-UI-2 — neither waits on a reply from this page, so neither gets a card;
     // both say plainly what the run is waiting for.
     case 'timer': {
@@ -77,6 +81,10 @@ export function RenderInterrupt({ runId, active, onResolved }: Props) {
         </div>
       );
     }
+    // CC-ORCH-3 — a run waiting on linked runs or an outside event needs nothing
+    // from this page; it fell through to "can't answer this kind of step".
+    case 'external-event':
+      return <div role="status" className="alert">{t('externalEventWaits')}</div>;
     case 'walkthrough-step':
     case 'tour-step':
       return (
@@ -87,13 +95,14 @@ export function RenderInterrupt({ runId, active, onResolved }: Props) {
     default: {
       // ADR 1109 D7 — say what the step asks, even when this app cannot answer it.
       // No buttons: guessing a resume value for a schema the app cannot read could
-      // resolve the step wrongly.
+      // resolve the step wrongly. ADR 1125 D1: no kind name in what a person reads;
+      // a kind that notifies always has a case above (the kinds ratchet).
       const words = requestWords(active.data);
       return (
         <div role="status" className="alert warning">
           {words.title ? <p className="u-m-0"><strong>{words.title}</strong></p> : null}
           {words.text ? <p className="u-m-0">{words.text}</p> : null}
-          <p className="u-m-0">{t('unknownKindBody', { kind: active.kind })}</p>
+          <p className="u-m-0">{t('unknownKindBody')}</p>
         </div>
       );
     }

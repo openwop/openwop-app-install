@@ -20,6 +20,12 @@
  * vacuous against the DOM read). Sabotage: restoring the `cur || …` selection
  * without the reset reds CO-SP-4; preselecting `''` or `b[0]` reds CO-SP-12;
  * mapping a failed ledger read to `[]` reds CO-SP-1.
+ *
+ * Since ADR 0941 D5 the detail is its own route (`CampaignDetailPage`), so the
+ * list and the detail are mounted as the app routes them and a row click opens
+ * the detail; its other sections (ledger, command, variants, autonomy) are
+ * mocked out and own their tests. Wave 113 (`w113g4-co-*`) re-probed every
+ * claim on that route.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('../CampaignLedgerSection.js', () => ({ CampaignLedgerSection: () => null })); // own tests: campaignLedgerSection.test.tsx
@@ -29,33 +35,40 @@ vi.mock('../CommandSection.js', () => ({ CommandSection: () => null })); // own 
 vi.mock('../CampaignVariantsSection.js', () => ({ CampaignVariantsSection: () => null })); // own tests: campaignVariantsSection.test.tsx
 import { render, screen, cleanup, fireEvent, act, within, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import type { AdDispatch, BriefRef, MarketingCampaign, MessagingKernel, OrgRef } from '../campaignStudioClient.js';
+import type * as CS from '../campaignStudioClient.js';
+import type { AdDispatch, BriefRef, CampaignLinks, MarketingCampaign, MessagingKernel, OrgRef } from '../campaignStudioClient.js';
 
-const listCampaigns = vi.fn();
-const listDispatches = vi.fn();
-const listBriefs = vi.fn();
-const listOrgs = vi.fn();
-const updateCampaign = vi.fn();
-const finalizeBrief = vi.fn();
+// Typed against the real client, so a fixture that drifts from the SSoT fails tsc.
+const listCampaigns = vi.fn<typeof CS.listCampaigns>();
+const listDispatches = vi.fn<typeof CS.listDispatches>();
+const listBriefs = vi.fn<typeof CS.listBriefs>();
+const listOrgs = vi.fn<typeof CS.listOrgs>();
+const updateCampaign = vi.fn<typeof CS.updateCampaign>();
+const finalizeBrief = vi.fn<typeof CS.finalizeBrief>();
 
 vi.mock('../campaignStudioClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
   return {
     ...actual,
-    listCampaigns: (..._a: unknown[]) => listCampaigns(),
-    listDispatches: (...a: unknown[]) => listDispatches(...a),
-    listBriefs: (...a: unknown[]) => listBriefs(...a),
-    listOrgs: (..._a: unknown[]) => listOrgs(),
+    listCampaigns: (...a: Parameters<typeof CS.listCampaigns>) => listCampaigns(...a),
+    listDispatches: (...a: Parameters<typeof CS.listDispatches>) => listDispatches(...a),
+    listBriefs: (...a: Parameters<typeof CS.listBriefs>) => listBriefs(...a),
+    listOrgs: () => listOrgs(),
     deleteCampaign: vi.fn(async () => {}),
     // ADR 0941 D5 — the detail is its own route; it reads the campaign by id.
-    getCampaign: async (id: string) => ((await listCampaigns()) as MarketingCampaign[]).find((c) => c.id === id),
+    // A missing id rejects as the real route does (404 → "not found"), never `undefined`.
+    getCampaign: async (id: string): Promise<MarketingCampaign> => {
+      const found = (await listCampaigns()).find((c) => c.id === id);
+      if (!found) throw new Error('Campaign not found');
+      return found;
+    },
     getCampaignLinks: vi.fn(async () => ({
-  products: { status: 'ok', items: [] }, project: { status: 'ok', items: [] },
-  assets: { status: 'ok', items: [] }, runs: { status: 'ok', items: [] }, emailSends: { status: 'ok', items: [] },
-  adDispatches: { status: 'ok', items: [] }, plans: { status: 'ok', items: [] }, opsAssets: { status: 'ok', items: [] }, assetTotal: 0,
-})),
-    updateCampaign: (...a: unknown[]) => updateCampaign(...a),
-    finalizeBrief: (...a: unknown[]) => finalizeBrief(...a),
+      products: { status: 'ok', items: [] }, project: { status: 'ok', items: [] },
+      assets: { status: 'ok', items: [] }, runs: { status: 'ok', items: [] }, emailSends: { status: 'ok', items: [] },
+      adDispatches: { status: 'ok', items: [] }, plans: { status: 'ok', items: [] }, opsAssets: { status: 'ok', items: [] }, assetTotal: 0,
+    } satisfies CampaignLinks)),
+    updateCampaign: (...a: Parameters<typeof CS.updateCampaign>) => updateCampaign(...a),
+    finalizeBrief: (...a: Parameters<typeof CS.finalizeBrief>) => finalizeBrief(...a),
   };
 });
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
@@ -114,7 +127,8 @@ beforeEach(() => {
   listBriefs.mockReset().mockResolvedValue(BRIEFS_A);
   listOrgs.mockReset().mockResolvedValue(ORGS);
   updateCampaign.mockReset().mockResolvedValue(CAMPAIGN);
-  finalizeBrief.mockReset().mockResolvedValue({ id: 'camp-9', name: 'New' });
+  // A full campaign, as the route returns it (the old `{ id, name }` was not one).
+  finalizeBrief.mockReset().mockResolvedValue({ ...CAMPAIGN, id: 'camp-9', name: 'New' });
 });
 afterEach(cleanup);
 
@@ -140,6 +154,7 @@ describe('CO-SP-1 — a failed ledger read is a failure, not an empty ledger', (
     } satisfies AdDispatch]);
     await openDetail();
     expect(await screen.findByText(/as of dispatch time/)).toBeTruthy();
+    expect(screen.getByText('mc-9')).toBeTruthy();
     expect(screen.getByText('as-9')).toBeTruthy();
     expect(screen.getByText('ad-9')).toBeTruthy();
   });
@@ -184,6 +199,8 @@ describe('CO-SP-3 — a finalize failure renders INSIDE the dialog', () => {
     // The failure renders inside the dialog (Modal's error region), not behind
     // the scrim.
     expect(await within(dialog).findByText('finalize exploded')).toBeTruthy();
+    // …and the dialog is still the open one (it did not close behind the error).
+    expect(screen.getByRole('dialog')).toBe(dialog);
   });
 });
 
@@ -216,6 +233,8 @@ describe('CO-SP-3 — a failed status change is visible from the detail view', (
     await openDetail();
     fireEvent.change(screen.getByLabelText(/Status/), { target: { value: 'paused' } });
     expect(await screen.findByText('status write failed')).toBeTruthy();
+    // The write that failed is the one the operator asked for.
+    expect(updateCampaign).toHaveBeenCalledWith('camp-1', { status: 'paused' });
   });
 });
 

@@ -12,6 +12,7 @@ export const messages = {
   emptyTitle: 'Nenhuma campanha ainda',
   emptyBody: 'Finalize um briefing confirmado em uma campanha, ou execute uma de ponta a ponta com o Estrategista de Campanha.',
   runWithStrategist: 'Executar com o Estrategista',
+  strategistRunDraft: 'Verifique com campaign-orchestration.status se a campanha “{{name}}” ({{campaignId}}, briefing {{briefId}}, organização {{orgId}}) está pronta e me diga o que vai rodar antes de iniciar qualquer coisa.',
   designFunnelWithArchitect: 'Criar um funil com o Arquiteto de funis',
   designJourney: 'Criar uma jornada',
   finalizeBrief: 'Finalizar um briefing',

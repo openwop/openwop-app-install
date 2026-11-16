@@ -34,6 +34,8 @@ import { getCollaborator } from '../../host/externalCollaborators.js';
 import { getCollection, listDocuments } from '../kb/kbService.js';
 import { publicDocumentView, getDocument, canReadDocument } from '../documents/documentsService.js';
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
+import { assetTokensInValue } from '../../host/assetServePath.js';
+import { schedulePublicAssetResync } from '../../host/assetGrants.js';
 import { messageView, transcriptToMarkdown } from '../chat-export/transcriptRenderer.js';
 import { getConversationMeta } from '../../host/conversationStore.js';
 import { getEntryUnfiltered, resolveEntryBody, readableBy as promptReadableBy } from '../prompts/promptLibraryService.js';
@@ -1059,6 +1061,7 @@ export async function createLink(
     ...(expiry.expiresAt ? { deadAt: expiry.expiresAt } : {}),
   };
   await links.put(link);
+  schedulePublicAssetResync('share-link', link.tenantId, link.tokenHash); // ADR 1122 P1b — the link exposes its resource
   // WF-SHARE-1 — no `void sweepDeadLinks()` here any more: retention rides the
   // daemon tick, not an unrelated write on the request path.
   return { ...link, token: minted.raw }; // shown once — never at rest, never re-readable
@@ -1153,6 +1156,7 @@ export async function purgeLinksForResource(tenantId: string, resourceType: Reso
     if (l.tenantId === tenantId && l.resourceType === resourceType && l.resourceId === resourceId) {
       // The frame-view cascade rides `links`' own delete hook now (one choke).
       await links.delete(l.tokenHash);
+      schedulePublicAssetResync('share-link', l.tenantId, l.tokenHash); // ADR 1122 P1b
       purged += 1;
     }
   }
@@ -1307,6 +1311,7 @@ export async function revokeLink(tenantId: string, orgId: string, token: string)
   }
   const revokedAt = nowIsoSharing();
   await links.put({ ...link, revoked: true, revokedAt, deadAt: revokedAt });
+  schedulePublicAssetResync('share-link', link.tenantId, link.tokenHash); // ADR 1122 P1b — a revoked link exposes nothing
 }
 
 /**
@@ -1369,6 +1374,42 @@ export async function adoptLink(tenantId: string, orgId: string, token: string, 
  *  content. The carve-out existed precisely because gating capability tokens on
  *  a content-sharing toggle was wrong — removing the toggle removes the need
  *  for the exception rather than widening it. */
+/**
+ * ADR 1122 P1b — the asset tokens a share link makes public: everything its anonymous
+ * projection exposes (`RESOLVERS[type].load`, what `resolveShared` serves), while the
+ * link is live. A revoked, expired, view-capped or wrong-tenant link, or one whose
+ * owning feature is off, exposes nothing. The tokens may be bare fields or served URLs.
+ */
+export async function publicAssetTokensForLink(tenantId: string, tokenHash: string): Promise<string[]> {
+  const link = await links.get(tokenHash);
+  if (!link || link.tenantId !== tenantId || link.revoked) return [];
+  if (link.expiresAt) {
+    const exp = Date.parse(link.expiresAt);
+    if (Number.isNaN(exp) || exp <= Date.now()) return [];
+  }
+  if (link.maxViews !== undefined && (link.viewCount ?? 0) >= link.maxViews) return [];
+  if (!(await owningFeatureEnabled(link.resourceType, link.tenantId))) return [];
+  const resource = await RESOLVERS[link.resourceType].load(link.tenantId, link.orgId, link.resourceId, { snapshotAt: link.createdAt });
+  return resource ? assetTokensInValue(resource) : [];
+}
+
+/** ADR 1122 P1b — one bounded page of share links by key, for the grant backfill. */
+export async function shareLinkPage(after: string | undefined, limit: number): Promise<{ items: Array<{ tenantId: string; id: string }>; next?: string }> {
+  const storage = hostExtStorage();
+  const prefix = 'hostext:sharing:link:';
+  const rows = storage.kvListPage
+    ? await storage.kvListPage(prefix, { ...(after ? { after } : {}), limit })
+    : (await storage.kvList(prefix)).filter((r) => !after || r.key > after).slice(0, limit);
+  const items: Array<{ tenantId: string; id: string }> = [];
+  for (const { value } of rows) {
+    let row: { tenantId?: unknown; tokenHash?: unknown };
+    try { row = JSON.parse(value) as typeof row; } catch { continue; }
+    if (typeof row.tenantId === 'string' && typeof row.tokenHash === 'string') items.push({ tenantId: row.tenantId, id: row.tokenHash });
+  }
+  const last = rows[rows.length - 1]?.key;
+  return { items, ...(rows.length >= limit && last ? { next: last } : {}) };
+}
+
 async function resolveActiveLink(token: string, opts: { enforceViewCap?: boolean } = {}): Promise<ShareLink> {
   // SHCD-3 — the WIRE stays a uniform, reason-less 404 (that is the whole
   // non-oracle posture, and it is deliberate). But the justification for

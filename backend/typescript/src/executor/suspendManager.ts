@@ -18,8 +18,12 @@ import { assertResumeSchemaDeclaration } from '../host/resumeSchemaValidation.js
 let backend: Storage | null = null;
 
 
-/** Interrupt kinds that never notify: nobody is being asked anything (#5922). */
-export const NEVER_NOTIFY_KINDS: ReadonlySet<InterruptRecord['kind']> = new Set<InterruptRecord['kind']>(['timer', 'tour-step', 'walkthrough-step', 'conversation']);
+/** Interrupt kinds that never notify: nobody is being asked anything (#5922).
+ *  `external-event` (ADR 1125 D1) is a machine wait: a dispatch wave join, a
+ *  Claude Code task, or an assistant approval wait whose approval already shows
+ *  in the Needs-you queue. Every kind not listed here MUST have a card in the
+ *  SPA's `RenderInterrupt` (adr1125-request-kinds-ratchet.test.ts). */
+export const NEVER_NOTIFY_KINDS: ReadonlySet<InterruptRecord['kind']> = new Set<InterruptRecord['kind']>(['timer', 'tour-step', 'walkthrough-step', 'conversation', 'external-event']);
 
 export function setSuspendBackend(storage: Storage): void {
   backend = storage;

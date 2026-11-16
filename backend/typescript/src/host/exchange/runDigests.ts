@@ -122,6 +122,19 @@ async function readCompletedOutputs(storage: Storage, runId: string): Promise<un
   return payload?.outputs ?? payload?.output;
 }
 
+/**
+ * CC-STRAT-3 — what a waiting run is waiting FOR. `waiting-external` (linked child
+ * runs, a webhook, an outside event) resumes on its own; telling the model it was
+ * "waiting for input" made the Campaign Strategist tell a person the run was
+ * "waiting for a person to decide" while it waited on its own channel runs. The
+ * same distinction the UI draws (CC-ORCH-3, `chat/interruptKinds.ts`).
+ */
+export function waitingLine(status: string): string {
+  if (status === 'waiting-external') return 'waiting for its linked runs or an outside event; it continues on its own and nobody needs to act';
+  if (status === 'waiting-approval' || status === 'waiting-for-approval') return 'paused, waiting for a person to approve a step';
+  return 'paused, waiting for input';
+}
+
 /** The headline alone: host-authored run id + status enum, nothing run-derived. */
 function headlineFor(run: RunRecord): string {
   return `[Workflow run ${run.runId} — ${run.status}]`;
@@ -142,7 +155,7 @@ async function detailedDigest(storage: Storage, tenantId: string, ref: RunRef, r
     }
     lines.push(`outputs: ${out}`);
   } else if (run.status.startsWith('waiting-')) {
-    lines.push('paused, waiting for input');
+    lines.push(waitingLine(run.status));
   }
   return { headline: headlineFor(run), detail: fenceUntrustedBlock(lines.join('\n'), `workflow run ${run.runId}`) };
 }

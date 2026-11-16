@@ -30,7 +30,6 @@ import { createHostAdapterSuite } from '../src/host/index.js';
 import { sweepDueTimers } from '../src/executor/timerResume.js';
 import { timerResumeContinuation } from '../src/routes/interrupts.js';
 import { sweepDispatchOutbox } from '../src/host/runDispatchSweeper.js';
-import { DISPATCH_OUTBOX_HINT_GRACE_MS } from '../src/host/runInsert.js';
 import { getNotificationEmitter } from '../src/notifications/emitter.js';
 import { upsertFromPrincipal } from '../src/features/users/usersService.js';
 import { createContact } from '../src/features/crm/contactsService.js';
@@ -284,7 +283,13 @@ describe('ADR 0954 D6 — rungs', () => {
       insertFault.mockRestore(); getFault.mockRestore(); expect(childId).toEqual(expect.any(String));
       const child = (await storage.getRun(childId!))!;
       expect(child.status).toBe('pending');
-      await sweepDispatchOutbox({ storage, hostSuite: createHostAdapterSuite({ storage }) }, 'sla-child-recovery', Date.parse(child.createdAt) + DISPATCH_OUTBOX_HINT_GRACE_MS + 1);
+      // Sweep at the row's own due time. The row's `nextAttemptAt` is read from
+      // the clock at insert, after the run's `createdAt` and some awaits, so
+      // `createdAt + grace + 1` was a 0-1 ms margin: under a loaded gate the
+      // sweep claimed nothing, the child never ran, and the wait below timed out.
+      const due = (await storage.listDispatchOutbox({ status: 'pending', limit: 100 })).find((row) => row.runId === childId);
+      expect(due, 'the committed child left its outbox row').toBeDefined();
+      expect(await sweepDispatchOutbox({ storage, hostSuite: createHostAdapterSuite({ storage }) }, 'sla-child-recovery', due!.nextAttemptAt), 'the sweep dispatched the child').toBe(1);
       const decision = await until(() => getRoutingDecision(TENANT, orgA, contactId, source.epoch + 1), 'recovered child assignment');
       expect(decision.runId).toBe(childId); expect(decision.chosen).not.toBe(source.chosen);
       await openTimer(childId!);

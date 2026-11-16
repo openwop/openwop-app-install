@@ -13,7 +13,10 @@
  * of the three answers is rendered: re-admitted (durable, announced),
  * `not_erased` (information, never an error), refused (inside the dialog).
  *
- * Sabotage-witnessed (/grade-tests w9): treating an erased lookup as "none", dropping
+ * Both live regions are reset per case (module state), and the CN2UX-2 case waits for
+ * the re-read's own result before judging that it stayed silent (/grade-tests w110).
+ *
+ * Sabotage-witnessed (/grade-tests w9, re-probed w110): treating an erased lookup as "none", dropping
  * the receipt's door or adding one to a no-record lookup, either dialog gate, the
  * outcome's announce / silent re-read / re-read / focus, the not_erased toast, or the
  * 403 / validation_error branches — each reds a case below.
@@ -21,7 +24,20 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent, act } from '@testing-library/react';
 import type { ReadmitResult, SubjectErasureResult } from '../consentClient.js';
-import { currentAnnouncements } from '../../../ui/announce.js';
+import { announce, currentAnnouncements } from '../../../ui/announce.js';
+
+// Every message sent to the live region, in order. The final polite value alone cannot
+// show that the CN2UX-2 re-read stayed silent: the re-read resolves in a microtask,
+// BEFORE the outcome Notice's passive effect speaks, so a re-read that announced would
+// be overwritten and invisible. The wrapper still delegates to the real announcer.
+const announceCalls = vi.hoisted((): string[] => []);
+vi.mock('../../../ui/announce.js', async (orig) => {
+  const real = await orig<typeof import('../../../ui/announce.js')>();
+  return {
+    ...real,
+    announce: (message: string, opts?: { assertive?: boolean }): void => { announceCalls.push(message); real.announce(message, opts); },
+  };
+});
 
 let eraseResult: SubjectErasureResult;
 let readmitAnswer: ReadmitResult | Error;
@@ -60,7 +76,7 @@ const click = (name: RegExp): void => { fireEvent.click(screen.getByRole('button
 
 const ATTESTATION = 'Asked by email on 11 Sep to receive the newsletter again; ticket 4821.';
 
-/** Open the dialog from the "no record" lookup path. */
+/** Open the dialog from the ERASED-lookup path (ADR 0849 D3). */
 async function openFromLookup(key = 'erased-1'): Promise<void> {
   const input = await mount();
   type(input, key);
@@ -80,10 +96,16 @@ function fillAndSubmit(key = 'erased-1', attestation = ATTESTATION): void {
 beforeEach(() => {
   eraseResult = { ok: true, consentRecord: true, erasure: { total: 4, failed: 0, keysResolved: 2 } };
   readmitAnswer = { readmitted: true, subjectKey: 'erased-1' };
+  getSubject.mockReset();
   getSubject.mockImplementation(async () => ({ record: null, erased: true, erasedAt: '2026-09-01T10:00:00.000Z' }));
   readmitSubject.mockReset();
   readmitSubject.mockImplementation(async () => { if (readmitAnswer instanceof Error) throw readmitAnswer; return readmitAnswer; });
   toastInfo.mockClear(); toastSuccess.mockClear(); toastError.mockClear();
+  // The live-region values are module state that no case resets: without this the
+  // two "announced" cases below can each pass on the OTHER case's "Re-admitted"
+  // announcement under shuffle (/grade-tests w110).
+  announce(''); announce('', { assertive: true });
+  announceCalls.length = 0;
 });
 afterEach(cleanup);
 
@@ -187,11 +209,21 @@ describe('the three answers', () => {
   it('CN2UX-2 — after a re-admit the erased panel is re-read, never left contradicting the outcome', async () => {
     await openFromLookup();
     getSubject.mockImplementation(async () => ({ record: null, erased: false }));
+    announceCalls.length = 0;
     fillAndSubmit();
     await screen.findByText(/re-admitted .*erased-1/i);
-    await waitFor(() => expect(screen.queryByText(/^erased on /i)).toBeNull());
+    // The re-read LANDED: the panel now shows what the server says after the re-admit.
+    // (Clearing the panel alone — `setLookup(null)` without the re-read — would also
+    // remove "Erased on", so that absence cannot witness the re-read.)
+    expect(await screen.findByText(/no consent record for that subject/i)).toBeTruthy();
+    expect(getSubject).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText(/^erased on /i)).toBeNull();
     expect(screen.queryByRole('button', { name: /re-admit subject/i }), 'no door back to a door already used').toBeNull();
-    await waitFor(() => expect(currentAnnouncements().polite, 'the re-read is silent; the Notice is the voice').toMatch(/re-admitted/i));
+    // Asserted AFTER the re-read settled, against every message sent (see `announceCalls`):
+    // the final polite value alone would hide a re-read that spoke first.
+    await waitFor(() => expect(currentAnnouncements().polite).toMatch(/re-admitted/i));
+    expect(announceCalls.filter((m) => /no consent record/i.test(m)), 'the re-read is silent; the Notice is the voice').toEqual([]);
+    expect(announceCalls.some((m) => /^re-admitted/i.test(m)), 'positive control: the outcome WAS spoken').toBe(true);
     // N1 — the button the dialog returned focus to is gone; the outcome takes focus.
     await waitFor(() => {
       expect(document.activeElement, 'focus never falls to <body>').not.toBe(document.body);

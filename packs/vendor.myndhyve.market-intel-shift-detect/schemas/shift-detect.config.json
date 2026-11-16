@@ -1,8 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-shift-detect/1.0.1/shift-detect.config.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-shift-detect/1.1.0/shift-detect.config.json",
   "title": "MarketIntelShiftDetectConfig",
   "type": "object",
-  "properties": {},
+  "properties": {
+    "previous": { "description": "Back-compat: the prior run's set, read when inputs.previous is absent (ADR 1116). An object or its JSON.", "type": ["object", "string"] }
+  },
   "additionalProperties": true
 }

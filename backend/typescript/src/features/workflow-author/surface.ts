@@ -13,6 +13,7 @@ import type { FeatureSurface } from '../../host/featureSurfaces.js';
 import { resolveDisabledPacks } from '../../host/packVisibility.js';
 import { parseFieldContract } from '../../host/preserveDroppedFields.js';
 import { assertModelWorkflowWrite } from '../../host/workflowWriteAuthority.js';
+import { workflowClientReaderForScope } from '../../host/workflowClientAccess.js'; // ADR 1132 D5
 import {
   buildAuthoringCatalog,
   validateAuthoredWorkflow,
@@ -40,14 +41,14 @@ export function buildWorkflowAuthorSurface(scope: BundleScope): FeatureSurface {
     getWorkflow: async (args) => {
       const workflowId = String((args ?? {}).workflowId ?? '');
       if (!workflowId) return { found: false };
-      return readAuthoredWorkflow(workflowId, { tenantId: scope.tenantId });
+      return readAuthoredWorkflow(workflowId, { tenantId: scope.tenantId, mayRead: workflowClientReaderForScope(scope) });
     },
 
     /** The registered-workflow index (compact — id + authoring metadata name/
      *  description when present), TENANT-SCOPED: the caller's own authored
      *  workflows + built-ins, never another tenant's (ADR 0163). */
     listWorkflows: async () => ({
-      workflows: await listAuthoredWorkflows({ tenantId: scope.tenantId }),
+      workflows: await listAuthoredWorkflows({ tenantId: scope.tenantId, mayRead: workflowClientReaderForScope(scope) }),
     }),
 
     /** Validate a candidate WorkflowDefinition WITHOUT persisting; returns

@@ -3,6 +3,9 @@
  * the voice transcript stream has no replay. A message posted in the reconnect
  * gap sends no frame, so a REconnect reloads the thread once. The first connect
  * does not (the caller loaded the thread when it subscribed).
+ *
+ * Red when: the first connect refreshes; a reconnect does not refresh; a
+ * reconnect refreshes more than once.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { subscribeVoiceTranscripts } from '../voiceClient.js';
@@ -23,15 +26,18 @@ describe('subscribeVoiceTranscripts — ADR 0897 bounded close', () => {
     // every time with random=0). Pin the roll to 1: every backoff is exactly
     // 1000 ms and the next timer lands outside the window.
     vi.spyOn(Math, 'random').mockReturnValue(1);
-    const onMessage = vi.fn();
+    // Each refresh records WHICH connect it followed, so "once, on the reconnect"
+    // is one value: [2]. A first-connect refresh reads [1, …]; a double one [2, 2].
+    const refreshedAfterConnect: number[] = [];
+    const onMessage = (): void => { refreshedAfterConnect.push(fetchMock.mock.calls.length); };
     const unsub = subscribeVoiceTranscripts('conv-1', onMessage);
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     await drain();
-    expect(onMessage).not.toHaveBeenCalled();
+    expect(refreshedAfterConnect).toEqual([]);
     await vi.advanceTimersByTimeAsync(1_000);
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     await drain();
     unsub();
-    expect(onMessage).toHaveBeenCalledTimes(1);
+    expect(refreshedAfterConnect).toEqual([2]);
   });
 });

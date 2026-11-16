@@ -82,6 +82,8 @@ const KNOWN_TYPEIDS = new Set([
   'core.openwop.integration.slack-message',
   'feature.notifications.nodes.notify',
   'feature.crm.nodes.create-task',
+  // CC-SEO-2: seo.keyword-brief saves its brief as a draft Document.
+  'feature.documents.nodes.save-document',
 ]);
 
 describe('gap packs — discovery', () => {

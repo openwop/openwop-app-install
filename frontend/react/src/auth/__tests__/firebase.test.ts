@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 /**
  * Unit coverage for the lazy Firebase module (GAP-ANALYSIS E13) on the
@@ -34,6 +34,18 @@ import {
 } from '../firebase.js';
 
 describe('firebase auth (not configured)', () => {
+  // The file OWNS the not-configured precondition rather than inheriting it from
+  // whatever env the run happens to load: `readConfigFromEnv` reads these three
+  // at call time, and one empty value is enough to make the build unconfigured.
+  beforeEach(() => {
+    vi.stubEnv('VITE_FIREBASE_API_KEY', '');
+    vi.stubEnv('VITE_FIREBASE_AUTH_DOMAIN', '');
+    vi.stubEnv('VITE_FIREBASE_PROJECT_ID', '');
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('reports not-configured', () => {
     expect(isAuthConfigured()).toBe(false);
   });
@@ -47,8 +59,9 @@ describe('firebase auth (not configured)', () => {
     const cb = vi.fn();
     const unsub = onAuthChanged(cb);
     await vi.waitFor(() => expect(cb).toHaveBeenCalled());
-    // Let any (wrong) second emission land before counting.
-    await new Promise<void>((r) => { queueMicrotask(r); });
+    // Let any (wrong) second emission land before counting: a full macrotask
+    // turn, not one microtask, so a re-emit scheduled by a timer is counted too.
+    await new Promise<void>((r) => { setTimeout(r, 0); });
     expect(cb).toHaveBeenCalledTimes(1);
     expect(cb).toHaveBeenCalledWith(null);
     expect(sdk.loads).toEqual([]);

@@ -78,6 +78,67 @@ export async function retireConversationRequests(storage: Storage, now: () => Da
   return await storage.resolveRequestNotificationsOfKind('conversation', { state: 'withdrawn', at: now().toISOString() });
 }
 
+/** ADR 1124 D2 — `OPENWOP_NOTIF_STALE_RECONCILE`: `report`, `apply`, or null (off, the default). */
+export function staleReconcileMode(): 'report' | 'apply' | null {
+  const v = process.env.OPENWOP_NOTIF_STALE_RECONCILE?.trim().toLowerCase();
+  return v === 'report' || v === 'apply' ? v : null;
+}
+
+/** Per-tenant counts of what the reconcile found. Counts only, never ids or content. */
+export interface StaleReconcileCounts { resolved: number; runEnded: number; runDeleted: number; stillOpen: number; unexplained: number }
+export interface StaleReconcileReport { mode: 'report' | 'apply'; scanned: number; stamped: number; byTenant: Record<string, StaleReconcileCounts> }
+
+/**
+ * ADR 1124 D2 — retire the request rows ADR 1114 never stamped: rows filed
+ * before its subscriber existed, and rows whose run was deleted before D1. Each
+ * unstamped row is decided from what is still stored:
+ *  - its interrupt is resolved → the subscriber's own mapping of the answer;
+ *  - its interrupt is gone and the run is gone → `run-deleted`;
+ *  - its interrupt is gone and the run is terminal → `run-ended`;
+ *  - its interrupt is still open → left alone (it is still waiting);
+ *  - its interrupt is gone but the run is NOT terminal → left alone, counted
+ *    `unexplained` (nothing here can say how it ended).
+ * `report` writes nothing and logs the counts; `apply` stamps through
+ * `resolveRequestNotifications` (same row rules, idempotent). Paged; a stamped
+ * row drops out of the next page's predicate, so the cursor never skips one.
+ */
+export async function reconcileStaleRequests(storage: Storage, mode: 'report' | 'apply', pageSize = 500): Promise<StaleReconcileReport | null> {
+  if (!storage.listUnstampedRequestRows) return null;
+  const report: StaleReconcileReport = { mode, scanned: 0, stamped: 0, byTenant: {} };
+  const runs = new Map<string, Awaited<ReturnType<Storage['getRun']>>>();
+  let after: { tenantId: string; runId: string; notificationId: string } | undefined;
+  for (;;) {
+    const page = await storage.listUnstampedRequestRows({ ...(after ? { after } : {}), limit: pageSize });
+    if (page.length === 0) break;
+    for (const row of page) {
+      report.scanned += 1;
+      const counts = (report.byTenant[row.tenantId] ??= { resolved: 0, runEnded: 0, runDeleted: 0, stillOpen: 0, unexplained: 0 });
+      const interrupt = await storage.getInterrupt(row.interruptId);
+      let resolution: RequestResolution | null = null;
+      if (interrupt?.resolvedAt) {
+        resolution = { state: resolutionStateOf(interrupt.resolvedValue), at: interrupt.resolvedAt };
+        counts.resolved += 1;
+      } else if (interrupt) {
+        counts.stillOpen += 1;
+      } else {
+        if (!runs.has(row.runId)) runs.set(row.runId, await storage.getRun(row.runId));
+        const run = runs.get(row.runId);
+        const at = new Date().toISOString();
+        if (!run) { resolution = { state: 'run-deleted', at }; counts.runDeleted += 1; }
+        else if (RUN_END_TYPES.has(`run.${run.status}`)) { resolution = { state: 'run-ended', at: run.updatedAt ?? at }; counts.runEnded += 1; }
+        else counts.unexplained += 1;
+      }
+      if (resolution && mode === 'apply') {
+        report.stamped += await storage.resolveRequestNotifications({ tenantId: row.tenantId, runId: row.runId, interruptId: row.interruptId, resolution });
+      }
+    }
+    const last = page[page.length - 1]!;
+    after = { tenantId: last.tenantId, runId: last.runId, notificationId: last.notificationId };
+    if (page.length < pageSize) break;
+  }
+  return report;
+}
+
 let installed = false;
 
 /** Subscribe once at boot. A second call is a no-op. */

@@ -4,10 +4,11 @@
  * actions ({connected}/{skip}) flow through onAction; a capability-only prompt
  * (no providerId) falls back to the Access-hub link, not a dead Connect button.
  *
- * Sabotage witnesses (w43): ignoring `oauthConfigured`, dropping the
+ * Sabotage witnesses (w43; re-probed w110 as `w110g3-crc-*`): ignoring or inverting
+ * `oauthConfigured` (an unconfigured provider gets the link, not Connect), dropping the
  * `window.location.href` launch, the providerId argument, either resume payload,
- * the card's `onAction('resolve')` adaptation, the capability-only branch, or the
- * no-providerId catalog skip each turn a case red.
+ * the card's `onAction('resolve')` adaptation, the capability-only branch, the
+ * no-providerId catalog skip, the return path, or the Access-hub href each turn a case red.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent, cleanup } from '@testing-library/react';
@@ -26,7 +27,7 @@ import type { Provider } from '../../features/connections/connectionsClient.js';
 /** A catalog row as `listProviders` returns it (the P9 `oauthConfigured` honesty flag set). */
 const GOOGLE: Provider = { id: 'google', label: 'Google Workspace', kind: 'oauth2', reach: 'workspace', refreshable: true, oauthConfigured: true };
 
-function renderCard(connection: Record<string, unknown>, onAction = vi.fn()): { onAction: ReturnType<typeof vi.fn> } {
+function renderCard(connection: Record<string, unknown>, onAction = vi.fn<CardProps['onAction']>(async () => {})): { onAction: typeof onAction } {
   const props: CardProps = {
     payload: { data: { profile: 'openwop-connection', connection } },
     // The connection prompt rides the clarification interrupt (defaultCards
@@ -73,11 +74,14 @@ describe('ConnectionRequiredCard', () => {
     const realLocation = window.location;
     Object.defineProperty(window, 'location', {
       configurable: true,
-      value: { ...realLocation, pathname: '/', search: '', set href(v: string) { nav.push(v); }, get href() { return nav[nav.length - 1] ?? ''; } },
+      value: { ...realLocation, pathname: '/chat', search: '?conversation=c1', set href(v: string) { nav.push(v); }, get href() { return nav[nav.length - 1] ?? ''; } },
     });
     try {
       fireEvent.click(connectBtn);
-      await waitFor(() => expect(beginOAuth).toHaveBeenCalledWith('google', expect.any(String)));
+      // The consent returns to THIS surface (path AND query), so the open interrupt is
+      // where the user lands to click "I've connected".
+      await waitFor(() => expect(beginOAuth).toHaveBeenCalledWith('google', '/chat?conversation=c1'));
+      expect(beginOAuth).toHaveBeenCalledTimes(1);
       // The launch actually happened: the component navigated to the URL it was
       // given. Asserting only `beginOAuth` would leave a component that fetched the
       // URL and dropped it indistinguishable from one that launched.
@@ -85,6 +89,15 @@ describe('ConnectionRequiredCard', () => {
     } finally {
       Object.defineProperty(window, 'location', { configurable: true, value: realLocation });
     }
+
+    // "Host-configured" is half the claim (the P9 `oauthConfigured` honesty flag): the
+    // same provider listed WITHOUT a configured OAuth client gets the Access-hub link,
+    // never a Connect button whose consent this host cannot run.
+    cleanup();
+    listProviders.mockResolvedValue([{ ...GOOGLE, oauthConfigured: false }]);
+    renderCard({ ref: 'google', providerId: 'google', label: 'Google Workspace' });
+    expect((await screen.findByText('connectionRequiredManage')).closest('a')?.getAttribute('href')).toBe('/access?tab=connections');
+    expect(screen.queryByText(/connectionRequiredConnect/)).toBeNull();
   });
 
   it('resume actions flow through onAction (connected carries providerId; skip is bare)', async () => {
@@ -100,8 +113,11 @@ describe('ConnectionRequiredCard', () => {
   });
 
   it('a capability-only prompt (no providerId) shows the Access-hub link, not Connect', () => {
+    // The catalog WOULD answer (and offer Google), so "not called" below is the
+    // no-providerId skip, not a read that had nothing to return.
+    listProviders.mockResolvedValue([GOOGLE]);
     renderCard({ ref: 'capability:ticketing', category: 'ticketing' });
-    expect(screen.getByText('connectionRequiredManage')).toBeTruthy();
+    expect(screen.getByText('connectionRequiredManage').closest('a')?.getAttribute('href')).toBe('/access?tab=connections');
     expect(screen.queryByText(/connectionRequiredConnect/)).toBeNull();
     expect(listProviders).not.toHaveBeenCalled();
   });

@@ -10,14 +10,23 @@
  * CREATE/CREATEROLE check itself (`pgSqlRuntime` verify) is witnessed by
  * `pg-sql-live.test.ts`, which needs Docker and skips in the gate. S3 blob: a put,
  * read-back, list and delete under a reserved tenant root, cleaned up even
- * when a step fails. Each is a no-op when its backend is not selected, and both
- * pg pools honour their `*_POOL_MAX`, which preflight Gate 5 counts.
+ * when a step fails. Each is a no-op when its backend is not selected. The
+ * vector pool honours OPENWOP_VECTOR_PG_POOL_MAX and the sql registration refuses
+ * a budget below 2 (the sql pool's own size is opened by `pgSqlRuntime`, which
+ * only `pg-sql-live` reaches); preflight Gate 5 counts both.
+ *
+ * ADR 0904 P3: the KB's lexical side table rides the SAME vector pool, and after
+ * a switch away from pgvector a configured DSN still reaches it for teardown
+ * without creating `vector(NaN)` or the unused extension.
  *
  * Tracker TST-BFB-4. Red when: the extension DDL runs after the table DDL; the
- * vector pool ignores OPENWOP_VECTOR_PG_POOL_MAX; the sql registration accepts
- * a pool of 1 or a missing role key; the blob boot check accepts an object that
- * did not read back or skips its cleanup; the s3 check runs when s3 is not
- * selected.
+ * vector pool ignores OPENWOP_VECTOR_PG_POOL_MAX; the lexical DDL leaves the
+ * vector pool or a second pool opens; maintenance after a switch is unreachable,
+ * serves reads, skips the purge DELETE, or runs the vector DDL; the sql
+ * registration accepts a pool of 1 or a missing role key; the blob boot check
+ * accepts an object that did not read back, skips the list or the presigned
+ * fetch, writes outside the reserved tenant root, or skips its cleanup; the s3
+ * check runs when s3 is not selected.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -45,7 +54,6 @@ import { registerPgVectorAdapter, verifyPgVectorBackend, CREATE_EXTENSION_SQL } 
 import { lexicalIndex, lexicalMaintenanceIndex } from '../src/host/vector/pgLexical.js';
 import { registerPgSqlAdapter, verifyPgSqlBackend } from '../src/host/sql/pgSql.js';
 import { verifyS3BlobBackend, type S3Config } from '../src/host/blob/s3Blob.js';
-import { BLOB_BOOT_CHECK_TENANT } from '../src/host/blob/blobBootCheck.js';
 
 const ENV_KEYS = [
   'OPENWOP_SURFACE_BACKEND', 'OPENWOP_SURFACE_VECTOR', 'OPENWOP_SURFACE_SQL', 'OPENWOP_SURFACE_BLOB',
@@ -89,7 +97,9 @@ describe('ADR 0867 — pgvector boot check', () => {
     expect(lexicalIndex()).toBeNull();
     const maintenance = lexicalMaintenanceIndex();
     expect(maintenance).not.toBeNull();
-    await maintenance!.purgeTenant('retired-fixture');
+    await expect(maintenance!.purgeTenant('retired-fixture')).resolves.toBe(0);
+    // The purge itself reached the lexical table (not only its DDL).
+    expect(pg.queries).toContain('DELETE FROM kb_lexical WHERE tenant = $1 RETURNING chunk_id');
     expect(pg.poolOpts).toHaveLength(1);
     expect(pg.queries.some(q => q.includes('CREATE TABLE IF NOT EXISTS kb_lexical '))).toBe(true);
     expect(pg.queries.some(q => q.includes('vector(NaN)') || q === CREATE_EXTENSION_SQL)).toBe(false);
@@ -130,10 +140,13 @@ describe('ADR 0867 — Postgres sql boot check', () => {
 function fakeS3(opts: { failGet?: boolean } = {}) {
   const store = new Map<string, Buffer>();
   const deletes: string[] = [];
+  /** `<METHOD> list|object` per request, in order. */
+  const calls: string[] = [];
   const fetchFn: typeof fetch = async (input, init = {}) => {
     const u = new URL(input instanceof Request ? input.url : String(input));
     const method = (init.method ?? 'GET').toUpperCase();
     const [, , ...rest] = u.pathname.split('/');
+    calls.push(`${method} ${rest.length === 0 ? 'list' : 'object'}`);
     if (rest.length === 0) {
       const prefix = u.searchParams.get('prefix') ?? '';
       const keys = [...store.keys()].filter((k) => k.startsWith(prefix)).sort();
@@ -150,7 +163,7 @@ function fakeS3(opts: { failGet?: boolean } = {}) {
     if (!body || opts.failGet) return new Response(null, { status: 404 });
     return new Response(method === 'HEAD' ? null : body, { status: 200 });
   };
-  return { store, deletes, fetchFn };
+  return { store, deletes, calls, fetchFn };
 }
 const S3: S3Config = {
   bucket: 'b', region: 'auto', accessKeyId: 'AK', secretAccessKey: 'SK',
@@ -158,12 +171,15 @@ const S3: S3Config = {
 };
 
 describe('ADR 0867 — S3 blob boot check', () => {
-  it('writes, reads back, lists and deletes one object under the reserved tenant root', async () => {
+  it('writes, reads back, lists, fetches presigned and deletes one object under the reserved tenant root', async () => {
     process.env.OPENWOP_SURFACE_BLOB = 's3';
     const s3 = fakeS3();
     await verifyS3BlobBackend({ fetch: s3.fetchFn, config: S3 });
+    // Every step of the round trip, in order (HEAD is presign's existence check, not a step).
+    expect(s3.calls.filter((c) => !c.startsWith('HEAD'))).toEqual(['PUT object', 'GET object', 'GET list', 'GET object', 'DELETE object']);
     expect(s3.deletes).toHaveLength(1);
-    expect(s3.deletes[0]).toMatch(new RegExp(`^p/tenants/${BLOB_BOOT_CHECK_TENANT}/boot-check-`));
+    // A literal, not the imported BLOB_BOOT_CHECK_TENANT, so a moved root cannot move the expectation.
+    expect(s3.deletes[0]).toMatch(/^p\/tenants\/__openwop_boot_check__\/boot-check-[0-9a-f-]{36}$/);
     expect(s3.store.size).toBe(0);
   });
   it('rejects when the object does not read back, and still deletes it', async () => {

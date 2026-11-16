@@ -3,6 +3,7 @@
  * its publication to the client's verified frozen policy and exact snapshot.
  * No mutable workflow-catalog lookup or node output can stand in for approval.
  */
+import { planExemptScopeOfRun } from '../../../host/operatorPlanExemption.js';
 import { isDeepStrictEqual } from 'node:util';
 import { OpenwopError, type EventRecord, type RunRecord } from '../../../types.js';
 import { hostExtStorage } from '../../../host/hostExtPersistence.js';
@@ -81,7 +82,7 @@ export async function assertReportPublishGatePassed(
   const run = await storage.getRun(runId);
   if (!run || run.tenantId !== tenantId || !/^[a-f0-9]{64}$/.test(snapshotHash)) throw refused('report_publish_ungated');
   const frozen = runAutonomyOf(run);
-  if (!frozen.stamp || autonomyOrgOf(run.metadata, frozen.stamp) !== orgId || !(await autonomyToggleOn(tenantId))) {
+  if (!frozen.stamp || autonomyOrgOf(run.metadata, frozen.stamp) !== orgId || !(await autonomyToggleOn(tenantId, planExemptScopeOfRun(tenantId, run.metadata as Record<string, unknown> | undefined)))) {
     throw refused('report_publish_ungated');
   }
   // Includes live client status/mode and attended-fork floors, unlike deciding

@@ -216,11 +216,24 @@ export const messages = {
   priorityHigh: 'Alta',
   priorityLow: 'Baja',
   cardUnread: 'Sin leer',
+  // ADR 1125 D3 — the card's line 2, its "…" menu and collapsed news.
+  cardMoreActions: 'Más acciones',
+  cardActivityLog: 'Ver el registro de actividad',
+  cardFrom: 'de {{asker}}',
+  cardReasonNamed: 'eres aprobador designado',
+  cardReasonAdmins: 'enviado a los administradores',
+  cardReasonRole: 'enviado al rol {{role}}',
+  cardRepeats_one: '· {{count}} vez',
+  cardRepeats_other: '· {{count}} veces',
+  cardShowAll: 'Mostrar los {{count}}',
+  cardShowFewer: 'Mostrar menos',
   subjectUnknownProject: 'Un proyecto',
   cardRunLink: 'Abrir la ejecución →',
   archive: 'Archivar',
   delete: 'Eliminar',
   interruptResolvedElsewhere: 'Este paso ya no espera.',
+  // ADR 1124 D3 — the step's run is deleted.
+  interruptUnavailable: 'Este paso ya no se puede abrir aquí.',
   // ADR 1114 (issue 5868) — a request whose step is over.
   archiveResolved: 'Archivar solicitudes terminadas',
   endApproved: 'Aprobada',
@@ -229,6 +242,8 @@ export const messages = {
   endTimedOut: 'Vencida',
   endAnswered: 'Respondida',
   endRunEnded: 'Ya no espera',
+  // ADR 1124 — a request whose run was deleted.
+  endRunDeleted: 'Ejecución eliminada',
 
   // ─── pushSubscription (developer-facing errors stay code; none user-facing) ──
 

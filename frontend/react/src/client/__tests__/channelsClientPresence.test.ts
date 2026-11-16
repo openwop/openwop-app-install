@@ -5,7 +5,10 @@
  *
  * What breaks it: a presence-disabled (404) or membership-denied (403) host hammered by
  * reconnects, a transient drop that kills presence for good, or every reconnect burning
- * the per-IP request budget. Backoff runs on FAKE timers (only setTimeout/clearTimeout
+ * the per-IP request budget. ADR 0897: a clean end of a HEALTHY (≥ 10 s) presence stream
+ * reconnects without a `connected:false` flash while an instant end still shows one, and a
+ * REconnected message stream refreshes the thread once (the first connect does not).
+ * Backoff runs on FAKE timers (only setTimeout/clearTimeout
  * are faked, so stream microtasks stay real) — no real-clock waits.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
@@ -29,13 +32,14 @@ const fetchReturning = (make: () => Response) => vi.fn(async (_input: RequestInf
 
 describe('subscribeChannelPresence', () => {
   it('parses a channel.presence frame and calls back with the snapshot', async () => {
-    vi.stubGlobal('fetch', fetchReturning(() => new Response(sseBody(frame(['user:alice'], ['user:alice'])), { status: 200 })));
+    // Asymmetric present/typing, so a swapped or dropped list cannot pass.
+    vi.stubGlobal('fetch', fetchReturning(() => new Response(sseBody(frame(['user:alice', 'user:bob'], ['user:bob'])), { status: 200 })));
     let unsub = (): void => {};
     const snap = await new Promise<{ present: string[]; typing: string[]; connected: boolean }>((resolve) => {
       unsub = subscribeChannelPresence('c1', (s) => resolve(s));
     });
     unsub(); // stop the reconnect loop so it doesn't leak into later tests
-    expect(snap).toMatchObject({ conversationId: 'c1', present: ['user:alice'], typing: ['user:alice'], connected: true });
+    expect(snap).toEqual({ conversationId: 'c1', present: ['user:alice', 'user:bob'], typing: ['user:bob'], connected: true });
   });
 });
 
@@ -53,6 +57,9 @@ describe('setChannelTyping', () => {
 
 describe('subscribeChannelPresence reconnect (ADR 0126 hardening)', () => {
   it('reconnects after the stream ends (a transient drop does not kill presence)', async () => {
+    // Pin the jitter mid-range: each backoff is then exactly 750 ms, so the one 1000 ms
+    // advance below admits exactly ONE reconnect.
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
     let call = 0;
     // first connection yields alice then closes; second yields bob then closes
     const fetchMock = fetchReturning(() => { call += 1; return new Response(sseBody(frame([call === 1 ? 'user:alice' : 'user:bob'])), { status: 200 }); });
@@ -65,7 +72,7 @@ describe('subscribeChannelPresence reconnect (ADR 0126 hardening)', () => {
     await vi.advanceTimersByTimeAsync(PAST_FIRST_BACKOFF_MS);
     await vi.waitFor(() => expect(seen).toEqual(['user:alice', 'user:bob']));
     unsub();
-    expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(2); // reconnected
+    expect(fetchMock).toHaveBeenCalledTimes(2); // reconnected once, not a tight loop
   });
 
   // One case per terminal status: silent (no callback, not even `connected:false`) AND no retry.
@@ -75,15 +82,15 @@ describe('subscribeChannelPresence reconnect (ADR 0126 hardening)', () => {
   ])('%s', async (_title, status) => {
     const fetchMock = fetchReturning(() => new Response(null, { status }));
     vi.stubGlobal('fetch', fetchMock);
-    const cb = vi.fn();
-    const unsub = subscribeChannelPresence('c1', cb);
+    const snaps: unknown[] = [];
+    const unsub = subscribeChannelPresence('c1', (snap) => { snaps.push(snap); });
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
     await drain();
     await vi.advanceTimersByTimeAsync(PAST_FIRST_BACKOFF_MS);
     await drain();
     unsub();
     expect(fetchMock).toHaveBeenCalledTimes(1); // terminal ⇒ no retry
-    expect(cb).not.toHaveBeenCalled();          // terminal ⇒ no snapshot at all
+    expect(snaps).toEqual([]);                  // terminal ⇒ no snapshot at all (not even connected:false)
   });
 
   it('CS-CH-1 — the stream connect declares Accept: text/event-stream (the rate-limiter SSE exemption gate)', async () => {
@@ -143,16 +150,15 @@ describe('ADR 0897 — bounded close', () => {
       { status: 200 },
     ));
     vi.stubGlobal('fetch', fetchMock);
-    const onMessage = vi.fn();
-    const unsub = subscribeChannelMessages('c1', onMessage);
+    const refreshes: unknown[][] = [];
+    const unsub = subscribeChannelMessages('c1', (...args: unknown[]) => { refreshes.push(args); });
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     await drain();
-    expect(onMessage).not.toHaveBeenCalled();
+    expect(refreshes, 'the first connect does not refresh').toEqual([]);
     await vi.advanceTimersByTimeAsync(PAST_FIRST_BACKOFF_MS);
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     await drain();
     unsub();
-    expect(onMessage).toHaveBeenCalledTimes(1);
-    expect(onMessage).toHaveBeenCalledWith();
+    expect(refreshes, 'exactly one plain refresh (no messageId) on the reconnect').toEqual([[]]);
   });
 });

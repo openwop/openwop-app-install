@@ -10,7 +10,7 @@
  */
 
 import { Button } from '../ui/Button.js';
-import { useCallback, useEffect, useMemo, useRef, useState, type Ref } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type Ref } from 'react';
 import { useTranslation } from 'react-i18next';
 import { confirm } from '../ui/confirm.js';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
@@ -22,17 +22,18 @@ import { useNotificationStore } from './notificationStore.js';
 import { PageHeader } from '../ui/PageHeader.js';
 import { StateCard } from '../ui/StateCard.js';
 import { Notice } from '../ui/Notice.js';
-import { IconButton } from '../ui/IconButton.js';
+import { Menu, type MenuEntry } from '../ui/Menu.js';
 import { KeyFigureBand, type KeyFigureItem } from '../ui/KeyFigure.js';
 import {
   CheckSquareIcon,
   ScaleIcon,
   InboxIcon,
-  TrashIcon,
+  MoreHorizontalIcon,
   CheckIcon,
   RotateCwIcon,
 } from '../ui/icons/index.js';
 import { listOpenInterrupts, type OpenInterrupt } from '../client/interruptsClient.js';
+import { ApiError } from '../client/requestJson.js';
 import { RenderInterrupt } from '../interrupts/RenderInterrupt.js';
 import { NeedsYouInbox } from './NeedsYouInbox.js';
 import { DelegationSection } from './DelegationSection.js';
@@ -41,10 +42,11 @@ import { relativeLabel } from './relativeLabel.js';
 import { priorityChip } from './priorityChip.js';
 import { formatDateTime } from '../i18n/format.js';
 import type { Notification } from './types.js';
-import { isActionNeeded as isActionNeededFor, subjectProjectId, TYPE_LABEL_KEYS } from './types.js';
+import { isActionNeeded as isActionNeededFor, subjectProjectId } from './types.js';
 import { archiveResolvedNotifications, requestResolutionOf } from './requestResolution.js';
 import type { RequestResolutionState } from './requestResolution.js';
 import { SubjectChip } from './SubjectChip.js';
+import { askerOf, groupCards, isOpenRequest, reasonOf } from './inboxCards.js';
 import { featureActionNeededTypes } from '../features/registry.js';
 import { listProjects } from '../features/projects/projectsClient.js';
 import { notificationTypeIcon } from './notificationIcons.js';
@@ -60,6 +62,8 @@ import {
 /** ADR 1109 D5 — the host's action-needed types plus every composed feature's. */
 const FEATURE_ACTION_TYPES = featureActionNeededTypes();
 const isActionNeeded = (n: Notification): boolean => isActionNeededFor(n, FEATURE_ACTION_TYPES);
+/** ADR 1125 D3 — an open request cannot be archived or deleted from the inbox. */
+const isOpen = (n: Notification): boolean => isOpenRequest(n, FEATURE_ACTION_TYPES);
 
 /** ADR 1114 — the chip a finished request shows in place of its type and priority. */
 const RESOLUTION_KEYS: Record<RequestResolutionState, string> = {
@@ -71,6 +75,8 @@ const RESOLUTION_KEYS: Record<RequestResolutionState, string> = {
   'run-ended': 'endRunEnded',
   // #5922 — an idle chat's old item: it was never waiting on anyone.
   withdrawn: 'endRunEnded',
+  // ADR 1124 — the run was removed while the request was open.
+  'run-deleted': 'endRunDeleted',
 };
 
 type Tab = InboxTab;
@@ -187,6 +193,26 @@ export function NotificationsPage(): JSX.Element {
     [inTab, urgentOnly],
   );
 
+  // ADR 1125 D3 — identical news collapse into one card; requests never do. The
+  // keyboard cursor walks what is on screen, so it reads the visible list.
+  const groups = useMemo(() => groupCards(filtered, FEATURE_ACTION_TYPES), [filtered]);
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleExpanded = useCallback((key: string) => setExpanded((cur) => {
+    const next = new Set(cur);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  }), []);
+  // A deep link to a collapsed row opens its group, or the card it names is hidden.
+  useEffect(() => {
+    if (!target) return;
+    const g = groups.find((x) => x.rest.some((r) => r.notificationId === target.notificationId));
+    if (g && !expanded.has(g.key)) toggleExpanded(g.key);
+  }, [target, groups, expanded, toggleExpanded]);
+  const visible = useMemo(
+    () => groups.flatMap((g) => (expanded.has(g.key) ? [g.head, ...g.rest] : [g.head])),
+    [groups, expanded],
+  );
+
   // Scroll + focus the matching card once it's rendered under the active tab
   // (re-runs after an auto-tab switch changes `filtered`). DL-UX-2 focus pattern.
   useEffect(() => {
@@ -194,10 +220,10 @@ export function NotificationsPage(): JSX.Element {
       focusRef.current.scrollIntoView({ block: 'center', behavior: scrollBehavior() });
       focusRef.current.focus({ preventScroll: true });
     }
-  }, [focusId, filtered]);
+  }, [focusId, visible]);
 
   const filteredRef = useRef<Notification[]>([]);
-  filteredRef.current = filtered;
+  filteredRef.current = visible;
   const cursorRef = useRef<string | null>(null);
   cursorRef.current = cursorId;
   useEffect(() => {
@@ -221,6 +247,8 @@ export function NotificationsPage(): JSX.Element {
         e.preventDefault();
         setCursorId(list[Math.max(idx - 1, 0)]!.notificationId);
       } else if (e.key === 'e' && idx >= 0) {
+        // ADR 1125 D3 — an open request still waits on someone: `e` skips it.
+        if (isOpen(list[idx]!)) return;
         e.preventDefault();
         // Keep the cursor USABLE after the row leaves the list (the DASH-1
         // focus lesson): move to the neighbour before archiving.
@@ -350,7 +378,10 @@ export function NotificationsPage(): JSX.Element {
           it would duplicate the header's Mark-all-read. */}
       {(() => {
         const unreadInTab = tab !== 'archived' ? inTab.filter((n) => n.status === 'unread') : [];
-        const readCount = notifications.filter((n) => n.status === 'read').length;
+        // ADR 1125 D3 — "Archive read" never sweeps an open request away.
+        const readRows = notifications.filter((n) => n.status === 'read');
+        const keep = readRows.filter(isOpen).map((n) => n.notificationId);
+        const readCount = readRows.length - keep.length;
         // ADR 1114 — offered while any request row is still in the inbox; the
         // server decides which are over (older rows carry no resolution yet).
         const hasRequests = tab !== 'archived' && notifications.some((n) => n.status !== 'archived' && Boolean(n.interruptId));
@@ -364,7 +395,7 @@ export function NotificationsPage(): JSX.Element {
             ) : null}
             {/* tab is provably not 'archived' past the guard above */}
             {readCount > 0 ? (
-              <Button variant="quiet" size="sm" onClick={() => void archiveRead()}>
+              <Button variant="quiet" size="sm" onClick={() => void archiveRead(keep)}>
                 <InboxIcon size={13} /> {t('archiveRead', { count: readCount })}
               </Button>
             ) : null}
@@ -432,41 +463,48 @@ export function NotificationsPage(): JSX.Element {
       )}
 
       <div className="page-enter u-grid u-gap-3">
-        {filtered.map((n) => (
-          <NotificationCard
-            key={n.notificationId}
-            notification={n}
-            projectNames={projectNames}
-            active={n.notificationId === focusId}
-            cursor={n.notificationId === cursorId}
-            cardRef={n.notificationId === focusId ? focusRef : undefined}
-            onToggleRead={n.status === 'archived' ? undefined : () => {
-              if (n.status === 'unread') void markAsRead(n.notificationId);
-              else void markAsUnread(n.notificationId);
-            }}
-            onArchive={() => {
-              // R2 IB-SP-10 — the DASH-1 lesson: the card under the clicked
-              // button unmounts, dropping focus to <body>. Hand focus to the
-              // neighbouring card (which is about to shift into this slot).
-              const i = filtered.findIndex((x) => x.notificationId === n.notificationId);
-              const neighbour = filtered[i + 1] ?? filtered[i - 1];
-              void archive(n.notificationId);
-              if (neighbour) {
-                requestAnimationFrame(() => {
-                  (document.querySelector(`[data-notification-id="${escAttr(neighbour.notificationId)}"]`) as HTMLElement | null)?.focus();
-                });
-              }
-            }}
-            onDelete={() => { void confirm({ title: t('deleteConfirm'), danger: true, confirmLabel: t('common:delete') }).then((ok) => { if (ok) void deleteN(n.notificationId); }); }}
-            onResolved={() => {
-              // After an interrupt is resolved, archive the notification
-              // and re-fetch — the BE may have emitted a follow-up event
-              // (e.g., next interrupt opens) we'd otherwise miss until
-              // the next SSE frame.
-              void archive(n.notificationId);
-              void refresh();
-            }}
-          />
+        {groups.map((g) => (
+          <Fragment key={g.key}>
+            {[g.head, ...(expanded.has(g.key) ? g.rest : [])].map((n) => (
+              <NotificationCard
+                key={n.notificationId}
+                notification={n}
+                projectNames={projectNames}
+                active={n.notificationId === focusId}
+                cursor={n.notificationId === cursorId}
+                cardRef={n.notificationId === focusId ? focusRef : undefined}
+                {...(n === g.head && g.rest.length > 0
+                  ? { repeats: g.rest.length + 1, expanded: expanded.has(g.key), onToggleExpanded: () => toggleExpanded(g.key) }
+                  : {})}
+                onToggleRead={n.status === 'archived' ? undefined : () => {
+                  if (n.status === 'unread') void markAsRead(n.notificationId);
+                  else void markAsUnread(n.notificationId);
+                }}
+                onArchive={() => {
+                  // R2 IB-SP-10 — the DASH-1 lesson: the card under the clicked
+                  // button unmounts, dropping focus to <body>. Hand focus to the
+                  // neighbouring card (which is about to shift into this slot).
+                  const i = visible.findIndex((x) => x.notificationId === n.notificationId);
+                  const neighbour = visible[i + 1] ?? visible[i - 1];
+                  void archive(n.notificationId);
+                  if (neighbour) {
+                    requestAnimationFrame(() => {
+                      (document.querySelector(`[data-notification-id="${escAttr(neighbour.notificationId)}"]`) as HTMLElement | null)?.focus();
+                    });
+                  }
+                }}
+                onDelete={() => { void confirm({ title: t('deleteConfirm'), danger: true, confirmLabel: t('common:delete') }).then((ok) => { if (ok) void deleteN(n.notificationId); }); }}
+                onResolved={() => {
+                  // After an interrupt is resolved, archive the notification
+                  // and re-fetch — the BE may have emitted a follow-up event
+                  // (e.g., next interrupt opens) we'd otherwise miss until
+                  // the next SSE frame.
+                  void archive(n.notificationId);
+                  void refresh();
+                }}
+              />
+            ))}
+          </Fragment>
         ))}
       </div>
 
@@ -491,6 +529,10 @@ interface NotificationCardProps {
   onArchive: () => void;
   onDelete: () => void;
   onResolved: () => void;
+  /** ADR 1125 D3 — on the head of collapsed news: how many identical items. */
+  repeats?: number | undefined;
+  expanded?: boolean | undefined;
+  onToggleExpanded?: (() => void) | undefined;
 }
 
 function NotificationCard({
@@ -503,18 +545,39 @@ function NotificationCard({
   onArchive,
   onDelete,
   onResolved,
+  repeats,
+  expanded,
+  onToggleExpanded,
 }: NotificationCardProps): JSX.Element {
   const { t } = useTranslation('notifications');
   const { pathname } = useLocation();
+  const navigate = useNavigate();
   const isUnread = notification.status === 'unread';
   // ADR 1114 — set once the host has retired this request (its step is over).
   const resolution = requestResolutionOf(notification);
+  // ADR 1125 D3 — while a request waits, it cannot be archived or deleted here.
+  const open = isOpen(notification);
+  const asker = askerOf(notification);
+  const reason = reasonOf(notification);
+  const projectId = subjectProjectId(notification);
   const when = relativeLabel(notification.createdAt, t); // R2 IB-SP-7 — the ONE localized implementation
   // Prefer the entity-specific actionUrl, but never render a self-link: an
   // action-needed notification targets /inbox, which IS this page — there the
-  // inline resolver below is the real affordance, so fall back to the run link.
+  // inline resolver below is the real affordance.
   const actionHref = isSafeActionUrl(notification.actionUrl) ? notification.actionUrl : undefined;
   const actionIsSelf = actionHref ? actionHref.split(/[?#]/)[0] === pathname : false;
+  // The title already says it when the message repeats it.
+  const message = notification.message.trim() && notification.message.trim() !== notification.title.trim() ? notification.message : null;
+  // Housekeeping and the diagnostic live behind "…". The run link is the
+  // activity log; a run that was deleted has none (ADR 1124).
+  const menu: MenuEntry[] = [
+    ...(onToggleRead ? [{ id: 'read', label: t(isUnread ? 'rowMarkRead' : 'rowMarkUnread'), onSelect: onToggleRead }] : []),
+    ...(!open && notification.status !== 'archived' ? [{ id: 'archive', label: t('archive'), onSelect: onArchive }] : []),
+    ...(!open ? [{ id: 'delete', label: t('common:delete'), onSelect: onDelete }] : []),
+    ...(notification.runId && resolution?.state !== 'run-deleted'
+      ? [{ id: 'log', label: t('cardActivityLog'), onSelect: () => navigate(`/runs/${notification.runId}`) }]
+      : []),
+  ];
   return (
     <div
       ref={cardRef}
@@ -523,36 +586,48 @@ function NotificationCard({
       aria-current={active ? 'location' : undefined}
       className={`surface-card${active ? ' is-deeplink-focus' : ''}${cursor ? ' notifpage-card--cursor' : ''}`}
     >
-      <div className="u-flex u-flex-wrap u-items-center u-gap-2 u-mb-2">
+      <div className="u-flex u-flex-wrap u-items-center u-gap-2 u-mb-1">
+        {isUnread ? <span className="notifpage-unread-dot" role="img" aria-label={t('cardUnread')} /> : null}
         <span className="muted u-iflex" aria-hidden="true">{typeIcon(notification.type)}</span>
-        <strong>{notification.title}</strong>
+        <strong className={isUnread ? undefined : 'notifpage-card-title--read'}>{notification.title}</strong>
+        {repeats ? <span className="muted u-fs-12">{t('cardRepeats', { count: repeats })}</span> : null}
         {resolution ? (
           <span className="chip chip--muted">{t(RESOLUTION_KEYS[resolution.state])}</span>
-        ) : (
-          <>
-            <span className="chip chip--muted">{t(TYPE_LABEL_KEYS[notification.type] ?? notification.type)}</span>
-            {priorityChip(notification.priority, t)}
-          </>
-        )}
-        {isUnread && <span className="chip chip--accent">{t('cardUnread')}</span>}
-        <SubjectChip projectId={subjectProjectId(notification)} projectNames={projectNames} />
+        ) : notification.priority === 'high' || notification.priority === 'urgent' ? (
+          priorityChip(notification.priority, t)
+        ) : null}
         <span className="muted u-ml-auto u-fs-12" title={formatDateTime(notification.createdAt)}>
           {when ?? formatDateTime(notification.createdAt)}
         </span>
+        {menu.length > 0 ? (
+          <Menu
+            label={t('cardMoreActions')}
+            triggerTitle={t('cardMoreActions')}
+            triggerClassName="icon-button"
+            triggerContent={<MoreHorizontalIcon size={15} />}
+            items={menu}
+            portal
+          />
+        ) : null}
       </div>
-      <p className="notifpage-card-message">{notification.message}</p>
-      {/* Deep-link spine: one competing link, not two — the entity-specific
-          actionUrl (guarded, never a self-link) else the run link. */}
+      {projectId !== undefined || asker || reason ? (
+        <div className="u-flex u-flex-wrap u-items-center u-gap-2 u-mb-2 u-fs-12 muted">
+          <SubjectChip projectId={projectId} projectNames={projectNames} />
+          {asker ? <span>{t('cardFrom', { asker })}</span> : null}
+          {reason ? (
+            <span>
+              {reason.kind === 'named' ? t('cardReasonNamed')
+                : reason.role === 'admin' ? t('cardReasonAdmins')
+                : t('cardReasonRole', { role: reason.role })}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+      {message ? <p className="notifpage-card-message">{message}</p> : null}
       {actionHref && !actionIsSelf ? (
         <div className="u-mb-2">
           <Link to={actionHref} className="inline-link u-fs-12">
             {t(actionLabelKeyFor(notification.type, notification.actionUrl))} →
-          </Link>
-        </div>
-      ) : notification.runId ? (
-        <div className="u-mb-2">
-          <Link to={`/runs/${notification.runId}`} className="inline-link u-fs-12">
-            {t('cardRunLink')}
           </Link>
         </div>
       ) : null}
@@ -565,21 +640,13 @@ function NotificationCard({
         />
       )}
 
-      <div className="action-bar u-justify-end u-mt-3">
-        {/* R2 IB-SP-12 — clearing ONE row's unread no longer requires the
-            panel or mark-all. */}
-        {onToggleRead && (
-          <IconButton
-            label={t(isUnread ? 'rowMarkRead' : 'rowMarkUnread')}
-            icon={<CheckIcon size={15} />}
-            onClick={onToggleRead}
-          />
-        )}
-        {notification.status !== 'archived' && (
-          <IconButton label={t('archive')} icon={<InboxIcon size={15} />} onClick={onArchive} />
-        )}
-        <IconButton label={t('common:delete')} icon={<TrashIcon size={15} />} className="icon-button u-text-danger" onClick={onDelete} />
-      </div>
+      {repeats && onToggleExpanded ? (
+        <div className="u-mt-2">
+          <Button variant="quiet" size="sm" aria-expanded={Boolean(expanded)} onClick={onToggleExpanded}>
+            {expanded ? t('cardShowFewer') : t('cardShowAll', { count: repeats })}
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -594,6 +661,9 @@ function InlineInterruptResolver({ runId, interruptId, onResolved }: ResolverPro
   const { t } = useTranslation('notifications');
   const [open, setOpen] = useState<OpenInterrupt | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // ADR 1124 D3 — a 404 is "not openable here": the run is gone, or (ADR 1121) it
+  // is a client run this person may not read. Never claim which.
+  const [unavailable, setUnavailable] = useState(false);
   // ADR 0778 (`APUX-14`) — `open` is null both while the fetch is pending and
   // when nothing is open, so every row briefly claimed "resolved elsewhere"
   // on load. Track the settle separately.
@@ -614,12 +684,15 @@ function InlineInterruptResolver({ runId, interruptId, onResolved }: ResolverPro
         setOpen(match);
         setLoaded(true);
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+        if (cancelled) return;
+        if (err instanceof ApiError && err.status === 404) setUnavailable(true);
+        else setError(err instanceof Error ? err.message : String(err));
       }
     })();
     return () => { cancelled = true; };
   }, [runId, interruptId]);
 
+  if (unavailable) return <div className="muted u-fs-12">{t('interruptUnavailable')}</div>;
   if (error) return <Notice variant="error">{t('interruptLoadFailed')}</Notice>; // R2 IB-SP-8
   if (!loaded) return <div className="muted u-fs-12" aria-busy="true">{t('common:loading')}</div>;
   if (!open) {

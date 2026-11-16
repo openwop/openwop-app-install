@@ -396,6 +396,7 @@ const EXPECTED_COVERED = new Set([
   'users:canonical',
   'profiles:profile',
   'insights:config', // ADR 1102 D8 — `eraseInsightsSuiteSubject`; was RECORDED_DEBT (COS-1)
+  'settings:user-prefs', // CHAN-F19 #4 — `eraseSettingsSubject`; was RECORDED_DEBT ("no eraser yet")
   // SCC-1 — moved out of ACTOR_ATTRIBUTED_DEBT: `eraseScheduledChatsSubject`
   // disables the schedule + tombstones `createdBy` (ordinal 207, ADR 0125).
   'schedchat:config',
@@ -434,7 +435,6 @@ const EXPECTED_COVERED = new Set([
  */
 const RECORDED_DEBT = new Map<string, string>([
   ['notifications:prefs', 'Per-user notification preferences. Safe to delete on erasure; simply has no eraser yet.'],
-  ['settings:user-prefs', 'Per-user settings. Safe to delete on erasure; simply has no eraser yet.'],
   // ── FOUND BY the CRM-2 contactId/email widening. Each was read individually; none
   //    is a coverage claim. They are recorded rather than covered because each needs
   //    a decision from its owning feature that this CRM change is not the place to make.
@@ -1843,8 +1843,13 @@ const SIGNAL_FREE_BASELINE: readonly string[] =
  *  signal), team-ledger erases it, and a 7-day TTL bounds author-less rows → 109.
  *  CHAN-F19 #3 (2026-11-14): campaign-ops:request (its fields come through `extends
  *  ChangeRequest`, which the census cannot follow) declares PII, and campaign-ops'
- *  eraser tombstones its creator, answerers and override author → 108. */
-const SIGNAL_FREE_BASELINE_CEILING = 108;
+ *  eraser tombstones its creator, answerers and override author → 108.
+ *  CHAN-F19 #4 (2026-11-14): settings:byok-usage rows now record `userId` (a census
+ *  signal), and `eraseSettingsSubject` deletes the subject's day counters → 107.
+ *  CHAN-F19 #5 (2026-11-15): commerce:affiliate declares its `name` PII and the
+ *  operator redact route clears it (an affiliate is not a workspace principal);
+ *  commerce:payout holds only the affiliate id and money fields, reviewed → 105. */
+const SIGNAL_FREE_BASELINE_CEILING = 105;
 
 /** Reviewed signal-free feature stores: each holds no subject data, and says why.
  *  Each was read at its declaration: the row type with its nested types, AND the
@@ -1927,6 +1932,7 @@ const SIGNAL_FREE_REVIEWED = new Map<string, string>([
   ['commerce:catalog-index-day', 'ADR 1110: the UTC day the catalog-index drift repair last ran'],
   ['commerce:coupon', 'an operator-defined coupon: code, type, value, currency and active flag'],
   ['commerce:order-idem', 'a checkout dedup claim: a client idempotency key to an order id'],
+  ['commerce:payout', 'CHAN-F19 #5: an affiliate payout: affiliate id, amount, currency and status. A money record keyed by the affiliate id; the name lives only on commerce:affiliate, which the operator redact clears'],
   ['commerce:product-fielddef', 'an operator-defined custom product field (key, label, type, options)'],
   ['commerce:reservation-due', 'a stock reservation expiry index: order id, tenant, org and due time'],
   ['commerce:spend-approval', 'approval index: tenant and approval id, keyed by a quote or order content hash'],

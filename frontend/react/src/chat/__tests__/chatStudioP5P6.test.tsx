@@ -1,6 +1,15 @@
 /**
  * ADR 0768 P5 + P6 — the Pocket (launcher + non-modal popover over the ONE
  * embedded chat), mobile pane arbitration, and the compact composer.
+ *
+ * Breaks if: the Pocket stops passing `density="pocket"` / the agent / the context
+ * label to the shared EmbeddedChatPanel; opening stops moving focus into the composer,
+ * or closing (Esc or the close button) stops returning it to the launcher; closing
+ * unmounts the conversation instead of hiding it (an unsent draft is lost); the chrome
+ * stops portalling to <body> (the ADR 0768 correction: a page-arrival transform made
+ * inline fixed children page-relative) or becomes modal; Mod+J stops toggling on Cmd
+ * or on Ctrl; the mobile arbitration closes the wrong pane or acts above the
+ * breakpoint; the compact composer stops folding its chips into the + menu.
  */
 import { render, screen, fireEvent, act, renderHook } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
@@ -30,7 +39,7 @@ describe('ChatPocket', () => {
     render(<ChatPocket agentId="store" title="Store Assistant" contextLabel="your stores" />);
     expect(screen.queryByRole('dialog')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /pocketAsk:Store Assistant/ }));
-    expect(screen.getByRole('dialog', { name: 'Store Assistant' })).toBeTruthy();
+    expect(screen.getByRole('dialog', { name: 'Store Assistant' }).hasAttribute('hidden')).toBe(false);
     expect(panelProps.at(-1)).toMatchObject({ agentId: 'store', density: 'pocket', contextLabel: 'your stores' });
   });
 
@@ -98,7 +107,7 @@ describe('ChatPocket', () => {
   it('toggles with Mod+J', () => {
     render(<ChatPocket agentId="a" title="Helper" />);
     act(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', metaKey: true })); });
-    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect(screen.getByRole('dialog', { name: 'Helper' }).hasAttribute('hidden')).toBe(false);
     act(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', ctrlKey: true })); });
     expect(screen.queryByRole('dialog')).toBeNull();
   });
@@ -144,14 +153,13 @@ describe('compact composer', () => {
     render(<ChatInput onSend={vi.fn()} compact boardSigil />);
     expect(screen.queryByRole('button', { name: 'sigilWorkflowAria' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'composerMoreActions' }));
-    for (const name of ['attachFile', 'sigilWorkflowAria', 'sigilAgentAria', 'sigilBoardAria']) {
-      expect(screen.getByRole('menuitem', { name })).toBeTruthy();
-    }
+    expect(screen.getAllByRole('menuitem').map((el) => el.textContent?.trim())).toEqual(['attachFile', 'sigilWorkflowAria', 'sigilAgentAria', 'sigilBoardAria']);
   });
 
   it('keeps the visible chips on a wide composer', () => {
     render(<ChatInput onSend={vi.fn()} />);
-    expect(screen.getByRole('button', { name: 'sigilWorkflowAria' })).toBeTruthy();
+    // A visible chip in the composer row, not a menu entry.
+    expect(screen.getByRole('button', { name: 'sigilWorkflowAria' }).classList.contains('chatinput-sigil-btn')).toBe(true);
     expect(screen.queryByRole('button', { name: 'composerMoreActions' })).toBeNull();
   });
 });

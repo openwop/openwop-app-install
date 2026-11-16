@@ -1,6 +1,6 @@
 # ADR 1111 — the marketing launch step and `connectionRef` on `openapi-call` (CC-CHAIN-1)
 
-Status: Proposed
+Status: Accepted (P0–P2 implemented on `fix/cc-chain-1-launch-governed`; P3 deployed retest pending)
 
 ## Context
 
@@ -83,6 +83,38 @@ What exists today (measured on `373d4863a`):
   document handoff as `publish-ad-variants` does today?
 - **Q3.** Banner: change the copy (preferred), or build the recorded host skip?
 
+## Owner decisions (user, 2026-11-14)
+
+- **Q1 — launch via the existing `publish-ad-variants`.** No new `ad-launch` node. The mapping
+  turned out not to need a mapping node: the chain's `copy` step became a
+  `core.ai.structuredOutput` whose `outputSchema` IS the node's `ad_variants` draft shape
+  (`{ platformSets: [{ platform, variants: [{ headline, description, cta }] }] }`). Its `data`
+  goes to the review gate as `artifact` (`copy.data → review.artifact`), so the reviewer
+  approves the exact draft that is launched, and `launch` takes it FROM THE GATE on the single
+  conditioned edge `review.artifact → launch.draft` (`truthy approved`) — the ADR 0582 §11
+  pattern, with no unconditional sibling edge. `creative` and `page` stay review-only
+  (`publish-ad-variants` publishes copy, not creative). `orgId`, `adAccountId`, `platform` and
+  `briefId` reach the node as declared inputs from chain params; the three new params default to
+  `""`, so a run with none of them set hands off. A live launch also needs the platform's own
+  fields (Meta `pageId`, Google `landingUrl` + `euPoliticalAdvertising`, TikTok `identityId`);
+  the chain does not collect them, the node names whichever is missing as a typed failure, and
+  they can be set on the step in the builder.
+- **Q2 — no connection ⇒ the ADR 0166 document handoff, and the run completes.** This is what
+  `publish-ad-variants` already does for no `adAccountId`, `no_connection` and
+  `no_developer_token`; no node change.
+- **Q3 — change the banner copy; no host-side skip.** `preRunConnsIntro` (en/es/fr/pt-BR) no
+  longer says the steps "will skip".
+
+  > **Correction to the Q3 wording, made while implementing.** The approved direction was "say
+  > the steps hand off or report not launched, and the run still completes". After P2 the
+  > marketing chain has no `connectionRef` at all, so it no longer shows this banner. The chains
+  > that still do are the `openapi-call` steps in `people-hr` (`itProvision`, `deprovision`,
+  > `calendar`) and `data-ops` (`read`, `upsert`), and those FAIL (now with
+  > `openapi_document_missing`), so "the run still completes" would be false for every chain the
+  > banner appears on today. The shipped copy says what is true of both behaviours: until you
+  > connect, those steps can't do their part — some hand you a draft instead, others stop the
+  > run. Those chains need the same treatment as this one (see Follow-ups).
+
 ## Implementation plan
 
 | Phase | Change | Test |
@@ -91,3 +123,23 @@ What exists today (measured on `373d4863a`):
 | P1 | `openapi-call`: named `openapi_document_missing` when `connectionRef` is set and no document is wired; banner copy per Q3 | node unit test (red on `373d4863a`: `CONFIG_INVALID`); FE copy test |
 | P2 | Re-point the launch per Q1/Q2; bump the marketing chain pack version; steward manifest | chain test: unlinked run completes with `launched:false`; linked + `dryRun` produces the PAUSED plan; regression for CC-CHAIN-1 |
 | P3 | Deployed retest of `marketing.campaign-launch` in the QA workspace | campaign ledger CC-CHAIN-1 |
+
+## Implementation record
+
+| Phase | Change | Files | Test |
+|---|---|---|---|
+| P1 | `openapiCall`: `config.connectionRef` set and no `inputs.openapi.paths` ⇒ typed `openapi_document_missing` ("this step needs a wired OpenAPI document (inputs.openapi); the connection … does not provide one"). Without a `connectionRef` the old `CONFIG_INVALID` stays. `core.openwop.http` 2.1.2 → 2.1.3 (schema `$id`s follow; `connectionRef` description says it supplies no document); steward manifest regenerated. | `packs/core.openwop.http/index.mjs`, `pack.json`, `schemas/*.json`, `packs/.steward-manifest.json` | `test/cc-chain-1-openapi-document-missing.test.ts` (red on main: `CONFIG_INVALID`) |
+| P1 | Banner copy per Q3 (and its correction above), four locales. No frontend test pinned this string before; none added. | `frontend/react/src/builder/i18n/{en,es,fr,pt-BR}.ts` | — |
+| P2 | `marketing.campaign-launch` 1.1.0 → 1.2.0: `copy` → `core.ai.structuredOutput` emitting the `ad_variants` draft; `launch` → `feature.campaign-channels.nodes.publish-ad-variants@1.4.0` fed from the gate; params `adAccountId` / `platform` / `briefId` (default `""`). Pack `core.openwop.workflows.marketing` 1.2.1 → 1.2.2. | `examples/workflow-chain-packs/marketing/pack.json` | `test/cc-chain-1-campaign-launch-governed.test.ts` (red on main): unlinked approve ⇒ `launch` completes with a DRAFT `campaign-ad-copy` document holding the approved copy and never calls `ctx.ads`; account set + `no_connection` ⇒ the params reach `publishAd`, then the handoff; reject ⇒ `launch` skipped, run completes |
+| P2 | Ratchet + existing-test upkeep: `publish-ad-variants` added to the ADR 0582 reject witness's effect set (so `launch` stays witnessed); the marketing mini-scheduler test's fake answers the structured `copy` call with `data` and expects `artifact` on the gate. | `test/workflow-chain-effect-reject-witness.test.ts`, `test/workflow-chain-marketing-execution.test.ts` | those files |
+| P3 | Deployed retest of `marketing.campaign-launch` in the QA workspace. Needs the registry publish of `core.openwop.http@2.1.3` and `core.openwop.workflows.marketing@1.2.2` (DEPLOY.md "Vendoring a pack is NOT shipping it"). | — | campaign ledger CC-CHAIN-1 |
+
+## Follow-ups (not in this change)
+
+- `people-hr` (`itProvision`, `deprovision`, `calendar`) and `data-ops` (`read`, `upsert`) are the
+  same defect: `openapi-call` + `connectionRef` with no wired document. They now fail by name,
+  but they cannot succeed even after connecting. Each needs a re-point like this one (or a wired
+  document param for `data-ops`, whose operation is already a param).
+- `marketing.campaign-launch` lost its builder Connect chip with its `connectionRef`. A
+  `x-usesConnections: true` on `publish-ad-variants` (a `feature.campaign-channels.nodes` bump)
+  would at least report `connectionUsage: 'uses'` in the pre-flight.

@@ -24,6 +24,8 @@ describe('classifyDifficulty — token tiers + bumps', () => {
   const f = (o: TurnFeatures) => classifyDifficulty(o);
   it('token tiers: <500 low, <4000 medium, else high', () => {
     expect(f({ tokenEstimate: 100 })).toBe('low');
+    // Both sides of each boundary, so a moved tier cannot hide between fixtures.
+    expect(f({ tokenEstimate: 499 })).toBe('low');
     expect(f({ tokenEstimate: 500 })).toBe('medium');
     expect(f({ tokenEstimate: 3999 })).toBe('medium');
     expect(f({ tokenEstimate: 4000 })).toBe('high');
@@ -52,6 +54,19 @@ describe('routeTurn — a single difficultyAtLeast cost rule', () => {
     // medium turn does NOT reach the high threshold → cheap
     expect(routeTurn({ tokenEstimate: 1000 }, config, probe, 0)?.target.model).toBe('cheap');
   });
+  // At level `high` (the top) an at-least and an equality comparison agree, so the
+  // case above cannot tell them apart. At `medium` they differ on both sides.
+  it('a medium rule is AT-LEAST: it takes a medium AND a high turn, not a low one', () => {
+    const medium: ModelRouterConfig = {
+      rules: [
+        { when: { kind: 'difficultyAtLeast', level: 'medium' }, target: { provider: 'anthropic', model: 'mid' } },
+        { when: { kind: 'always' }, target: { provider: 'openai', model: 'cheap' } },
+      ],
+    };
+    expect(routeTurn({ tokenEstimate: 1000 }, medium, probe, 0)?.target.model).toBe('mid');
+    expect(routeTurn({ tokenEstimate: 5000 }, medium, probe, 0)?.target.model).toBe('mid');
+    expect(routeTurn({ tokenEstimate: 100 }, medium, probe, 0)?.target.model).toBe('cheap');
+  });
 });
 
 describe('config validation — difficultyAtLeast', () => {
@@ -66,6 +81,8 @@ describe('config validation — difficultyAtLeast', () => {
     expect(() => validateRouterConfig({
       rules: [{ when: { kind: 'difficultyAtLeast', level: 'extreme' }, target: { provider: 'anthropic', model: 'claude-haiku-4-5' } }],
       fallback: { provider: 'anthropic', model: 'claude-haiku-4-5' },
-    })).toThrow(/difficultyAtLeast/);
+      // The level check's own message: the unknown-`kind` default branch also names
+      // `difficultyAtLeast`, so a bare /difficultyAtLeast/ would accept that refusal.
+    })).toThrow('`difficultyAtLeast.level` MUST be one of low | medium | high.');
   });
 });

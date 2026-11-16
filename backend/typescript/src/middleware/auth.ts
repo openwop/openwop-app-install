@@ -376,6 +376,9 @@ export const PUBLIC_PATH_PREFIXES = [
   // posture as `/p` above. Missing here, the door 401s every crawler — the
   // `/llms.txt` lesson one line up.
   '/docs',
+  // ADR 0391 (b) — the crawlable `/pricing` document door (publishing routes):
+  // the `pricing` page of the configured site org, the same posture as `/p`.
+  '/pricing',
   // ADR 0281 — the dealer PARTNER PORTAL. The capability token in the path IS the
   // credential (the Sharing pattern): tenant/org/dealer resolve FROM the token,
   // never the request; a bad token 404s uniformly. Rides the global per-IP rate

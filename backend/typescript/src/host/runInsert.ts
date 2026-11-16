@@ -28,8 +28,32 @@ import { AdmissionRefusedError, type InsertRunOptions, type Storage } from '../s
 import type { RunRecord } from '../types.js';
 import { stampRunStartContext, type RunStartContext } from './runStartContext.js';
 import { extractRunAttribution } from './agentRunActivityIndex.js';
+import { clientRunStamp, runClientStamp, RUN_CLIENT_STAMP_KEYS } from './runClientOrg.js';
+
+const CLIENT_RUN_STAMP_KEY = RUN_CLIENT_STAMP_KEYS[1];
+import { getOwned } from './workflowOwnership.js';
+import { isHostExtPersistenceInitialized } from './hostExtPersistence.js';
+import { registerInheritedRunMetadataKey } from './inheritedRunMetadata.js';
+import { OpenwopError } from '../types.js';
+
+// ADR 1132 — a sub-workflow CHILD run carries the client its parent run was
+// for. The child DEFINITION is template-only (children expand with `params: {}`;
+// their values arrive per run through the parent's inputMapping), so the client
+// content a child sees is in its RUN, and that run must be the client's. This was
+// registered only by the campaign-ops feature; it is core now, with the same
+// projection: the org only, never approval or execution authority. An unreadable
+// parent stamp refuses the child rather than start it unscoped.
+registerInheritedRunMetadataKey(CLIENT_RUN_STAMP_KEY, (raw) => {
+  const orgId = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>).orgId : undefined;
+  if (typeof orgId !== 'string' || !orgId.trim()) {
+    throw new OpenwopError('validation_error', 'The parent run\'s client stamp is invalid.', 422, { reason: 'campaign_client_unresolved' });
+  }
+  return { orgId };
+});
 import { getNodeRegistry } from '../executor/nodeRegistry.js';
 import { pinMismatches } from './chainPinRule.js';
+import { requiredParamFindings, runPreflightMode, runPreflightRefusal, type ChainParamDecl } from './runPreflight.js';
+import { getChain } from './workflowChainPackLoader.js';
 import { createLogger } from '../observability/logger.js';
 
 const log = createLogger('host.runInsert');
@@ -170,6 +194,36 @@ export async function insertRunWithStartContext(
     if (mismatches.length > 0) {
       run.metadata = { ...(run.metadata ?? {}), nodePinMismatches: mismatches };
       log.warn('run_node_pin_mismatch', { runId: run.runId, workflowId: run.workflowId, mismatches });
+    }
+  }
+  // ADR 1132 D4 — a run launched from a client's definition is that client's run:
+  // its snapshot and events carry the definition's frozen params, so ADR 1121's
+  // floor must see the client. Stamped once, only when the run names no client
+  // already (a fork keeps its parent's stamp; a campaign run keeps its own). A
+  // failed ownership read fails the insert rather than leave the run open.
+  if (runClientStamp(run.metadata as Record<string, unknown> | undefined) === undefined && isHostExtPersistenceInitialized()) {
+    const clientOrgId = (await getOwned(run.tenantId, run.workflowId))?.clientOrgId;
+    if (clientOrgId) run.metadata = { ...(run.metadata ?? {}), ...clientRunStamp(clientOrgId) };
+  }
+  // Run admission preflight D1/D2 (P0) — the run admission preflight, FRESH runs only: a replay
+  // reads recorded outputs and a fork inherits its parent's inputs, so neither is
+  // re-judged here. Shadow by default (see runPreflight.ts): the findings are
+  // recorded on the run and logged; only `OPENWOP_RUN_PREFLIGHT=enforce` refuses,
+  // and it refuses BEFORE the row is written.
+  const preflightMode = runPreflightMode();
+  if (preflightMode !== 'off' && ctx.definition && !ctx.derivedFromRun && !run.parentRunId && !run.forkMode) {
+    const supplied = {
+      ...(run.configurable && typeof run.configurable === 'object' ? run.configurable : {}),
+      ...(run.inputs && typeof run.inputs === 'object' && !Array.isArray(run.inputs) ? (run.inputs as Record<string, unknown>) : {}),
+    };
+    const findings = requiredParamFindings(ctx.definition, supplied, (chainId) => {
+      const parameters = getChain(chainId)?.chain.parameters as ChainParamDecl | undefined;
+      return parameters ?? null;
+    });
+    if (findings.length > 0) {
+      log.warn('run_preflight_findings', { runId: run.runId, workflowId: run.workflowId, mode: preflightMode, findings: findings.map((f) => `${f.kind}:${f.chainId}:${f.param}`) });
+      if (preflightMode === 'enforce') throw runPreflightRefusal(findings);
+      run.metadata = { ...(run.metadata ?? {}), preflightFindings: findings };
     }
   }
   // ADR 0099 Phase 2 — derive the attributed agent (for per-agent lossy opt-in)

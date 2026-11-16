@@ -19,11 +19,22 @@
  * genuinely has none reached the identical permanent skeleton by the honest
  * route. Strings are asserted in full, not as a regex spanning old and new
  * wording — a test indifferent to the noun cannot guard the noun.
+ *
+ * Sabotage that turns it red (re-probed wave 115): the failed read mapped back to
+ * `setOrgs([])` in `ui/useOrgSelection`; the failed branch skipped in
+ * `ui/OrgSelectionState`; the retry not re-running the read; the zero-org branch
+ * skipped; the `if (orgId)` load gate removed; the page's failed/empty clauses dropped;
+ * the widget rows rendered without their domains.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
 
-const { listOrgs, listWidgets } = vi.hoisted(() => ({ listOrgs: vi.fn(), listWidgets: vi.fn() }));
+// Typed against the real client, so a fixture the client could never return fails tsc
+// instead of passing an untyped mock.
+const { listOrgs, listWidgets } = vi.hoisted(() => ({
+  listOrgs: vi.fn<typeof import('../../../client/chatWidgetClient.js').listOrgs>(),
+  listWidgets: vi.fn<typeof import('../../../client/chatWidgetClient.js').listWidgets>(),
+}));
 vi.mock('../../../client/chatWidgetClient.js', async (orig) => ({
   ...(await orig<typeof import('../../../client/chatWidgetClient.js')>()),
   listOrgs, listWidgets,
@@ -36,12 +47,14 @@ vi.mock('../../../client/chatWidgetClient.js', async (orig) => ({
 
 // ADR 1018 — the page now offers a roster picker (listAgents) and a "try in chat" deep
 // link (useNavigate), so it renders inside a router with the roster read stubbed.
-vi.mock('../../../client/agentsClient.js', () => ({ listAgents: vi.fn(async () => []) }));
+vi.mock('../../../client/agentsClient.js', () => ({
+  listAgents: vi.fn<typeof import('../../../client/agentsClient.js').listAgents>(async () => []),
+}));
 import { MemoryRouter } from 'react-router-dom';
 import { WidgetsPage } from '../WidgetsPage.js';
-import type { Widget } from '../../../client/chatWidgetClient.js';
+import type { Org, Widget } from '../../../client/chatWidgetClient.js';
 
-const ORG = { orgId: 'o1', name: 'Acme' };
+const ORG: Org = { orgId: 'o1', name: 'Acme' };
 const WIDGET: Widget = { widgetId: 'w1', agentId: 'a1', allowedDomains: ['example.com'], caps: {}, token: 'wgt_x', enabled: true };
 
 const mount = async (): Promise<void> => {
@@ -52,6 +65,9 @@ const mount = async (): Promise<void> => {
 afterEach(cleanup);
 beforeEach(() => {
   vi.clearAllMocks();
+  // mockReset, not only clearAllMocks: a queued `…Once` reply must never answer the next case.
+  listOrgs.mockReset();
+  listWidgets.mockReset();
   listOrgs.mockResolvedValue([ORG]);
   listWidgets.mockResolvedValue([WIDGET]);
 });

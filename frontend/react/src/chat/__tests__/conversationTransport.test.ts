@@ -13,15 +13,18 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import type { RunSnapshot } from '@openwop/openwop';
 import type { OpenInterrupt } from '../../client/interruptsClient.js';
 
-const openConversation = vi.fn<(input: { workflowId: string }) => Promise<{ runId: string }>>();
-const listOpenInterrupts = vi.fn<(runId: string) => Promise<readonly OpenInterrupt[]>>();
+type OpenConversation = typeof import('../conversationClient.js').openConversation;
+const openConversation = vi.fn<OpenConversation>();
+const listOpenInterrupts = vi.fn<typeof import('../../client/interruptsClient.js').listOpenInterrupts>();
 const getRun = vi.fn<(runId: string) => Promise<RunSnapshot>>();
 
 vi.mock('../conversationClient.js', async (importActual) => ({
   ...(await importActual<typeof import('../conversationClient.js')>()),
-  openConversation: (input: { workflowId: string }) => openConversation(input),
+  openConversation: (input: Parameters<OpenConversation>[0]) => openConversation(input),
 }));
-vi.mock('../../client/interruptsClient.js', () => ({
+// Spread the real module (never enumerate a mock), override only the seam.
+vi.mock('../../client/interruptsClient.js', async (importActual) => ({
+  ...(await importActual<typeof import('../../client/interruptsClient.js')>()),
   listOpenInterrupts: (runId: string) => listOpenInterrupts(runId),
 }));
 vi.mock('../../client/runsClient.js', async (importActual) => ({
@@ -248,14 +251,17 @@ describe('openConversationSession — ADR 0975 D8 agent scope', () => {
     openConversation.mockResolvedValue({ runId: 'run-a' });
     listOpenInterrupts.mockResolvedValue([{ interruptId: 'i-gate', nodeId: 'gate', kind: 'conversation.start', data: null, createdAt: '2026-10-26T00:00:00.000Z' }]);
     await openConversationSession({ chatSessionId: 's-1', agentScope: 'vendor.example.agents.author' });
-    expect(openConversation.mock.calls[0]![0]).toMatchObject({ metadata: { chatSessionId: 's-1', agentScope: 'vendor.example.agents.author' } });
+    expect(openConversation).toHaveBeenCalledTimes(1);
+    expect(openConversation.mock.calls[0]![0].metadata).toEqual({ chatSessionId: 's-1', agentScope: 'vendor.example.agents.author' });
   });
 
   it('sends no agentScope when none is given', async () => {
     openConversation.mockResolvedValue({ runId: 'run-b' });
     listOpenInterrupts.mockResolvedValue([{ interruptId: 'i-gate', nodeId: 'gate', kind: 'conversation.start', data: null, createdAt: '2026-10-26T00:00:00.000Z' }]);
     await openConversationSession({ chatSessionId: 's-2' });
-    expect(openConversation.mock.calls[0]![0]).toEqual(expect.objectContaining({ metadata: { chatSessionId: 's-2' } }));
+    // Exact keys: an `agentScope` key (even an undefined or defaulted one) is a red.
+    expect(Object.keys(openConversation.mock.calls[0]![0].metadata ?? {})).toEqual(['chatSessionId']);
+    expect(openConversation.mock.calls[0]![0].metadata).toEqual({ chatSessionId: 's-2' });
   });
 });
 
@@ -292,9 +298,12 @@ describe('openConversationSession — waits for the gate before the first turn',
     openConversation.mockResolvedValue({ runId: 'run-2' });
     listOpenInterrupts.mockResolvedValue([]);              // gate never opens
     getRun.mockResolvedValue(snapshot('failed'));          // run died first
-    const outcome = expect(openConversationSession({})).rejects.toThrow('The conversation could not start (run failed).');
+    const outcome = openConversationSession({}).then(() => 'resolved', (e: unknown) => e);
     await vi.advanceTimersByTimeAsync(1_000);              // well inside the 10 s deadline
-    await outcome;
+    // Settled by now (fail FAST), not still waiting for the deadline: a wait that
+    // stopped checking the run's status reads 'still waiting' here, not a timeout.
+    const settled = await Promise.race([outcome, Promise.resolve('still waiting')]);
+    expect(settled).toEqual(new Error('The conversation could not start (run failed).'));
     expect(getRun).toHaveBeenCalledWith('run-2');
   });
 });

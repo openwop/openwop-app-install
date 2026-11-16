@@ -47,6 +47,8 @@ vi.mock('../campaignStudioClient.js', async (orig) => ({
 vi.mock('../../commerce/commerceClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), listProductsPage: h.listProductsPage, getProductsByIds: h.getProductsByIds }));
 
 import { CampaignDetailPage } from '../CampaignDetailPage.js';
+import { takeStagedComposerDraft } from '../../../chat/composerSeed.js';
+import { useLocation } from 'react-router-dom';
 
 const CAMPAIGN: MarketingCampaign = {
   id: 'cmp_a', tenantId: 't1', orgId: 'org-a', briefId: 'b1', name: 'Spring push', status: 'draft',
@@ -205,5 +207,40 @@ describe('ADR 0941 P3 — campaign detail', () => {
     const region = await screen.findByRole('region', { name: 'Linked work' });
     await waitFor(() => expect(within(region).getByText('Plans')).toBeTruthy());
     expect(within(region).queryByText('Funnels')).toBeNull();
+  });
+});
+
+/**
+ * CC-HUB-2 — "Run with the Strategist" on a campaign opened the chat on an empty
+ * composer, so the person had to tell the agent which campaign they meant
+ * (casavoga-f8 R-009). It now stages a one-shot draft naming the campaign, its
+ * brief and its organization, worded to check readiness first, then deep-links
+ * the Strategist. Red before the fix: nothing was staged.
+ */
+describe('CC-HUB-2 — Run with the Strategist names the campaign', () => {
+  function ChatProbe(): JSX.Element {
+    const loc = useLocation();
+    return <p data-testid="chat-probe">{loc.pathname + loc.search}</p>;
+  }
+
+  it('stages a draft naming the campaign, brief and org, and opens the Strategist', async () => {
+    takeStagedComposerDraft(); // nothing left over from another case
+    render(
+      <MemoryRouter initialEntries={['/campaign-studio/campaigns/cmp_a']}>
+        <Routes>
+          <Route path="/campaign-studio/campaigns/:campaignId" element={<CampaignDetailPage />} />
+          <Route path="/" element={<ChatProbe />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByRole('heading', { name: 'Spring push' })).toBeTruthy();
+    fireEvent.click(screen.getAllByRole('button', { name: /Run with the Strategist/ })[0]!);
+    expect((await screen.findByTestId('chat-probe')).textContent).toMatch(/^\/\?agent=/);
+    const draft = takeStagedComposerDraft();
+    expect(draft).toContain('Spring push');
+    expect(draft).toContain('cmp_a');
+    expect(draft).toContain('b1');
+    expect(draft).toContain('org-a');
+    expect(draft).toMatch(/before you start anything/);
   });
 });

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-voc/1.0.2/voc-extraction.output.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-voc/1.1.0/voc-extraction.output.json",
   "title": "MarketIntelVocExtractionOutput",
   "type": "object",
   "required": ["records", "summary", "warnings", "recordCount", "success"],
@@ -16,7 +16,11 @@
           "intentStage": { "type": "string", "enum": ["ready_now", "researching", "problem_aware", "unaware"] },
           "impliedOutcome": { "type": "string" },
           "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
-          "classificationRationale": { "type": "string" }
+          "classificationRationale": { "type": "string" },
+          "quotePreview": { "type": "string", "maxLength": 200, "description": "The quote cut to 200 characters: the field opportunity-scoring reads (ADR 1116)." },
+          "community": { "type": "string", "description": "Where the quote came from: the page host (pages lane) or inputs.community." },
+          "sourceUrl": { "type": "string", "description": "Pages lane: the page this quote is verbatim from." },
+          "sourceTitle": { "type": "string" }
         },
         "additionalProperties": true
       }
@@ -56,6 +60,23 @@
     },
     "warnings": { "type": "array", "items": { "type": "string" } },
     "recordCount": { "type": "integer", "minimum": 0 },
+    "sources": {
+      "type": "array",
+      "description": "Pages lane: one entry per page extracted from (ADR 1116).",
+      "items": {
+        "type": "object",
+        "required": ["url", "recordCount"],
+        "properties": {
+          "url": { "type": "string" },
+          "title": { "type": "string" },
+          "recordCount": { "type": "integer", "minimum": 0 },
+          "error": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "icpContext": { "type": "object", "description": "The parsed input context, passed through so scoring reads the same object (ADR 1116 D3).", "additionalProperties": true },
+    "productContext": { "type": "object", "description": "The parsed input context, passed through so scoring reads the same object (ADR 1116 D3).", "additionalProperties": true },
     "model": { "type": "string" },
     "usage": {
       "type": "object",

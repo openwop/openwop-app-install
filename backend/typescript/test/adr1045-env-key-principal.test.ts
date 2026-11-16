@@ -31,7 +31,8 @@
  * The LEGACY case pins the CHAN-F14 cure (2026-11-12): the unique-prefix rule
  * ADR 1045 accepted is deleted, because after a same-prefix rotation the unique
  * holder vouched for the rotated-out key's legacy records (review C1). Stored
- * legacy ids were rewritten first (`legacy-bearer-id-rewrite`).
+ * legacy ids were rewritten first by the one-time `legacy-bearer-id-rewrite`
+ * job, which shipped through release 0.14.0 and was then removed (CHAN-F18).
  *
  * Sabotage-witnessed 2026-11-05 (each applied alone, the named legs went red,
  * then restored and `git diff` checked exact): see ADR 1045 § "Env-key principal

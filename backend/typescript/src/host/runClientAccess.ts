@@ -22,48 +22,49 @@
  *   - a stamp that cannot be read, or two stamps naming different orgs, is
  *     readable by the tenant-level grants only. It fails closed.
  *
+ * ADR 1133 adds one more question, after the client one and behind the same
+ * tenant-level grants: a run a PRIVATE project is working on is read only by that
+ * project's people (`runProjectAccess.ts`, derived from the run's attribution,
+ * never stamped).
+ *
  * A refused run is reported as absent (`run_not_found`, 404), the same
  * no-existence-leak posture as the tenant check, and is dropped from lists.
  */
 import type { Request } from 'express';
 import type { RunRecord } from '../types.js';
 import { OpenwopError } from '../types.js';
-import { assertOrgScope, type Scope } from './accessControlService.js';
+import type { Scope } from './accessControlService.js';
 import { callerSubject, tenantOf } from './requestSubject.js';
 import { runClientStamp } from './runClientOrg.js';
-import { runPayloadAccess } from './runPayloadAccess.js';
+import { clientOrgGate, hasTenantWideClientAccess } from './clientOrgGate.js';
+import { runProjectReader } from './runProjectAccess.js';
 
 /** Decide, once per request, which client runs in `tenantId` the caller may
  *  read. One membership resolve per distinct client org, cached for the request. */
 export async function runClientReader(req: Request, tenantId: string = tenantOf(req), scope: Scope = 'runs:read'): Promise<(run: Pick<RunRecord, 'metadata'>) => Promise<boolean>> {
-  const subject = callerSubject(req);
-  // Both are resolved lazily: a run that names no client costs no lookup, and
-  // most runs name none.
+  // ADR 1132 — the floor itself is `clientOrgGate`, shared with workflow definitions.
+  const mayActIn = clientOrgGate(req, tenantId, scope);
   let tenantWide: Promise<boolean> | undefined;
-  const decided = new Map<string, Promise<boolean>>();
-  const mayReadOrg = (orgId: string): Promise<boolean> => {
-    let p = decided.get(orgId);
-    if (!p) {
-      p = subject === undefined
-        ? Promise.resolve(false)
-        : assertOrgScope(tenantId, subject, orgId, scope).then(
-            () => true,
-            (err: unknown) => {
-              if (err instanceof OpenwopError && (err.code === 'not_found' || err.code === 'forbidden_scope')) return false;
-              throw err; // a storage error is not "you may not read": surface it
-            },
-          );
-      decided.set(orgId, p);
-    }
-    return p;
-  };
-  return async (run) => {
+  const clientOk = async (run: Pick<RunRecord, 'metadata'>): Promise<boolean> => {
     const stamp = runClientStamp(run.metadata as Record<string, unknown> | undefined);
     if (stamp === undefined) return true;
-    tenantWide ??= runPayloadAccess(req, tenantId).then((a) => a.all);
-    if (await tenantWide) return true;
-    if ('refused' in stamp) return false;
-    return mayReadOrg(stamp.orgId);
+    if ('refused' in stamp) {
+      // An unreadable or self-contradicting stamp: the tenant-level grants only.
+      tenantWide ??= hasTenantWideClientAccess(req, tenantId);
+      return tenantWide;
+    }
+    return mayActIn(stamp.orgId);
+  };
+  // ADR 1133 — and the project the run is working on, after the client check and
+  // behind the same tenant-wide grants. Derived, never stamped (runProjectAccess.ts).
+  const projectOk = runProjectReader(tenantId, callerSubject(req));
+  return async (run) => {
+    if (!(await clientOk(run))) return false;
+    if (!(await projectOk(run.metadata as Record<string, unknown> | undefined))) {
+      tenantWide ??= hasTenantWideClientAccess(req, tenantId);
+      return tenantWide;
+    }
+    return true;
   };
 }
 

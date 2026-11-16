@@ -26,6 +26,7 @@ import {
   AUTONOMY_STAMP_KEY, FALLBACK_PRESET, autonomyToggleOn, FORK_POSTURE_KEY, buildAutonomyStamp, isCampaignBound, presetPolicy,
   resolveEffectivePolicy,
 } from '../../host/autonomyPolicy/index.js';
+import { planExemptScopeOfRun } from '../../host/operatorPlanExemption.js';
 import { getCampaign } from './campaignService.js';
 import { readCampaignRunTag } from './campaignRunTag.js';
 
@@ -59,7 +60,7 @@ export async function campaignAutonomyContributor(ctx: RunStartContext): Promise
   }
   const tag = readCampaignRunTag(metadata); // throws on wrong_client ⇒ the seam logs it, no stamp
   if (!tag) return {};
-  if (!(await autonomyTogglesOn(ctx.tenantId))) return {};
+  if (!(await autonomyTogglesOn(ctx.tenantId, planExemptScopeOfRun(ctx.tenantId, metadata)))) return {};
   const mcpOrigin = metadata.source === MCP_ORIGIN_SOURCE;
   const resolvedAt = new Date().toISOString();
   const campaign = await getCampaign(ctx.tenantId, tag.campaignId);

@@ -136,7 +136,8 @@ describe('ADR 0764 — digest rendering (pure)', () => {
 
   it('a run reference with no digest says it was not re-read — never a status, never the JSON', () => {
     const msgs = turnsToMessages([userTurn(1, 0), turn(2, { kind: 'workflow_run', runId: 'r-1' }, 1)], 'sys', 'a');
-    expect(msgs[2]).toEqual({ role: 'assistant', content: '[Workflow run r-1 — earlier run, status not re-read this turn]' });
+    expect(msgs[2]!.role).toBe('assistant');
+    expect(String(msgs[2]!.content).split('\n').at(-1)).toBe('[Workflow run r-1 — earlier run, status not re-read this turn]');
   });
 
   it('a digest BEFORE the first user turn is a labelled user-role host note, never a leading assistant message', () => {

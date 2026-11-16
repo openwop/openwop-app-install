@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-discovery/1.0.2/ai-discovery.output.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-discovery/1.1.0/ai-discovery.output.json",
   "title": "MarketIntelAiDiscoveryOutput",
   "type": "object",
   "required": ["sources", "communities", "searchQueries", "warnings", "success"],
@@ -9,6 +9,11 @@
       "type": "array",
       "items": { "type": "string" },
       "description": "Discovered URLs. Each entry is either a full http(s):// URL OR a reddit-style 'r/<subreddit>' identifier (the source guidance allows both)."
+    },
+    "fetchSources": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "ADR 1135: http(s) URLs ordered for fetching. Live-search result URLs first, then the model's URLs, deduped and interleaved by host (one per host per round); URLs on hosts that block automated reads (reddit.com, x.com, twitter.com, quora.com, facebook.com, linkedin.com, instagram.com, tiktok.com) last. Reddit-style 'r/<name>' identifiers are not included."
     },
     "communities": {
       "type": "array",

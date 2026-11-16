@@ -87,8 +87,15 @@ function toMessages(inputs) {
   for (const k of ['prompt', 'text', 'message', 'content', 'input']) {
     if (typeof src[k] === 'string' && src[k].length > 0) return [{ role: 'user', content: src[k] }];
   }
-  for (const [k, v] of Object.entries(src)) {
-    if (k !== 'messages' && typeof v === 'string' && v.length > 0) return [{ role: 'user', content: v }];
+  // CC-SEO-3: this used to send the FIRST string-valued field as the whole user
+  // turn whenever no named port was present, dropping every other field. After a
+  // port-less edge from web search, the model got `engine: "exa"` and never saw
+  // `results`, and the SEO brief was saved as a refusal (prod, 2026-11-15). A
+  // lone string is still sent bare; anything with more than one defined field is
+  // serialized whole below, so no upstream data is silently lost.
+  const defined = Object.entries(src).filter(([k, v]) => k !== 'messages' && v !== undefined);
+  if (defined.length === 1 && typeof defined[0][1] === 'string' && defined[0][1].length > 0) {
+    return [{ role: 'user', content: defined[0][1] }];
   }
   const structured = {};
   for (const [k, v] of Object.entries(src)) if (k !== 'messages' && v !== undefined) structured[k] = v;

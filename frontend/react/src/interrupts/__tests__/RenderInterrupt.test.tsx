@@ -78,12 +78,12 @@ describe('RenderInterrupt dispatcher', () => {
     await vi.waitFor(() => expect(resolveByRun).toHaveBeenCalledWith('r', 'n1', { action: 'skip' }));
   });
 
-  it('degrades gracefully on an unknown kind (no crash, names the kind, neutral copy)', () => {
+  it('degrades gracefully on an unknown kind (no crash, neutral copy, no kind name)', () => {
     render(<RenderInterrupt runId="r" active={mk('low-confidence', {})} onResolved={() => {}} />);
-    // DEMO-14: neutral user-facing copy — carries the kind, never instructs
-    // the user to edit source files.
-    expect(screen.getByText(/can't answer this kind of step/i)).toBeTruthy();
-    expect(screen.getByText(/low-confidence/)).toBeTruthy();
+    // DEMO-14: neutral user-facing copy, never instructs the user to edit source
+    // files. ADR 1125 D1: the kind is an engine word, so it is not shown.
+    expect(screen.getByText(/This request can't be answered here/i)).toBeTruthy();
+    expect(screen.queryByText(/low-confidence/)).toBeNull();
     expect(screen.queryByText(/RenderInterrupt\.tsx/)).toBeNull();
     // ADR 1109 D7 — a customer has no administrator to ask.
     expect(screen.queryByText(/administrator/i)).toBeNull();
@@ -94,6 +94,24 @@ describe('RenderInterrupt dispatcher', () => {
     expect(screen.getByText('Confirm the supplier')).toBeTruthy();
     expect(screen.getByText('The quote changed since Monday.')).toBeTruthy();
     expect(screen.queryAllByRole('button')).toHaveLength(0);
+  });
+
+  it('a credential request offers Connect to the HOST route, never the URL in its data (ADR 1125 D1)', () => {
+    const open = vi.spyOn(window, 'open').mockImplementation(() => null);
+    render(<RenderInterrupt runId="run 1" active={mk('credential', { provider: 'Google', connectUrl: 'https://evil.example/login', reason: 'missing' })} onResolved={() => {}} />);
+    expect(screen.getByText(/needs access to Google/)).toBeTruthy();
+    expect(screen.queryByText(/evil\.example/)).toBeNull();
+    screen.getByRole('button', { name: 'Connect' }).click();
+    expect(open).toHaveBeenCalledTimes(1);
+    const url = String(open.mock.calls[0]![0]);
+    expect(url).toMatch(/\/host\/openwop-app\/connections\/connect\/run%201\/n1$/);
+    expect(url).not.toContain('evil.example');
+    open.mockRestore();
+  });
+
+  it('a credential request without a provider still reads as a sentence', () => {
+    render(<RenderInterrupt runId="r" active={mk('credential', { connectUrl: 'https://evil.example/' })} onResolved={() => {}} />);
+    expect(screen.getByText(/needs access to an account/)).toBeTruthy();
   });
 
   it('an approval card is headed by the gate\'s own title (ADR 1109 D1)', () => {

@@ -67,6 +67,14 @@ describe('SR-1 substitution rules (agent-memory.md §SR-1 reference-impl notes)'
   });
 
   it('is SUBSTRING replacement, not regex — a secret full of metacharacters still redacts', () => {
+    // FIRST a secret that is a VALID regex: as a pattern `a.c.e.g.i` matches
+    // `aXcXeXgXi`, so a RegExp implementation redacts text that holds no secret.
+    // This leg comes first because the metacharacter secret below makes `new
+    // RegExp` THROW, which would red the case before any value is compared. The
+    // `includes` pre-check and the split/join are a double guard for it; one
+    // edit that swaps both for a `replace(new RegExp…)` is what reds this line.
+    expect(redactRunSecretsForMemory('aXcXeXgXi', { 'dots': 'a.c.e.g.i' })).toBe('aXcXeXgXi');
+    expect(redactRunSecretsForMemory('see a.c.e.g.i here', { 'dots': 'a.c.e.g.i' })).toBe('see [REDACTED:dots] here');
     // Under a regex implementation this either throws, matches nothing, or
     // matches far too much. Under split/join it is inert text.
     const secret = 'a.*+?(){}[]|^$b';
@@ -143,9 +151,9 @@ describe('writeMemoryEntryRedacted — the chokepoint, end to end', () => {
       { content: 'the run resolved sk-ant-live-plaintext-value-0001 and summarised it', tags: [] },
       'run-sr1',
     );
-    // Persisted form.
-    expect(row.content).not.toContain('sk-ant-live-plaintext-value-0001');
-    expect(row.content).toContain('[REDACTED:anthropic]');
+    // Persisted form — the exact text, so a marker that keeps a tail of the value
+    // or drops the surrounding words cannot pass.
+    expect(row.content).toBe('the run resolved [REDACTED:anthropic] and summarised it');
     // Read-back form — the point of SR-1 is the READ surface.
     const back = await getMemoryEntry(TENANT, REF, row.id);
     expect(back?.content).toBe(row.content);
@@ -240,21 +248,20 @@ describe('agents.memoryBackends advert is derived from the memory surface', () =
   }
 
   it('is ABSENT on the non-durable default tier — no over-claim on a demo deploy', async () => {
-    await withMemoryBackend(MEMORY_BACKEND, async () => {
-      // Precondition, asserted rather than assumed: if this ever fails the
-      // message names the resolution, not the advert.
-      expect(
-        resolveBackendId('memory'),
-        'precondition: the memory surface must resolve to the in-memory default here',
-      ).toBe(MEMORY_BACKEND);
-      expect(memoryBackends(), 'a process-local tier is not a cross-run durable store').toBeUndefined();
-    });
+    // Read inside the env window, assert outside it, so every assertion runs unconditionally.
+    const seen = await withMemoryBackend(MEMORY_BACKEND, async () => ({
+      resolved: resolveBackendId('memory'),
+      backends: memoryBackends(),
+    }));
+    // Precondition, asserted rather than assumed: if this ever fails the
+    // message names the resolution, not the advert.
+    expect(seen.resolved, 'precondition: the memory surface must resolve to the in-memory default here').toBe(MEMORY_BACKEND);
+    expect(seen.backends, 'a process-local tier is not a cross-run durable store').toBeUndefined();
   });
 
   it("is ['long-term'] when a durable memory backend is selected", async () => {
-    await withMemoryBackend('durable', async () => {
-      expect(memoryBackends()).toEqual(['long-term']);
-    });
+    const backends = await withMemoryBackend('durable', async () => memoryBackends());
+    expect(backends).toEqual(['long-term']);
   });
 
   it('the GLOBAL OPENWOP_SURFACE_BACKEND fallback also earns the claim', async () => {

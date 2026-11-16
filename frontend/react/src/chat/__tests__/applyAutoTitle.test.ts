@@ -3,10 +3,17 @@
  * the new title. Born red: the hook used to call `setSession` alone, so a screen-reader
  * user never heard the rail/tab title change under them.
  *
- * Sabotage: announce assertively / drop the swap → the helper case reds; route the titled
- * event through a bare `setSession(...)` (any spelling, even with the helper call left in a
- * comment) → the WIRING case reds. Ceiling: the wiring leg reads the hook's SOURCE — driving
- * `useTurnTransport`'s SSE loop end to end costs far more than the one-line claim.
+ * ADR 1019 D4 — the same helper is the one landing for the header follow too: it retitles
+ * only the chat that was titled, announces only while that chat is on screen, and tells
+ * every session list (rail + tab labels, this tab and others) to refetch the header.
+ *
+ * Sabotage: announce assertively / drop the swap → the helper case reds; drop the
+ * `s.id === sessionId` check or the `isOpen` gate → the switched-away case reds; drop the
+ * broadcast → the session-list case reds; route the titled event through a bare
+ * `setSession(...)` (any spelling, even with the helper call left in a comment), drop the
+ * once-guard, or start the follow without `persist` → the WIRING case reds. Ceiling: the
+ * wiring leg reads the hook's SOURCE — driving `useTurnTransport`'s SSE loop end to end
+ * costs far more than the one-line claim.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { applyAutoTitle } from '../lib/applyAutoTitle.js';
@@ -57,7 +64,13 @@ describe('applyAutoTitle (ATU-1 / ADR 1019 D4)', () => {
     expect(branch).toMatch(/applyTitleOnce\(\s*autoTitle\s*,\s*titleSessionId\s*\)/);
     expect(branch).not.toMatch(/setSession\s*\(/);
     // …and the once-guard lands through the helper, with the chat's id.
-    const once = src.slice(src.indexOf('const applyTitleOnce'), src.indexOf('}, [setSession]);', src.indexOf('const applyTitleOnce')));
+    // The slice ends at the callback's OWN dependency list (the first `}, [` after it),
+    // so a match cannot come from some later callback in the hook.
+    const onceAt = src.indexOf('const applyTitleOnce');
+    expect(onceAt, 'the once-guard callback must exist').toBeGreaterThan(-1);
+    const once = src.slice(onceAt, src.indexOf('}, [', onceAt));
+    // Once per chat: a second title for the same chat returns before it lands.
+    expect(once).toMatch(/if \(titledSessionsRef\.current\.has\(sessionId\)\) return;\s*titledSessionsRef\.current\.add\(sessionId\);/);
     expect(once).toMatch(/applyAutoTitle\(\s*title\s*,\s*setSession\s*,\s*sessionId\s*,\s*sessionRef\.current\.id\s*===\s*sessionId\s*\)/);
     // ADR 1019 D4 — the header follow starts only after a chat's FIRST exchange, only
     // for a persisted chat, only with the toggle on, and lands through the once-guard.

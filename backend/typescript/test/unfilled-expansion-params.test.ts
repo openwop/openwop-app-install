@@ -32,6 +32,18 @@
  * Minting still SUCCEEDS on purpose: "Use template = just copy" is a documented
  * contract and the ADR 0498 enforcement revert established that refusing at mint
  * time breaks it.
+ *
+ * Which tokens are findings (4495883049): a whole-value token for a REQUIRED param,
+ * or for a name the chain never declared (a typo), is recorded. A DECLARED
+ * optional param with no default is not: the key vanishes on purpose so the node
+ * uses its own default (campaign-sync's `syncScope` falls back to the org setting).
+ * A declared default fills the value, so nothing is unfrozen.
+ *
+ * Red when (wave 116 probes): declared-optional params are recorded; undeclared
+ * names are treated as optional; required params are treated as optional; a
+ * declared default is not applied; the live re-check stops treating `''` as
+ * unfilled, keeps a finding whose node was deleted, or guesses from a definition
+ * with no record; an authored empty literal is recorded.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -70,7 +82,10 @@ describe('an unfrozen param is recorded at expansion', () => {
     const omitted = expandChain(syncChain, { params: { orgId: 'client', platform: 'google' } });
     expect(findUnfilledExpansionParams(omitted)).toEqual([]);
     const sync = omitted.nodes.find((n) => n.typeId.includes('campaign-connectors.nodes.sync'));
-    expect(JSON.parse(JSON.stringify(sync?.inputs ?? {}))).not.toHaveProperty('syncScope'); // persistence omits it; runtime uses connector settings
+    // The node IS there with its required input frozen, so the absence below is of
+    // the optional key only (an absent node would pass a `not.toHaveProperty`).
+    expect(sync?.inputs).toMatchObject({ orgId: 'client', platform: 'google' });
+    expect(JSON.parse(JSON.stringify(sync?.inputs))).not.toHaveProperty('syncScope'); // persistence omits it; runtime uses connector settings
     const explicit = expandChain(syncChain, { params: { orgId: 'client', platform: 'google', syncScope: 'account' } });
     expect(explicit.nodes.find((n) => n.typeId.includes('campaign-connectors.nodes.sync'))?.inputs).toMatchObject({ syncScope: 'account' });
     expect(findUnfilledExpansionParams(expandChain(syncChain, { params: { platform: 'google' } })).map((f) => f.param)).toEqual(['orgId']);

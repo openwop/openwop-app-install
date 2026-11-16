@@ -9,17 +9,25 @@
  *    presentation is an unlabelled number plus a note.
  *  - CI-G2: the four reports were fetched with `Promise.all`, so one failing
  *    sub-report blanked ALL FOUR sections behind a single error line.
+ *
+ * Every failure case asserts the EXACT `sectionsFailed` sentence, so a case
+ * cannot pass on a different section's failure. Sabotage (/grade-tests wave 113,
+ * `w113g4-mc-*`): reading the label from the currency string instead of the
+ * flag, guessing a currency when attribution failed, re-gating on the budget
+ * read, dropping the stale-batch guard, or rendering an empty anomaly section
+ * each turn a case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import type { AttributionReport, BudgetRecommendation, CampaignForecast, PacingReport } from '../campaignIntelClient.js';
+import type { Anomaly, AttributionReport, BudgetRecommendation, CampaignForecast, PacingReport } from '../campaignIntelClient.js';
 
-const getBudget = vi.fn();
-const getForecast = vi.fn();
-const getAttribution = vi.fn();
-const getPacing = vi.fn();
-const getAnomalies = vi.fn();
+// Typed against the client's return types, so a fixture that drifts fails tsc.
+const getBudget = vi.fn<() => Promise<BudgetRecommendation>>();
+const getForecast = vi.fn<() => Promise<CampaignForecast[]>>();
+const getAttribution = vi.fn<() => Promise<AttributionReport>>();
+const getPacing = vi.fn<() => Promise<PacingReport>>();
+const getAnomalies = vi.fn<() => Promise<Anomaly[]>>();
 
 vi.mock('../campaignIntelClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
@@ -72,7 +80,7 @@ beforeEach(() => {
   vi.mocked(listOrgs).mockResolvedValue([{ orgId: 'org-1', name: 'Acme' }]);
   getBudget.mockReset(); getForecast.mockReset(); getAttribution.mockReset(); getPacing.mockReset(); getAnomalies.mockReset().mockResolvedValue([]);
   getBudget.mockResolvedValue(BUDGET);
-  getForecast.mockResolvedValue([] as CampaignForecast[]);
+  getForecast.mockResolvedValue([]);
   getPacing.mockResolvedValue({ rows: [], unplanned: 0, computedAt: '2026-07-01T00:00:00.000Z' } satisfies PacingReport);
   getAttribution.mockResolvedValue(attribution('USD', false));
 });
@@ -101,6 +109,8 @@ describe('CI-G1: org-wide figures never claim a currency the org does not use', 
     await view();
     expect(screen.getByText(/more than one currency/i)).toBeTruthy();
     expect(screen.getByText(/not converted/i)).toBeTruthy();
+    // R2 CI-SP-13 — and that the recommendations compare across currencies too.
+    expect(screen.getByText(/across currencies without conversion/i)).toBeTruthy();
   });
 
   it('a genuinely-USD org still shows $ — the flag, not the string, decides', async () => {
@@ -111,9 +121,11 @@ describe('CI-G1: org-wide figures never claim a currency the org does not use', 
   });
 
   it('an OLDER backend with no flag keeps today\'s labelled behaviour', async () => {
-    const legacy = attribution('EUR', false) as Partial<AttributionReport>;
-    delete legacy.currencyMixed;
-    getAttribution.mockResolvedValue(legacy as AttributionReport);
+    // `currencyMixed` is optional on the wire type: an older backend omits it.
+    const legacy: AttributionReport = {
+      rows: [], email: [], unattributedConversions: 0, currency: 'EUR', computedAt: '2026-07-01T00:00:00.000Z',
+    };
+    getAttribution.mockResolvedValue(legacy);
     await view();
     // Labelled in the report's own currency — not merely "a number is shown".
     expect(screen.getByText(/€12,345/)).toBeTruthy();
@@ -155,7 +167,7 @@ describe('R2 CI-SP-1/4 — the failure legs round 1 never covered', () => {
     expect(await screen.findByText('Paced campaign', { selector: 'span' })).toBeTruthy();
     expect(screen.queryByText(/Analyzing performance/i)).toBeNull();
     // The failure is named — and only the failure.
-    expect(screen.getByText(/Could not load/)).toBeTruthy();
+    expect(screen.getByText('Could not load: Budget recommendation. The other sections are current.')).toBeTruthy();
   });
 
   it('a FAILED attribution read leaves org-wide figures UNLABELLED — never an arbitrary currency', async () => {
@@ -166,8 +178,9 @@ describe('R2 CI-SP-1/4 — the failure legs round 1 never covered', () => {
     await screen.findByText(/Shift spend toward/);
     // The mixed flag rides only attribution: its failure used to fall back to
     // pacing.rows[0].currency (an ARBITRARY campaign's GBP here) and re-label
-    // the org figures — the exact defect round 1 fixed. Unknown = unlabelled.
-    expect(screen.getByText(/12,345/)).toBeTruthy();
+    // the org figures — the exact defect round 1 fixed. Unknown = unlabelled:
+    // the EXACT bare number (a regex also matched "£12,345" / "€12,345").
+    expect(screen.getByText('12,345')).toBeTruthy();
     expect(screen.queryByText(/£12,345/)).toBeNull();
     expect(screen.queryByText(/\$12,345/)).toBeNull();
   });
@@ -177,10 +190,11 @@ describe('R2 CI-SP-1/4 — the failure legs round 1 never covered', () => {
     getForecast.mockRejectedValue(new Error('f'));
     getAttribution.mockRejectedValue(new Error('a'));
     getPacing.mockRejectedValue(new Error('p'));
+    getAnomalies.mockRejectedValue(new Error('an'));
     render(<MemoryRouter><CampaignIntelPage /></MemoryRouter>);
     await act(async () => {});
-    expect(await screen.findByText(/Could not load/)).toBeTruthy();
-    // Three failed reads are NOT an empty-data assertion.
+    expect(await screen.findByText('Could not load: Budget recommendation, Forecast, Attribution (last-click), Budget pacing, Anomalies. The other sections are current.')).toBeTruthy();
+    // Five failed reads are NOT an empty-data assertion.
     expect(screen.queryByText(/Not enough data yet/i)).toBeNull();
   });
 });
@@ -189,7 +203,7 @@ describe('R2 CI-SP-3 — the localized noteCode path (not just the prose fallbac
   it('renders the localized shift note with formatted money under the org rule', async () => {
     getBudget.mockResolvedValue({
       ...BUDGET,
-      noteCode: 'shift' as const,
+      noteCode: 'shift',
       noteParams: { shift: 7655, from: 'meta', to: 'google' },
       note: 'Shift ~7655 from meta to google.',
     });
@@ -230,7 +244,7 @@ describe('R3 CI-SP-8 remainder — the anomaly detector gets its reader', () => 
     render(<MemoryRouter><CampaignIntelPage /></MemoryRouter>);
     await act(async () => {});
   };
-  it('renders spikes/drops with metric + z; a clean scan renders NO section', async () => {
+  it('renders spikes/drops with metric + z', async () => {
     getAnomalies.mockResolvedValue([
       { platform: 'meta', campaignName: 'Spring Push', metric: 'spend', date: '2026-08-12', value: 900, mean: 300, z: 4.2, direction: 'spike' },
       { platform: 'google', campaignName: 'Brand', metric: 'ctr', date: '2026-08-13', value: 0.1, mean: 1.2, z: -3.4, direction: 'drop' },
@@ -244,6 +258,8 @@ describe('R3 CI-SP-8 remainder — the anomaly detector gets its reader', () => 
 
   it('a clean scan (no anomalies) renders no section; a FAILED read lands in sectionsFailed', async () => {
     await mountWithOrg(); // beforeEach: []
+    // Settle first: while loading the section is absent anyway.
+    await screen.findByText(/Shift spend toward/);
     expect(screen.queryByText('Anomalies')).toBeNull();
     cleanup();
     getAnomalies.mockRejectedValue(new Error('boom'));

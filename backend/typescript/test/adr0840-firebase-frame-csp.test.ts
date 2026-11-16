@@ -24,6 +24,9 @@
  * under `/api/v1/`, when `pluginFrameCsp()` changes without firebase.json, or when an
  * installed frontend-plugin pack declares `connectSrc`. The connectSrc scan must see at
  * least the 3 frontend-plugin packs measured in packs/ (a scan of nothing would pass).
+ * Wave 115: also red when the entry rule loses its `sandbox allow-scripts` directive
+ * (the ADR 1021 regression), asserted literally so a lockstep edit of the builder and
+ * firebase.json cannot drop it on parity alone.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
@@ -48,7 +51,13 @@ describe('ADR 0840 D3 — Firebase plugin header rules', () => {
   });
 
   it('the entry path carries the frame policy, sandbox included (ADR 1021)', () => {
-    expect(csp('/api/host/openwop-app/ui-plugin/packs/**/entry')).toBe(pluginFrameCsp());
+    const entry = csp('/api/host/openwop-app/ui-plugin/packs/**/entry');
+    expect(entry).toBe(pluginFrameCsp());
+    // The posture itself, literally: the expectation above is the product's own
+    // builder, so the builder and firebase.json dropping `sandbox` together would
+    // stay green on parity alone.
+    expect(entry?.split('; ')[0]).toBe('sandbox allow-scripts');
+    expect(entry).not.toContain('allow-same-origin');
   });
 
   it('no rule names a stale /api/v1 plugin path', () => {

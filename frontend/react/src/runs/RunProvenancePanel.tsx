@@ -209,6 +209,8 @@ function fmtDuration(ms?: number): string | null {
 export function humanChip(human: ProvenanceSummary['human']): { cls: string; label: string } {
   // CC-UI-2 — a timer waits on the clock, not a person.
   if (human.open && human.openKind === 'timer') return { cls: 'chip--muted', label: i18n.t('runs:provWaitingTimer') };
+  // CC-ORCH-3 — linked runs or an outside event: not a person either.
+  if (human.open && human.openKind === 'external-event') return { cls: 'chip--muted', label: i18n.t('runs:provWaitingExternal') };
   if (human.open) return { cls: 'chip--warning chip--pulse', label: i18n.t('runs:provAwaitingHuman') };
   if (human.resumes > 0) return { cls: 'chip--success', label: i18n.t('runs:provHumanResolved', { count: human.resumes }) };
   if (human.interrupts > 0) return { cls: 'chip--muted', label: i18n.t('runs:provGateUnresolved', { count: human.interrupts }) };

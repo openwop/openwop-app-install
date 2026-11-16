@@ -334,6 +334,13 @@ import { featureSubjectErasers } from './featureContributions.js';
  *      deletes the subject's queued rows (matched on `authorUserId`), so the text
  *      never reaches the model afterwards. Author-less legacy rows age out (7 days).
  */
+/*
+ *  +1 (2026-11-14, ADR 0464 §9 CHAN-F19 #4):
+ *    + `eraseSettingsSubject` — `settings:user-prefs` sat in RECORDED_DEBT ("simply has
+ *      no eraser yet") and `settings:byok-usage` in the signal-free baseline. Every row
+ *      of both is keyed to one person, so a DSAR deletes the subject's prefs row and
+ *      day counters; nothing shared or tenant-level lives in either store.
+ */
 export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseChannelIngressSubject', // ADR 1042 D8
   'eraseRelayOwnerSubject', // ADR 1042 D8
@@ -459,6 +466,7 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseSubjectUserAgentRevisions',
   'eraseSuggestionSubject',
   'eraseSuggesterQueueSubject', // CHAN-F19 #2 — the decision suggester's queued chat text
+  'eraseSettingsSubject', // CHAN-F19 #4 — personal settings prefs + BYOK day counters
   'eraseSyncBindingSubject',
   'eraseTeamLedgerSubject',
   'eraseTeamsDelivery',

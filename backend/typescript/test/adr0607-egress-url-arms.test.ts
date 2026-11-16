@@ -214,7 +214,7 @@ describe('ADR 0607 ratchet — every guarded-dispatcher site is classified', () 
     expect(stale, `these no longer dial the dispatcher: ${stale.join(', ')}`).toEqual([]);
   });
 
-  it('the three ADR 0606/0607 sites reference the shared predicate by name', () => {
+  it('the four ADR 0606/0607/0747 sites reference the shared predicate by name', () => {
     for (const f of [
       'host/webhookDeliveryWorker.ts',
       'host/a2aPushDelivery.ts',

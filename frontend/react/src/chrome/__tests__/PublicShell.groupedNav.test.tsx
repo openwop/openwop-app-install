@@ -21,12 +21,15 @@
  * the duplicate check, resolving a fragment off the owning page, or leaving
  * links out of the grouped-mode switch each reds an authored-links case.
  * ADR 1113 D5: ignoring `ctaHref`, resolving its fragment off the page, or
- * accepting an off-site one reds the button-destination case.
+ * accepting an off-site one reds the button-destination case. ADR 1080 D13:
+ * listing Blog for a site with no published post reds the Blog case. ADR 1049
+ * addendum: leaving Blog in Company when a Resources group exists reds the
+ * Resources case.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, within } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, within, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 function json(status: number, body: unknown): Response {
@@ -95,7 +98,11 @@ describe('PublicShell grouped site navigation (ADR 1049)', () => {
   it('lists Blog only when the site has published a post (ADR 1080 D13)', async () => {
     const panel = await renderWith(GROUPED_SITE, []);
     expect(await within(panel).findByRole('link', { name: /^Agencies/ })).toBeTruthy();
-    await new Promise((r) => setTimeout(r, 20));
+    // "No posts" renders nothing, so settle the blog read itself: it was issued,
+    // then its response chain is drained (a few macrotasks, no wall-clock wait).
+    // The case-1 fixture (one post) is the positive control: Blog does show there.
+    await vi.waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([u]) => String(u).includes('/public/host-site/blog'))).toBe(true));
+    await act(async () => { for (let i = 0; i < 5; i += 1) await new Promise<void>((r) => { setTimeout(r, 0); }); });
     expect(groupLinks(panel, '.public-menu__group', '.public-menu__heading', 'Company')).toEqual(['/p/about']);
   });
 

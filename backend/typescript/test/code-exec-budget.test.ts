@@ -3,9 +3,9 @@
  * paid, high-blast-radius surface).
  *
  * Breaks if the cap is checked after dispatch instead of before, if a successful run is
- * not charged, if `max=0` stops meaning uncapped, or if concurrent reservations lose
- * increments (CXE-3). The race case used to be `it.fails` (BLOCKED-ON-PRODUCT, w24 g2):
- * check → execute → record was not atomic. ADR 0995 D6 made it a reservation, so it is a
+ * not charged, if `max=0` stops meaning uncapped, if a released unit is not given back,
+ * or if concurrent reservations lose increments or share a unit (CXE-3). The race case
+ * used to be `it.fails` (BLOCKED-ON-PRODUCT, w24 g2): check → execute → record was not atomic. ADR 0995 D6 made it a reservation, so it is a
  * plain `it` now.
  */
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
@@ -56,7 +56,10 @@ describe('codeExecBudget', () => {
   it('CXE-3: concurrent reservations do not lose increments (atomic CAS)', async () => {
     process.env.OPENWOP_CODE_EXEC_MAX_PER_DAY = '1000';
     const N = 8;
-    await Promise.all(Array.from({ length: N }, () => reserveCodeExec('t-cas', DAY)));
+    const results = await Promise.all(Array.from({ length: N }, () => reserveCodeExec('t-cas', DAY)));
+    // Every caller took a DISTINCT unit: a blind write hands two callers the same count.
+    expect(results.every((r) => r.reserved)).toBe(true);
+    expect(results.map((r) => r.used).sort((x, y) => x - y)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     expect((await checkCodeExecBudget('t-cas', DAY)).used).toBe(N); // a read-then-write would drop some
   });
 });
@@ -70,7 +73,7 @@ describe('tenant-bound sandbox runner', () => {
     const before = hits;
     expect((await runner({ language: 'python', code: 'print(1)' })).stdout).toBe('ok'); // 1
     expect((await runner({ language: 'python', code: 'print(2)' })).stdout).toBe('ok'); // 2
-    await expect(runner({ language: 'python', code: 'print(3)' })).rejects.toMatchObject({ code: 'resource_exhausted' }); // 3 → over
+    await expect(runner({ language: 'python', code: 'print(3)' })).rejects.toMatchObject({ code: 'resource_exhausted', message: 'code execution daily budget reached (2/2).' }); // 3 → over (the budget refusal, not the CXE-4 capacity one)
     expect(hits - before, 'the over-budget call must never reach the sandbox').toBe(2);
   });
 
@@ -86,6 +89,9 @@ describe('tenant-bound sandbox runner', () => {
     const before = hits;
     const settled = await Promise.allSettled([1, 2, 3].map((i) => runner({ language: 'python', code: `print(${i})` })));
     expect(hits - before).toBe(1);
-    expect(settled.filter((s) => s.status === 'rejected')).toHaveLength(2);
+    const refused = settled.flatMap((s) => (s.status === 'rejected' ? [s.reason] : []));
+    expect(refused).toHaveLength(2);
+    // Refused by the daily budget (not by CAS contention or the CXE-4 concurrency cap).
+    for (const r of refused) expect(r).toMatchObject({ code: 'resource_exhausted', message: 'code execution daily budget reached (1/1).' });
   });
 });

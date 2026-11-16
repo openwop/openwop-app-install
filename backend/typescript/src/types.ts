@@ -442,7 +442,8 @@ export type NotificationStatus = 'unread' | 'read' | 'archived';
  * `withdrawn` (#5922): the item was never a request (an idle chat), retired once
  * by the `retire-conversation-requests` background job.
  */
-export type RequestResolutionState = 'approved' | 'rejected' | 'changes-requested' | 'timed-out' | 'answered' | 'run-ended' | 'withdrawn';
+/** ADR 1114 D2 states; `run-deleted` is ADR 1124 D1 (the run was removed while the request was open). */
+export type RequestResolutionState = 'approved' | 'rejected' | 'changes-requested' | 'timed-out' | 'answered' | 'run-ended' | 'withdrawn' | 'run-deleted';
 export interface RequestResolution { state: RequestResolutionState; at: string }
 
 export interface NotificationRecord {

@@ -14,12 +14,14 @@ import type { BYOKActiveConfig } from '../../../byok/lib/useBYOKConfig.js';
  * the first-mount bootstrap tab, or closes a tab other than the one asked for.
  */
 
-// Stub TabSession to a lightweight marker — presence in the DOM == mounted.
-// ADR 0978 D4 — the deck resolves the active workspace before it restores.
+// ADR 0978 D4 — a signed-in deck resolves the active workspace before it restores.
+// This file is signed out (`useAuth` → null), so the deck skips that read and
+// renders at once; the stub only keeps any workspace read local, never live.
 vi.mock('../../../client/workspaceClient.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../client/workspaceClient.js')>()),
   listMyWorkspaces: async () => ({ workspaces: [], active: 'ws-test', personal: 'ws-test' }),
 }));
+// Stub TabSession to a lightweight marker — presence in the DOM == mounted.
 vi.mock('../TabSession.js', () => ({
   TabSession: ({ sessionId }: { sessionId: string }) => <div data-testid="tabsession" data-sid={sessionId} />,
 }));

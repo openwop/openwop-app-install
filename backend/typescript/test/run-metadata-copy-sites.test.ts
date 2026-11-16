@@ -41,6 +41,11 @@
  * The BEHAVIOURAL witness for both live copiers is
  * `test/tool-output-compaction-fork-real-path.test.ts` (real routes, real rows).
  * This file is the population; that file is the proof.
+ *
+ * Tracker TST-8W2-47. Red when a new creator is unclassified, a classified file
+ * stops creating a run, a copier drops (or only comments) `derivedFromRun: true`,
+ * a FRESH site passes it or spreads a source run's `.metadata`, or a known copier
+ * loses the fingerprint (grade-tests w115 probes `w115g2-rm-*`).
  */
 import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
@@ -205,7 +210,12 @@ const CLASSIFIED: Record<string, { source: MetadataSource; why: string }> = {
   // ── Fresh creators that never load a run ──────────────────────────────
   'host/runStarter.ts': {
     source: 'FRESH',
-    why: 'The shared starter composes `stripReservedRunMetadata(input.metadata)` + launchResolved from its CALLER, never from a run row.',
+    why:
+      'The shared starter composes `stripReservedRunMetadata(input.metadata)` + launchResolved from its CALLER. ' +
+      'Its run reads are the deterministic-run-id idempotency check (before and after the insert race) and, with ' +
+      '`inheritFromRunId`, the tenant-checked parent row, from which ONLY the keys registered in ' +
+      '`host/inheritedRunMetadata.ts` are projected (as in `executor/subWorkflowDispatcher.ts`) — never the parent ' +
+      'metadata blob, so the new run resolves its own frozen decisions.',
   },
   'host/triggerIngestionService.ts': {
     source: 'FRESH',
@@ -221,7 +231,11 @@ const CLASSIFIED: Record<string, { source: MetadataSource; why: string }> = {
   },
   'features/agent-deployments/service.ts': {
     source: 'FRESH',
-    why: 'ADR 1005 deployment-management run (RFC 0254 §D): bare `storage.insertRun` with metadata composed in place from the transition request (agentId, version, transition). It reads no source run and never executes.',
+    why:
+      'ADR 1005 deployment-management run (RFC 0254 §D): bare `storage.insertRun` with metadata composed in place ' +
+      'from the transition request (agentId, version, transition). Its two run reads gate the transition — the ' +
+      'cited eval run\'s verdict (`verifyEval`) and whether a held approval\'s run is still open (`claimPending`) — ' +
+      'and neither run\'s metadata is copied. The management run never executes.',
   },
   'host/evals/createEvalRun.ts': {
     source: 'FRESH',
@@ -295,7 +309,8 @@ describe('ADR 0604 H1 — every run-creation site declares where its metadata ca
     expect(creators).toContain('routes/workflowDebug.ts');
     expect(creators).toContain('host/anonymousActor.ts'); // a bare-insertRun lane
     // MEASURED 2026-10-22 at 2404797bf: 26 creators (was asserted >= 20, far below
-    // the truth). A floor at the measured count catches a walk that silently loses files.
+    // the truth); 28 at d5b98aafaa (w115). A floor at the measured count catches a
+    // walk that silently loses files.
     expect(creators.length).toBeGreaterThanOrEqual(26);
   });
 
@@ -340,7 +355,10 @@ describe('ADR 0604 H1 — every run-creation site declares where its metadata ca
     // The derived leg. This is where the defect can actually live, and the row
     // is only worth having if it forces the judgment rather than the paperwork.
     const risky = creators.filter((f) => CLASSIFIED[f]?.source === 'FRESH' && loadsExistingRun(f));
-    // MEASURED 2026-10-22 at 2404797bf: 11 FRESH creators also load a run (was asserted >= 6).
+    // MEASURED 2026-10-22 at 2404797bf: 11 FRESH creators also load a run (was asserted >= 6);
+    // 13 at d5b98aafaa (w115). The `why` length below is paperwork, not judgment: it
+    // passed the two rows corrected in w115 (runStarter, agent-deployments), whose
+    // prose said they read no run.
     expect(risky.length, 'derivation broke: no FRESH creator reads a run, which cannot be true').toBeGreaterThanOrEqual(11);
     for (const f of risky) {
       expect(

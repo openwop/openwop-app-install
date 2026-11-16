@@ -10,6 +10,7 @@
  * project through them. Fail-soft: a resolver that throws resolves nothing.
  */
 import { createLogger } from '../observability/logger.js';
+import { getBoard } from './kanbanService.js';
 
 const log = createLogger('host.runProjectBinding');
 
@@ -33,4 +34,36 @@ export async function resolveRunProject(tenantId: string, metadata: Readonly<Rec
     }
   }
   return undefined;
+}
+
+type Obj = Record<string, unknown>;
+const isObj = (x: unknown): x is Obj => x !== null && typeof x === 'object' && !Array.isArray(x);
+
+/**
+ * ADR 1133 — THE answer to "which project is this run working on", from its
+ * host-written attribution: a card run on a project board
+ * (`metadata.kanban.boardId` → the board's `ownerSubject`), a project-fired
+ * schedule (`metadata.schedule.ownerScope = 'project:<id>'`), then the
+ * registered feature resolvers above. The team ledger, the handoff cards and the
+ * run read gate (`runProjectAccess.ts`) all ask here; before this the first two
+ * kept partial copies (the handoff copy had no schedule branch).
+ *
+ * `boardOf` lets a caller that asks for many runs memoise the board read.
+ */
+export async function runProject(
+  tenantId: string,
+  metadata: Readonly<Obj>,
+  boardOf: (boardId: string) => Promise<{ tenantId: string; ownerSubject?: { kind: string; id: string } } | null> = getBoard,
+): Promise<string | undefined> {
+  const k = metadata.kanban;
+  if (isObj(k) && typeof k.boardId === 'string') {
+    const board = await boardOf(k.boardId);
+    if (board && board.tenantId === tenantId && board.ownerSubject?.kind === 'project') return board.ownerSubject.id;
+  }
+  const s = metadata.schedule;
+  if (isObj(s) && typeof s.ownerScope === 'string' && s.ownerScope.startsWith('project:')) {
+    const id = s.ownerScope.slice('project:'.length);
+    if (id) return id; // a bare `project:` binds nothing (the ADR 1109 `runSubjectOf` rule)
+  }
+  return resolveRunProject(tenantId, metadata);
 }

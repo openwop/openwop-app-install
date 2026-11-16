@@ -42,8 +42,13 @@ export const ADS_API_VERSIONS: Readonly<Record<AdPlatform, AdsApiVersionPin>> = 
   meta: {
     // Marketing API table: v24.0 expired 2026-10-06, v25.0 (2026-02-18) shows TBD.
     // Recent Marketing API versions lived ~12 months, hence the estimate.
-    platform: 'meta', version: 'v25.0', sunset: '2027-02-18', basis: 'estimated', reviewBy: '2027-01-15',
-    source: 'https://developers.facebook.com/docs/graph-api/changelog/versions/', checkedAt: '2026-10-17',
+    // Re-read 2026-11-16: Marketing API v25.0 expiration still "TBD", and the
+    // Marketing table has no v26.0 row yet (Graph API v26.0 released 2026-07-29,
+    // expiration TBD). So the estimate stands. reviewBy 2027-02-01 trips on
+    // 2026-12-03, ahead of the estimated sunset's own trip on 2026-12-20, which
+    // leaves time to bump if Meta publishes v25.0's end or a Marketing v26.0.
+    platform: 'meta', version: 'v25.0', sunset: '2027-02-18', basis: 'estimated', reviewBy: '2027-02-01',
+    source: 'https://developers.facebook.com/docs/graph-api/changelog/versions/', checkedAt: '2026-11-16',
   },
   tiktok: {
     platform: 'tiktok', version: 'v1.3', basis: 'none-announced', reviewBy: '2027-04-01',

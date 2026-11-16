@@ -16,8 +16,7 @@
  * @see docs/adr/0831-team-intent-ledger.md §D3
  */
 import type { RunStartContext } from '../../host/runStartContext.js';
-import { getBoard } from '../../host/kanbanService.js';
-import { resolveRunProject } from '../../host/runProjectBinding.js';
+import { runProject } from '../../host/runProjectBinding.js';
 import { getProject, resolveProjectAccess } from '../projects/projectsService.js';
 import { getLedger } from './ledgerStore.js';
 import { ledgerEvidence, TEAM_LEDGER_STAMP_SHAPE } from './evidence.js';
@@ -29,26 +28,11 @@ export interface TeamLedgerStamp { ledgerId: string; version: number }
 type Obj = Record<string, unknown>;
 const isObj = (x: unknown): x is Obj => x !== null && typeof x === 'object' && !Array.isArray(x);
 
-/** The project a run's host-written attribution points at, if any. */
-async function boundProjectId(tenantId: string, metadata: Readonly<Obj>): Promise<string | undefined> {
-  const k = metadata.kanban;
-  if (isObj(k) && typeof k.boardId === 'string') {
-    const board = await getBoard(k.boardId);
-    if (board?.ownerSubject?.kind === 'project') return board.ownerSubject.id;
-  }
-  const s = metadata.schedule;
-  if (isObj(s) && typeof s.ownerScope === 'string' && s.ownerScope.startsWith('project:')) {
-    return s.ownerScope.slice('project:'.length);
-  }
-  // ADR 0852 D2 — a feature-owned binding (a campaign run ⇒ the campaign's project).
-  return resolveRunProject(tenantId, metadata);
-}
-
 /** The run-start contributor. Fail-soft by contract (a throw contributes nothing). */
 export async function teamLedgerRunStartContributor(ctx: RunStartContext): Promise<Record<string, unknown>> {
   if (ctx.derivedFromRun) return {}; // ADR 0604: a copied blob is authoritative, present or absent
   const metadata = ctx.metadata ?? {};
-  const projectId = await boundProjectId(ctx.tenantId, metadata);
+  const projectId = await runProject(ctx.tenantId, metadata); // ADR 1133: the one derivation
   if (!projectId) return {};
   const project = await getProject(ctx.tenantId, projectId);
   if (!project) return {}; // another tenant's project resolves to nothing

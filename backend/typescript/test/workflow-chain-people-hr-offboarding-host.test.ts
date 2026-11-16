@@ -24,7 +24,7 @@
  *     expansion — no clock/random in the added nodes);
  *   - a MANUAL run (no triggerData) reaches the SAME terminal state it did
  *     before the rewire: it fails at the unwired M365 `deprovision` connector
- *     (`CONFIG_INVALID`) and never reaches `attest`/`deprovision-host` — stated
+ *     (`openapi_document_missing` since CC-CHAIN-1; was `CONFIG_INVALID`) and never reaches `attest`/`deprovision-host` — stated
  *     honestly rather than claimed as "completes" (no chain-pack run of this
  *     chain has ever completed in this host; see the execution test's MODE note).
  */
@@ -221,7 +221,9 @@ describe('people-hr.offboarding 1.1.0 — a MANUAL run (no triggerData) reaches 
     }
     if (!settled) throw new Error(`run ${runId} did not settle after ${POLLS} polls (last status: ${snap.status})`);
     expect(snap.status).toBe('failed');
-    expect(snap.error?.code).toBe('openwop-app.config_invalid');
+    // CC-CHAIN-1 (core.openwop.http 2.1.3): deprovision names a connection but has
+    // no wired OpenAPI document, so it fails with the typed code that says so.
+    expect(snap.error?.code).toBe('openwop-app.openapi_document_missing');
 
     const bundle = await call<{ events?: Array<{ type: string; nodeId?: string }> }>('GET', `/runs/${runId}/debug-bundle`);
     expect(bundle.status, JSON.stringify(bundle.body)).toBe(200);

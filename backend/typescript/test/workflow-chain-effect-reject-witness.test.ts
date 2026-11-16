@@ -125,6 +125,11 @@ const EFFECT_TYPEIDS = new Set<string>([
   'core.openwop.connectors.ticket-create',
   'core.openwop.connectors.ad-budget-update',
   'core.openwop.http.openapi-call',
+  // CC-CHAIN-1 / ADR 1111 — `marketing.campaign-launch`'s launch moved off
+  // openapi-call onto the governed ad publish (PAUSED create, else a document
+  // handoff). Added so the Batch 3+4 `launch` row stays a governed effect here
+  // rather than silently leaving the witnessed population.
+  'feature.campaign-channels.nodes.publish-ad-variants',
   // ADR 0617 D2/D3 — the host-account lifecycle nodes (`people-hr.offboarding`
   // `deprovision-host`). Added so the witness is not blind to them.
   'feature.users.nodes.deactivate',

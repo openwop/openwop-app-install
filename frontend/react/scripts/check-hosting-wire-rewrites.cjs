@@ -207,7 +207,9 @@ for (const src of ['/.well-known/**', '/v1/**', SEAMS_SOURCE, ...V2_SOURCES]) {
 // the Cloud Run source set that (3) below checks site routes against, because the
 // SPA's own `/docs` route is SUPPOSED to sit under a door (the backend serves humans
 // the same SPA shell there).
-for (const src of ['/', '/p/**', '/docs', '/docs/**']) {
+// `/pricing` (ADR 0391 b): MEASURED 2026-11-16 on casavoga.com, a link-preview crawler
+// got the shell at `/pricing` while `/p/pricing` carried every og:* tag (ISS-061).
+for (const src of ['/', '/p/**', '/pricing', '/docs', '/docs/**']) {
   const i = idxOf(src);
   if (i === -1) fail(`no rewrite for the document door "${src}" — crawlers would get the SPA shell instead of the prerender (ADR 0384 / ADR 1057).`);
   if (!rewrites[i].run?.serviceId) fail(`the document door "${src}" does not target a Cloud Run service.`);

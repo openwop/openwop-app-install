@@ -5,15 +5,32 @@
  *   - a blocked checklist names what is missing and keeps Launch disabled;
  *   - Launch says the run started (or that a recent one continues);
  *   - a 403 says edit access is needed; a failed read is said, never "ready".
+ *   - ADR 0961 / ADR 0712 (dedicated launches): Launch opens the shared Run dialog
+ *     with its AI-key picker; only AI-provider keys are offered, nothing is
+ *     preselected, and only an explicitly chosen key rides the launch. A failed
+ *     key list is said (never an empty vault) and the default launch still works.
+ *     A credential refusal reads as a key problem, not as missing edit access.
+ *   - identity / campaign changes: no launch from a modal opened before an auth
+ *     change, no "running" for the previous campaign's launch, no late preflight
+ *     for the previous campaign replacing the current checklist.
  *
  * Sabotage: enabling the button regardless of `ready` reds the blocked case;
  * mapping a failed read to an empty checklist reds the failed-read case;
- * dropping the 403 branch reds the forbidden case.
+ * dropping the 403 branch reds the forbidden case. Wave 111 adds: the missing-
+ * item labels, the view-only line, the reused copy, the `aiKeyOption` flag, the
+ * chosen key dropped from the launch, the exact-provider filter, a failed key
+ * list presented as an empty vault, a pending key list blocking the default
+ * launch, the `campaign_ai_` reason, the launch epoch check, and (one edit each)
+ * the launched-state and preflight-state epoch checks.
+ * Double guard: an old modal's keyed submit after an auth change is refused by
+ * the dialog (`keys.isVerified()`, ui/RunInputsForm) AND by this section's epoch
+ * check. The blank-key case is held by the epoch check alone.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
 
-const h = vi.hoisted(() => ({ getPreflight: vi.fn(), launchAutopilot: vi.fn(), listStoredRefs: vi.fn<() => Promise<string[]>>() }));
+type Client = typeof import('../autopilotClient.js');
+const h = vi.hoisted(() => ({ getPreflight: vi.fn<Client['getPreflight']>(), launchAutopilot: vi.fn<Client['launchAutopilot']>(), listStoredRefs: vi.fn<() => Promise<string[]>>() }));
 vi.mock('../../../byok/lib/byokClient.js', () => ({ listStoredRefs: h.listStoredRefs }));
 vi.mock('../autopilotClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), getPreflight: h.getPreflight, launchAutopilot: h.launchAutopilot }));
 
@@ -103,7 +120,7 @@ describe('AutopilotSection', () => {
   });
 
   it('a failed read is said, never shown as ready', async () => {
-    h.getPreflight.mockRejectedValue(new Error('500'));
+    h.getPreflight.mockRejectedValue(new AutopilotError(500, 'preflight returned 500'));
     render(<AutopilotSection campaignId="c1" />);
     expect((await screen.findAllByText('The checklist could not be loaded.')).length).toBeGreaterThan(0);
     expect(screen.queryByRole('list', { name: 'Preflight checklist' })).toBeNull();
@@ -111,7 +128,7 @@ describe('AutopilotSection', () => {
   });
 });
 
-
+describe('ADR 0961 / ADR 0712 — the launch key and identity guards', () => {
 it('dedicated Launch uses the real shared key picker and only explicitly selected name', async () => {
   h.getPreflight.mockResolvedValue({ preflight: READY, canLaunch: true });
   h.launchAutopilot.mockResolvedValue({ runId: 'r-key', campaignId: 'c1', reused: false });
@@ -213,4 +230,5 @@ it('late preflight from campaign A cannot replace the current B checklist or ope
   expect(launchButton().disabled).toBe(true);
   expect(screen.getByText(/Finish the required items/)).toBeTruthy();
   expect(screen.queryByLabelText('AI key for this run')).toBeNull();
+});
 });

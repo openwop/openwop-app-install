@@ -15,12 +15,17 @@
  * would be needed to verify the bundled-tree layout — out of scope for
  * a fast unit test.
  *
- * The test also asserts that `promptPackLoader.ts`, a consumer that hit this
- * bug, locates the schemas directory via the helper.
+ * The test also drives `promptPackLoader.ts` (the RFC 0028 §B prompt-pack
+ * loader, a consumer that hit this bug): it resolves its schemas dir through the
+ * helper at module load but reads the schemas LAZILY, on the first prompt pack it
+ * validates. So the case installs a real prompt pack from a temp root — a helper
+ * that resolved the WRONG directory makes that read ENOENT, which a bare
+ * `import` (this case until wave 114) could never see.
  *
- * Sabotages that red this file (8fw1g4 round 1 + 2): returning the walk's
- * current dir instead of the `schemas/` candidate, never throwing at the
- * filesystem root, and ignoring the sentinel.
+ * Sabotages that red this file (8fw1g4 round 1 + 2, re-probed wave 114):
+ * returning the walk's current dir instead of the `schemas/` candidate, never
+ * throwing at the filesystem root, ignoring the sentinel, and the loader going
+ * back to a fixed `..`-count path instead of the helper.
  *
  * Round 2 cut "locates the same schemas/ directory regardless of sentinel
  * filename": no sabotage reds it without also redding case 1 (rp-return reds
@@ -28,7 +33,8 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -49,8 +55,29 @@ describe('host/_repoPath: locateRepoSchemasDir', () => {
     ).toThrow(/walked from .* to filesystem root/);
   });
 
-  it('promptPackLoader.ts loads its schema at module-load via the helper (no ENOENT)', async () => {
-    const mod = await import('../src/host/promptPackLoader.js');
-    expect(typeof mod.loadPromptPacks).toBe('function');
+  it('promptPackLoader.ts validates a prompt pack against the schemas in the dir the helper found', async () => {
+    const { loadPromptPacks } = await import('../src/host/promptPackLoader.js');
+    const root = mkdtempSync(join(tmpdir(), 'repo-schemas-path-'));
+    try {
+      const writePack = (dir: string, manifest: Record<string, unknown>): void => {
+        mkdirSync(join(root, dir));
+        writeFileSync(join(root, dir, 'pack.json'), JSON.stringify(manifest));
+      };
+      writePack('good', {
+        name: 'vendor.repo-schemas-path.good',
+        version: '1.0.0',
+        kind: 'prompt',
+        engines: { openwop: '>=1.0.0' },
+        prompts: [{ templateId: 'repo-schemas-path-probe', version: '1.0.0', kind: 'system', text: 'Probe.' }],
+      });
+      // Refused by that same schema (`prompts` minItems 1): the validator really ran.
+      writePack('bad', { name: 'vendor.repo-schemas-path.bad', version: '1.0.0', kind: 'prompt', engines: { openwop: '>=1.0.0' }, prompts: [] });
+      const results = loadPromptPacks({ roots: [root], requireSignature: false });
+      expect(results.map((r) => [r.packName, r.templatesInstalled, r.signatureCheck])).toEqual([
+        ['vendor.repo-schemas-path.good', 1, 'skipped'],
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

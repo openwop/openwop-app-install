@@ -10,14 +10,18 @@
  *    saved, the Save stays reachable, and the refusal is SAID — a toast naming WCAG AA
  *    and the "Contrast check" warning, which a passing theme does not show.
  *  - Generator-owned tokens in a legacy override are dropped, named, and never sent.
+ *  - The public-page motion preset (ADR 1029 D6) loads into its select, saves, and the
+ *    "Calm (default)" option removes the key from the saved theme.
  *
- * Sabotage-witnessed (wave 51): drop the AA early return → case 5 red; drop its toast
- * or the Contrast-check Notice → case 5 red; apply another preset's accent → case 2 red;
- * keep a default pairing's fonts → case 3 red; treat 403 as a load failure → case 4 red;
- * skip the generator-owned split or its notice → case 6 red.
+ * Sabotage-witnessed (wave 51, re-probed wave 115): drop the AA early return, its toast
+ * or the Contrast-check Notice → the below-AA case red; apply another preset's accent →
+ * the preset case red; keep a default pairing's fonts → the default-preset case red;
+ * treat 403 as a load failure → the 403 case red; skip the generator-owned split or its
+ * notice → the legacy-override case red; ignore the stored motion, save a different one, or keep it
+ * when "Calm (default)" is chosen → the motion case red.
  */
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { ApiError } from '../client/requestJson.js';
 import { toast } from '../ui/toast.js';
 import type { AppBrand } from './appBrandClient.js';
@@ -40,6 +44,11 @@ const sentIdentity = (): PublicBrandIdentity | undefined => putAppBrand.mock.cal
 const inputByLabel = (label: string): HTMLInputElement => {
   const el = screen.getByLabelText(label);
   if (!(el instanceof HTMLInputElement)) throw new Error(`${label} is not an <input>`);
+  return el;
+};
+const selectByLabel = (label: string): HTMLSelectElement => {
+  const el = screen.getByLabelText(label);
+  if (!(el instanceof HTMLSelectElement)) throw new Error(`${label} is not a <select>`);
   return el;
 };
 
@@ -93,22 +102,33 @@ describe('AppearancePanel', () => {
     getAppBrand.mockResolvedValue(brand({ theme: { motion: 'subtle' } }));
     render(<AppearancePanel />);
     await screen.findByRole('heading', { name: 'Appearance' });
-    const motion = screen.getByLabelText('Public page motion') as HTMLSelectElement;
+    const motion = selectByLabel('Public page motion');
     expect(motion.value).toBe('subtle');
     fireEvent.change(motion, { target: { value: 'lively' } });
     fireEvent.click(screen.getByRole('button', { name: /Save/ }));
     await waitFor(() => expect(putAppBrand).toHaveBeenCalledTimes(1));
     expect(sentIdentity()?.theme?.motion).toBe('lively');
-    fireEvent.change(screen.getByLabelText('Public page motion'), { target: { value: '' } });
+    // Choose the option the user sees as "Calm (default)", by its label.
+    const calm = within(selectByLabel('Public page motion')).getByRole('option', { name: 'Calm (default)' });
+    if (!(calm instanceof HTMLOptionElement)) throw new Error('Calm (default) is not an <option>');
+    fireEvent.change(selectByLabel('Public page motion'), { target: { value: calm.value } });
     fireEvent.click(screen.getByRole('button', { name: /Save/ }));
     await waitFor(() => expect(putAppBrand).toHaveBeenCalledTimes(2));
-    expect(putAppBrand.mock.calls[1]?.[0].identity?.theme?.motion).toBeUndefined();
+    const second = putAppBrand.mock.calls[1]?.[0].identity;
+    expect(second?.theme).toBeDefined(); // the theme was sent, without its motion key
+    expect(second?.theme && 'motion' in second.theme).toBe(false);
   });
 
   it('shows the read-only notice for a non-superadmin (403), with the editor withheld', async () => {
     getAppBrand.mockRejectedValue(new ApiError({ status: 403, statusText: 'forbidden', url: '/app-brand' }));
     render(<AppearancePanel />);
-    expect(await screen.findByText(/super-admin/i)).toBeTruthy();
+    // Settle on the page heading (both the denied and the load-failed states render
+    // it), so a 403 mistaken for a load failure reds on the notice, not by timeout.
+    await screen.findByRole('heading', { name: 'Appearance' });
+    // Counted, not looked up: a 403 read as a load failure reds on the value (0, and the
+    // load-failed title present), not on a lookup miss.
+    expect(screen.queryAllByText('super-admin')).toHaveLength(1);
+    expect(screen.queryAllByText('Could not load your brand settings')).toHaveLength(0);
     expect(screen.queryByRole('button', { name: /Save/ })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Reset to default' })).toBeNull();
   });
@@ -122,7 +142,8 @@ describe('AppearancePanel — AA save gate (ADR 0510 §5, DSA-014)', () => {
     getAppBrand.mockResolvedValue(brand({ theme: { accentSeed: 'oklch(99% 0.01 90)' } }));
     render(<AppearancePanel />);
     await screen.findByRole('heading', { name: 'Appearance' });
-    expect(screen.getByText(CONTRAST_CHECK)).toBeTruthy(); // the warning names the failure before Save
+    // The warning names the failure before Save: exactly one, counted after the heading settled.
+    expect(screen.queryAllByText(CONTRAST_CHECK)).toHaveLength(1);
     const save = screen.getByRole('button', { name: /Save/ });
     if (!(save instanceof HTMLButtonElement)) throw new Error('Save is not a <button>');
     expect(save.disabled).toBe(false); // reachable, never a dead button
@@ -147,7 +168,8 @@ describe('AppearancePanel — AA save gate (ADR 0510 §5, DSA-014)', () => {
     }));
     render(<AppearancePanel />);
     await screen.findByRole('heading', { name: 'Appearance' });
-    expect(screen.getByText(/--clay/)).toBeTruthy(); // the dropped token is NAMED visibly
+    // The dropped token is NAMED visibly, and only it (the kept --cat-ai is not listed).
+    expect(screen.queryAllByText(/^Ignored generator-owned tokens: --clay\. /)).toHaveLength(1);
     fireEvent.click(screen.getByRole('button', { name: /Save/ }));
     await waitFor(() => expect(putAppBrand).toHaveBeenCalledTimes(1));
     expect(sentIdentity()?.theme?.override?.light).toEqual({ '--cat-ai': '#654321' }); // generator-owned key never sent

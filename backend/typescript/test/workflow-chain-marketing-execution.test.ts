@@ -338,7 +338,7 @@ async function walkChain(
   chainId: string,
   params: Record<string, string>,
   runInputs: Record<string, string>,
-  deps: { features: Record<string, unknown>; callAI: (args: unknown) => Promise<{ content: string }> },
+  deps: { features: Record<string, unknown>; callAI: (args: unknown) => Promise<{ content?: string; data?: unknown }> },
 ): Promise<WalkOutcome> {
   const chain = getChain(chainId)!.chain;
   const def = expandChain(chain, { params });
@@ -406,11 +406,14 @@ describe('marketing.campaign-launch — mini-scheduler (real crm/cms reads + rea
     const { otherCompanyId, otherPageId } = await seedOtherOrg(owner);
 
     const features = buildFeatureSurfaces({ tenantId, runId: 'run:mktgchain-mini' });
-    let aiCalls = 0;
-    const callAI = async (): Promise<{ content: string }> => {
-      aiCalls += 1;
-      return { content: aiCalls === 1 ? 'COPY VARIANT A' : 'CREATIVE VARIANT B' };
-    };
+    // CC-CHAIN-1 (ADR 1111): `copy` is a structured-output node since chain 1.2.0 —
+    // it returns the ad_variants draft the launch step publishes — so the fake
+    // answers a schema'd call with `data` and the free-form `creative` call with text.
+    const COPY_DRAFT = { platformSets: [{ platform: 'google', variants: [{ headline: 'COPY VARIANT A', description: 'Analytics, added.', cta: 'Learn more' }] }] };
+    const callAI = async (args: unknown): Promise<{ content?: string; data?: unknown }> =>
+      typeof args === 'object' && args !== null && 'responseSchema' in args && args.responseSchema !== undefined
+        ? { data: COPY_DRAFT }
+        : { content: 'CREATIVE VARIANT B' };
 
     const params = { brief: 'Q3 launch for the analytics add-on', orgId };
     // Run inputs omit `orgId` (see the real-executor case): the frozen config is the only org source.
@@ -436,8 +439,10 @@ describe('marketing.campaign-launch — mini-scheduler (real crm/cms reads + rea
     // silently clobbered `copy`/`creative`, and `review` would never have
     // seen the ad copy or creative variants at all.
     const reviewInputs = inputsByShortId.review!;
-    expect(Object.keys(reviewInputs).sort()).toEqual(['copy', 'creative', 'page']);
-    expect((reviewInputs.copy as { content: string }).content).toBe('COPY VARIANT A');
+    // The copy arrives as the gate's `artifact` (CC-CHAIN-1): the reviewer approves
+    // the exact draft that the launch step takes FROM THE GATE on its conditioned edge.
+    expect(Object.keys(reviewInputs).sort()).toEqual(['artifact', 'creative', 'page']);
+    expect(reviewInputs.artifact).toEqual(COPY_DRAFT);
     expect((reviewInputs.creative as { content: string }).content).toBe('CREATIVE VARIANT B');
     const reviewPages = (reviewInputs.page as { pages: Array<{ pageId: string }> }).pages;
     expect(reviewPages.map((p) => p.pageId)).toContain(pageId);

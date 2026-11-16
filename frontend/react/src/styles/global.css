@@ -8084,6 +8084,9 @@ a.btn-accent-solid:hover { color: var(--color-on-scrim); }
 
 /* NotificationsPage.tsx */
 .notifpage-card-message { margin: 0 0 8px 0; }
+/* ADR 1125 D3 — unread is weight plus a dot, not a chip. */
+.notifpage-unread-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--clay-text); }
+.notifpage-card-title--read { font-weight: var(--weight-emphasis); }
 .notifpage-resolver { border-top: 1px solid var(--rule); padding-top: 12px; margin-top: 8px; }
 
 /* AgentDetailPage.tsx */

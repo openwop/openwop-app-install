@@ -1,3 +1,12 @@
+/**
+ * ADR 0649 § Correction (#3766; scan exclusions ADR 0812 P3a–P3c) — the
+ * unversioned-mount collision guard's constant is pinned against source.
+ *
+ * What breaks it (sabotage witnesses, /grade-tests w110): a registration, rewrite
+ * or comparison spelled so its scan cannot see it (each mechanism's floor/witness
+ * case reds); a root dropped from HOST_OWN_UNVERSIONED_MOUNTS, or the manifest-root
+ * exclusion going empty (the union case reds).
+ */
 import { describe, it, expect } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';

@@ -6,8 +6,11 @@
  * Sabotage (wave 14): navigate to '/' → the deep-link case red; scope comments to
  * another resourceType → the comments case red; rename an export button → the
  * export-set case red; DOC-G3 sabotages are listed on that block.
+ * Sabotage (ADR 1055 D4 / DE87UX-9): stop quoting the saved document → the quote case
+ * red; drop the unsaved-changes note → the unsaved case red; carry on after a failed
+ * read, or show that failure in a non-error tone → the read-failure case red.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, cleanup, fireEvent, screen, act } from '@testing-library/react';
 
 const navSpy = vi.fn();
@@ -28,9 +31,12 @@ vi.mock('../../comments/CommentsPanel.js', () => ({
 
 import { DocumentToolbarExtras } from '../DocumentToolbarExtras.js';
 import { takeStagedComposerDraft } from '../../../chat/composerSeed.js';
+import { config } from '../../../client/config.js';
 
+// The staged composer draft is module state: drain it so no case reads another's.
+beforeEach(() => { takeStagedComposerDraft(); });
 afterEach(() => {
-  cleanup(); navSpy.mockReset(); vi.unstubAllGlobals();
+  cleanup(); navSpy.mockReset(); vi.unstubAllGlobals(); takeStagedComposerDraft();
   Reflect.deleteProperty(navigator, 'clipboard');
 });
 
@@ -40,9 +46,14 @@ describe('DocumentToolbarExtras — AI assist deep-link', () => {
   // cannot read the canvas, the SAVED document is quoted into the draft.
   it('opens the Writing Assistant in the existing chat with the saved document quoted', async () => {
     const saved = { canvasId: 'c1', canvasTypeId: 'canvas.document', version: 1, state: { content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Saved body' }] }] } } };
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(saved), { status: 200, headers: { 'content-type': 'application/json' } })));
+    const fetchSpy = vi.fn(async (_url: unknown) => new Response(JSON.stringify(saved), { status: 200, headers: { 'content-type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchSpy);
     render(<DocumentToolbarExtras orgId="o1" canvasId="c1" docName="Doc" dirty={false} />);
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'aiAssist' })); });
+    // The quote is THIS document's saved canvas (one read, this org and canvas).
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(String(fetchSpy.mock.calls[0]?.[0])).toBe(`${config.baseUrl}/host/openwop-app/document-editor/orgs/o1/canvases/c1`);
+    expect(navSpy).toHaveBeenCalledTimes(1);
     expect(navSpy).toHaveBeenCalledWith('/?agent=vendor.openwop-app.document-editor.agents.writing-assistant');
     expect(takeStagedComposerDraft()).toBe('askAiPrompt(title=Doc,text=Saved body)');
   });
@@ -55,7 +66,9 @@ describe('DocumentToolbarExtras — AI assist deep-link', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'aiAssist' })); });
     expect(navSpy).not.toHaveBeenCalled();
     expect(takeStagedComposerDraft()).toBeNull();
-    expect(screen.getByText('askAiReadFailed')).toBeTruthy();
+    // Shown as an error (the role=alert Notice), not as a neutral status chip.
+    expect(screen.getByRole('alert').textContent).toContain('askAiReadFailed');
+    expect(screen.queryByRole('status')).toBeNull();
   });
 
   it('names unsaved changes as missing from the quoted document', async () => {
@@ -68,10 +81,12 @@ describe('DocumentToolbarExtras — AI assist deep-link', () => {
 
   // aiAssist / comments / copyMarkdown are each driven by their own case below;
   // this case owns the export set (Markdown / PDF / DOCX downloads).
-  it('renders AI + Comments + Copy + Download actions', () => {
+  it('renders the export set: Markdown, PDF and DOCX downloads, ready to use', () => {
     render(<DocumentToolbarExtras orgId="o1" canvasId="c1" docName="Doc" dirty={false} />);
     for (const name of ['downloadMarkdown', 'downloadPdf', 'downloadDocx']) {
-      expect(screen.getByRole('button', { name })).toBeTruthy();
+      const button = screen.getByRole('button', { name });
+      if (!(button instanceof HTMLButtonElement)) throw new Error(`${name} is not a button`);
+      expect(button.disabled).toBe(false);
     }
   });
 

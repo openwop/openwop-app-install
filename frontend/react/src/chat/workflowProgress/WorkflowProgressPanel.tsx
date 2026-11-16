@@ -33,6 +33,7 @@ import type { ChatMessage } from '../hooks/useChatSession.js';
 import { PauseIcon, WorkflowIcon } from '../../ui/icons/index.js';
 import { LeftRailPanelHeader } from '../leftRail/LeftRailPanelHeader.js';
 import { StateCard } from '../../ui/StateCard.js';
+import { needsPersonInput } from '../interruptKinds.js';
 
 /** Render-time humanization for the pointer-chip copy. Maps the raw
  *  lowercase `kind` enum to its `chat` i18n key — translated at the
@@ -286,8 +287,13 @@ function FocusedRunView({
           between two surfaces every gate. Show a short pointer here
           so users who are watching the panel know where to look. */}
       {(() => {
-        const open = message.activeInterrupts ?? [];
-        if (open.length === 0) return null;
+        const all = message.activeInterrupts ?? [];
+        if (all.length === 0) return null;
+        // CC-ORCH-3 — only steps a person must answer point at a card.
+        const open = all.filter((i) => needsPersonInput(i.kind));
+        if (open.length === 0) {
+          return <div className="wfprog-interrupt"><PauseIcon size={14} /> <span>{t('waitingResumesOnItsOwn')}</span></div>;
+        }
         const first = open[0]!;
         const kindLabel = INTERRUPT_KIND_LABEL_KEYS[first.kind]
           ? t(INTERRUPT_KIND_LABEL_KEYS[first.kind]!)

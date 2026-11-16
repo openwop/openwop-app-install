@@ -300,6 +300,7 @@ export const messages = {
   // RunProvenancePanel
   provAwaitingHuman: 'A la espera de intervención humana',
   provWaitingTimer: 'Esperando un temporizador',
+  provWaitingExternal: 'Esperando un evento externo',
   provHumanResolved_one: 'Humano resolvió {{count}}',
   provHumanResolved_other: 'Humano resolvió {{count}}',
   provGateUnresolved_one: '{{count}} compuerta, sin resolver',

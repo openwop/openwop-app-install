@@ -11,6 +11,8 @@
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { registerKvAgeOut } from '../../host/kvAgeOut.js';
 import type { ReasoningDirectiveStrength } from '../../host/envelopeDirective.js';
+import type { SubjectEraseReport } from '../../host/subjectErasure.js';
+import { subjectKeyForms } from '../../host/subjectErasureRedaction.js';
 
 export interface PersonalBudgetPref {
   /** Daily BYOK token cap (0 ⇒ no personal cap). Tokens, never USD (the ADR
@@ -80,7 +82,16 @@ export async function putUserPrefs(
 // Keyed (tenant, user, UTC-day); CAS-retry increment (the lineage precedent) so
 // concurrent turns both count.
 
-interface UserUsageRow { id: string; tenantId: string; inputTokens: number; outputTokens: number; updatedAt: string }
+interface UserUsageRow {
+  id: string; // `${tenantId}:${userId}:${day}`
+  tenantId: string;
+  /** CHAN-F19 #4 — the counter's person, also in the key. Rows written before
+   *  this field existed lack it; the eraser reads those from the key. */
+  userId?: string;
+  inputTokens: number;
+  outputTokens: number;
+  updatedAt: string;
+}
 const usage = new DurableCollection<UserUsageRow>(
   'settings:byok-usage',
   (r) => r.id,
@@ -108,6 +119,7 @@ export async function incrementUserByokUsage(tenantId: string, userId: string, d
     const next: UserUsageRow = {
       id: k,
       tenantId,
+      userId,
       inputTokens: (cur?.inputTokens ?? 0) + inputTokens,
       outputTokens: (cur?.outputTokens ?? 0) + outputTokens,
       updatedAt: new Date().toISOString(),
@@ -116,6 +128,37 @@ export async function incrementUserByokUsage(tenantId: string, userId: string, d
   }
   // A persistent CAS loser under-counts one turn — acceptable for a personal
   // soft budget; the org lane (ADR 0178) still counts it authoritatively.
+}
+
+/** The user a usage row counts: its `userId`, or (rows written before that
+ *  field) the middle of its key, which is `${tenantId}:${userId}:${day}`. A user
+ *  id may contain ':' and a day never does, so the key is cut at its last ':'. */
+function usageRowUser(tenantId: string, r: UserUsageRow): string | null {
+  if (r.userId) return r.userId;
+  const prefix = `${tenantId}:`;
+  const end = r.id.lastIndexOf(':');
+  return r.id.startsWith(prefix) && end > prefix.length ? r.id.slice(prefix.length, end) : null;
+}
+
+/**
+ * CHAN-F19 #4 (ADR 0464 §9) — a person's settings: their prefs row and their
+ * per-day BYOK usage counters. Both are deleted, not scrubbed: every row in
+ * these two stores is keyed to one person, so neither holds a shared or
+ * tenant-level setting. A personal pref means nothing without its person, and
+ * the counters are personal accounting (the org lane, ADR 0178, keeps its own
+ * count). Tenant-scoped only: a user id is never matched in another tenant.
+ */
+export async function eraseSettingsSubject(tenantId: string, subjectKey: string): Promise<SubjectEraseReport> {
+  if (!tenantId || !subjectKey) return { rowsTouched: 0 }; // never an unscoped sweep
+  const { forms } = subjectKeyForms(subjectKey);
+  let rowsTouched = 0;
+  for (const userId of forms) if (await rows.delete(key(tenantId, userId))) rowsTouched++;
+  for (const r of await usage.listForTenantIndexed(tenantId)) {
+    if (r.tenantId !== tenantId) continue;
+    const user = usageRowUser(tenantId, r);
+    if (user !== null && forms.has(user) && await usage.delete(r.id)) rowsTouched++;
+  }
+  return { rowsTouched };
 }
 
 /** Test-only. */

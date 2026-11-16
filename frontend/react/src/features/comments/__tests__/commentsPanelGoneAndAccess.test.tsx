@@ -8,9 +8,10 @@
  *    subject-bound collection the caller is not bound to — used to answer
  *    `200 {comments:[]}` and render "Be the first to leave a note on this
  *    resource" with a LIVE composer. D1 makes it a uniform 404; this file pins
- *    that the panel renders ONE gone-state with NO composer, for ALL SIX
- *    commentable types (the four picker-less ones are precisely what the
- *    notification emitter deep-links, and they had no hedge anywhere).
+ *    that the panel renders ONE gone-state with NO composer, for EVERY
+ *    commentable type (`ALL_RESOURCE_TYPES`, eight at `ea379aab2`; the
+ *    picker-less ones are precisely what the notification emitter deep-links,
+ *    and they had no hedge anywhere).
  *  - `CMNT-UX-16` a write must not take the control out from under the user.
  *    The assertions are on the MECHANISM (`disabled` stays false, `aria-busy` /
  *    `aria-disabled` carry the state) rather than on `document.activeElement`
@@ -18,14 +19,18 @@
  *    defect depended on — an activeElement-only test would pass against the
  *    BROKEN code and pin nothing.
  *  - `CMNT-UX-18` no backend prose in a toast, on any lane.
- *  - `CMNT-UX-20` a read-only member is not offered writes.
+ *  - `CMNT-UX-20` a read-only member is not offered writes. The `readThread`
+ *    mock answers `viewer: null` (a host that predates ADR 0881 D7), so these
+ *    cases drive the org-access FALLBACK (`useOrgEffectiveAccess`), not
+ *    `viewer.canWrite`.
  *  - `CMNT-UX-22` `namesFailed` and `failed` can no longer both announce.
  *
  * SABOTAGE (witnessed, /grade-tests wave 10): every probe on the gone-state predicate,
  * re-resolve-on-404, native `disabled`, retry `keepList`, the 400/403/forbidden_scope/
  * non-http copy, the 409 refusal, the access gate (viewer / writer / unresolved), the
  * namesFailed predicate and the reply index reds its case here; the in-flight repeat
- * guard is a double guard (see that case).
+ * guard is a double guard (see that case). Re-probed at /grade-tests w110, which also
+ * added the DELETE 403 leg (the case named "two refusals" exercised only the 409).
  *
  * All four mount sites (`/comments`, chat, the document toolbar, the document
  * Modal) construct `<CommentsPanel orgId resourceType resourceId />` with those
@@ -290,12 +295,24 @@ describe('CMNT-UX-18 — a refusal in the reader’s language, on every lane', (
 
   it('DELETE keeps its two named refusals (403 vs 409 remain different advice)', async () => {
     api.listThread.mockResolvedValue([comment('c1', 'doomed')]);
-    api.deleteComment.mockRejectedValueOnce(new CommentsHttpError('nope', 409, 'conflict'));
+    api.deleteComment
+      .mockRejectedValueOnce(new CommentsHttpError('nope', 409, 'conflict'))
+      .mockRejectedValueOnce(new CommentsHttpError('nope', 403, 'forbidden'));
     view();
     await screen.findByText('doomed');
-    fireEvent.click(screen.getByRole('button', { name: /Delete comment/i }));
-    await waitFor(() => expect(toasts.error).toHaveBeenCalled());
+    const del = screen.getByRole('button', { name: /Delete comment/i });
+    // 409 — others replied: resolve instead.
+    fireEvent.click(del);
+    await waitFor(() => expect(toasts.error).toHaveBeenCalledTimes(1));
     expect(lastToast()).toMatch(/Other people have replied/i);
+    // 403 — not yours to delete. A DIFFERENT sentence, not the 409's and not the
+    // generic write refusal ("You can’t make that change").
+    await waitFor(() => expect(del.getAttribute('aria-busy')).toBeNull());
+    fireEvent.click(del);
+    await waitFor(() => expect(toasts.error).toHaveBeenCalledTimes(2));
+    expect(lastToast()).toMatch(/can’t delete this comment/i);
+    expect(lastToast()).not.toMatch(/Other people have replied/i);
+    expect(api.deleteComment).toHaveBeenCalledTimes(2);
   });
 
   it('a NON-http failure falls back to a localized key, never `e.message`', async () => {
@@ -312,7 +329,7 @@ describe('CMNT-UX-18 — a refusal in the reader’s language, on every lane', (
 });
 
 describe('CMNT-UX-20 — a read-only member is told, not refused', () => {
-  it('VIEWER: no composer input, no Reply / Resolve / Delete, and a reason that says why', async () => {
+  it('VIEWER: the composer input is disabled, no Reply / Resolve / Delete, and a reason that says why', async () => {
     orgAccess.value = VIEWER;
     api.listThread.mockResolvedValue([comment('c1', 'a note')]);
     view();
@@ -391,15 +408,17 @@ describe('CMNT-UX-21 — the reply index is keyed, and a keystroke does not re-r
     api.listThread.mockResolvedValue([
       comment('r1', 'root one'),
       comment('r2', 'root two'),
-      comment('a1', 'reply to one', { parentId: 'r1' }),
-      comment('b1', 'reply to two', { parentId: 'r2' }),
-      comment('a2', 'second reply to one', { parentId: 'r1' }),
+      comment('a1', 'alpha answer', { parentId: 'r1' }),
+      comment('b1', 'beta answer', { parentId: 'r2' }),
+      comment('a2', 'gamma answer', { parentId: 'r1' }),
     ]);
     view();
     const rootOne = (await screen.findByText('root one')).closest('.surface-inset')!.parentElement!;
-    expect(rootOne.textContent).toContain('reply to one');
-    expect(rootOne.textContent).toContain('second reply to one');
-    expect(rootOne.textContent).not.toContain('reply to two');
+    // Bodies share no substring (w110: the old 'second reply to one' CONTAINED
+    // 'reply to one', so an index that kept only the LAST reply still passed).
+    expect(rootOne.textContent).toContain('alpha answer');
+    expect(rootOne.textContent).toContain('gamma answer');
+    expect(rootOne.textContent).not.toContain('beta answer');
   });
 
   // POSSIBLE DEFECT-PIN — needs a product decision (/grade-tests wave 10, filed by the

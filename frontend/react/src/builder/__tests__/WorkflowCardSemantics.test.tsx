@@ -5,7 +5,9 @@
  * accessible name, (b) the card container itself is NOT focusable and carries
  * no ARIA name (prohibited on generics), (c) activating the kebab menu never
  * also opens the workflow (the old bubbling hazard), and (d) the embedded
- * runs-link stays independently clickable.
+ * runs-link stays independently clickable, and (e) while its menu is open the card
+ * carries `workflow-card--menu-open` (8a15bfdf9: global.css raises that card above
+ * its siblings so a later card's links and kebab cannot paint through the popover).
  *
  * CEILING, recorded (w47 grade-tests): (c) and (d) can no longer fail through a
  * click. Since DSA-019 the card container has NO click handler — "open" lives
@@ -29,7 +31,8 @@ const wf: WorkflowListItem = {
   id: 'wf-1',
   name: 'Lead enrichment',
   nodeCount: 4,
-  updatedAt: new Date().toISOString(),
+  // A fixed instant: no case asserts the relative-time text.
+  updatedAt: '2026-06-01T09:00:00.000Z',
 };
 
 function renderCard(
@@ -102,6 +105,7 @@ describe('WorkflowCard semantics (DSA-019)', () => {
   // and kebab paint through the popover (global.css `.workflow-card--menu-open`).
   it('carries the menu-open modifier only while its menu is open', () => {
     const closed = renderCard();
+    expect(closed.container.querySelector('[role=menu]')).toBeNull();
     expect(closed.container.querySelector('.workflow-card')!.classList.contains('workflow-card--menu-open')).toBe(false);
     closed.unmount();
     const { container } = renderCard({ menuOpen: true });

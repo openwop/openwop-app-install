@@ -114,9 +114,9 @@ describe('resolveModelRoute', () => {
     await setRouterConfig(T, 'u1', cfg);
     await setRouterEnabled(T, 'u1', true);
     const big = await resolveModelRoute(T, { tokenEstimate: 9000 }, 0);
-    expect(big?.target).toMatchObject({ provider: 'anthropic', model: BIG });
+    expect(big).toEqual({ target: { provider: 'anthropic', model: BIG }, reason: 'rule', ruleIndex: 0 });
     const small = await resolveModelRoute(T, { tokenEstimate: 100 }, 0);
-    expect(small?.target).toMatchObject({ provider: 'anthropic', model: SMALL }); // fallback
+    expect(small).toEqual({ target: { provider: 'anthropic', model: SMALL }, reason: 'fallback' });
   });
 });
 
@@ -167,5 +167,11 @@ describe('ADR 1016 D3/D4 — resolveTurnModelRoute (the chat exchange\'s per-tur
     await expect(turn({ provider: 'anthropic', credentialRef: 'subscription:github.copilot' })).resolves.toBeNull();
     await expect(turn({ provider: 'compat', credentialRef: 'my-endpoint' })).resolves.toBeNull();
     await expect(turn({ provider: 'mock', credentialRef: 'mock' })).resolves.toBeNull();
+    // A compat endpoint may take any vendor's key, and a ref NAMED for a routable provider
+    // would otherwise make the openai/anthropic rules eligible: only the compat/mock
+    // refusal stands between these two and a route (the two lines above are also held
+    // by the provider filter, since no rule can target compat or mock).
+    await expect(turn({ provider: 'compat', credentialRef: 'openai-endpoint' })).resolves.toBeNull();
+    await expect(turn({ provider: 'mock', credentialRef: 'anthropic-mock' })).resolves.toBeNull();
   });
 });

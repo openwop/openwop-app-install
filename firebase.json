@@ -55,6 +55,13 @@
         }
       },
       {
+        "source": "/pricing",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
         "source": "/docs",
         "run": {
           "serviceId": "openwop-app-backend",

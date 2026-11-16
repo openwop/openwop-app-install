@@ -31,8 +31,42 @@ const resetSlots = (): void => { announce(''); announce('', { assertive: true })
 const SRC = join(__dirname, '..', '..');
 const read = (p: string): string => readFileSync(join(SRC, p), 'utf8');
 
+/**
+ * Each `<Notice …>` OPENING TAG, read to the `>` that closes it at brace depth 0
+ * (quoted text skipped). A `<Notice[^>]*` regex stops at the first `>` anywhere
+ * in the tag, so a prop such as `onDismiss={() => …}` or
+ * `variant={n > 0 ? … : …}` written before `announce` hid the announcement: w112
+ * MEASURED one such site in the app (`CampaignConnectorsPage.tsx`, an announce
+ * after `lastImport.invalid > 0`). On every file this suite lists, the scan
+ * counts exactly what the regex counted.
+ */
+function noticeOpenTags(src: string): string[] {
+  const tags: string[] = [];
+  const re = /<Notice\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src))) {
+    let depth = 0;
+    let quote: string | null = null;
+    let i = m.index + 1;
+    for (; i < src.length; i++) {
+      const c = src[i];
+      if (quote) {
+        if (c === quote && src[i - 1] !== '\\') quote = null;
+        continue;
+      }
+      if (c === '"' || c === "'" || c === '`') quote = c;
+      else if (c === '{') depth++;
+      else if (c === '}') depth--;
+      else if (c === '>' && depth === 0) break;
+    }
+    tags.push(src.slice(m.index, i + 1));
+  }
+  return tags;
+}
+const ANNOUNCE_PROP = /\bannounce\s*[:=]/;
+
 /** Accepts both legal idioms — the plain prop and the conditional spread. */
-const announced = (p: string): number => (read(p).match(/<Notice[^>]*\bannounce\s*[:=]/g) ?? []).length;
+const announced = (p: string): number => noticeOpenTags(read(p)).filter((tag) => ANNOUNCE_PROP.test(tag)).length;
 // SUCCESS-variant announcements only. `announced()` counts every variant, which
 // stopped matching this suite's intent on 2026-08-11: failed-read disclosures
 // across the app were wired to announce, so `InvitesSection` gained a SECOND
@@ -45,8 +79,9 @@ const announced = (p: string): number => (read(p).match(/<Notice[^>]*\bannounce\
 // They contend, and the failed read is allowed to win — the user has already
 // seen the success visually (it answers their own action), whereas "the list
 // could not be re-read" is new information they have no other way to learn.
+// The variant and the announce may sit in either order inside the tag.
 const announcedSuccess = (p: string): number =>
-  (read(p).match(/<Notice[^>]*variant\s*=\s*"success"[^>]*\bannounce\s*[:=]/g) ?? []).length;
+  noticeOpenTags(read(p)).filter((tag) => /\bvariant\s*=\s*"success"/.test(tag) && ANNOUNCE_PROP.test(tag)).length;
 
 /** Sites that report a completed user action. Each announces exactly one notice. */
 const HOST_WIRED = [
@@ -182,6 +217,9 @@ describe('tranche 2 wiring stays wired', () => {
   });
 
   it.each(NOT_ANNOUNCED)('%s stays silent — %s', (p) => {
+    // Two-sided: the file still renders a Notice, so "zero announced" is about
+    // its notices and not about a file that no longer has one.
+    expect(noticeOpenTags(read(p)).length).toBeGreaterThan(0);
     expect(announced(p)).toBe(0);
   });
 

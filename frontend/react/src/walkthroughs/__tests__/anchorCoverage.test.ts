@@ -48,6 +48,10 @@
  * longer counts), and the spotlight check reads product sources only. Sabotage-
  * witnessed: renaming the /cli anchor (or hiding it behind a comment), dropping a nav
  * entry and renaming a core spotlight anchor each red their case.
+ *
+ * w116 (/grade-tests): the spotlight check reads CODE (comments stripped, as the
+ * screen check already did), so a renamed anchor kept alive in a comment reds it.
+ * Floors re-measured at 63e4c73654: 99 screens, 25 spotlight anchors (both equal).
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
@@ -136,9 +140,12 @@ function navScreens(): NavScreen[] {
  *  counts (w51 r2: a block comment naming data-walkthrough beside a renamed attribute
  *  kept the screen "covered" — probe an-cli-comment). Measured: the strict form leaves
  *  exactly the same three offenders as the old substring test, so nothing moved. */
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
+}
+
 function carriesAnchor(src: string): boolean {
-  const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1');
-  return /data-walkthrough=["{]/.test(code);
+  return /data-walkthrough=["{]/.test(stripComments(src));
 }
 
 function hasAnchor(screen: NavScreen): boolean {
@@ -257,7 +264,10 @@ describe('ADR 0489 D3 — walkthrough anchor coverage ratchet', () => {
       }
     };
     walk('src');
-    const all = src.join('\n');
+    // CODE only (grade-tests w116): comments stripped as `carriesAnchor` does, so a
+    // renamed anchor whose old `data-walkthrough="…"` survives in a comment no longer
+    // satisfies the check (measured at 63e4c73654: the same 25 anchors, none missing).
+    const all = src.map(stripComments).join('\n');
 
     // Both registration shapes: the direct call, and the CORE_PAGE_SPOTLIGHTS triples.
     const anchors = new Set<string>();

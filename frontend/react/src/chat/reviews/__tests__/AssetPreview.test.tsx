@@ -3,12 +3,21 @@
  * asset under review. Breaks if: the model-influenced serve URL reaches a raw
  * <img>/<video> without the shared `mediaSrc` allowlist (DOM-XSS); media is
  * guessed from a missing or unknown MIME; a typed artifact dumps raw JSON as its
- * body. Sabotage-witnessed in /grade-tests wave 44 (w44g3-ap-*).
+ * body instead of its registered renderer (ADR 0459; ADR 1031 P2 moved every
+ * product renderer to its feature, so the typed case rides the test-only
+ * `testOutlineRenderer` fixture type); an unregistered type stops reaching the
+ * text path. Sabotage-witnessed in /grade-tests wave 44 (w44g3-ap-*) and
+ * re-probed in wave 116 (w116g3-ap-*): bypassing `mediaSrc`, treating every
+ * MIME as an image, guessing a MIME from the URL, dropping the alt text or the
+ * video controls, dropping the artifact ref, skipping the registry lookup, and
+ * rendering an empty card for an unregistered type each turn a case red.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import { AssetPreview } from '../AssetPreview.js';
 import type { ReviewAsset } from '../reviewClient.js';
+// ADR 1031 P2 — registers the test-only typed review renderer (side effect).
+import { TEST_NO_MATCHER_TYPE } from './testOutlineRenderer.js';
 
 afterEach(cleanup);
 
@@ -50,16 +59,17 @@ describe('AssetPreview media rendering', () => {
   it('falls back to the text path for an unknown/unsupported MIME', () => {
     const asset: ReviewAsset = { url: 'https://cdn.example/archive.zip', mimeType: 'application/zip', content: 'a drafted lesson' };
     const { container } = render(<AssetPreview asset={asset} />);
-    expect(container.querySelector('img')).toBeNull();
-    expect(container.querySelector('video')).toBeNull();
-    expect(screen.getByText('a drafted lesson')).toBeTruthy();
+    // Neither media element, and nothing at all carries the URL as a src.
+    expect(container.querySelectorAll('img, video, [src]')).toHaveLength(0);
+    expect(screen.getAllByText('a drafted lesson')).toHaveLength(1);
   });
 
   it('falls back to the text path when a URL has no MIME (never guessed)', () => {
-    const asset: ReviewAsset = { url: 'https://cdn.example/img.png', content: 'a drafted lesson' };
-    const { container } = render(<AssetPreview asset={asset} />);
-    expect(container.querySelector('img')).toBeNull();
-    expect(container.querySelector('video')).toBeNull();
+    // The URL LOOKS like an image (`.png`): guessing from the extension would draw it.
+    const asset: ReviewAsset = { label: 'Cover', url: 'https://cdn.example/img.png', content: 'a drafted lesson' };
+    render(<AssetPreview asset={asset} />);
+    expect(screen.queryByRole('img', { name: 'Cover' })).toBeNull();
+    expect(screen.getByText('Cover').tagName).toBe('SPAN'); // the label heading, not an alt
     expect(screen.getByText('a drafted lesson')).toBeTruthy();
   });
 
@@ -77,6 +87,17 @@ describe('AssetPreview media rendering', () => {
  * review-renderer registry (a humanized card), NOT the raw-JSON markdown path.
  */
 describe('AssetPreview typed-artifact dispatch', () => {
+  it('renders a REGISTERED artifactTypeId through its renderer, not as a raw JSON dump', () => {
+    const content = JSON.stringify({ title: 'Week one outline', days: [{ day: 1, title: 'Kickoff' }] });
+    const asset: ReviewAsset = { content, artifactTypeId: TEST_NO_MATCHER_TYPE };
+    render(<AssetPreview asset={asset} hideLabel />);
+    expect(screen.getByRole('heading', { name: 'Week one outline' }).tagName).toBe('H3');
+    expect(screen.getAllByRole('listitem').map((li) => li.textContent)).toEqual(['Day 1: Kickoff']);
+    // Neither the untyped field view (ReadableJson's humanized "Title" key) nor the JSON text.
+    expect(screen.queryByText('Title')).toBeNull();
+    expect(screen.queryByText(/"days"/)).toBeNull();
+  });
+
   it('falls through to markdown for an UNREGISTERED artifactTypeId (untyped path unchanged)', () => {
     const asset: ReviewAsset = { content: 'plain drafted text', artifactTypeId: 'some.unknown.type' };
     render(<AssetPreview asset={asset} hideLabel />);

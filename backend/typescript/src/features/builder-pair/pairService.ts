@@ -27,6 +27,7 @@ import { getConversationMeta, setConversationCapabilityScope } from '../../host/
 import { intersectScopes } from '../conversation-tools/scopeResolver.js';
 import { PAIR_TOOL_SCOPE } from './pairToolScope.js';
 import { createLogger } from '../../observability/logger.js';
+import { workflowClientReaderForScope } from '../../host/workflowClientAccess.js';
 
 const log = createLogger('builder-pair');
 import {
@@ -83,9 +84,10 @@ export const EMPTY_REVISION = 'absent';
  * without this the empty-sheet first draft could never pair (review CR-1). An id
  * that EXISTS but is not readable by this tenant is a miss, never an empty draft.
  */
-async function readHead(tenantId: string, workflowId: string): Promise<{ def: WorkflowDefinition; revision: string } | null> {
+async function readHead(who: PairWho, workflowId: string): Promise<{ def: WorkflowDefinition; revision: string } | null> {
   if (!WORKFLOW_ID_PATTERN.test(workflowId)) return null;
-  const owned = await readAuthoredWorkflow(workflowId, { tenantId });
+  // ADR 1132 D5 — another client's definition is a miss, like another tenant's.
+  const owned = await readAuthoredWorkflow(workflowId, { tenantId: who.tenantId, mayRead: workflowClientReaderForScope(who) });
   if (!owned.found) {
     if (await getRegisteredWorkflowAsync(workflowId)) return null; // exists, not yours
     return { def: { workflowId, nodes: [], edges: [] }, revision: EMPTY_REVISION };
@@ -110,7 +112,7 @@ export async function writePairContext(
 ): Promise<PairContext | PairRefusal> {
   if (!who.actingUserId) return refuse('acting_user_required', 'Pairing needs a signed-in user.');
   if (!(await can(who, 'workspace:read'))) return refuse('forbidden', 'Missing required scope: workspace:read');
-  const head = await readHead(who.tenantId, body.workflowId);
+  const head = await readHead(who, body.workflowId);
   if (!head) return refuse('not_found', 'Workflow not found.');
   const sel = (body.selection ?? {}) as { nodeIds?: unknown; edgeIds?: unknown };
   const wantNodes = uniqStrings(sel.nodeIds, 100);
@@ -205,7 +207,7 @@ export async function readCanvas(storage: Storage, who: PairWho, conversationId:
   const ctx = await toolPreamble(who, conversationId, runId);
   if ('refused' in ctx) return ctx;
   if (!(await can(who, 'workspace:read'))) return refuse('forbidden', 'Missing required scope: workspace:read');
-  const head = await readHead(who.tenantId, ctx.workflowId);
+  const head = await readHead(who, ctx.workflowId);
   if (!head) return refuse('not_found', 'The paired workflow no longer exists.');
   const name = typeof head.def.metadata?.name === 'string' ? head.def.metadata.name : undefined;
   let lastRun: CanvasRead['lastRun'];
@@ -263,7 +265,7 @@ export async function suggestEdits(
   if (!(await can(who, 'workspace:write'))) {
     return refuse('forbidden', 'This user can view but not edit this workflow, so suggestions are off. Answer or explain instead.');
   }
-  const head = await readHead(who.tenantId, ctx.workflowId);
+  const head = await readHead(who, ctx.workflowId);
   if (!head) return refuse('not_found', 'The paired workflow no longer exists.');
   if (typeof input.baseRevision !== 'string' || input.baseRevision !== head.revision) {
     return refuse('workflow_head_moved', 'The workflow changed since you read it. Call read-canvas again, then suggest against the new revision.', { revision: head.revision });
@@ -346,7 +348,7 @@ export async function suggestFromChain(
 ): Promise<SuggestResult | PairRefusal> {
   if (!who.actingUserId) return refuse('acting_user_required', 'Sign in to start from a template.');
   if (!(await can(who, 'workspace:write'))) return refuse('forbidden', 'Missing required scope: workspace:write');
-  const head = await readHead(who.tenantId, body.workflowId);
+  const head = await readHead(who, body.workflowId);
   if (!head) return refuse('not_found', 'Workflow not found.');
   if (head.def.nodes.length > 0) return refuse('validation_error', 'A template can only be drawn onto an empty workflow.');
   const found = getChain(body.chainId);

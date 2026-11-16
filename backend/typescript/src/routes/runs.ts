@@ -56,6 +56,7 @@ import {
 } from '../host/authorityContext.js';
 import { resolveRunDefinition } from '../host/resolveRunDefinition.js';
 import { resolveLaunchWorkflow } from '../host/resolveLaunchDefinition.js';
+import { assertWorkflowClientAccess } from '../host/workflowClientAccess.js';
 import { boundParamConflicts } from '../host/chainParamBinding.js';
 import { createAgentEvalRun, callerFromRequest } from '../host/evals/createEvalRun.js';
 import { requireAgentEvalsEnabled } from '../host/evals/access.js';
@@ -553,6 +554,10 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
         // ADR 0820 §7 / G6 — the owning-feature gate inside the funnel (typed 403).
         subject: launchSubjectOf(req),
       });
+      // ADR 1132 — launching a client's definition needs runs:create IN that client
+      // (the same 404 as an unknown workflow). The run is then stamped for the
+      // client at insert (D4).
+      if (wf && typeof body.workflowId === 'string') await assertWorkflowClientAccess(req, body.workflowId, 'runs:create', tenantId);
       // ADR 0197 Phase 3 — best-effort input validation for schema-bearing
       // workflows. Always-on since ADR 0434 (the `run-input-forms` toggle
       // graduated; it was an explicit opt-in "until the toggle GAs"). Same 400

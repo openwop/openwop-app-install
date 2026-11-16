@@ -30,6 +30,7 @@ import {
   AUTONOMY_STAMP_KEY, FALLBACK_PRESET, autonomyToggleOn, buildAutonomyStamp,
   clientBoundOrg, isCampaignBound, presetPolicy, resolveEffectivePolicy,
 } from '../../host/autonomyPolicy/index.js';
+import { planExemptScopeOfRun } from '../../host/operatorPlanExemption.js';
 import { getClient } from './clientService.js';
 
 /** ADR 0075 §D3 — the org whose roles/groups approval gates resolve against. */
@@ -42,7 +43,7 @@ export async function clientAutonomyContributor(ctx: RunStartContext): Promise<R
   if (metadata[AUTONOMY_STAMP_KEY] !== undefined || isCampaignBound(metadata)) return {};
   const orgId = clientBoundOrg(metadata);
   if (!orgId) return {};
-  if (!(await autonomyToggleOn(ctx.tenantId))) return {};
+  if (!(await autonomyToggleOn(ctx.tenantId, planExemptScopeOfRun(ctx.tenantId, metadata)))) return {};
   const mcpOrigin = metadata.source === MCP_ORIGIN_SOURCE;
   const resolvedAt = new Date().toISOString();
   if (!(await getClient(ctx.tenantId, orgId))) {

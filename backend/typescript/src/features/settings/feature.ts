@@ -19,7 +19,8 @@ import { configurePersonalByokBudget } from '../../aiProviders/byokChatBudget.js
 import { configureUserReasoningOverride } from '../../host/envelopeReasoningConfig.js';
 import { getNotificationEmitter } from '../../notifications/emitter.js';
 import { createLogger } from '../../observability/logger.js';
-import { getUserPrefs, getUserByokUsage, incrementUserByokUsage } from './prefsStore.js';
+import { registerSubjectEraser } from '../../host/subjectErasure.js';
+import { getUserPrefs, getUserByokUsage, incrementUserByokUsage, eraseSettingsSubject } from './prefsStore.js';
 
 const log = createLogger('features.settings');
 const DEFAULT_SOFT_WARNING_PCT = 80;
@@ -28,6 +29,8 @@ export const settingsFeature: BackendFeature = {
   id: 'settings',
   registerRoutes: (deps) => {
     registerSettingsRoutes(deps);
+    // CHAN-F19 #4 (ADR 0464 §9) — a DSAR deletes the person's prefs and usage counters.
+    registerSubjectEraser(eraseSettingsSubject);
     // ── The personal BYOK budget lane (ADR 0396 P3, composing ADR 0178). ────
     configurePersonalByokBudget({
       async resolveCap(tenantId, userId) {

@@ -3,8 +3,11 @@
  * Asserts BOTH defense layers around untrusted model output: mermaid initialised
  * with `securityLevel: 'strict'`, and the rendered SVG shown only inside a
  * `sandbox=""` iframe whose srcdoc carries the no-script `default-src 'none'` CSP
- * (stricter than the ADR 0128 artifact frame). Plus the never-throw/never-blank
- * degrade-to-code-block path. Breaks if either layer is loosened or a failed
+ * (stricter than the ADR 0128 artifact frame) and is `inert` (ADR 1017: a sandboxed
+ * frame still follows a clicked link). Plus the never-throw/never-blank
+ * degrade-to-code-block path, and the frame height (the whole diagram up to an
+ * 8000 px guard, ADR 1017). Breaks if either layer is loosened (strict mode, the
+ * empty sandbox, the srcdoc CSP, `inert`), if the height cap moves, or if a failed
  * render shows a frame (or nothing) instead of the source.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
@@ -53,6 +56,9 @@ describe('MermaidDiagram — render + isolation + degrade', () => {
     await waitFor(() => expect(container.querySelector('iframe')).not.toBeNull());
     const iframe = container.querySelector('iframe')!;
     expect(iframe.getAttribute('sandbox')).toBe(''); // empty = no scripts, null origin
+    // ADR 1017: a sandbox="" frame still navigates itself on a click or Tab+Enter over a
+    // link; `inert` takes clicks and focus away (set by a layout effect, before paint).
+    expect(iframe.getAttribute('inert')).toBe('');
     const srcdoc = iframe.getAttribute('srcdoc') ?? '';
     expect(srcdoc).toContain('<svg height="100">');
     // Layer 2: the frame's document carries the locked-down CSP, not the bare SVG.

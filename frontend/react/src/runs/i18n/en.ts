@@ -302,6 +302,7 @@ export const messages = {
   // RunProvenancePanel
   provAwaitingHuman: 'Awaiting human',
   provWaitingTimer: 'Waiting on a timer',
+  provWaitingExternal: 'Waiting on an outside event',
   provHumanResolved_one: 'Human resolved {{count}}',
   provHumanResolved_other: 'Human resolved {{count}}',
   provGateUnresolved_one: '{{count}} gate, unresolved',

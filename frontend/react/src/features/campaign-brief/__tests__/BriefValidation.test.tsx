@@ -16,15 +16,27 @@
  * mocked (it was a live fetch — allowlist line retired); the fixture is a full
  * typed row (no casts). Sabotage-witnessed: one row per issue, the section jump +
  * focus, the unknown-field fallback, save-first when dirty, no save when clean.
+ *
+ * CC-UI-1 (`35e7340754`): the shared `ui/Notice` renders ONE status
+ * icon and puts the labelled dismiss LAST; the brief page must not add a second
+ * icon of its own inside the children.
+ *
+ * Wave 112 (`w112g4-bv-*`): each issue row is asserted as its full text (the
+ * section label beside ITS message), the jump lands on the named section's own
+ * heading, an unknown field's row holds no control at all (the Notice's Close is
+ * in the same group), the success copy names the enabled channel, and save-first
+ * is asserted as an ORDER (save called before validate), not as two calls.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent, act, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import type * as C from '../campaignBriefClient.js';
 import type { CampaignBrief, ValidationResult } from '../campaignBriefClient.js';
 
-const listBriefs = vi.fn();
-const validateBriefById = vi.fn();
-const updateBrief = vi.fn();
+// Typed against the real client, so a fixture drifting from its types fails tsc.
+const listBriefs = vi.fn<typeof C.listBriefs>();
+const validateBriefById = vi.fn<typeof C.validateBriefById>();
+const updateBrief = vi.fn<typeof C.updateBrief>();
 
 // The collection selector reads the current client's KB through its own client.
 vi.mock('../../kb/kbClient.js', () => ({ listCollections: vi.fn(async () => []) }));
@@ -33,9 +45,9 @@ vi.mock('../campaignBriefClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
   return {
     ...actual,
-    listBriefs: (...a: unknown[]) => listBriefs(...a),
-    validateBriefById: (...a: unknown[]) => validateBriefById(...a),
-    updateBrief: (...a: unknown[]) => updateBrief(...a),
+    listBriefs: (...a: Parameters<typeof C.listBriefs>) => listBriefs(...a),
+    validateBriefById: (...a: Parameters<typeof C.validateBriefById>) => validateBriefById(...a),
+    updateBrief: (...a: Parameters<typeof C.updateBrief>) => updateBrief(...a),
     listPersonas: vi.fn(async () => []),
     listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'Acme' }]),
     listBrands: vi.fn(async () => []),
@@ -80,6 +92,13 @@ async function openAndValidate(): Promise<HTMLElement> {
   return await screen.findByRole('group', { name: /validation result/i });
 }
 
+/** The Notice root inside the validation group (no cast: a missing root fails here). */
+function noticeBox(summary: HTMLElement): HTMLElement {
+  const box = summary.firstElementChild;
+  if (!(box instanceof HTMLElement)) throw new Error('validation group has no Notice');
+  return box;
+}
+
 beforeEach(() => {
   listBriefs.mockReset(); validateBriefById.mockReset(); updateBrief.mockReset();
   listBriefs.mockResolvedValue([BRIEF]);
@@ -96,19 +115,25 @@ describe('brief validation summary', () => {
 
   it('CB-G1: each issue names the SECTION the server pointed at', async () => {
     const summary = await openAndValidate();
-    // The `field` the validator returned is no longer discarded.
-    expect(within(summary).getByRole('button', { name: 'Audience' })).toBeTruthy();
-    expect(within(summary).getByRole('button', { name: 'Messaging' })).toBeTruthy();
-    expect(within(summary).getByRole('button', { name: 'Channels' })).toBeTruthy();
+    // The `field` the validator returned is no longer discarded: each row is the
+    // section label beside ITS OWN message, in the server's order.
+    expect(within(summary).getAllByRole('listitem').map((li) => li.textContent)).toEqual([
+      'Audience: At least one persona is required.',
+      'Messaging: A primary value proposition is required.',
+      'Channels: Enable at least one channel.',
+    ]);
+    expect(within(summary).getAllByRole('listitem').map((li) => within(li).getByRole('button').textContent)).toEqual(['Audience', 'Messaging', 'Channels']);
   });
 
   it('CB-G1: clicking an issue focuses the section that owns it', async () => {
     const summary = await openAndValidate();
     fireEvent.click(within(summary).getByRole('button', { name: 'Messaging' }));
     // The section is focusable precisely so an issue can carry the reader to it.
-    const focused = document.activeElement as HTMLElement;
+    const focused = document.activeElement;
+    if (!(focused instanceof HTMLElement)) throw new Error('nothing focused');
     expect(focused.tagName).toBe('SECTION');
-    expect(within(focused).getByText(/messaging/i)).toBeTruthy();
+    // The section's OWN heading, not any text that mentions messaging.
+    expect(focused.querySelector('h3')?.textContent).toBe('Messaging');
   });
 
   it('CB-G1: an UNRECOGNISED field still shows its message, with no jump offered', async () => {
@@ -118,9 +143,12 @@ describe('brief validation summary', () => {
       enabledChannels: [],
     } satisfies ValidationResult);
     const summary = await openAndValidate();
-    expect(within(summary).getByText(/A new rule fired\./)).toBeTruthy();
-    // We do not guess where an unknown field lives.
-    expect(within(summary).queryByRole('button', { name: 'somethingNew' })).toBeNull();
+    const [row, ...rest] = within(summary).getAllByRole('listitem');
+    expect(rest).toHaveLength(0);
+    expect(row!.textContent).toBe('somethingNew: A new rule fired.');
+    // We do not guess where an unknown field lives: the row holds NO control (the
+    // group's only button is the Notice's Close).
+    expect(within(row!).queryByRole('button')).toBeNull();
   });
 
   it('CB-G1: a valid brief still reports success, not an empty list', async () => {
@@ -128,8 +156,8 @@ describe('brief validation summary', () => {
     const summary = await openAndValidate();
     expect(within(summary).queryAllByRole('listitem')).toHaveLength(0);
     // The success copy itself, not merely "some text" (an invalid-with-0-issues
-    // render also has text).
-    expect(within(summary).getByText(/Ready to generate/)).toBeTruthy();
+    // render also has text), naming the enabled channel by its label.
+    expect(within(summary).getByText(/Ready to generate/).textContent).toBe('Ready to generate. Channels: Email sequence.');
   });
 });
 
@@ -143,7 +171,7 @@ describe('validation notice chrome (CC-UI-1)', () => {
   it('valid: one status icon, message first, a trailing labelled dismiss', async () => {
     validateBriefById.mockResolvedValue({ valid: true, issues: [], enabledChannels: ['email_sequence'] } satisfies ValidationResult);
     const summary = await openAndValidate();
-    const box = summary.querySelector('.alert') as HTMLElement;
+    const box = noticeBox(summary);
     expect(statusIcons(box)).toBe(1);
     const close = within(summary).getByRole('button', { name: 'Close' });
     expect(box.lastElementChild).toBe(close);
@@ -154,16 +182,19 @@ describe('validation notice chrome (CC-UI-1)', () => {
 
   it('invalid: one status icon, and the dismiss trails the issue list', async () => {
     const summary = await openAndValidate();
-    const box = summary.querySelector('.alert') as HTMLElement;
+    const box = noticeBox(summary);
     expect(statusIcons(box)).toBe(1);
+    expect(within(summary).getAllByRole('listitem')).toHaveLength(3);
     expect(box.lastElementChild).toBe(within(summary).getByRole('button', { name: 'Close' }));
   });
 });
 
 describe('validate reports on the document you are looking at', () => {
   it('CB-G2: a clean form validates WITHOUT saving', async () => {
-    await openAndValidate();
-    await waitFor(() => expect(validateBriefById).toHaveBeenCalled());
+    const summary = await openAndValidate();
+    // The answer rendered (the stored brief's three issues) and no save preceded it.
+    expect(within(summary).getAllByRole('listitem')).toHaveLength(3);
+    expect(validateBriefById).toHaveBeenCalledExactlyOnceWith('brief-1');
     expect(updateBrief).not.toHaveBeenCalled();
   });
 
@@ -181,10 +212,12 @@ describe('validate reports on the document you are looking at', () => {
     const action = await screen.findByRole('button', { name: /save & validate/i });
     fireEvent.click(action);
 
-    await waitFor(() => expect(updateBrief).toHaveBeenCalled());
-    // The edit reached the server before the question was asked.
-    const [, payload] = updateBrief.mock.calls[0] as [string, { messaging: { primaryValueProp: string } }];
-    expect(payload.messaging.primaryValueProp).toBe('The fastest widget');
-    await waitFor(() => expect(validateBriefById).toHaveBeenCalled());
+    await waitFor(() => expect(validateBriefById).toHaveBeenCalledTimes(1));
+    // The edit reached the server BEFORE the question was asked.
+    expect(updateBrief).toHaveBeenCalledTimes(1);
+    const [id, payload] = updateBrief.mock.calls[0]!;
+    expect(id).toBe('brief-1');
+    expect(payload.messaging?.primaryValueProp).toBe('The fastest widget');
+    expect(updateBrief.mock.invocationCallOrder[0]!).toBeLessThan(validateBriefById.mock.invocationCallOrder[0]!);
   });
 });

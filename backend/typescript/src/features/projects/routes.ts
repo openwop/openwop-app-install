@@ -49,6 +49,7 @@ import {
   resolveProjectAccess, listVisibleProjects, addProjectMember, removeProjectMember, setProjectVisibility, setProjectFacet,
   notebookCorpusToDelete, orderProjectAgentCohort, type Project,
   type ProjectRole,
+  projectRoleOf,
 } from './projectsService.js';
 import { MAX_MULTI_PARTY_PARTICIPANTS } from '../../host/multiPartyConversation.js';
 import { deleteNotebook, getNotebook, isNotebookProject, NOTEBOOK_RESEARCHER_AGENT_ID } from '../notebooks/notebooksService.js';
@@ -67,6 +68,7 @@ import {
   subjectConversationId, ensureConversationMeta, getConversationMeta, addParticipant, removeParticipant, refreshEntityChatTitle, agentRef,
 } from '../../host/conversationStore.js';
 import { getRosterEntry } from '../../host/rosterService.js';
+import { assertWorkflowClientAccess } from '../../host/workflowClientAccess.js';
 
 const tenantOf = (req: Request): string => req.tenantId ?? 'default';
 const actingUserOf = (req: Request): string | undefined => req.userId ?? req.principal?.principalId;
@@ -137,7 +139,7 @@ const view = (tenantId: string) => async (
   if (callerSubject === undefined) return { ...p, boardId, deletesCorpus };
   // ADR 1095 — the caller's own role on the project (a label, never a scope;
   // ADR 0054 D2), for presentation such as role-limited tabs.
-  const myRole = (p.members ?? []).find((m) => m.ref === `user:${callerSubject}`)?.role;
+  const myRole = projectRoleOf(p, callerSubject);
   return { ...p, boardId, deletesCorpus, canWrite: (await resolveProjectAccess(tenantId, id, callerSubject)) === 'write', ...(myRole ? { myRole } : {}) };
 };
 
@@ -427,6 +429,8 @@ export function registerProjectsRoutes(deps: RouteDeps): void {
   app.post(`${BASE}/:id/schedules`, async (req, res, next) => {
     try {
       const { id } = await requireProject(req, 'workspace:write');
+      // ADR 1132 D5 — a schedule that launches a client's workflow needs launch authority there.
+      { const wid = (req.body as { workflowId?: unknown } | undefined)?.workflowId; if (typeof wid === 'string') await assertWorkflowClientAccess(req, wid, 'runs:create'); }
       const schedule = await createProjectSchedule(tenantOf(req), id, (req.body ?? {}) as { cronExpr?: unknown; workflowId?: unknown; timezone?: unknown });
       res.status(201).json(schedule);
     } catch (err) { next(err); }
@@ -435,6 +439,8 @@ export function registerProjectsRoutes(deps: RouteDeps): void {
   app.patch(`${BASE}/:id/schedules/:jobId`, async (req, res, next) => {
     try {
       const { id } = await requireProject(req, 'workspace:write');
+      // ADR 1132 D5 — a schedule that launches a client's workflow needs launch authority there.
+      { const wid = (req.body as { workflowId?: unknown } | undefined)?.workflowId; if (typeof wid === 'string') await assertWorkflowClientAccess(req, wid, 'runs:create'); }
       const schedule = await updateProjectSchedule(tenantOf(req), id, req.params.jobId, (req.body ?? {}) as { enabled?: unknown; cronExpr?: unknown; workflowId?: unknown; timezone?: unknown });
       res.json(schedule);
     } catch (err) { next(err); }
