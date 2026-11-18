@@ -42,6 +42,7 @@ import type { HostAdapterSuite } from '../host/index.js';
 import type { RunRecord } from '../types.js';
 import { childPlanExemptionStamp } from '../host/operatorPlanExemption.js';
 import {
+  deferredConfigurableInputs,
   seedRunVariables,
   snapshotRunVariables,
   setRunVariable,
@@ -350,7 +351,9 @@ export async function dispatchSubWorkflow(
 
   // Seed child variable bag — inputMapping wins over the workflow's
   // defaultValues per RFC 0022 §B HVMAP-2.
-  seedRunVariables(childRunId, wf.definition.variables, childInputs);
+  // CC-JOURNEY-1: a deferred child reads prefixed variables; its per-item inputs
+  // arrive under the bare param names, so translate them through the aliases.
+  seedRunVariables(childRunId, wf.definition.variables, deferredConfigurableInputs(wf.definition, undefined, childInputs));
 
   // Run the child to terminal. executeRun is synchronous-Promise:
   // returns when the run reaches terminal status (completed / failed /

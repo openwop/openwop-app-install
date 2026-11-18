@@ -42,6 +42,11 @@ export const messages = {
   // KanbanBoardView — shared board renderer
   priorityLow: 'LOW',
   dueDate: 'due {{date}}',
+  dueOverdue: 'Overdue · {{date}}',
+  dueSoon: 'Due soon · {{date}}',
+  openSource: 'Open {{label}}',
+  markingDone: 'Finishing…',
+  markDoneNamed: 'Mark “{{title}}” done',
   whyAssigned: 'Why assigned: {{reason}}',
   blocked: 'Blocked: {{note}}',
   heldChip: "Held",

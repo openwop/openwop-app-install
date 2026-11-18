@@ -57,6 +57,8 @@ export const messages = {
   wordmarkEmphasisLabel: 'emphase',
   wordmarkSubLabel: 'sous-titre',
   documentTitleLabel: 'Titre du document',
+  footerTextLabel: 'Texte du pied de page',
+  footerTextHelp: 'Affiché avant les liens du pied de page de l’application. Laissez vide pour ne rien afficher.',
   logoHeading: 'Logo',
   logoUrlLabel: 'URL du logo',
   logoUrlHelp: 'Une URL https, un chemin /relatif ou un URI data:image. L’upload arrivera avec Media.',

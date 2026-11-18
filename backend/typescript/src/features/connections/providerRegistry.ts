@@ -58,6 +58,11 @@ export interface ProviderManifest {
    *  catch a mutating POST; the no-write-scope manifest is the real guard. A `readOnly`
    *  provider MUST NOT declare a write scope group (see `assertReadOnlyConsistent`). */
   readOnly?: boolean;
+  /** #5983 — OIDC scopes added to EVERY authorize request (e.g. `openid`), so the
+   *  token response carries an `id_token` naming the provider account. Its `sub`
+   *  becomes the connection's `externalSubject`, which tells two accounts of one
+   *  provider apart. Checked against `issuer` and the host's client id. */
+  identityScopes?: readonly string[];
   /** A WRITE-scoped provider whose write is a GOVERNED action (ADR 0028) and therefore
    *  MUST be reachable ONLY through its host adapter's `brokeredPost` (which host-pins the
    *  URL + funnels through the approval gate), NEVER through the generic `ctx.http.safeFetch`
@@ -133,6 +138,9 @@ export interface ProviderManifest {
 const GOOGLE_AUTHORIZATION_SERVER = {
   issuer: 'https://accounts.google.com',
   issResponseParameter: true,
+  // #5983 — `openid` is what makes Google return an id_token with the account's
+  // stable `sub`; without it a Google connection never had an externalSubject.
+  identityScopes: ['openid'],
 } as const;
 
 const BUILTIN: ProviderManifest[] = [

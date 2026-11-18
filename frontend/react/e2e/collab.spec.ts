@@ -83,7 +83,7 @@ test.describe('realtime canvas collaboration (ADR 0359)', { tag: '@serial' }, ()
     // ── User B: same tenant, org member with write ───────────────────────────
     const ctxB = await browser.newContext();
     const bUserId = await login(ctxB.request, 'beta@e2e.test', tenantId);
-    const addB = await ctxA.request.post(`${API}/orgs/${orgId}/members`, {
+    const addB = await ctxA.request.post(`${API}/test/orgs/${orgId}/members`, {
       data: { displayName: 'Beta', subject: bUserId, roles: ['editor'] },
     });
     expect(addB.ok(), await addB.text()).toBe(true);

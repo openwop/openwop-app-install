@@ -133,7 +133,8 @@ const { getMe, bindOidc, migrateAnonToUser, getCurrentIdToken } = vi.hoisted(() 
 }));
 vi.mock('../features/users/usersClient.js', async (orig) => ({
   ...(await orig<typeof import('../features/users/usersClient.js')>()),
-  getMe, bindOidc,
+  // Issue 5991 — the session store probes with getMeIfSignedIn; same answers, same mock.
+  getMe, getMeIfSignedIn: getMe, bindOidc,
 }));
 vi.mock('../auth/migrateTenant.js', () => ({ migrateAnonToUser }));
 vi.mock('../auth/firebase.js', () => ({ getCurrentIdToken, getCurrentUser: () => null }));

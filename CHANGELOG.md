@@ -18,6 +18,171 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-11-18
+
+A MINOR release under ADR 0052. It carries one change that is **breaking for API
+callers** (allowed in a 0.x minor, ADR 0052 §D1): a person is no longer added to an
+org by their user id (#5945). See "Upgrading from 0.15.0". Every error response is
+now `Cache-Control: no-store` (ADR 1147). A run's approval request reaches only
+people who can open the run, and a share link can verify its recipient with an
+emailed code (off by default). Stored API keys with an empty scope list can be
+rewritten to an explicit `['*']`, and empty can then be made to deny, behind two
+switches that are off by default (#6053). The Inbox gains Needs you / Updates /
+Archived with one count. Collaboration, replay (RFC 0260 recipe 2), observability
+(RFC 0262), Kanban due reminders, per-org media caps and the browser agent's
+groundwork land, and a broad fix batch follows. One additive schema migration
+(sqlite 54 / postgres 52); app migrations are unchanged (26). It is rolling-safe,
+not a required stop.
+
+### Security
+
+- **Error responses are never cached (ADR 1147).** One guard, mounted first, stamps
+  `Cache-Control: no-store` on every 4xx/5xx however it was written. That covers the
+  126 direct `res.status(...).json()` writes, `.send`/`.end` and the catch-all 404.
+  A route's stricter value stays; a weaker one is overridden and logged once per route.
+  Behind Firebase, a header-less error used to be cached for 10 minutes on its URL
+  (#5841, #6019, #6079, #6085, #6100).
+- **A person is no longer added to an org by their user id (#5945, #6003).** See
+  "Upgrading from 0.15.0" above.
+- **A run's approval request reaches only people who can open the run (ADR 1140,
+  #6020).** A named approver who cannot open the run is no longer asked. The run's
+  operators are told instead, and if nobody named can open it, the request goes to
+  them. SLA reminders follow the same rule.
+- **A share link can require its recipient to enter an emailed code (ADR 1141,
+  #6046, #6047, #6090).** It is off by default, so existing links are unchanged.
+- **No path mints a new undeclared API key (#6053, #6056).** A stored one can be
+  rewritten to an explicit `['*']`, and then empty can be made to deny (#6059; the
+  switches are above).
+- **Dependencies (#6099):** `qs` 6.16.1 (GHSA-6pq8) and `fast-xml-parser` 5.12.0
+  (GHSA-474x) in the backend. Desktop's build-time `picomatch`/`minimatch` advisories
+  have time-boxed, reachability-assessed exceptions: no fix exists upstream, and none
+  ships in the app (#6092).
+- **The free-text secret scrub keeps declared record-id prefixes whole (#6027).**
+
+### Added
+
+- **Kanban:** due reminders, and Open/Done on mirrored cards (ADR 1138, #5989).
+- **Collaboration (ADR 1099 P0b/P0c):** firm collaborator routes gated per grant kind
+  (#6078). Per-viewer projections, and a mint-time recipient check for grant kinds
+  (#6101).
+- **Replay:** the RFC 0260 LLM cache key recipe 2 on the effect ledger, behind
+  `OPENWOP_LLM_CACHE_KEY_RECIPE_2` (ADR 1142, #6072).
+- **Observability:** the v2 telemetry family behind `OPENWOP_TELEMETRY_FAMILY`, and
+  resumed runs keep their trace (#6057). genAiSemconv 1.37.0, and spans carry the wire
+  run id (ADR 1146, #6080).
+- **Media:** per-org media caps set per deployment (#6107).
+- **Chat:**
+  - chain templates in the `/` picker (ADR 1143, #6067);
+  - tool display summaries on a host channel, and feature links in chat (ADR 1040,
+    #5545).
+- **Campaign ops:** a house client for the firm's own business (ADR 1144, #6066), and
+  set-up when clients already exist (#6082).
+- **Preflight:** required features checked at run admission, in shadow mode first (ADR
+  1134 P1, #6075).
+- **Forms:** delete a clean submission from the list; refused under a legal hold
+  (#6086).
+- **Inbox (ADR 1125 P3, #6062):**
+  - Needs you, Updates and Archived tabs with ONE count (#5909);
+  - an empty state that names the last decision;
+  - deep links that follow the tabs.
+- **Browser agent groundwork (ADR 1136 P2).** Production constructs no browser adapter
+  yet:
+  - a session stops when a page script submits without approval (`unapproved_effect`),
+    and a forked run never drives the browser (#6052);
+  - the companion's `browser` mode (#6055);
+  - the paired-device browser executor and one-capability pairing (#6077).
+- **Film rehearsals:** private silent rehearsals and timing replay (#6069).
+
+### Changed
+
+- The conformance suite is pinned at 2.49.7 (#6045, #6083).
+- `/pricing` serves the app shell when no pricing page is published (ADR 0391 b,
+  #6061).
+
+### Fixed
+
+- **Public pages:** the PublicShell actions and CTA no longer overflow sideways at 360px
+  with long CTA labels (#6110).
+- **Inbox:** the fallback for an unknown request kind is truthful and links the
+  activity log (#5843, #6050).
+- **Auth:**
+  - a sign-out in another tab takes the old account's data off this tab (#6043,
+    #6044);
+  - an open tab follows a sign-in made in another tab (#5842, #6041);
+  - the session probe logs no failed request for a signed-out visitor (#5991, #6035).
+- **Chat:**
+  - finished runs keep no open wait, and the refusal banner is plain (#6068);
+  - smoke-fixture agents leave the @ picker (#5799, #6024);
+  - an agent's @handle comes from its name (#5800, #6023);
+  - a finished run's outputs read as fields (#5849, #6040);
+  - a turn's reply owns its writes, and the safe-mode copy says what it holds (#5908,
+    #6033).
+- **Reviews:** a wait that resumes on its own is not a review (#6081); an approval
+  artifact reads as a document (#5844, #6025).
+- **Chains:** bare param names bind for deferred workflows on every seeding (#6105).
+- **CRM:** the reported v0 model pointer is accepted, and restoring v0 is allowed (ADR
+  0954, #6104).
+- **Agents:**
+  - a repeated call is answered unless something wrote since it ran (#5932, #6018);
+  - an agent's own board shows its kanban.add-todo cards (#5965, #6016);
+  - the drawer's lane labels are translated (#5912, #6014);
+  - a person's own workflow names show, not raw ids (#5911, #6029).
+- **Profiles:** the twin tab loads its namespace (#5775, #6015).
+- **Brand:** the footer text is editable in Appearance (#5913, #6039).
+- **Email:** a stale template link shows not-found (#5962, #6037).
+- **Admin:** refused and loading states use the full width (#5890, #6030).
+- **Publishing:** the SPA shell refreshes as soon as its bundle is pruned (#5840, #6036).
+- **Knowledge sync:** a changed file is replaced in place (#6031).
+- **Connections:** the Google account id is recorded as `externalSubject` (#5983,
+  #6028).
+- **Memory:** "cannot" and apostrophe-less contractions are negators (#5774, #6011).
+- **Tracegate:** a slow coverage take records "no footprint" instead of failing (#6064).
+
+#### Upgrading from 0.15.0
+
+- **Breaking for API callers (#5945, ADR 1123 follow-up).** A person is no longer
+  added to an org by typing their user id:
+  - `POST /host/openwop-app/orgs/:orgId/members` with a `user:` subject now answers
+    `409 use_add_existing`;
+  - a `PATCH` that binds a `user:` subject answers `409 use_link`.
+
+  Use `POST …/members/add-existing` (a `candidateId` from `GET …/member-candidates`)
+  and `POST …/members/:memberId/link`. openwop-cli 2.1.0 has `orgs members
+  add-existing` and `link`. Exempt:
+  - service and identity-provider subjects (`oidc:`, `saml:`, `scim:` …);
+  - subject-less placeholders;
+  - a host superadmin and the wildcard operator key.
+
+  A fork's test fixtures must seed members through
+  `/host/openwop-app/test/orgs/:orgId/members`.
+- **Schema:** one additive migration. SQLite 54 and Postgres 52 add a NULLABLE
+  `invocation_log.llm_cache_key` (RFC 0260 recipe 2), with no backfill. The 0.15.0 binary
+  runs against the new schema unchanged.
+- **Background job (not a versioned app migration):** `api-key-undeclared-rewrite`,
+  idempotent. It does nothing unless `OPENWOP_API_KEY_UNDECLARED_REWRITE` is set:
+  - `report` counts stored keys with an empty scope list, per tenant;
+  - `apply` rewrites them to `['*']` (the same authority, now declared).
+
+  Run `report` first.
+- **New optional environment variables.** Each defaults to today's behaviour:
+  - `OPENWOP_API_KEY_EMPTY_SCOPES`: `deny` makes an empty scope declaration deny
+    instead of permit. Default: permit. Set it only after `apply` has run (#6053).
+  - `OPENWOP_API_KEY_UNDECLARED_REWRITE`: `report` | `apply` (above). Default: off.
+  - `OPENWOP_MEDIA_ORG_MAX_ASSETS`, `OPENWOP_MEDIA_ORG_MAX_BYTES`,
+    `OPENWOP_MEDIA_ORG_MAX_COLLECTIONS`: per-org media caps for this deployment.
+    Default: the built-in caps.
+  - `OPENWOP_LLM_CACHE_KEY_RECIPE_2`: record the RFC 0260 recipe-2 key on each LLM
+    effect. Default: off.
+  - `OPENWOP_TELEMETRY_FAMILY`: advertise the v2 telemetry family. Default: off.
+- **No env var or route is removed.** A rolling upgrade needs no downtime; back up
+  first, as the planner says below.
+
+`node scripts/upgrade-plan.mjs 0.15.0`: **1 step, not a required stop, rolling-safe.**
+The schema permits 0.15.0 instances during the 0.16.0 migrations. Back up the
+database (and object store) first, because rollback is a restore, not a downgrade.
+Then start 0.16.0, and its migrations replay on boot: sqlite 53 → 54, postgres
+51 → 52, app 26 → 26. Check that `/readiness` reports `version 0.16.0`.
+
 ## [0.15.0] — 2026-11-16
 
 A MINOR release under ADR 0052. Run admission now checks a chain's required

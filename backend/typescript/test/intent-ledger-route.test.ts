@@ -72,7 +72,7 @@ async function login(c: ReturnType<typeof client>, email: string): Promise<strin
 async function join(owner: ReturnType<typeof client>, c: ReturnType<typeof client>, email: string): Promise<string> {
   const r = await c<{ user: { userId: string } }>('POST', '/host/openwop-app/test/login', { email, tenantId: T });
   const userId = r.body.user.userId;
-  const add = await owner('POST', `/host/openwop-app/orgs/${encodeURIComponent(T)}/members`, { displayName: 'editor', subject: userId, roles: ['editor'] });
+  const add = await owner('POST', `/host/openwop-app/test/orgs/${encodeURIComponent(T)}/members`, { displayName: 'editor', subject: userId, roles: ['editor'] });
   expect(add.status).toBe(201);
   return userId;
 }

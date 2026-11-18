@@ -792,6 +792,17 @@ async function approvalVisible(a: PendingApproval, ctx: ReviewAuthCtx, memo?: Re
 
 // ── list / get ───────────────────────────────────────────────────────────
 
+/** Open interrupts the pending inbox never lists. `conversation` is a chat gate.
+ *  `external-event` and `timer` resume on their own: a parent waiting on its child
+ *  runs, a webhook, a delay (the SPA's CC-ORCH-3 rule, `chat/interruptKinds.ts`).
+ *  CC-CHAT-7, measured on prod 2026-11-17: a live campaign orchestration waiting
+ *  on its channel runs was listed as a decidable review with a `resolve` action.
+ *  The chat rail filed it under "Needs you", and the conversation showed a
+ *  "Needs your approval" card that invited a person to answer the wait with a
+ *  value. An assistant approval behind an `external-event` wait still lists, as
+ *  its own approval row. */
+export const NOT_A_REVIEW_KINDS: ReadonlySet<InterruptRecord['kind']> = new Set<InterruptRecord['kind']>(['conversation', 'external-event', 'timer']);
+
 export interface ListReviewsOpts {
   /** Filter. Omitted ⇒ the pending inbox (open interrupts + pending approvals). */
   status?: ReviewStatus;
@@ -829,7 +840,8 @@ export async function listReviews(storage: Storage, ctx: ReviewAuthCtx, opts: Li
       log.warn('review_interrupt_scan_truncated', { limit: INTERRUPT_SCAN_LIMIT, tenantId: ctx.tenantId });
     }
     // ADR 0778 D8 — the runs of the page in ONE read, not one `getRun` per row.
-    const candidates = open.filter((it) => it.kind !== 'conversation'); // a chat gate is not a review request
+    // Not review requests: a chat gate, and a wait that resumes on its own (CC-CHAT-7).
+    const candidates = open.filter((it) => !NOT_A_REVIEW_KINDS.has(it.kind));
     const runs = await loadRuns(storage, candidates.map((it) => it.runId));
     for (const it of candidates) {
       const run = runs.get(it.runId);

@@ -156,6 +156,21 @@ different tool, or answer. A turn that exhausts its rounds with no text returns 
 > gets says the result is unchanged "since nothing has run since", which holds for this
 > loop's own effects; a tool needing fresher semantics should use `continueTurn`, not a
 > per-tool opt-out list.
+>
+> **Correction (2026-11-16, #5932 — a write cleared the guard for its own repeat).**
+> MEASURED on casavoga-prod `370f6666`: site-coordinator (run `a709e5ca`) and spec-writer
+> (run `408fb17e`) each ran an A,B,A,B pair with one args hash for all five rounds. When one
+> of the pair is a write, the write cleared the read set and each call differed from the
+> one before it, so neither rule matched. The two rules are now one: each finished success
+> is remembered with the turn's write generation, and an identical call is answered with
+> the note while that generation holds. Any write, or a tool of unknown effect, starts a
+> new generation, including a failed write, which may have half-applied. So a repeated
+> write with only reads between is answered, not re-run, which also stops a duplicated
+> side effect. Residual: two different writes alternating still run, since each can change
+> what the other reads; the round budget ends that turn `tool_rounds_exhausted`. The issue's
+> second ask, native tool_use/tool_result pairing in history, stays as ADR 1119 D2 decided.
+> Test: `test/adr0975-tool-loop-repeat-guard.test.ts` (#5932 cases).
+> (`lastRanCall` and the read set named above are both replaced by this map.)
 
 ### D7 — a plan says what it cites, before the run builds anything (fixes #7) — P6
 

@@ -317,7 +317,8 @@ export async function beginAuthorization(input: {
   // Read scopes first; a write re-consent adds the WRITE groups on top of the
   // read defaults so the upgraded grant still covers reads (ADR 0024 §3).
   const baseScopes = input.scopes && input.scopes.length > 0 ? input.scopes : manifest.defaultScopes;
-  const scopes = input.includeWrite ? [...new Set([...baseScopes, ...writeScopesOf(input.provider)])] : baseScopes;
+  const withWrite = input.includeWrite ? [...baseScopes, ...writeScopesOf(input.provider)] : baseScopes;
+  const scopes = [...new Set([...withWrite, ...(manifest.identityScopes ?? [])])];
 
   const state = base64url(randomBytes(32));
   const codeVerifier = base64url(randomBytes(64));
@@ -473,7 +474,7 @@ export async function exchangeCodeForTokens(input: {
     ...(grantResourceOf(manifest) !== null ? { resource: grantResourceOf(manifest)! } : {}),
   });
   const tokens = await postTokenRequest(tokenEndpoint, form, manifest);
-  return shapeTokenMaterial(tokens, input.scopes);
+  return shapeTokenMaterial(tokens, input.scopes, { manifest, clientId: client.clientId });
 }
 
 /** Mint a fresh access token from a stored refresh token (ADR 0024 §4). */
@@ -498,7 +499,7 @@ export async function refreshAccessToken(input: {
     ...(grantResourceOf(manifest) !== null ? { resource: grantResourceOf(manifest)! } : {}),
   });
   const tokens = await postTokenRequest(tokenEndpoint, form, manifest);
-  const material = shapeTokenMaterial(tokens, input.scopes);
+  const material = shapeTokenMaterial(tokens, input.scopes, { manifest, clientId: client.clientId });
   // Token-rotation: providers may omit a fresh refresh_token (keep the old one).
   if (!material.refreshToken) material.refreshToken = input.refreshToken;
   return material;
@@ -512,6 +513,8 @@ interface RawTokenResponse {
   scope?: string;
   // Slack returns the granted identity differently; capture what we can.
   authed_user?: { id?: string; access_token?: string; scope?: string };
+  /** OIDC (`openid` granted): the account identity, read for `sub` only. */
+  id_token?: string;
   bot_user_id?: string;
   team?: { id?: string };
   ok?: boolean;
@@ -553,7 +556,38 @@ async function postTokenRequest(endpoint: string, form: URLSearchParams, manifes
 
 /** Normalize a provider's token response into our stored shape. Slack nests the
  *  user token under `authed_user`; Google/standard OAuth use the top level. */
-function shapeTokenMaterial(raw: RawTokenResponse, requestedScopes: string[]): OAuthTokenMaterial {
+/**
+ * #5983 — the account `sub` of an OIDC `id_token` that came straight back from the
+ * provider's token endpoint. OIDC Core §3.1.3.7 lets TLS to the token endpoint stand
+ * in for the signature check on that channel; the claims are still checked: `iss`
+ * is the manifest's issuer (Google also sends it without the scheme), `aud` names
+ * this host's client, and the token has not expired. Anything else is `undefined`,
+ * never a guess.
+ *
+ * Do NOT drop the `iss`/`aud`/`exp` checks to "simplify": with no signature check
+ * they are what makes reading this token legal. And never call this on an id_token
+ * from any other channel (a redirect, a body, a header): only the token endpoint's
+ * own TLS response qualifies.
+ */
+export function idTokenSubject(idToken: string | undefined, expected: { issuer: string | undefined; clientId: string }, nowMs: number = Date.now()): string | undefined {
+  if (!idToken || !expected.issuer) return undefined;
+  const part = idToken.split('.')[1];
+  if (!part) return undefined;
+  let claims: { iss?: unknown; aud?: unknown; exp?: unknown; sub?: unknown };
+  try {
+    claims = JSON.parse(Buffer.from(part, 'base64url').toString('utf8')) as typeof claims;
+  } catch {
+    return undefined;
+  }
+  const issuer = expected.issuer;
+  const issOk = claims.iss === issuer || (typeof claims.iss === 'string' && `https://${claims.iss}` === issuer);
+  const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+  const expOk = typeof claims.exp === 'number' && claims.exp * 1000 > nowMs;
+  if (!issOk || !aud.includes(expected.clientId) || !expOk) return undefined;
+  return typeof claims.sub === 'string' && claims.sub.length > 0 && claims.sub.length <= 255 ? claims.sub : undefined;
+}
+
+function shapeTokenMaterial(raw: RawTokenResponse, requestedScopes: string[], oidc?: { manifest: ProviderManifest; clientId: string }): OAuthTokenMaterial {
   const accessToken = raw.authed_user?.access_token ?? raw.access_token;
   if (!accessToken) throw Object.assign(new Error('token response had no access_token'), { code: 'token_exchange_failed' });
   const grantedScopes = (raw.authed_user?.scope ?? raw.scope)?.split(/[ ,]+/).filter(Boolean);
@@ -566,7 +600,8 @@ function shapeTokenMaterial(raw: RawTokenResponse, requestedScopes: string[]): O
   if (typeof raw.expires_in === 'number' && raw.expires_in > 0) {
     material.expiresAt = new Date(Date.now() + raw.expires_in * 1000).toISOString();
   }
-  const subject = raw.authed_user?.id ?? raw.team?.id;
+  const subject = raw.authed_user?.id ?? raw.team?.id
+    ?? (oidc ? idTokenSubject(raw.id_token, { issuer: oidc.manifest.issuer, clientId: oidc.clientId }) : undefined);
   if (subject) material.externalSubject = subject;
   return material;
 }

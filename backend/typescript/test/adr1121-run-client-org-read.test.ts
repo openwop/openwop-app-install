@@ -89,7 +89,7 @@ async function agency() {
     const c = client();
     const u = await signup(c);
     for (const [orgId, roles] of [[ws, [rootRole]], ...clients.map((o) => [o, [clientRole]] as const)] as const) {
-      const add = await owner.post(`/host/openwop-app/orgs/${enc(orgId)}/members`, { displayName: 'P', subject: u.userId, roles });
+      const add = await owner.post(`/host/openwop-app/test/orgs/${enc(orgId)}/members`, { displayName: 'P', subject: u.userId, roles });
       expect(add.status, JSON.stringify(add.body)).toBe(201);
     }
     expect((await c.post(`/host/openwop-app/workspaces/${enc(ws)}/switch`)).status).toBe(200);

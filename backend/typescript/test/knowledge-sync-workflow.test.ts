@@ -47,14 +47,14 @@ vi.mock('../src/host/featureToggles/service.js', async () => {
 });
 vi.mock('../src/features/connections/connectionsService.js', () => ({ getConnection: vi.fn() }));
 vi.mock('../src/host/knowledgeSourceFetch.js', () => ({ listFolder: vi.fn(), fetchKnowledgeSource: vi.fn(), fetchKnowledgeSourceBytes: vi.fn() }));
-vi.mock('../src/features/kb/kbService.js', () => ({ ingestDocument: vi.fn(), deleteDocument: vi.fn(), getCollection: vi.fn(async () => ({ collectionId: 'col' })) })); // `getCollection` (ADR 0643 R4 Should 3): the runner resolves the target collection as the connection owner BEFORE listing/fetching — a readable stub here, so these tests keep exercising the per-file lanes
+vi.mock('../src/features/kb/kbService.js', () => ({ upsertDocument: vi.fn(), deleteDocument: vi.fn(), getCollection: vi.fn(async () => ({ collectionId: 'col' })) })); // `getCollection` (ADR 0643 R4 Should 3): the runner resolves the target collection as the connection owner BEFORE listing/fetching — a readable stub here, so these tests keep exercising the per-file lanes
 // ADR 1101 D3 — the pass-time org-write check, held open here (its own witness is
 // `knowledge-sync-pass-integrity.test.ts`); these cases are about the surface's gates.
 vi.mock('../src/features/knowledge-sync/knowledgeSyncAccess.js', () => ({ passActorMayWrite: vi.fn(async () => true), holdsOrgScope: vi.fn(async () => true) }));
 
 import { getConnection, type Connection } from '../src/features/connections/connectionsService.js';
 import { listFolder, fetchKnowledgeSource, type SyncFolderListing } from '../src/host/knowledgeSourceFetch.js';
-import { ingestDocument, deleteDocument, type KnowledgeDocument } from '../src/features/kb/kbService.js';
+import { upsertDocument, deleteDocument, type KnowledgeDocument } from '../src/features/kb/kbService.js';
 import { buildKnowledgeSyncSurface } from '../src/features/knowledge-sync/surface.js';
 import {
   createSyncSource, setSyncStatus, syncDocumentId,
@@ -68,7 +68,7 @@ import { getJob } from '../src/host/schedulingService.js';
 const mConn = vi.mocked(getConnection);
 const mList = vi.mocked(listFolder);
 const mFetch = vi.mocked(fetchKnowledgeSource);
-const mIngest = vi.mocked(ingestDocument);
+const mIngest = vi.mocked(upsertDocument); // #5770: the runner upserts
 const mDelete = vi.mocked(deleteDocument);
 const NOW = '2026-06-22T00:00:00.000Z';
 
@@ -222,7 +222,8 @@ describe('the knowledge-sync surface runOnce (WF-KB-4 spend gate)', () => {
     // The pass reached the KB write — this is the egress a disabled tenant must NOT do —
     // with the stable id and the untrusted fence.
     expect(mIngest).toHaveBeenCalledTimes(1);
-    expect(mIngest.mock.calls[0]![5]).toEqual({ documentId: syncDocumentId(source.id, 'a'), contentTrust: 'untrusted', silent: true });
+    expect(mIngest.mock.calls[0]![3]).toBe(syncDocumentId(source.id, 'a'));
+    expect(mIngest.mock.calls[0]![5]).toMatchObject({ contentTrust: 'untrusted', silent: true });
   });
 });
 

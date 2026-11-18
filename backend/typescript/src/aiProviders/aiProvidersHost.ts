@@ -89,7 +89,9 @@ import { getInvocationLog, type InvocationRecordKey } from '../executor/invocati
 import { stripSecretsFromPersisted } from '../byok/ephemeralRunSecrets.js';
 import { isSubscriptionProhibitedProvider, CLEARED_SUBSCRIPTION_PROVIDERS } from '../byok/subscriptionCredentialScope.js';
 import { copilotSubscriptionConfigured, COPILOT_PROVIDER_ID } from './copilotSubscription.js';
+import { genAiSpanAttributes, spanRunId } from '../observability/telemetryFamily.js';
 import { semanticRequestDigestV2 } from '../providers/llmCacheKey.js';
+import { CONFORMANCE_MOCK_PROVIDER, recipe2Matches, sentSampling, storedLlmCacheKey, type KeyInputs } from '../providers/llmCacheKey2.js';
 import { logicalInvocationId, nextLogicalInvocationOrdinal } from '../host/effectIdentity.js';
 
 /** ADR 0326 P3a — the tagged discriminator marking a recorded FAILED provider
@@ -821,6 +823,8 @@ async function viaReplayLane<T extends object>(
   providerKey: string,
   decode: (recorded: Record<string, unknown>) => T | null,
   live: () => Promise<{ result: T; usage?: ProviderUsagePayload }>,
+  // RFC 0260 §C (ADR 1142 D7) — the recipe-2 inputs of this call, over what it sends.
+  llmKey?: KeyInputs,
 ): Promise<T> {
   const logicalInvocationOrdinal = nextLogicalInvocationOrdinal(scope.runId, scope.nodeId, scope.attempt);
   const identityFor = (runId: string): string =>
@@ -832,13 +836,20 @@ async function viaReplayLane<T extends object>(
   let invocationLog: ReturnType<typeof getInvocationLog> | null;
   try { invocationLog = getInvocationLog(); } catch { invocationLog = null; }
   if (!invocationLog) return (await live()).result;
+  const llmCacheKey = llmKey ? storedLlmCacheKey(llmKey) : undefined;
+  const llmOpts = llmCacheKey ? { llmCacheKey } : undefined;
 
   const sourceRunId = scope.replayInvocationsFromRunId;
   if (sourceRunId) {
     let recorded: unknown = await invocationLog.get(cacheKey);
     if (!recorded) {
-      recorded = await invocationLog.get({ ...cacheKey, runId: sourceRunId, invocationId: identityFor(sourceRunId) });
-      if (isRecordObject(recorded) && recordTenantOf(recorded) === scope.tenantId) await invocationLog.put(cacheKey, recorded).catch(() => undefined);
+      const sourceRecordKey = { ...cacheKey, runId: sourceRunId, invocationId: identityFor(sourceRunId) };
+      recorded = await invocationLog.get(sourceRecordKey);
+      // RFC 0260 §C.3 (ADR 1142 D8) — as in `callAI`: a recipe-2 source record
+      // is served only on an equal key, and the copy carries its key verbatim.
+      const sourceLlmKey = recorded ? await invocationLog.llmCacheKey(sourceRecordKey) : null;
+      if (recorded && llmKey && !recipe2Matches(sourceLlmKey, llmKey)) recorded = null;
+      if (isRecordObject(recorded) && recordTenantOf(recorded) === scope.tenantId) await invocationLog.put(cacheKey, recorded, sourceLlmKey ? { llmCacheKey: sourceLlmKey } : undefined).catch(() => undefined);
     }
     // ADR 1002 — a record never crosses a tenant. The tenant is in the identity
     // preimage, so another tenant's record cannot be addressed; this is the
@@ -874,7 +885,7 @@ async function viaReplayLane<T extends object>(
     out = await live();
   } catch (err) {
     const envelope = failureEnvelopeFor(err);
-    if (envelope) await invocationLog.put(cacheKey, { ...envelope, tenantId: scope.tenantId }).catch(() => undefined);
+    if (envelope) await invocationLog.put(cacheKey, { ...envelope, tenantId: scope.tenantId }, llmOpts).catch(() => undefined);
     throw err;
   }
   // Best-effort: the call already succeeded and was already metered, so a lost
@@ -882,7 +893,7 @@ async function viaReplayLane<T extends object>(
   // Scrubbed like the failure envelopes (SR-1), and stamped with the tenant the
   // replay read checks.
   const record: ReplayLaneRecord<T> = stripSecretsFromPersisted({ ...out.result, ...(out.usage ? { providerUsage: out.usage } : {}), tenantId: scope.tenantId });
-  await invocationLog.put(cacheKey, record).catch((err: unknown) => {
+  await invocationLog.put(cacheKey, record, llmOpts).catch((err: unknown) => {
     log.warn('invocation-log record failed', { runId: scope.runId, nodeId: scope.nodeId, err: err instanceof Error ? err.message : String(err) });
   });
   return out.result;
@@ -924,6 +935,13 @@ async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallRe
     return callAIManaged(scope, req);
   }
 
+  // ADR 1142 D5 — the RFC 0260 fixture's provider id. `conformance-mock` IS the
+  // `mock` dispatcher under the fixture's own name: it routes, gates and refuses
+  // exactly as `mock` does (LEAK-4 in `assertProviderSupported`), and only the
+  // recipe-2 preimage keeps the name the request used.
+  const keyProvider = req.provider;
+  if (req.provider === CONFORMANCE_MOCK_PROVIDER) req = { ...req, provider: 'mock' };
+
   assertProviderSupported(req.provider);
   await enforcePolicy(scope, req.provider, req.model, req.credentialRef);
 
@@ -943,6 +961,19 @@ async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallRe
   // request compute the same digest. Isolation moved to where the spec puts it
   // — `tenantId` is in the Layer-2 IDENTITY preimage below.
   const providerKey = plainRequestDigest(req);
+
+  // RFC 0260 §B (ADR 1142 D3) — recipe 2, over the request the adapter receives:
+  // the messages `toChatMessages` builds and the sampling fields `sentSampling`
+  // forwards for this provider. Undefined while the flag is off.
+  const llmKeyInputs: KeyInputs = {
+    provider: keyProvider,
+    model: req.model,
+    messages: toChatMessages(req),
+    ...(req.responseSchema !== undefined ? { responseSchema: req.responseSchema } : {}),
+    sent: sentSampling(req.provider, req),
+  };
+  const llmCacheKey = storedLlmCacheKey(llmKeyInputs);
+  const llmOpts = llmCacheKey ? { llmCacheKey } : undefined;
 
   // RFC 0150 §B — the LOGICAL EFFECT IDENTITY. The ordinal is allocated once
   // per logical activity and rewinds at each node attempt, so attempt 2's first
@@ -1034,16 +1065,23 @@ async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallRe
       logicalInvocationOrdinal,
       providerKey,
     });
-    cached = (await invocationLog.get({
-      ...cacheKey,
-      runId: scope.replayInvocationsFromRunId,
-      invocationId: sourceInvocationId,
-    })) as InvocationRecord | null;
+    const sourceRecordKey = { ...cacheKey, runId: scope.replayInvocationsFromRunId, invocationId: sourceInvocationId };
+    cached = (await invocationLog.get(sourceRecordKey)) as InvocationRecord | null;
+    // RFC 0260 §C.3 (ADR 1142 D8) — a source record names the recipe it was keyed
+    // by. One keyed by recipe 2 is served only to an invocation whose recipe-2
+    // key equals it, whatever this host advertises now; one with no key was
+    // recorded under RFC 0041's recipe and keeps that matching. The copy below
+    // carries the SOURCE key verbatim, never a recomputed one.
+    const sourceLlmKey = cached ? await invocationLog.llmCacheKey(sourceRecordKey) : null;
+    if (cached && !recipe2Matches(sourceLlmKey, llmKeyInputs)) {
+      log.info('replay source record keyed by a different recipe-2 key; dispatching live', { runId: scope.runId, nodeId: scope.nodeId });
+      cached = null;
+    }
     // Copy-on-read: land the parent's record under THIS run's key so the
     // fork's log is self-contained — a fork-of-a-fork replays from its
     // immediate parent instead of live-dispatching (the fallback only ever
     // reaches ONE level up). Best-effort like the failure-record write.
-    if (cached) await invocationLog.put(cacheKey, cached).catch(() => undefined);
+    if (cached) await invocationLog.put(cacheKey, cached, sourceLlmKey ? { llmCacheKey: sourceLlmKey } : undefined).catch(() => undefined);
     // RFC 0041 §C — the replay's OBSERVABLE sequence must be byte-equivalent
     // to the source's (modulo per-event volatiles). A live dispatch emits
     // `provider.usage`; a cache-hit replay must too, and regenerating it
@@ -1114,7 +1152,7 @@ async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallRe
     // (provider messages can echo key material — SR-1); the write is
     // best-effort and never masks the original throw.
     const envelope = failureEnvelopeFor(err);
-    if (envelope) await invocationLog.put(cacheKey, envelope).catch(() => undefined);
+    if (envelope) await invocationLog.put(cacheKey, envelope, llmOpts).catch(() => undefined);
     throw err;
   }
 
@@ -1137,7 +1175,7 @@ async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallRe
   // `result` from dispatch* never carries `credentialRefHashed`, so
   // caching `{...result}` is already secret-free. The hashed ref is
   // re-attached for the current return value below.
-  await invocationLog.put(cacheKey, result);
+  await invocationLog.put(cacheKey, result, llmOpts);
   return { ...result, credentialRefHashed };
 }
 
@@ -1198,12 +1236,24 @@ async function callAIWithTools(scope: AdapterScope, req: AiToolCallRequest): Pro
   const { cleartext: credentialCleartext, refUsed } = resolveCredential(scope, req.provider, req.credentialRef);
   const credentialRefHashed = sha256Hex(refUsed);
 
-  const served = await viaReplayLane(scope, toolsRoundDigest(req), decodeAiToolCallResult, () => dispatchByokTools(scope, req, credentialCleartext));
+  // ADR 1142 D3 — the tool definitions are computed once, so the round sends
+  // exactly what the recipe-2 key hashes.
+  const sentTools = sentToolsFor(scope, req);
+  const served = await viaReplayLane(scope, toolsRoundDigest(req), decodeAiToolCallResult, () => dispatchByokTools(scope, req, credentialCleartext, sentTools),
+    { provider: req.provider, model: req.model, messages: toChatMessages(req), tools: sentTools, sent: sentSampling(req.provider, req) });
   return { ...served, credentialRefHashed };
 }
 
+/** ADR 0148 A3 / ADR 1003 D4 — the tool definitions a round sends, through the
+ *  one diet funnel. ADR 1142 D3: computed once per round, so the dispatch and the
+ *  recipe-2 key see the same array. */
+function sentToolsFor(scope: AdapterScope, req: AiToolCallRequest) {
+  return dietToolSurface(req.tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })), scope.tenantId);
+}
+type SentTools = ReturnType<typeof sentToolsFor>;
+
 /** The live BYOK tools round behind `callAIWithTools`. */
-async function dispatchByokTools(scope: AdapterScope, req: AiToolCallRequest, credentialCleartext: string): Promise<{ result: AiToolCallResult; usage?: ProviderUsagePayload }> {
+async function dispatchByokTools(scope: AdapterScope, req: AiToolCallRequest, credentialCleartext: string, sentTools: SentTools): Promise<{ result: AiToolCallResult; usage?: ProviderUsagePayload }> {
   // ADR 1012 — the provider runs this search; a replay miss must not reach it.
   if (req.webSearch) assertEffectAllowed('network-egress', `native-web-search ${req.provider}`);
   const result = await wrapInSpan(scope, req.provider, req.model, async () => {
@@ -1219,7 +1269,8 @@ async function dispatchByokTools(scope: AdapterScope, req: AiToolCallRequest, cr
           // annotations before the catalog reaches the model (gated; off ⇒
           // unchanged). Sibling site: host/conversationToolLoop.ts (managed chat).
           // ADR 1003 D4 — through the one funnel that also reports what it did.
-          tools: dietToolSurface(req.tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })), scope.tenantId),
+          // ADR 1142 D3 — computed by the caller, once, and hashed as sent.
+          tools: sentTools,
           ...(req.webSearch ? { webSearch: true } : {}),
           // ADR 1003 D3 — dispatcher hint, outside `toolsRoundDigest`'s preimage.
           ...(req.cacheConversation ? { cacheConversation: true } : {}),
@@ -1272,7 +1323,8 @@ async function callAIManaged(scope: AdapterScope, req: AiCallRequest): Promise<A
   }
   const credentialRefHashed = sha256Hex(req.credentialRef!);
   // ADR 1002 — recorded, and served on the replay lane, like a BYOK call.
-  const served = await viaReplayLane(scope, plainRequestDigest(req), decodeAiCallResult, () => dispatchManagedPlain(scope, req));
+  const served = await viaReplayLane(scope, plainRequestDigest(req), decodeAiCallResult, () => dispatchManagedPlain(scope, req),
+    { provider: req.provider, model: req.model, messages: toChatMessages(req), sent: sentSampling(req.provider, req) });
   return { ...served, credentialRefHashed };
 }
 
@@ -1335,12 +1387,14 @@ async function dispatchManagedPlain(scope: AdapterScope, req: AiCallRequest): Pr
 async function callAIWithToolsManaged(scope: AdapterScope, req: AiToolCallRequest): Promise<AiToolCallResult> {
   const credentialRefHashed = sha256Hex(req.credentialRef!);
   // ADR 1002 — recorded, and served on the replay lane, like the BYOK round.
-  const served = await viaReplayLane(scope, toolsRoundDigest(req), decodeAiToolCallResult, () => dispatchManagedTools(scope, req));
+  const sentTools = sentToolsFor(scope, req);
+  const served = await viaReplayLane(scope, toolsRoundDigest(req), decodeAiToolCallResult, () => dispatchManagedTools(scope, req, sentTools),
+    { provider: req.provider, model: req.model, messages: toChatMessages(req), tools: sentTools, sent: sentSampling(req.provider, req) });
   return { ...served, credentialRefHashed };
 }
 
 /** The live managed tools round behind `callAIWithToolsManaged`. */
-async function dispatchManagedTools(scope: AdapterScope, req: AiToolCallRequest): Promise<{ result: AiToolCallResult; usage?: ProviderUsagePayload }> {
+async function dispatchManagedTools(scope: AdapterScope, req: AiToolCallRequest, sentTools: SentTools): Promise<{ result: AiToolCallResult; usage?: ProviderUsagePayload }> {
   // ADR 1012 — see `dispatchByokTools`.
   if (req.webSearch) assertEffectAllowed('network-egress', `native-web-search ${req.provider}`);
   const userFacingProvider = managedProviderIdFromRef(req.credentialRef!);
@@ -1351,8 +1405,9 @@ async function dispatchManagedTools(scope: AdapterScope, req: AiToolCallRequest)
       runId: scope.runId, // ADR 0821 D4 — see callAIManaged
       ...(scope.actingUserId ? { actingSubject: scope.actingUserId } : {}),
       messages: toChatMessages(req),
-      // ADR 0148 A3, same diet as the BYOK round (ADR 1003 D4 funnel).
-      tools: dietToolSurface(req.tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })), scope.tenantId),
+      // ADR 0148 A3, same diet as the BYOK round (ADR 1003 D4 funnel), computed
+      // once by the caller and hashed as sent (ADR 1142 D3).
+      tools: sentTools,
       ...(req.maxTokens != null ? { maxTokens: req.maxTokens } : {}),
       ...(req.cacheConversation ? { cacheConversation: true } : {}),
     });
@@ -2396,7 +2451,10 @@ async function dispatchPlain(
         model: req.model,
         apiKey,
         messages: toChatMessages(req),
-        ...(req.maxTokens != null ? { maxTokens: req.maxTokens } : {}),
+        // ADR 1142 D3/D4 — exactly the sampling fields this provider forwards,
+        // the same set the recipe-2 key hashes. Real providers get `maxTokens`
+        // only, as before; the conformance mock also receives `temperature`/`stop`.
+        ...sentSampling(req.provider, req),
         // ADR 0912 (Book AI P22) — ask the vendor for JSON natively where it can.
         ...(req.responseSchema !== undefined ? { jsonSchema: req.responseSchema } : {}),
         signal,
@@ -3097,10 +3155,12 @@ async function wrapInSpan<T extends AiCallResult | { usage?: { inputTokens?: num
     attributes: {
       'openwop.tenant_id': scope.tenantId,
       ...(scope.scopeId ? { 'openwop.scope_id': scope.scopeId } : {}),
-      'openwop.run_id': scope.runId,
+      'openwop.run_id': spanRunId(scope.runId, scope.tenantId),
       'openwop.node_id': scope.nodeId,
       'openwop.cost.provider': provider,
       'gen_ai.request.model': model,
+      // ADR 1146 D5 — the GenAI chat-call set, while the telemetry family is claimed.
+      ...genAiSpanAttributes(provider),
     },
   });
   try {
@@ -3110,6 +3170,7 @@ async function wrapInSpan<T extends AiCallResult | { usage?: { inputTokens?: num
     const usage = 'usage' in r ? r.usage : undefined;
     if (usage?.inputTokens != null) span.setAttribute('openwop.cost.tokens.input', usage.inputTokens);
     if (usage?.outputTokens != null) span.setAttribute('openwop.cost.tokens.output', usage.outputTokens);
+    span.setAttributes(genAiSpanAttributes(provider, usage));
     span.setStatus({ code: SpanStatusCode.OK });
     return r;
   } catch (err) {

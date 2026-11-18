@@ -120,7 +120,7 @@ describe('ADR 0544 matrix row 8 — inside a REAL shared workspace', () => {
 
     // ADMIN specifically — matrix row 8 says the subject rule holds "never merely
     // org-admin", so the strongest non-owner role is the one worth refusing.
-    const added = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, {
+    const added = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, {
       displayName: 'Colleague', subject: mateUserId, roles: ['admin'],
     });
     expect(added.status, `member add failed: ${JSON.stringify(added.body)}`).toBe(201);

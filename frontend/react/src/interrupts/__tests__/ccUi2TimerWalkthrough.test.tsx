@@ -9,8 +9,8 @@
  *
  * Pins: a timer shows when it resumes (absolute `until`, or createdAt + seconds);
  * a walkthrough/tour step points to Guided walkthroughs; neither shows the
- * "update the app" fallback; an unknown kind still does, without naming the
- * kind (control, ADR 1125 D1). Provenance
+ * "update the app" fallback; an unknown kind gets the generic fallback, which
+ * names no kind and links the activity log (control, ADR 1125 D1, #5843). Provenance
  * labels an open timer as waiting on a timer, an open approval as awaiting human.
  *
  * Red when: the two RenderInterrupt cases or the provenance timer branch are removed.
@@ -53,9 +53,16 @@ describe('CC-UI-2 — timer and walkthrough-step interrupts', () => {
   it('control: an unknown kind still shows the generic fallback', () => {
     renderIt(mk('something-new', {}));
     const text = screen.getByRole('status').textContent ?? '';
-    // ADR 1125 D1 — the fallback tells the person what to do, and never names the kind.
-    expect(text).toMatch(/update the app/i);
+    // ADR 1125 D1 + #5843 — the fallback names no kind, gives no untrue "update
+    // the app" advice, and offers the activity log as the action.
     expect(text).not.toMatch(/something-new/);
+    expect(text).not.toMatch(/administrator|update the app/i);
+    expect(screen.getByRole('link', { name: 'View the activity log' }).getAttribute('href')).toBe('/runs/r');
+  });
+
+  it('control: on the run page itself the fallback does not link to itself', () => {
+    render(<MemoryRouter initialEntries={['/runs/r']}><RenderInterrupt runId="r" active={mk('something-new', {})} onResolved={() => {}} /></MemoryRouter>);
+    expect(screen.queryByRole('link', { name: 'View the activity log' })).toBeNull();
   });
 });
 

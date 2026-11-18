@@ -24,6 +24,10 @@
  *
  * CC-AGENT-3 cases (below): red when the read-set check is removed (the
  * alternating pair runs every round) or never cleared by a write.
+ *
+ * #5932 (below): since the two rules became one write-generation rule, red when a
+ * write does not start a new generation, or when a repeated WRITE with only reads
+ * between is re-run (the A,B,A,B write/read loop).
  */
 import { describe, expect, it, vi } from 'vitest';
 import { runChatToolLoop, repeatedCallNote, TOOL_ROUNDS_EXHAUSTED, type CompiledTool } from '../src/host/agentDispatch.js';
@@ -136,5 +140,42 @@ describe('CC-AGENT-3 — a repeat of ANY read since the last write is answered, 
     const executeTool = vi.fn().mockResolvedValue({ content: 'ok' });
     await runChatToolLoop({ ...opts(6), toolEffect: () => undefined }, { callAIWithTools: m.callAIWithTools, executeTool });
     expect(ran(executeTool)).toEqual(['candidates', 'factory.run', 'candidates']);
+  });
+});
+
+// #5932 (casavoga-prod 370f6666) — A,B,A,B with one write and one read ran every
+// round: the write cleared the read set, and each call differed from the one
+// before it. A repeat now runs only if something wrote since it last ran.
+describe('#5932 — a repeat runs again only after a write since it last ran', () => {
+  const effects: Record<string, 'read' | 'write'> = { 'save-offer': 'write', 'get-offer': 'read', 'set-status': 'write' };
+  const optsE = (maxRounds: number) => ({ ...opts(maxRounds), tools: [tool('save-offer'), tool('get-offer'), tool('set-status')], toolEffect: (n: string) => effects[n] });
+  const ran = (fn: ReturnType<typeof vi.fn>) => fn.mock.calls.map((c) => (c[0] as { name: string }).name);
+
+  it('write, read, write, read with the same arguments runs each once, and the turn can answer', async () => {
+    const m = scripted([{ call: 'save-offer', input: { id: 'o1' } }, { call: 'get-offer', input: { id: 'o1' } }, { call: 'save-offer', input: { id: 'o1' } }, { call: 'get-offer', input: { id: 'o1' } }, { text: 'Saved.' }]);
+    const executeTool = vi.fn().mockResolvedValue({ content: 'ok' });
+    const res = await runChatToolLoop(optsE(6), { callAIWithTools: m.callAIWithTools, executeTool });
+    expect(ran(executeTool)).toEqual(['save-offer', 'get-offer']);
+    expect(lastUser(m.seen[3]!)).toBe(repeatedCallNote('save-offer'));
+    expect(lastUser(m.seen[4]!)).toBe(repeatedCallNote('get-offer'));
+    expect(res.finalText).toBe('Saved.');
+    expect(res.error).toBeUndefined();
+  });
+
+  it('a different write in between starts a new generation: the same write runs again', async () => {
+    const m = scripted([{ call: 'save-offer', input: { id: 'o1' } }, { call: 'set-status', input: { id: 'o1', s: 'sent' } }, { call: 'save-offer', input: { id: 'o1' } }, { text: 'Done.' }]);
+    const executeTool = vi.fn().mockResolvedValue({ content: 'ok' });
+    await runChatToolLoop(optsE(6), { callAIWithTools: m.callAIWithTools, executeTool });
+    expect(ran(executeTool)).toEqual(['save-offer', 'set-status', 'save-offer']);
+  });
+
+  it('a failed write still starts a new generation (it may have half-applied)', async () => {
+    const m = scripted([{ call: 'get-offer', input: { id: 'o1' } }, { call: 'save-offer', input: { id: 'o1' } }, { call: 'get-offer', input: { id: 'o1' } }, { text: 'Retried.' }]);
+    const executeTool = vi.fn()
+      .mockResolvedValueOnce({ content: 'ok' })
+      .mockResolvedValueOnce({ content: 'tool_execution_failed: conflict', isError: true })
+      .mockResolvedValueOnce({ content: 'ok' });
+    await runChatToolLoop(optsE(6), { callAIWithTools: m.callAIWithTools, executeTool });
+    expect(ran(executeTool)).toEqual(['get-offer', 'save-offer', 'get-offer']);
   });
 });

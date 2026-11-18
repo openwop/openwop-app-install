@@ -7,7 +7,8 @@
  * dropped; `withOrgCapacity` stops serializing check→write per tenant, counts
  * its bound from queue-join, or makes a writer pay a second bound; the run
  * surface stops applying the acting user's org scope (or the personal-root /
- * demo-only `default` shortcuts change).
+ * demo-only `default` shortcuts change); the per-org caps stop reading
+ * `OPENWOP_MEDIA_ORG_MAX_*` (#5928), or a bad value stops falling back to the default.
  */
 
 import http from 'node:http';
@@ -16,7 +17,7 @@ import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { buildMediaSurface } from '../src/features/media/surface.js';
-import { withOrgCapacity, __setCapacityWaitMs, createAsset } from '../src/features/media/mediaService.js';
+import { withOrgCapacity, __setCapacityWaitMs, createAsset, createCollection } from '../src/features/media/mediaService.js';
 import * as mediaStorage from '../src/features/media/mediaStorage.js';
 import { storeMediaAsset } from '../src/host/inMemorySurfaces.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
@@ -109,7 +110,7 @@ async function ownerWithViewer(roles: string[] = ['viewer']): Promise<{ owner: C
   const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId;
-  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Viewer', subject: viewerUser.userId, roles });
+  const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Viewer', subject: viewerUser.userId, roles });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, viewer, viewerId: viewerUser.userId, orgId, tenantId, ownerId: ownerUser.userId };
 }
@@ -201,6 +202,42 @@ describe('ADR 0818 — media access + quota probes', () => {
         });
       })));
     expect(raced.filter((r) => r.status === 'fulfilled').length, 'serialized check→write: exactly four fit').toBe(4);
+  });
+
+  it('the per-org caps are set per deployment (#5928), and a bad value keeps the default', async () => {
+    const png = (seed: number, size = 64) => ({ contentBase64: blob(size, seed), contentType: 'image/png', name: `o${seed}.png` });
+    try {
+      process.env.OPENWOP_MEDIA_ORG_MAX_ASSETS = '2';
+      const { owner, orgId } = await ownerWithViewer();
+      expect((await owner.post(m(orgId, '/assets'), png(60))).status).toBe(201);
+      expect((await owner.post(m(orgId, '/assets'), png(61))).status).toBe(201);
+      const third = await owner.post(m(orgId, '/assets'), png(62));
+      expect(third.status, JSON.stringify(third.body)).toBe(409);
+      expect(third.body.details?.max).toBe(2);
+      process.env.OPENWOP_MEDIA_ORG_MAX_ASSETS = 'lots';
+      expect((await owner.post(m(orgId, '/assets'), png(63))).status, 'non-numeric: the default 1000 applies').toBe(201);
+      delete process.env.OPENWOP_MEDIA_ORG_MAX_ASSETS;
+
+      // Under the file's 4 KiB workspace cap, so the refusal is the ORG's.
+      process.env.OPENWOP_MEDIA_ORG_MAX_BYTES = String(2 * 1024);
+      const b = await ownerWithViewer();
+      expect((await b.owner.post(m(b.orgId, '/assets'), png(70, 1536))).status).toBe(201);
+      const over = await b.owner.post(m(b.orgId, '/assets'), png(71, 1024));
+      expect(over.status, JSON.stringify(over.body)).toBe(409);
+      expect(over.body.details?.maxBytes).toBe(2 * 1024);
+      expect(over.body.details?.scope, 'the ORG cap refused it').toBeUndefined();
+
+      process.env.OPENWOP_MEDIA_ORG_MAX_COLLECTIONS = '1';
+      const c = await ownerWithViewer();
+      await createCollection(c.tenantId, c.orgId, 'Exteriors', c.ownerId);
+      await expect(createCollection(c.tenantId, c.orgId, 'Rooms', c.ownerId)).rejects.toMatchObject({ httpStatus: 409, details: { max: 1 } });
+      process.env.OPENWOP_MEDIA_ORG_MAX_COLLECTIONS = '0';
+      await expect(createCollection(c.tenantId, c.orgId, 'Rooms', c.ownerId), 'zero: the default 200 applies').resolves.toMatchObject({ name: 'Rooms' });
+    } finally {
+      delete process.env.OPENWOP_MEDIA_ORG_MAX_ASSETS;
+      delete process.env.OPENWOP_MEDIA_ORG_MAX_BYTES;
+      delete process.env.OPENWOP_MEDIA_ORG_MAX_COLLECTIONS;
+    }
   });
 
   it('a run acting for a VIEWER cannot write into the org through the workflow surface', async () => {

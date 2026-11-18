@@ -131,3 +131,34 @@ describe('ReadableJson — untyped JSON under review', () => {
     expect(humanizeKey('stable-activity-id')).toBe('Stable activity id');
   });
 });
+
+describe('issue 5844 — an approval artifact reads as a document, not a data dump', () => {
+  const HASH = 'a'.repeat(64);
+  it('a gate-bundled { artifact: { markdown, contentHash } } shows rendered markdown and no checksum on its face', () => {
+    const { container } = show({ artifact: { markdown: '# Who buys it: Kitchen\n\nThe **buyer** is the household.', contentHash: HASH } });
+    expect(container.querySelector('h1')?.textContent).toBe('Who buys it: Kitchen');
+    expect(container.querySelector('strong')?.textContent).toBe('buyer');
+    const face = container.querySelector('.readable-json-root')!;
+    const details = face.querySelector('details')!;
+    const faceText = (face.textContent ?? '').replace(details.textContent ?? '', '');
+    expect(faceText, 'no unrendered markdown on the face').not.toMatch(/# Who|\*\*/);
+    expect(faceText, 'no checksum on the face').not.toContain(HASH);
+    expect(faceText, 'the wrapper key is not a row').not.toMatch(/^Artifact/);
+    expect(details.textContent, 'every saved field is still there').toContain(HASH);
+  });
+
+  it('markdown stays inert: a link shows as text and an image as its alt text', () => {
+    const { container } = show({ markdown: '# T\n\nSee [the site](https://example.test/x) ![pixel](https://tracker.test/p.png)' });
+    const face = container.querySelector('.readable-json__prose')!;
+    expect(face.querySelector('a')).toBeNull();
+    expect(face.querySelector('img')).toBeNull();
+    expect(face.textContent).toContain('the site (https://example.test/x)');
+    expect(face.textContent).toContain('[pixel]');
+  });
+
+  it('plain multi-line text keeps the text path', () => {
+    const { container } = show({ note: 'line one\nline two' });
+    expect(container.querySelector('.readable-json__prose')).toBeNull();
+    expect(screen.getByText(/line one/)).toBeTruthy();
+  });
+});

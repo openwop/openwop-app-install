@@ -57,6 +57,8 @@ export const messages = {
   wordmarkEmphasisLabel: 'énfasis',
   wordmarkSubLabel: 'sub',
   documentTitleLabel: 'Título del documento',
+  footerTextLabel: 'Texto del pie de página',
+  footerTextHelp: 'Se muestra antes de los enlaces del pie de página de la app. Déjalo vacío para no mostrar ninguno.',
   logoHeading: 'Logotipo',
   logoUrlLabel: 'URL del logotipo',
   logoUrlHelp: 'Una URL https, una ruta /relativa o un URI data:image. La subida llegará con Media.',

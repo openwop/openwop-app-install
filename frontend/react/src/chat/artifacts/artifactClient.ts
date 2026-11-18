@@ -82,6 +82,15 @@ export async function listChatTurnArtifacts(conversationRunId: string, turnMessa
   return res.artifacts;
 }
 
+/** ADR 1040 D7 F3 — the display summaries one chat turn's tool calls recorded
+ *  (a host channel; never on the tool-return wire event). Gated by the
+ *  conversation read predicate; empty for anyone who cannot read it. */
+export async function listChatTurnToolSummaries(conversationRunId: string, turnMessageId: string): Promise<Array<{ callId: string; toolName: string; summary: string }>> {
+  const q = new URLSearchParams({ conversationRunId, turnMessageId });
+  const res = await http<{ summaries?: Array<{ callId: string; toolName: string; summary: string }> }>(`/host/openwop-app/chat/tool-summaries?${q.toString()}`);
+  return Array.isArray(res.summaries) ? res.summaries : [];
+}
+
 export async function listArtifacts(opts: { limit?: number; cursor?: string } = {}): Promise<ArtifactPage> {
   const q = new URLSearchParams();
   if (opts.limit != null) q.set('limit', String(opts.limit));

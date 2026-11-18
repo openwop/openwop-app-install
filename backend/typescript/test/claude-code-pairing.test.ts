@@ -302,7 +302,7 @@ describe('ADR 0785 P1 — abuse bounds + erasure', () => {
 
   it('approval is refused, with a reason a person can act on, when the workspace is at its key ceiling', async () => {
     const owner = await person();
-    for (let i = 0; i < 100; i += 1) await issueApiKey({ tenantId: owner.tenantId, name: `k${i}`, createdBy: owner.userId });
+    for (let i = 0; i < 100; i += 1) await issueApiKey({ scopes: ['*'], tenantId: owner.tenantId, name: `k${i}`, createdBy: owner.userId });
     const started = await startPairing('full');
     const r = await owner.c.post(`${BASE_PATH}/pair/requests/${started.userCode}/approve`, { consentHash: consentHash() });
     expect(r.status).toBe(409);

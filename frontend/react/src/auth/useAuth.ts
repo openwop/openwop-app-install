@@ -16,7 +16,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { reconcileRestoredSession } from './finalizeSession.js';
 import { adoptLocalContentForSubject } from './localContentAdoption.js';
-import { recordShellIdentity } from './shellIdentity.js';
+import { isForeignSignIn, isForeignSignOut, recordShellIdentity } from './shellIdentity.js';
+import { reloadIntoSession } from './reloadIntoSession.js';
 import { isStorageSubjectResolved } from '../platform/storage.js';
 import {
   type AuthUser,
@@ -60,6 +61,12 @@ export function useAuth(): UseAuth {
       return;
     }
     const unsubscribe = onAuthChanged((u) => {
+      // Issue 5842 — another tab signed in as someone else: this shell's mount-time
+      // reads belong to the old identity, so reload into the new one. Checked before
+      // the first-emission record, which it never changes.
+      // Issue 6043 — and a sign-out elsewhere: the signed-out account's data must not
+      // stay on screen.
+      if (isForeignSignIn(u?.uid ?? null) || isForeignSignOut(u?.uid ?? null)) { reloadIntoSession(); return; }
       // KT-AUTH-1 — first emission only: who this page's shell mounted as.
       recordShellIdentity(u?.uid ?? null);
       // ADR 0434 Phase 3 — ONE writer for the storage subject. Every `content`

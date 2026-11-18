@@ -15,6 +15,7 @@ import { Trans, useTranslation } from 'react-i18next';
 import { slugify } from './agentUi.js';
 import { Link, useNavigate } from 'react-router-dom';
 import { listAgents, type AgentEntry } from '../client/agentsClient.js';
+import { handleName, isFixtureAgent } from '../client/agentHandles.js';
 import { listRoster } from './rosterClient.js';
 import { PageHeader } from '../ui/PageHeader.js';
 import { DataTable, type DataColumn } from '../ui/DataTable.js';
@@ -71,7 +72,8 @@ export function AgentsPage(): JSX.Element {
         ]);
         if (isCancelled()) return;
         const advisorAgentIds = new Set(advisorRoster.map((e) => e.agentRef.agentId));
-        const visible = agents.filter((a) => !advisorAgentIds.has(a.agentId));
+        // Issue 5799 — smoke-fixture agents are not templates a person installs.
+        const visible = agents.filter((a) => !advisorAgentIds.has(a.agentId) && !isFixtureAgent(a));
         setState({ agents: visible, isLoading: false, error: null, filterUnavailable });
       } catch (err) {
         if (isCancelled()) return;
@@ -111,7 +113,7 @@ export function AgentsPage(): JSX.Element {
         <div className="u-flex u-flex-col u-gap-1">
           <div className="u-flex u-items-baseline u-gap-3 u-wrap">
             <strong className="u-fs-14">{a.label || a.persona}</strong>
-            <code className="muted u-fs-11">@{slugify(a.persona)}</code>
+            <code className="muted u-fs-11">@{slugify(handleName(a))}</code>
           </div>
           {a.description ? <span className="muted u-fs-12">{a.description}</span> : null}
         </div>

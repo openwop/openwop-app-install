@@ -62,7 +62,7 @@ describe('dealers P3 — governed surface write + reads', () => {
     const editor = client();
     const editorId = (await editor.post('/host/openwop-app/test/login', { email: `e-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
     const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: editorId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: editorId, roles: ['editor'] });
     const B = `/host/openwop-app/dealers/orgs/${encodeURIComponent(orgId)}`;
     const companyId = (await owner.post(`/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/companies`, { name: 'DCo' })).body.companyId;
     const dealerId = (await owner.post(`${B}/dealers`, { name: 'D', companyId })).body.dealerId;

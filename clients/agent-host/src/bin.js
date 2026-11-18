@@ -7,6 +7,10 @@
 //
 //   openwop-agent-host run [--root <dir>]
 //
+//   openwop-agent-host pair --browser [--host <url>]      ADR 1136 P2b: pair this machine's browser
+//   openwop-agent-host browser                            open the browser the app's agent can drive
+//   openwop-agent-host status --browser | unpair --browser
+//
 // Pairing gives this machine a developer key for the workspace; `run` hosts the
 // terminal sessions (P2) and app-dispatched tasks (P5).
 // The companion connects OUT; it never opens a listening port.
@@ -20,7 +24,10 @@ import { nodePtyFactory } from './ptySessions.js';
 import { writeClaudeConfig } from './claudeConfig.js';
 import { runPermissionHook } from './permissionHook.js';
 import { TaskRunner } from './taskRunner.js';
-import { clearCredential, defaultHome, loadCredential, saveCredential, setStreamBase } from './credentialStore.js';
+import { browserHome, clearCredential, defaultHome, loadCredential, saveCredential, setStreamBase } from './credentialStore.js';
+import { brandedDefaults } from './branding.js';
+import { randomBytes } from 'node:crypto';
+import { join } from 'node:path';
 
 function parseArgs(argv) {
   const [command, ...rest] = argv;
@@ -37,11 +44,13 @@ const out = (s) => process.stdout.write(`${s}\n`);
 const err = (s) => process.stderr.write(`${s}\n`);
 
 async function pair(opts) {
-  if (!opts.host) { err('Usage: openwop-agent-host pair --host https://your-app.example.com'); return 2; }
-  const host = normalizeHost(opts.host);
+  const kind = opts.browser ? 'browser' : 'terminal';
+  const hostArg = typeof opts.host === 'string' ? opts.host : brandedDefaults().defaultHost;
+  if (!hostArg) { err('Usage: openwop-agent-host pair --host https://your-app.example.com'); return 2; }
+  const host = normalizeHost(hostArg);
   const apiBase = typeof opts['api-base'] === 'string' ? opts['api-base'] : (process.env.OPENWOP_AGENT_HOST_API_BASE ?? '');
   const label = typeof opts.label === 'string' ? opts.label : hostname();
-  const started = await startPairing({ host, apiBase, label, platform: `${platform()}-${arch()}` });
+  const started = await startPairing({ host, apiBase, label, platform: `${platform()}-${arch()}`, capability: kind });
   out('');
   out(`  Your pairing code:  ${started.userCode}`);
   out('');
@@ -50,20 +59,21 @@ async function pair(opts) {
   out('  you a pairing link with a code already in it, do not approve it.)');
   out(`  (the code expires in ${Math.round(started.expiresIn / 60)} minutes)`);
   out('');
-  out('  Tip: signing Claude Code in with an Anthropic API key is the supported path.');
+  if (kind === 'browser') out('  This pairs a BROWSER only: it cannot run Claude Code or read the workspace.');
+  else out('  Tip: signing Claude Code in with an Anthropic API key is the supported path.');
   out('');
   const result = await waitForApproval({ host, apiBase, deviceCode: started.deviceCode, interval: started.interval, expiresIn: started.expiresIn });
   if (result.status === 'denied') { err('The pairing was denied. Nothing was stored.'); return 1; }
   if (result.status === 'failed') { err(`The pairing was approved, but ${result.message ?? 'the device key could not be issued.'} Nothing was stored.`); return 1; }
   if (result.status !== 'approved') { err('The code expired before it was approved. Run pair again.'); return 1; }
   const streamBase = await discoverStreamBase(apiRootFor(host, apiBase));
-  const { tokenIn } = saveCredential({ host, apiBase, ...(streamBase ? { streamBase } : {}), token: result.token, deviceId: result.deviceId, tenantId: result.tenantId, expiresAt: result.expiresAt });
+  const { tokenIn } = saveCredential({ home: kind === 'browser' ? browserHome() : defaultHome(), kind, host, apiBase, ...(streamBase ? { streamBase } : {}), token: result.token, deviceId: result.deviceId, tenantId: result.tenantId, expiresAt: result.expiresAt });
   out(`Paired. Device ${result.deviceId}; key stored in the ${tokenIn === 'keychain' ? 'macOS keychain' : `file ${defaultHome()}/credentials.json (mode 0600)`}.`);
   return 0;
 }
 
-function status() {
-  const c = loadCredential();
+function status(opts = {}) {
+  const c = loadCredential(opts.browser ? { home: browserHome() } : {});
   if (!c) { out('Not paired. Run: openwop-agent-host pair --host https://your-app.example.com'); return 1; }
   out(`Paired with ${c.host}`);
   out(`  device:  ${c.deviceId}`);
@@ -120,6 +130,39 @@ async function run(opts) {
   });
 }
 
+/** ADR 1136 P2b — open the person's own browser for the app's browser agent. */
+async function browser(_opts) {
+  const c = loadCredential({ home: browserHome() });
+  if (!c?.token) { err('No browser is paired. Run: openwop-agent-host pair --browser --host https://your-app.example.com'); return 1; }
+  if (c.kind !== 'browser') { err('That pairing is not a browser pairing. Run: openwop-agent-host pair --browser'); return 1; }
+  const { loadPlaywright, PlaywrightBrowserExecutor } = await import('./browserExecutor.js');
+  const pw = await loadPlaywright();
+  if (!pw.ok) { err(pw.reason); return 1; }
+  const discovered = await discoverStreamBase(apiRootFor(c.host, c.apiBase));
+  if (discovered && discovered !== c.streamBase) { setStreamBase({ home: browserHome(), streamBase: discovered }); c.streamBase = discovered; }
+  const apiRoot = serviceRootFor(c);
+  // One profile per pairing: never the person's everyday browser profile.
+  const profileDir = join(browserHome(), 'profiles', `${c.tenantId ?? 'workspace'}-${c.deviceId ?? 'device'}`.replace(/[^A-Za-z0-9_.-]/g, '_'));
+  const executorId = `ex_${randomBytes(9).toString('base64url')}`;
+  const executor = new PlaywrightBrowserExecutor({ chromium: pw.chromium, profileDir, executorId, log: (m) => out(`[browser] ${m}`) });
+  try {
+    await executor.start();
+  } catch (e) {
+    err(`Could not open Chrome: ${e instanceof Error ? e.message : String(e)}. Install Google Chrome, then try again.`);
+    return 1;
+  }
+  const daemon = new AgentHostDaemon({ mode: 'browser', browser: { executor, executorId }, apiRoot, token: c.token, root: browserHome(), log: (m) => out(`[agent-host] ${m}`) });
+  out(`[agent-host] browser ${executorId} for device ${c.deviceId}; connecting through ${apiRoot}`);
+  out('[agent-host] the agent acts only in the window that just opened. Close it, or press Ctrl+C, to stop.');
+  daemon.start();
+  return new Promise((done) => {
+    const quit = () => { daemon.stop(); void executor.stop().then(() => done(0)); };
+    process.once('SIGINT', quit);
+    process.once('SIGTERM', quit);
+    executor.context?.on('close', quit);
+  });
+}
+
 /** `headersHelper` for Claude Code's MCP connection: print the Authorization header
  *  as JSON. Reads the key from the credential store at call time, so it never has
  *  to live in a config file or the environment. */
@@ -141,8 +184,8 @@ async function permissionHook() {
   return 0;
 }
 
-function unpair() {
-  const c = clearCredential();
+function unpair(opts = {}) {
+  const c = clearCredential(opts.browser ? { home: browserHome() } : {});
   if (!c) { out('Not paired; nothing to forget.'); return 0; }
   out(`Forgot the pairing with ${c.host} on this machine.`);
   out(`To revoke the key itself, open ${c.host}/claude-code and choose Revoke.`);
@@ -153,18 +196,21 @@ async function main() {
   const { command, opts } = parseArgs(process.argv.slice(2));
   switch (command) {
     case 'pair': return pair(opts);
-    case 'status': return status();
+    case 'status': return status(opts);
     case 'run': return run(opts);
     case 'mcp-headers': return mcpHeaders();
     case 'permission-hook': return permissionHook();
-    case 'unpair': return unpair();
+    case 'unpair': return unpair(opts);
+    case 'browser': return browser(opts);
     default:
       out('openwop-agent-host — the Claude Code companion (ADR 0785)');
       out('  pair --host <url> [--label <name>]                      pair this machine with a workspace (the app finds its backend;');
       out('                                                          --api-base <url> overrides it)');
       out('  run [--root <dir>]                                      connect and host Claude Code sessions (in <dir>, default: here)');
-      out('  status                                                  show this machine\'s pairing');
-      out('  unpair                                                  forget the pairing here');
+      out('  status [--browser]                                      show this machine\'s pairing');
+      out('  unpair [--browser]                                      forget the pairing here');
+      out('  pair --browser [--host <url>]                           pair this machine\'s browser for the browser agent (ADR 1136)');
+      out('  browser                                                 open the browser the agent drives (a separate Chrome window)');
       return command ? 2 : 0;
   }
 }

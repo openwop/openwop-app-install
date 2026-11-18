@@ -57,6 +57,8 @@ export const messages = {
   wordmarkEmphasisLabel: 'ênfase',
   wordmarkSubLabel: 'sub',
   documentTitleLabel: 'Título do documento',
+  footerTextLabel: 'Texto do rodapé',
+  footerTextHelp: 'Aparece antes dos links no rodapé do app. Deixe vazio para não mostrar nenhum.',
   logoHeading: 'Logotipo',
   logoUrlLabel: 'URL do logotipo',
   logoUrlHelp: 'Uma URL https, um caminho /relativo ou um URI data:image. Upload chega com Media.',

@@ -120,7 +120,7 @@ describe('ADR 0278 — canonical board conversation', () => {
     // A second user in the SAME tenant, granted org membership (editor scope).
     const member = client();
     const memberUser = await login(member, tenantId);
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
 
     // Join = the member's open resolves the SAME conversation…
     const joined = await member.post<Opened>(`${A}/boards/${encodeURIComponent(boardId)}/chat`);

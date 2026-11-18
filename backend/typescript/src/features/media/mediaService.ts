@@ -229,7 +229,18 @@ async function assetsForOrg(tenantId: string, orgId: string): Promise<MediaAsset
   return (await assets.listForTenantIndexed(tenantId)).filter((a) => a.tenantId === tenantId && a.orgId === orgId);
 }
 
-const MAX = { name: 120, tag: 48, tags: 24, perOrgAssets: 1000, perOrgCollections: 200, perOrgBytes: 256 * 1024 * 1024, lineagePrompt: 2000, lineageRightsNote: 400, lineageModel: 120, lineageRef: 128 } as const;
+const MAX = { name: 120, tag: 48, tags: 24, lineagePrompt: 2000, lineageRightsNote: 400, lineageModel: 120, lineageRef: 128 } as const;
+
+/** #5928 — the per-org caps, operator-tunable like the workspace byte cap (ADR 0818 §3)
+ *  and read per call, so tests and ops can move them. A missing, non-numeric or
+ *  non-positive value keeps the default. */
+function envCap(name: string, fallback: number): number {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : fallback;
+}
+const orgMaxAssets = (): number => envCap('OPENWOP_MEDIA_ORG_MAX_ASSETS', 1000);
+const orgMaxCollections = (): number => envCap('OPENWOP_MEDIA_ORG_MAX_COLLECTIONS', 200);
+const orgMaxBytes = (): number => envCap('OPENWOP_MEDIA_ORG_MAX_BYTES', 256 * 1024 * 1024);
 
 /** Sentinel `?collectionId=` value selecting UNCATEGORIZED assets (those with no
  *  collection) — so the filter happens server-side, not over the wire. */
@@ -243,12 +254,14 @@ export const UNCATEGORIZED = 'none';
 export async function assertOrgCapacity(tenantId: string, orgId: string, addBytes: number): Promise<void> {
   const tenantAssets = await listAssetsForTenant(tenantId); // DEBT-2 — bounded tenant read, not a cross-tenant scan
   const orgAssets = tenantAssets.filter((a) => a.orgId === orgId);
-  if (orgAssets.length >= MAX.perOrgAssets) {
-    throw new OpenwopError('validation_error', `This org has the maximum ${MAX.perOrgAssets} assets.`, 409, { max: MAX.perOrgAssets });
+  const maxAssets = orgMaxAssets();
+  if (orgAssets.length >= maxAssets) {
+    throw new OpenwopError('validation_error', `This org has the maximum ${maxAssets} assets.`, 409, { max: maxAssets });
   }
   const totalBytes = orgAssets.reduce((sum, a) => sum + a.sizeBytes, 0);
-  if (totalBytes + addBytes > MAX.perOrgBytes) {
-    throw new OpenwopError('validation_error', `This org has reached its media storage limit (${Math.round(MAX.perOrgBytes / (1024 * 1024))} MiB).`, 409, { maxBytes: MAX.perOrgBytes });
+  const maxBytes = orgMaxBytes();
+  if (totalBytes + addBytes > maxBytes) {
+    throw new OpenwopError('validation_error', `This org has reached its media storage limit (${Math.round(maxBytes / (1024 * 1024))} MiB).`, 409, { maxBytes });
   }
   // ADR 0818 §3 — the per-org cap alone is not a quota: creating another org
   // reset it, so a workspace's storage was unbounded. The workspace total is
@@ -510,8 +523,9 @@ export function viewAsset(a: MediaAsset): MediaAssetView {
 
 export async function createCollection(tenantId: string, orgId: string, name: string, createdBy: string): Promise<MediaCollection> {
   const existing = (await collections.listForTenantIndexed(tenantId)).filter((c) => c.tenantId === tenantId && c.orgId === orgId);
-  if (existing.length >= MAX.perOrgCollections) {
-    throw new OpenwopError('validation_error', `This org has the maximum ${MAX.perOrgCollections} collections.`, 409, { max: MAX.perOrgCollections });
+  const maxCollections = orgMaxCollections();
+  if (existing.length >= maxCollections) {
+    throw new OpenwopError('validation_error', `This org has the maximum ${maxCollections} collections.`, 409, { max: maxCollections });
   }
   const c: MediaCollection = {
     collectionId: `mcol:${randomUUID()}`,

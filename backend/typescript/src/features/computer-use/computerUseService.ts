@@ -279,8 +279,11 @@ export async function startTask(adapter: ComputerUseAdapter, input: StartTaskInp
     steps: [], createdBy: input.createdBy, ...(input.runId ? { runId: input.runId } : {}), createdAt: now, updatedAt: now,
   });
   if (claim.outcome === 'exists') {
-    // Replay/re-run: the recorded session is the truth — advance only if live.
+    // Replay/re-run: the recorded session is the truth — advance only if live,
+    // and only for the run that opened it (ADR 1136 P2a): a forked run lands on
+    // the same session id, and must read the record, never drive the browser.
     const s = claim.session;
+    if (!drivableBy(s, input.runId)) return view(s);
     return s.status === 'running' || s.status === 'starting' ? advance(adapter, s) : view(s);
   }
 
@@ -413,9 +416,25 @@ export async function advance(adapter: ComputerUseAdapter, session: CuSession): 
   return view(s); // per-call budget spent — still running; re-invoke resumes
 }
 
+/**
+ * ADR 1136 P2a (release-manager condition 4, the WFAWF-24 lesson) — a session is
+ * driven only by the run that opened it. A session id is a hash of the task's
+ * inputs, not of the run, so a `:fork` of a run re-executing its `task` node
+ * lands on the SAME session. That run reads the recorded view; it never polls
+ * the provider or the person's browser, and it never approves an action. It
+ * restricts driving, not stopping: a deny or an abort from any authorised path
+ * still ends the session (see `decide`). A session started outside a run (no
+ * `runId` recorded) keeps today's behaviour.
+ */
+export function drivableBy(s: Pick<CuSession, 'runId'>, runId: string | undefined): boolean {
+  return !s.runId || s.runId === runId;
+}
+
 export interface DecideInput {
   tenantId: string;
   sessionId: string;
+  /** The run deciding. A run other than the opener's reads the record only. */
+  runId?: string;
   approve: boolean;
   /** The run's person (`scope.actingUserId`). Must be the opener (D2). */
   actor: string;
@@ -442,6 +461,11 @@ export async function decide(adapter: ComputerUseAdapter, input: DecideInput): P
   const s = await getSession(input.tenantId, input.sessionId);
   if (!s) throw new OpenwopError('not_found', 'Session not found.', 404, { sessionId: input.sessionId });
   openerOnly(s, input.actor);
+  // Condition 4 restricts DRIVING, never STOPPING: an approve from another run
+  // reads the record, but a deny from any run the opener acts in still ends the
+  // session and aborts on the device. An off-switch only one run could press
+  // would fail the wrong way.
+  if (input.approve && !drivableBy(s, input.runId)) return view(s);
   if (s.status !== 'awaiting_approval' || !s.pendingAction || !s.providerSessionId) {
     throw new OpenwopError('conflict', `Session is ${s.status} — nothing awaiting approval.`, 409, { sessionId: s.sessionId, status: s.status });
   }
@@ -479,10 +503,11 @@ export async function decide(adapter: ComputerUseAdapter, input: DecideInput): P
 
 /** Resume a `running` session one advance further (the decide node's poll
  *  while the provider is still working, CU2CD-1). Opener-only, like decide. */
-export async function resumeSession(adapter: ComputerUseAdapter, input: { tenantId: string; sessionId: string; actor: string }): Promise<SessionView> {
+export async function resumeSession(adapter: ComputerUseAdapter, input: { tenantId: string; sessionId: string; actor: string; runId?: string }): Promise<SessionView> {
   const s = await getSession(input.tenantId, input.sessionId);
   if (!s) throw new OpenwopError('not_found', 'Session not found.', 404, { sessionId: input.sessionId });
   openerOnly(s, input.actor);
+  if (!drivableBy(s, input.runId)) return view(s);
   return advance(adapter, s);
 }
 

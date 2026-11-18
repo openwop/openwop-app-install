@@ -144,7 +144,7 @@ describe('the sole-admin self-approval ADR (D1) — the sole admin may approve t
     const { run, interruptId } = await gateRun({ campaign: soloCampaign, actingUserId: 'u-solo' });
     if (!interruptId) throw new Error('expected an open gate');
     await expect(resolveAndResume(storage, hostSuite, interruptId, { action: 'approve' }, { subjectRef: 'u-solo' })).rejects.toMatchObject(REFUSED);
-    const { key } = await issueApiKey({ tenantId: TENANT, name: 'solo key', createdBy: 'u-solo' });
+    const { key } = await issueApiKey({ scopes: ['*'], tenantId: TENANT, name: 'solo key', createdBy: 'u-solo' });
     await expect(resolveAndResume(storage, hostSuite, interruptId, { action: 'approve' }, { subjectRef: `apikey:${key.keyId}`, resolvedBy: session(`apikey:${key.keyId}`) })).rejects.toMatchObject({ httpStatus: 403 });
     expect((await storage.getInterrupt(interruptId))?.resolvedAt).toBeUndefined();
     expect(await statusOf(run.runId)).toBe('waiting-approval');

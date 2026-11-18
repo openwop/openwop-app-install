@@ -16,9 +16,10 @@
  *  - ADR 0605 Tier 1: an INCOMPLETE listing prunes nothing and is REPORTED (result,
  *    `lastError`, `lastRun`), never a silent clean run.
  *  - per-file failure isolation; a pruned file loses its KB doc AND its cursor. Prune
- *    cases clear `mDelete` before the pass under test, because the seed pass's
- *    delete-then-ingest already called it with the same document id (that stale call
- *    let a dropped prune pass these cases: probe w23g1-run-prune-delete, vacuous).
+ *    cases clear `mDelete` before the pass under test (a guard kept from when the seed
+ *    pass delete-then-ingested with the same document id: probe w23g1-run-prune-delete).
+ *  - #5770: a CHANGED file is upserted, never deleted first; a failed upsert deletes
+ *    nothing and keeps the old cursor, so the next pass replaces it.
  *  - ADR 0605 Tier 5 (`KSWF-2`/`KSWF-4`): a failure backs off with the source still
  *    SCHEDULED (its scheduler job stays enabled); only a run of failures is terminal
  *    (job disabled); the single-runner claim lives in `syncNow` (409 on a lost claim).
@@ -42,7 +43,7 @@ import { loadWorkflowChainPacks, defaultWorkflowChainPackRoots } from '../src/ho
 
 vi.mock('../src/features/connections/connectionsService.js', () => ({ getConnection: vi.fn() }));
 vi.mock('../src/host/knowledgeSourceFetch.js', () => ({ listFolder: vi.fn(), fetchKnowledgeSource: vi.fn(), fetchKnowledgeSourceBytes: vi.fn(), MAX_LIST_FILES: 1000 })); // the real cap, read by the runner's partial-listing message
-vi.mock('../src/features/kb/kbService.js', () => ({ ingestDocument: vi.fn(), deleteDocument: vi.fn(), getCollection: vi.fn(async () => ({ collectionId: 'col' })) }));
+vi.mock('../src/features/kb/kbService.js', () => ({ upsertDocument: vi.fn(), deleteDocument: vi.fn(), getCollection: vi.fn(async () => ({ collectionId: 'col' })) }));
 // ADR 1101 D3 — the pass-time org-write check, held open (its witness is knowledge-sync-pass-integrity.test.ts).
 vi.mock('../src/features/knowledge-sync/knowledgeSyncAccess.js', () => ({ passActorMayWrite: vi.fn(async () => true), holdsOrgScope: vi.fn(async () => true) })); // `getCollection` (ADR 0643 R4 Should 3): the runner resolves the target collection as the connection owner BEFORE listing/fetching — a readable stub here, so these tests keep exercising the per-file lanes
 
@@ -51,7 +52,7 @@ import {
   listFolder, fetchKnowledgeSource, fetchKnowledgeSourceBytes,
   type SyncFolderListing, type FetchedSource, type FetchedBytes,
 } from '../src/host/knowledgeSourceFetch.js';
-import { ingestDocument, deleteDocument, type KnowledgeDocument } from '../src/features/kb/kbService.js';
+import { upsertDocument, deleteDocument, type KnowledgeDocument } from '../src/features/kb/kbService.js';
 import { runKnowledgeSyncOnce, syncNow } from '../src/features/knowledge-sync/knowledgeSyncRunner.js';
 import {
   createSyncSource, getSyncSource, listFileStates, syncDocumentId, claimSyncRun,
@@ -65,7 +66,7 @@ const mConn = vi.mocked(getConnection);
 const mList = vi.mocked(listFolder);
 const mFetch = vi.mocked(fetchKnowledgeSource);
 const mBytes = vi.mocked(fetchKnowledgeSourceBytes);
-const mIngest = vi.mocked(ingestDocument);
+const mIngest = vi.mocked(upsertDocument); // #5770: a file is upserted (replaced in place), never delete-then-ingested
 const mDelete = vi.mocked(deleteDocument);
 const NOW = '2026-06-22T00:00:00.000Z';
 
@@ -135,11 +136,11 @@ describe('runKnowledgeSyncOnce (ADR 0107 Phase 3)', () => {
     // `documentId`/`contentTrust` non-caller-settable; asserting the split (rather
     // than `objectContaining` over one merged bag) is what makes a regression that
     // moves them back into `input` fail here instead of at runtime.
-    expect(mIngest).toHaveBeenCalledWith('tA', 'org1', 'user:owner', 'col',
-      expect.objectContaining({ text: 'hello world' }),
-      { documentId: syncDocumentId(source.id, 'a'), contentTrust: 'untrusted', silent: true }, OWNER_CALLER);
-    expect(mIngest.mock.calls[0]![4]).not.toHaveProperty('contentTrust');
-    expect(mIngest.mock.calls[0]![4]).not.toHaveProperty('documentId');
+    // `upsertDocument` takes the document id positionally and its input is in-process
+    // only (never a request body), so `contentTrust` rides in the input there.
+    expect(mIngest).toHaveBeenCalledWith('tA', 'org1', 'col', syncDocumentId(source.id, 'a'), 'user:owner',
+      expect.objectContaining({ text: 'hello world', contentTrust: 'untrusted', silent: true }), OWNER_CALLER);
+    expect(mIngest.mock.calls[0]![5]).not.toHaveProperty('documentId');
     expect((await listFileStates(source.id)).map((s) => s.externalFileId).sort()).toEqual(['a', 'b']);
   });
 
@@ -149,9 +150,8 @@ describe('runKnowledgeSyncOnce (ADR 0107 Phase 3)', () => {
     expect(r.ingested).toBe(1);
     expect(mBytes).toHaveBeenCalledWith(expect.anything(), { provider: 'google', ref: 'p', mimeType: 'application/pdf' });
     expect(mFetch).not.toHaveBeenCalled(); // a binary file does NOT use the text path
-    expect(mIngest).toHaveBeenCalledWith('tA', 'org1', 'user:owner', 'col',
-      expect.objectContaining({ contentBase64: 'YmFzZTY0', contentType: 'application/pdf' }),
-      { documentId: syncDocumentId(source.id, 'p'), contentTrust: 'untrusted', silent: true }, OWNER_CALLER);
+    expect(mIngest).toHaveBeenCalledWith('tA', 'org1', 'col', syncDocumentId(source.id, 'p'), 'user:owner',
+      expect.objectContaining({ contentBase64: 'YmFzZTY0', contentType: 'application/pdf', contentTrust: 'untrusted', silent: true }), OWNER_CALLER);
   });
 
   it('a Google-native doc uses the TEXT export path, not the bytes download', async () => {
@@ -210,6 +210,25 @@ describe('runKnowledgeSyncOnce (ADR 0107 Phase 3)', () => {
     expect(mDelete).toHaveBeenCalledWith('tA', 'org1', 'col', syncDocumentId(source.id, 'b'), OWNER_CALLER, { silent: true }); // pruned doc deleted
     const states = (await listFileStates(source.id)).map((s) => `${s.externalFileId}:${s.revision}`).sort();
     expect(states).toEqual(['a:r2', 'c:r1']); // b cursor dropped, a bumped
+  });
+
+  it('#5770 — a CHANGED file whose upsert fails is not deleted, keeps its cursor, and the next pass replaces it', async () => {
+    mList.mockResolvedValueOnce(listing([file('a', 'r1')]));
+    await runKnowledgeSyncOnce(runDeps(), source); // seed a=r1
+    mDelete.mockClear(); mIngest.mockClear();
+    mList.mockResolvedValueOnce(listing([file('a', 'r2')]));
+    mIngest.mockRejectedValueOnce(new Error('embed fault'));
+    const failed = await runKnowledgeSyncOnce(runDeps(), source);
+    expect(failed).toMatchObject({ ingested: 0, failed: 1 });
+    // Nothing removed the old document first: before #5770 a deleteDocument ran here.
+    expect(mDelete).not.toHaveBeenCalled();
+    expect((await listFileStates(source.id)).map((x) => `${x.externalFileId}:${x.revision}`)).toEqual(['a:r1']);
+    mList.mockResolvedValueOnce(listing([file('a', 'r2')]));
+    const retried = await runKnowledgeSyncOnce(runDeps(), source);
+    expect(retried).toMatchObject({ ingested: 1, failed: 0 });
+    expect(mIngest).toHaveBeenLastCalledWith('tA', 'org1', 'col', syncDocumentId(source.id, 'a'), 'user:owner', expect.anything(), OWNER_CALLER);
+    expect((await listFileStates(source.id)).map((x) => `${x.externalFileId}:${x.revision}`)).toEqual(['a:r2']);
+    expect(mDelete).not.toHaveBeenCalled();
   });
 
   // ── ADR 0605 Tier 1 — the runner honours the listing's completeness ────────
@@ -277,7 +296,7 @@ describe('runKnowledgeSyncOnce (ADR 0107 Phase 3)', () => {
     // the GOOD file is the one that landed, and only it got a cursor — the bad one
     // has none, so the next pass retries it
     expect(mIngest).toHaveBeenCalledTimes(1);
-    expect(mIngest.mock.calls[0]![5]).toMatchObject({ documentId: syncDocumentId(source.id, 'ok') });
+    expect(mIngest.mock.calls[0]![3]).toBe(syncDocumentId(source.id, 'ok'));
     expect((await listFileStates(source.id)).map((s) => s.externalFileId)).toEqual(['ok']);
   });
 

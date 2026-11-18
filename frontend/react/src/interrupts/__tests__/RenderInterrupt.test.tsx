@@ -10,6 +10,7 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 
 const { resolveByRun } = vi.hoisted(() => ({ resolveByRun: vi.fn() }));
 vi.mock('../../client/interruptsClient.js', () => ({ resolveByRun }));
@@ -79,7 +80,7 @@ describe('RenderInterrupt dispatcher', () => {
   });
 
   it('degrades gracefully on an unknown kind (no crash, neutral copy, no kind name)', () => {
-    render(<RenderInterrupt runId="r" active={mk('low-confidence', {})} onResolved={() => {}} />);
+    render(<MemoryRouter><RenderInterrupt runId="r" active={mk('low-confidence', {})} onResolved={() => {}} /></MemoryRouter>);
     // DEMO-14: neutral user-facing copy, never instructs the user to edit source
     // files. ADR 1125 D1: the kind is an engine word, so it is not shown.
     expect(screen.getByText(/This request can't be answered here/i)).toBeTruthy();
@@ -90,7 +91,7 @@ describe('RenderInterrupt dispatcher', () => {
   });
 
   it('an unknown kind still says what the step asks, and offers no buttons (ADR 1109 D7)', () => {
-    render(<RenderInterrupt runId="r" active={mk('low-confidence', { title: 'Confirm the supplier', prompt: 'The quote changed since Monday.' })} onResolved={() => {}} />);
+    render(<MemoryRouter><RenderInterrupt runId="r" active={mk('low-confidence', { title: 'Confirm the supplier', prompt: 'The quote changed since Monday.' })} onResolved={() => {}} /></MemoryRouter>);
     expect(screen.getByText('Confirm the supplier')).toBeTruthy();
     expect(screen.getByText('The quote changed since Monday.')).toBeTruthy();
     expect(screen.queryAllByRole('button')).toHaveLength(0);

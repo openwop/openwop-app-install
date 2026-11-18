@@ -156,6 +156,17 @@ export function registerUsersRoutes(deps: RouteDeps): void {
       }
       res.json(user);
     } catch (err) {
+      // Issue 5991 — `?optional=1` is the SPA's session probe on every page, public ones
+      // included. A visitor who is not signed in is the expected answer there, not an
+      // error, so it is 204 (no user) instead of a 401 the browser logs on every load.
+      // Only `sign_in_required` is softened: a disabled account is still 403, and the
+      // plain route still answers 401. Its answer depends on the caller's cookie, so it
+      // is never cached.
+      if (req.query.optional === '1' && err instanceof OpenwopError && err.code === 'sign_in_required') {
+        res.setHeader('Cache-Control', 'private, no-store');
+        res.status(204).end();
+        return;
+      }
       next(err);
     }
   });

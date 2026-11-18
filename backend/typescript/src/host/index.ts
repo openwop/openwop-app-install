@@ -32,9 +32,10 @@ import { conformanceNodesEnabled } from '../bootstrap/conformanceMockAgent.js';
 import { SUPERVISOR_CALLS_LIVE_MODEL } from '../bootstrap/nodes.js';
 import { implementedMemoryActions } from '../bootstrap/conformanceMemoryProbe.js';
 import { CONFORMANCE_STORAGE_PROBE_TYPE_ID } from '../bootstrap/conformanceStorageProbe.js';
-import { CALLAI_ECHO_ATTEMPTS_TYPE_ID } from '../bootstrap/conformanceCallAiFixture.js';
+import { CALLAI_CACHE_KEY_TYPE_ID, CALLAI_ECHO_ATTEMPTS_TYPE_ID } from '../bootstrap/conformanceCallAiFixture.js';
 import { CONFORMANCE_TABLE_SCHEMA_PROBE_FIXTURE, CONFORMANCE_TABLE_SCHEMA_PROBE_TYPE_ID } from '../bootstrap/conformanceTableSchemaProbe.js';
 import { v2AdvertisedStorageFamilies } from './storageFamilyAdvert.js';
+import { llmCacheKeyRecipe2Enabled } from '../providers/llmCacheKey2.js';
 import { listFixtureSuiteIds, loadConformanceEvalSuites, registerScriptedEvalAgent } from './evals/fixtureSuites.js';
 import { normalizeEdgeCondition } from './edgeConditionMapping.js';
 
@@ -212,12 +213,14 @@ function fixtureNeedsConformanceNodes(def: WorkflowDefinition): boolean {
   // ADR 0967: so does `conformance.callai.echo-attempts` (RFC 0248), on its own
   // opt-in (`callAiFixtureEnabled()`). Without this line the opt-in registered
   // the node and the fixture was STILL withheld — measured on the m2 lane with
-  // conformance nodes off, the production gate.
+  // conformance nodes off, the production gate. ADR 1142 D6: the RFC 0260
+  // `conformance.callai.cache-key` node registers under the same opt-in.
   return (def.nodes ?? []).some(
     (n) =>
       n.typeId !== CONFORMANCE_STORAGE_PROBE_TYPE_ID &&
       n.typeId !== CONFORMANCE_TABLE_SCHEMA_PROBE_TYPE_ID &&
       n.typeId !== CALLAI_ECHO_ATTEMPTS_TYPE_ID &&
+      n.typeId !== CALLAI_CACHE_KEY_TYPE_ID &&
       (n.typeId.startsWith('core.conformance.') || n.typeId.startsWith('conformance.')),
   );
 }
@@ -405,6 +408,10 @@ export function listLoadedConformanceFixtures(supervisorCallsLiveModel: boolean 
     // RFC 0228 G4 (conformance/fixtures.md): "A host that does not advertise
     // `tableStorage` MUST NOT advertise this fixture."
     if (id === CONFORMANCE_TABLE_SCHEMA_PROBE_FIXTURE && !v2AdvertisedStorageFamilies().includes('tableStorage')) continue;
+    // RFC 0260 (conformance/fixtures.md): "A host that does not advertise
+    // `replay.llmCacheKeyRecipe` MUST NOT advertise this fixture." The node
+    // registers only at a boot with the flag on; this holds a later flip too.
+    if (id === 'conformance-llm-cache-key' && !llmCacheKeyRecipe2Enabled()) continue;
     if (fixtureIsAdvertisable(id, enabled, isResolvable)) advertised.push(id);
     else reportWithheldFixture(id, isResolvable);
   }

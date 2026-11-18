@@ -59,7 +59,7 @@ beforeAll(async () => {
   orgId = (await call('POST', '/host/openwop-app/orgs', { name: 'Rewrite Co' })).body!.orgId!;
   const v = await as(viewer)('POST', '/host/openwop-app/test/login', { email: `rewrite-viewer-${Date.now()}@x.test`, tenantId });
   expect(v.status).toBe(201);
-  const add = await call('POST', `/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: v.body!.user!.userId, roles: ['viewer'] });
+  const add = await call('POST', `/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: v.body!.user!.userId, roles: ['viewer'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
 });
 afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); });

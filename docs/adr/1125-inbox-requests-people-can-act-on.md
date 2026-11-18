@@ -80,10 +80,13 @@ mixes requests with news. Read from `origin/main` on 2026-11-15:
 - The default branch of `RenderInterrupt` (still reachable on a run page) drops the
   kind name: it shows the request's words and "This request can't be answered here."
 
-  > **CORRECTED 2026-11-16 (train 283b):** "can't be answered here" alone tells the
-  > person nothing to do. The fallback now reads "This request can't be answered
-  > here. Ask whoever runs this workspace to update the app." It still names no
-  > kind. The CC-UI-2 control test asserts the advice is there and the kind is not.
+  > **CORRECTED 2026-11-16 (train 283b, then #5843):** "can't be answered here" alone
+  > tells the person nothing to do. A first fix added "Ask whoever runs this workspace
+  > to update the app." That repeated the advice #5843 rejected, and ADR 1109 D7
+  > forbids: no version of the app has a card for these kinds, so updating would not
+  > help. The fallback now reads "This request can't be answered here." with a **View
+  > the activity log** link to the run, left out on that run's own page. It names no
+  > kind and no administrator. The CC-UI-2 control asserts all three.
 
 ### D2 — The words: a named asker and a composed sentence
 
@@ -138,6 +141,17 @@ mixes requests with news. Read from `origin/main` on 2026-11-15:
   no resolution), Archive and Delete are not offered, and the `e` key skips it.
   They return once it is decided or ended. The bulk "Archive read" skips open
   requests too. The server routes are unchanged; this is the inbox's own grammar.
+
+  > **CORRECTED 2026-11-16 (P2, #6001):** "the server routes are unchanged" could
+  > not hold for the bulk verb. `:archive-read` archives every read row on the server,
+  > so the inbox could not skip an open request by itself. The route now takes an
+  > optional `keep` id list (at most 500) and leaves those rows alone; the inbox sends
+  > its open read requests. `keep` only narrows the caller's own set: a `keep` id is
+  > never looked up, so a foreign or unknown id has no effect and reveals nothing. The
+  > client still decides what "open" means, because only it knows the composed
+  > features' action-needed types, the same split as `:bulk-read`. A call without
+  > `keep` behaves exactly as before. The single-row archive and delete routes are
+  > unchanged.
 - **Collapse:** news items (not requests) with the same type, title and asker
   collapse into one card, "*{title}* · 3 times", which expands in place. Requests
   never collapse: each is its own decision.
@@ -211,6 +225,16 @@ named approvers), and `{ kind: 'role', role }` for a role-addressed request
 | P3 | D4 tabs, one count, empty state, deep links | Needs-you count = open requests + queue items, and "All caught up" only at 0 (#5909 regression); a finished request's deep link opens Updates; empty state shows the last decision; keyboard triage still works on every tab |
 
 Each phase is one PR, through a train.
+
+### Implementation record
+
+| Phase | PR | What landed | Witnesses |
+|---|---|---|---|
+| P0 | #5943 | `conversation` never notifies; the items already sent are retired | (#5943) |
+| P1 | #5958 (train 285) | D1 kinds ratchet, `external-event` never notifies, host-built credential Connect card, fallback without the kind; D2 named asker and composed titles, banned-words ratchet; D5 `asker` and `reason` stamping | `adr1125-request-words-and-kinds`, `adr1109-readable-requests`, `adr0710-run-notice-audience` leg 6, `RenderInterrupt`, `ccUi2TimerWalkthrough` |
+| P2 | #6001 (train 285) | `notifications/inboxCards.ts`; the card (dot plus label for unread, no type chip, priority only for high and urgent, line 2 from `asker`/`reason`, message dropped when it repeats the title, "…" menu with Mark read/unread, Archive, Delete, View activity log); `e` skips open requests; Archive read sends `keep`; identical news collapse | `adr1125InboxCard` legs 1–7 (five guards sabotaged red, then restored); `priorityFilter` `e` cases; `notifications-feature` `keep` cases (own, foreign and unknown ids; 501 ids refused) |
+| D1 fix | #6050 (train 286a, not yet merged) | the fallback links the activity log instead of advising an update (D1 correction); the unused `cardRunLink` copy is retired | `ccUi2TimerWalkthrough` controls (removing the link reds them); `resolvedRequests` locale case |
+| P3 | — | not started: D4 tabs, one count (#5909), empty state, deep links | — |
 
 ## Open questions
 

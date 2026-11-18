@@ -7,7 +7,7 @@
  */
 
 import { useTranslation } from 'react-i18next';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import type { OpenInterrupt } from '../client/interruptsClient.js';
 import { formatDateTime } from '../i18n/format.js';
 import { ApprovalCard } from './ApprovalCard.js';
@@ -96,15 +96,29 @@ export function RenderInterrupt({ runId, active, onResolved }: Props) {
       // ADR 1109 D7 — say what the step asks, even when this app cannot answer it.
       // No buttons: guessing a resume value for a schema the app cannot read could
       // resolve the step wrongly. ADR 1125 D1: no kind name in what a person reads;
-      // a kind that notifies always has a case above (the kinds ratchet).
-      const words = requestWords(active.data);
-      return (
-        <div role="status" className="alert warning">
-          {words.title ? <p className="u-m-0"><strong>{words.title}</strong></p> : null}
-          {words.text ? <p className="u-m-0">{words.text}</p> : null}
-          <p className="u-m-0">{t('unknownKindBody')}</p>
-        </div>
-      );
+      // a kind that notifies always has a case above (the kinds ratchet). #5843:
+      // no "update the app" advice (no version has a card for these kinds, so it
+      // would be untrue); the action is the activity log, unless this is it.
+      return <UnknownKindFallback runId={runId} data={active.data} />;
     }
   }
+}
+
+/** The default branch, apart so only it reads the location (to never link the
+ *  run page to itself). */
+function UnknownKindFallback({ runId, data }: { runId: string; data: unknown }) {
+  const { t } = useTranslation('interrupts');
+  const { pathname } = useLocation();
+  const words = requestWords(data);
+  const log = `/runs/${encodeURIComponent(runId)}`;
+  return (
+    <div role="status" className="alert warning">
+      {words.title ? <p className="u-m-0"><strong>{words.title}</strong></p> : null}
+      {words.text ? <p className="u-m-0">{words.text}</p> : null}
+      <p className="u-m-0">
+        {t('unknownKindBody')}
+        {pathname !== log ? <> <Link to={log}>{t('unknownKindLog')}</Link></> : null}
+      </p>
+    </div>
+  );
 }

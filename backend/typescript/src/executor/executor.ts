@@ -115,6 +115,7 @@ import { makeNotificationAdapter } from '../host/notificationAdapter.js';
 import { makeConnectorsAdapter } from '../host/connectorsAdapter.js';
 import { makeMcpClient, McpError } from '../host/mcpClient.js';
 import { runTraceContext } from '../host/traceContext.js';
+import { runSpanParent, spanRunId } from '../observability/telemetryFamily.js';
 import { armRunAbort, isDeadlineAbort, notifyRunTerminal, runAbortSignal, runPauseRequest, clearRunPause, noteInterruptedNode, type RunPauseRequest } from './runLifecycle.js';
 // ADR 0553 P3 — the terminal-status predicate, taken from the PACKAGE rather
 // than re-exported through `host/runCancel.ts`: the executor must not grow an
@@ -1230,7 +1231,7 @@ async function runOneNodeBody(input: {
   // span attribute up automatically.
   const span = tracer.startSpan(`openwop.node.${nodeRef.typeId}`, {
     attributes: {
-      'openwop.run_id': run.runId,
+      'openwop.run_id': spanRunId(run.runId, run.tenantId),
       // `observability.md §"Run-level attributes"` — spans MUST carry
       // `openwop.workflow_id` for run-scoped roll-ups + filtering.
       'openwop.workflow_id': run.workflowId,
@@ -2111,13 +2112,13 @@ async function executeRunInner(
   // the canonical run → node hierarchy without operator-side stitching.
   const runSpan = tracer.startSpan('openwop.run', {
     attributes: {
-      'openwop.run_id': run.runId,
+      'openwop.run_id': spanRunId(run.runId, run.tenantId),
       'openwop.workflow_id': run.workflowId,
       'openwop.protocol_version': '1.1',
       ...(run.tenantId ? { 'openwop.tenant_id': run.tenantId } : {}),
       ...(run.scopeId ? { 'openwop.scope_id': run.scopeId } : {}),
     },
-  });
+  }, runSpanParent(run.metadata as Record<string, unknown> | undefined) ?? undefined);
   try {
     return await otelContext.with(
       trace.setSpan(otelContext.active(), runSpan),

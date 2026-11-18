@@ -32,6 +32,12 @@ let shellEtag: string | null = null;
  *  starved-continuation shape (see the wedge tests). */
 let shellHang = false;
 const hung: http.ServerResponse[] = [];
+/** #5840 — the bundles Hosting currently serves as JavaScript. Any other
+ *  `/assets/*` path falls through the SPA rewrite: `200 text/html`. */
+let liveBundles = new Set<string>();
+let assetHits = 0;
+let assetsDrop = false;
+let lastShellPath = '';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -40,6 +46,16 @@ beforeAll(async () => {
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { PORT = (server.address() as AddressInfo).port; res(); }); });
   await new Promise<void>((res) => {
     shellServer = http.createServer((req, r) => {
+      if (req.url?.startsWith('/assets/')) {
+        assetHits += 1;
+        if (assetsDrop) { r.destroy(); return; }
+        const live = liveBundles.has(req.url.split('?')[0]!);
+        r.statusCode = 200;
+        r.setHeader('content-type', live ? 'text/javascript' : 'text/html');
+        r.end(live ? '' : '<!doctype html>');
+        return;
+      }
+      lastShellPath = req.url ?? '';
       shellHits += 1;
       if (shellHang) { hung.push(r); return; } // never responds
       // Mirror Hosting: answer a matching If-None-Match with a bodyless 304.
@@ -75,6 +91,10 @@ afterEach(() => {
   condHits = 0;
   shellEtag = null;
   shellHang = false;
+  liveBundles = new Set();
+  assetHits = 0;
+  assetsDrop = false;
+  lastShellPath = '';
   for (const r of hung.splice(0)) { try { r.destroy(); } catch { /* already gone */ } }
 });
 
@@ -250,5 +270,54 @@ describe('ADR 0384 — a starved refresh must not wedge the cache (2026-08-08)',
     shellEtag = null;
     lapseTtl();
     expect((await humanGet('/')).body).toContain('SHELL v2');
+  });
+
+  // #5840 — a hosting release prunes the bundle the cached shell names; between TTL
+  // refreshes the shell's own bundle is checked, and a gone one refreshes at once.
+  const shellWith = (bundle: string, tag: string): string =>
+    `<!doctype html><html><head><script type="module" crossorigin src="/assets/${bundle}"></script></head><body>${tag}</body></html>`;
+  const advance = (ms: number): void => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.now() + ms);
+  };
+
+  it('#5840 — a release that prunes the cached bundle is picked up before the TTL, cache-busted', async () => {
+    process.env.OPENWOP_SPA_SHELL_URL = SHELL_URL;
+    process.env.OPENWOP_SPA_SHELL_TTL_S = '60';
+    shellBody = shellWith('index-OLD1.js', 'SHELL v1');
+    liveBundles = new Set(['/assets/index-OLD1.js']);
+    expect((await humanGet('/')).body).toContain('SHELL v1');
+    // The release: new shell, the old bundle pruned (it now answers text/html).
+    shellBody = shellWith('index-NEW2.js', 'SHELL v2');
+    liveBundles = new Set(['/assets/index-NEW2.js']);
+    advance(11_000); // past the bundle check, well inside the 60 s TTL
+    const after = await humanGet('/');
+    expect(after.body).toContain('SHELL v2');
+    expect(lastShellPath, 'the forced refresh bypasses caches').toMatch(/[?&]cb=\d+/);
+  });
+
+  it('#5840 — a live bundle keeps the shell cached, and the check runs at most every 10 s', async () => {
+    process.env.OPENWOP_SPA_SHELL_URL = SHELL_URL;
+    process.env.OPENWOP_SPA_SHELL_TTL_S = '60';
+    shellBody = shellWith('index-OLD1.js', 'SHELL v1');
+    liveBundles = new Set(['/assets/index-OLD1.js']);
+    await humanGet('/');
+    advance(11_000);
+    expect((await humanGet('/')).body).toContain('SHELL v1');
+    expect(shellHits).toBe(1);
+    expect(assetHits).toBe(1);
+    await humanGet('/');
+    expect(assetHits, 'a second request inside 10 s makes no HEAD').toBe(1);
+  });
+
+  it('#5840 — a bundle check that cannot reach the origin forces nothing', async () => {
+    process.env.OPENWOP_SPA_SHELL_URL = SHELL_URL;
+    process.env.OPENWOP_SPA_SHELL_TTL_S = '60';
+    shellBody = shellWith('index-OLD1.js', 'SHELL v1');
+    await humanGet('/');
+    assetsDrop = true;
+    advance(11_000);
+    expect((await humanGet('/')).body).toContain('SHELL v1');
+    expect(shellHits).toBe(1);
   });
 });

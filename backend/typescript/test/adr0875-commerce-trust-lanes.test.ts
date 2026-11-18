@@ -84,7 +84,7 @@ async function team(): Promise<{ owner: ReturnType<typeof client>; tenantId: str
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId as string;
   for (const [subject, role] of [[editorId, 'editor'], [viewerId, 'viewer']] as const) {
-    const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: role, subject, roles: [role] });
+    const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: role, subject, roles: [role] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
   }
   return { owner, tenantId, orgId, editorId, viewerId };

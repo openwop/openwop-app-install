@@ -85,7 +85,7 @@ async function ownerWithOrg(who: string): Promise<{ c: Client; orgId: string; te
 async function viewerIn(owner: Client, tenantId: string, orgId: string): Promise<Client> {
   const v = client();
   const vu = await v.post('/host/openwop-app/test/login', { email: uniqEmail('nb-tx-viewer'), tenantId });
-  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: body<{ user: { userId: string } }>(vu).user.userId, roles: ['viewer'] });
+  const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: body<{ user: { userId: string } }>(vu).user.userId, roles: ['viewer'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return v;
 }

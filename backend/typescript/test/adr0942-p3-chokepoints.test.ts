@@ -144,7 +144,7 @@ afterAll(async () => {
 
 describe('ADR 0942 P3 — ads: the policy decides a campaign run\'s spend', () => {
   it('refuses the causing admin of an actorless run and a delegated spelling of that admin', async () => {
-    const { key } = await issueApiKey({ tenantId: T, name: 'causing admin', createdBy: 'u1' });
+    const { key } = await issueApiKey({ scopes: ['*'], tenantId: T, name: 'causing admin', createdBy: 'u1' });
     const run = await campaignRun({ actingUserId: undefined, orgScopeSubject: 'u1' });
     const out = await ads(run.runId).updateBudget(budget(36_101));
     if (out.outcome !== 'requires_approval') throw new Error('expected approval');
@@ -156,7 +156,7 @@ describe('ADR 0942 P3 — ads: the policy decides a campaign run\'s spend', () =
   });
 
   it('canonicalizes a delegated requester in the stored row, keeping actor-before-cause precedence', async () => {
-    const { key } = await issueApiKey({ tenantId: T, name: 'acting admin', createdBy: 'u1' });
+    const { key } = await issueApiKey({ scopes: ['*'], tenantId: T, name: 'acting admin', createdBy: 'u1' });
     const run = await campaignRun({ actingUserId: `apikey:${key.keyId}`, orgScopeSubject: 'u-admin-2' });
     const out = await ads(run.runId).updateBudget(budget(36_102));
     if (out.outcome !== 'requires_approval') throw new Error('expected approval');
@@ -165,7 +165,7 @@ describe('ADR 0942 P3 — ads: the policy decides a campaign run\'s spend', () =
   });
 
   it('refuses the raw API-key owner even when its issuer differs from the acting requester', async () => {
-    const { key } = await issueApiKey({ tenantId: T, name: 'owning admin', createdBy: 'u-admin-2' });
+    const { key } = await issueApiKey({ scopes: ['*'], tenantId: T, name: 'owning admin', createdBy: 'u-admin-2' });
     const subject = `apikey:${key.keyId}`;
     const principal = opaquePrincipal(subject);
     const run = await campaignRun({ owner: { principal, subject: { issuer: 'urn:openwop-app:api-key', subjectId: principal, lane: 'api-key', kind: 'workload' } } });

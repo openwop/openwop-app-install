@@ -29,7 +29,7 @@ import { stripReservedRunMetadata, failRunClosedOnDispatchError } from './runDis
 import { inheritedRunMetadata } from './inheritedRunMetadata.js';
 import { launchPlanExemptSubject } from './operatorPlanExemption.js';
 import { workflowBudgetExhausted } from './workflowBudgets.js';
-import { seedRunVariables } from './variablesRuntime.js';
+import { deferredConfigurableInputs, seedRunVariables } from './variablesRuntime.js';
 import { assertEffectAllowed } from './runEffectContext.js';
 import { createLogger } from '../observability/logger.js';
 
@@ -227,7 +227,8 @@ export async function startWorkflowRun(
   // field verbatim. Not CRM-specific — this seeds variables for every
   // startWorkflowRun caller, closing the same latent gap for scheduled/
   // heartbeat-triggered templated workflows too.
-  seedRunVariables(runId, wf.definition.variables, input.inputs);
+  // CC-JOURNEY-1: the same deferred bare-name binding POST /runs applies.
+  seedRunVariables(runId, wf.definition.variables, deferredConfigurableInputs(wf.definition, input.configurable, input.inputs));
   // Index the agent attribution (if any) so fleet/per-agent activity queries
   // hit an index instead of scanning recent runs. Best-effort — never blocks.
   await recordRunAttribution(storage, run);

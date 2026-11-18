@@ -39,7 +39,7 @@ import {
 import { Link } from 'react-router-dom';
 import { TaskSourceChip } from '../agents/TaskSourceChip.js';
 import { workflowName } from '../agents/roleTemplates.js';
-import { AlertIcon, CheckIcon, GripVerticalIcon, PencilIcon, PlayIcon, RotateCwIcon, SettingsIcon, UserIcon, WorkflowIcon, XIcon, ZapIcon } from '../ui/icons/index.js';
+import { AlertIcon, CheckIcon, ExternalLinkIcon, GripVerticalIcon, PencilIcon, PlayIcon, RotateCwIcon, SettingsIcon, UserIcon, WorkflowIcon, XIcon, ZapIcon } from '../ui/icons/index.js';
 import { IconButton } from '../ui/IconButton.js';
 import { announce } from '../ui/announce.js';
 import { Button } from '../ui/Button.js';
@@ -51,6 +51,7 @@ import { useBackendSession } from '../auth/backendSession.js';
 import { columnSnapCoordinateGetter } from './columnKeyboardCoordinates.js';
 import type { KanbanBoard, KanbanCard, KanbanColumn, KanbanCardSource, KanbanWorkItem } from './kanbanClient.js';
 import { columnLaneKind, type LaneKind } from './laneKind.js';
+import { CardDue } from './CardDue.js';
 
 
 type MoveKind = 'todo' | 'working' | 'waiting' | 'done';
@@ -415,7 +416,16 @@ function DraggableCard({
           const who = creatorLabel(card.createdBy, myUserId, t('createdByYou'));
           return who ? <span className="kb-person"><UserIcon size={12} aria-hidden /> {who}</span> : null;
         })()}
-        {card.dueAt ? <span className="muted u-fs-12">{t('dueDate', { date: card.dueAt.slice(0, 10) })}</span> : null}
+        {card.dueAt ? <CardDue dueAt={card.dueAt} finished={lane === 'done'} /> : null}
+        {card.sourceRef ? (
+          <Link
+            to={card.sourceRef.path}
+            className="kb-run-link u-iflex u-items-center u-gap-1"
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <ExternalLinkIcon size={12} aria-hidden /> {t('openSource', { label: card.sourceRef.label })}
+          </Link>
+        ) : null}
         {/* ADR 0049 — assign this card to a workspace member (notifies them + */}
         {/* surfaces it on their "My Work" mirror). */}
         <AssigneeControl cardId={card.id} assigneeId={card.assigneeId} cardTitle={card.title} />

@@ -98,4 +98,6 @@ export const messages = {
   comboboxResults_other: '{{count}} coincidencias',
   comboboxResultsMore_one: "Más de {{count}} coincidencia; escribe para acotar",
   comboboxResultsMore_other: "Más de {{count}} coincidencias; escribe para acotar",
+  // Issue 5911 — a workflow the caller's own list does not name (shared by several areas).
+  workflowUnnamed: 'Flujo de trabajo sin nombre',
 } as const;

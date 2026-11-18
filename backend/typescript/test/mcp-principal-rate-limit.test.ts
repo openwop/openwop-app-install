@@ -10,10 +10,14 @@ import { enforceMcpPrincipalRateLimit, _resetRateLimitState } from '../src/middl
 /** Minimal Express Response capturing the rate-limit envelope. */
 function mockRes() {
   const r: { statusCode?: number; body?: unknown; headers: Record<string, string> } = { headers: {} };
-  // Only `set` and `status(..).json` are reached by the limiter; the single cast is
+  // The limiter reaches `set` and the error envelope (`getHeader`/`setHeader` for
+  // Cache-Control, `req` for the locale, then `status(..).json`); the single cast is
   // the honest ceiling (the function takes a full Express Response).
   const partial = {
+    req: { header: () => undefined } as Partial<import('express').Request> as import('express').Request,
     set: (k: string, v: string) => { r.headers[k] = v; },
+    getHeader: (k: string) => r.headers[k],
+    setHeader: (k: string, v: string) => { r.headers[k] = v; },
     status: (c: number) => { r.statusCode = c; return { json: (b: unknown) => { r.body = b; } }; },
   };
   return { res: partial as Partial<import('express').Response> as import('express').Response, captured: r };
@@ -38,6 +42,7 @@ describe('enforceMcpPrincipalRateLimit (MCP-1)', () => {
     expect(body.details.reason).toBe('mcp_principal_rate');
     expect(body.details.retryAfterMs).toBeGreaterThanOrEqual(1000);
     expect(Number(captured.headers['Retry-After'])).toBeGreaterThanOrEqual(1);
+    expect(captured.headers['Cache-Control'], 'a 429 is an error: never cached, and keeps Retry-After').toBe('no-store');
   });
 
   it('budgets each principal independently', () => {

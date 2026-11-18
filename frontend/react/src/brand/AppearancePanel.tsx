@@ -427,6 +427,8 @@ export function AppearancePanel(): JSX.Element {
               <Field label={t('wordmarkSubLabel')}>{(p) => <input {...p} value={wm.sub} onChange={(e) => patch({ wordmark: { ...wm, sub: e.target.value } })} />}</Field>
             </div>
             <Field label={t('documentTitleLabel')}>{(p) => <input {...p} value={id.documentTitle ?? ''} onChange={(e) => patch({ documentTitle: e.target.value })} />}</Field>
+            {/* Issue 5913 — the footer text was stored and shown but had no field here, so it could only change by API. Empty clears it. */}
+            <Field label={t('footerTextLabel')} help={t('footerTextHelp')}>{(p) => <input {...p} value={id.footerText ?? ''} onChange={(e) => patch({ footerText: e.target.value })} />}</Field>
           </section>
 
           <section className="surface-card u-grid u-gap-3 u-p-4">

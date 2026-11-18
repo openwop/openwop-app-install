@@ -92,6 +92,8 @@ function runIdFor(m: ChatMessage): string {
  *  otherwise fall to `<body>`. We move it to a remaining card instead (a11y —
  *  don't strand focus on removal). Each card container is `tabIndex={-1}` so it
  *  is a programmatic focus target. */
+const NO_INTERRUPTS: NonNullable<ChatMessage['activeInterrupts']> = [];
+
 function InterruptCardStack({
   message,
   tenantId,
@@ -101,7 +103,11 @@ function InterruptCardStack({
   tenantId: string;
   onResolveInterrupt: (messageId: string, value: unknown, nodeId?: string) => Promise<void>;
 }): JSX.Element | null {
-  const open = message.activeInterrupts ?? [];
+  // CC-CHAT-6: a finished run has no open cards, even in a message saved
+  // before its interrupts were cleared.
+  const runStatus = message.workflowRun?.status;
+  const finished = runStatus === 'completed' || runStatus === 'failed' || runStatus === 'cancelled';
+  const open = finished ? NO_INTERRUPTS : (message.activeInterrupts ?? NO_INTERRUPTS);
   const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const prevIds = useRef<string[]>(open.map((i) => i.interruptId));
   const idsKey = open.map((i) => i.interruptId).join('|');

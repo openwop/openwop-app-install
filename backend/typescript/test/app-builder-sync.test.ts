@@ -62,7 +62,7 @@ async function ownerEditorCanvas(): Promise<{ owner: Client; editor: Client; org
   const editorUser = (await editor.post('/host/openwop-app/test/login', { email: `ed-${Date.now()}-${n++}@acme.test`, tenantId })).body.user;
   const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(org.body.orgId)}/members`, { displayName: 'Ed', subject: editorUser.userId, roles: ['editor'] });
+  const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(org.body.orgId)}/members`, { displayName: 'Ed', subject: editorUser.userId, roles: ['editor'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   const canvas = await createCanvasForTenant(tenantId, { canvasTypeId: 'canvas.app-builder', name: 'S', initialState: STATE });
   return { owner, editor, orgId: org.body.orgId, canvasId: canvas.canvasId };

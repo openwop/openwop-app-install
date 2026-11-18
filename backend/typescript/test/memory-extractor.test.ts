@@ -106,6 +106,13 @@ describe('evidenceSupports — the fact must quote the person', () => {
     expect(evidenceSupports('Owns a car', 'be careful with this', ['be careful with this'])).toBe(false);
     expect(evidenceSupports('Is a nurse in Denver', 'my trip to Denver was fun', ['my trip to Denver was fun'])).toBe(false);
   });
+  it('treats "cannot" and apostrophe-less contractions as negators (#5774, TST-KZB-1)', () => {
+    expect(evidenceSupports('Can swim well', 'swim well', ['I cannot swim well'])).toBe(false);
+    expect(evidenceSupports('Lives in Paris', 'live in Paris', ['I dont live in Paris'])).toBe(false);
+    expect(evidenceSupports('Eats meat daily', 'eat meat daily', ['I cant eat meat daily'])).toBe(false);
+    // Words that merely end in "nt" are not negators (anti-rot).
+    expect(evidenceSupports('Wants a dog', 'want a dog now', ['I want a dog now'])).toBe(true);
+  });
   it('each rule bites on its own (row 57 sabotage found four shadowed by the others)', () => {
     // Only the 8-character floor refuses this: two words, both fact words shared.
     expect(evidenceSupports('Has bee', 'has bee', ['has bee'])).toBe(false);
@@ -117,10 +124,9 @@ describe('evidenceSupports — the fact must quote the person', () => {
     expect(evidenceSupports('Keeps bees on roof', 'keep bees on my roof', ['I keep bees', 'on my roof daily'])).toBe(false);
     // Only the SENTENCE negator rule refuses this: the quote itself omits the negation.
     expect(evidenceSupports('Lives in Paris', 'live in Paris', ["I don't live in Paris anymore"])).toBe(false);
-    // Only the QUOTE negator rule refuses this: the sentence spells it "cannot", which the
-    // word-bounded negator list does not match (grade-code TST-KZB-1), while the quote starts
-    // at "not".
-    expect(evidenceSupports('Can swim well', 'not swim well', ['I cannot swim well'])).toBe(false);
+    // (The QUOTE negator rule has no case of its own: the quote sits inside its sentence, so
+    // the sentence rule always sees the same negator. Its old witness here, "not swim well" out
+    // of "I cannot swim well", only isolated it because "cannot" was missed, #5774.)
     // Only `shared > 0` refuses this: a fact with no content word at all.
     expect(evidenceSupports('Is so', 'I keep bees', ['I keep bees'])).toBe(false);
     // …while the same quote from an affirmative sentence passes (anti-rot).

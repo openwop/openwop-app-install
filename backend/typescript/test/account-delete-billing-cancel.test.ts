@@ -237,7 +237,7 @@ describe('self-delete revokes what the account delegated in other workspaces (AD
     const me = await signIn('oidc:r2-503-keys');
     const ws = await createWorkspace({ name: 'R2 Keys', ownerSubject: 'oidc:r2-keys-owner' });
     await createMember({ tenantId: ws.tenantId, orgId: ws.orgId, subject: me.userId, displayName: 'r2', roles: ['editor'] });
-    const { token } = await issueApiKey({ tenantId: ws.tenantId, name: 'ci', createdBy: me.userId });
+    const { token } = await issueApiKey({ scopes: ['*'], tenantId: ws.tenantId, name: 'ci', createdBy: me.userId });
     await seedPlan(me.tenantId, 'sub_503_keys');
     await setSecret('billing:stripe-key', '');
 

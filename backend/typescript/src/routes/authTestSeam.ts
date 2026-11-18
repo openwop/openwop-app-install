@@ -24,6 +24,7 @@ import { issueUserSession } from '../middleware/auth.js';
 import { upsertFromPrincipal, sessionEpochOf } from '../features/users/usersService.js';
 import { ensurePersonalWorkspace, getWorkspace } from '../host/accessControlService.js';
 import { deploymentMarker } from '../host/oidcTrustGuard.js';
+import { memberCreateHandler, memberPatchHandler } from './accessControl.js';
 
 const log = createLogger('routes.authTestSeam');
 
@@ -59,6 +60,15 @@ export function registerAuthTestSeamRoutes(app: Express): void {
     return;
   }
   log.warn('auth test seam ENABLED — /host/openwop-app/test/login mints sessions. NEVER enable in a real deploy.');
+
+  // ADR 1123 follow-up (#5945) — the member routes, mounted for fixtures under
+  // the same gate and the same deployment refusal as /test/login. They run the
+  // real handlers (`accessControl.ts`) with `allowLegacySubject`, so a fixture
+  // can bind a `user:` subject directly, as /test/login can already mint any
+  // session; nothing that serves these is a real host. Fixtures reach them
+  // through `test/helpers/seedMember.ts`.
+  app.post('/host/openwop-app/test/orgs/:orgId/members', memberCreateHandler({ allowLegacySubject: true }));
+  app.patch('/host/openwop-app/test/orgs/:orgId/members/:memberId', memberPatchHandler({ allowLegacySubject: true }));
 
   // POST /v1/host/openwop-app/test/login
   //   { email?, displayName?, tenantId?, subject? }

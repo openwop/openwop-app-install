@@ -98,6 +98,22 @@ describe('AppearancePanel', () => {
     expect(sentIdentity()?.typography).toBeUndefined();
   });
 
+  it('issue 5913 — the footer text is an editable field: a stored value shows, an edit saves, empty clears it', async () => {
+    getAppBrand.mockResolvedValue(brand({ footerText: '© 2026 Old Name' }));
+    render(<AppearancePanel />);
+    await screen.findByRole('heading', { name: 'Appearance' });
+    const footer = inputByLabel('Footer text');
+    expect(footer.value).toBe('© 2026 Old Name');
+    fireEvent.change(footer, { target: { value: '© 2026 New Name' } });
+    fireEvent.click(screen.getByRole('button', { name: /Save/ }));
+    await waitFor(() => expect(putAppBrand).toHaveBeenCalledTimes(1));
+    expect(sentIdentity()?.footerText).toBe('© 2026 New Name');
+    fireEvent.change(inputByLabel('Footer text'), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: /Save/ }));
+    await waitFor(() => expect(putAppBrand).toHaveBeenCalledTimes(2));
+    expect(putAppBrand.mock.calls[1]?.[0].identity?.footerText).toBe('');
+  });
+
   it('saves the public-page motion preset, and "Calm (default)" removes it (ADR 1029 D6)', async () => {
     getAppBrand.mockResolvedValue(brand({ theme: { motion: 'subtle' } }));
     render(<AppearancePanel />);

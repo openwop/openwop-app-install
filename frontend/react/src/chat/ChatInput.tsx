@@ -27,6 +27,7 @@ import { AgentHandoffHint } from './AgentHandoffHint.js';
 import { stageSlashInputs } from './lib/slashInputs.js';
 import { toRunInputs } from '../ui/RunInputsForm.js';
 import { refreshWorkflowMentionCache } from './lib/workflowMentions.js';
+import type { TemplateIntent } from './lib/slashTemplates.js';
 import { voicePhaseKey } from './lib/voicePhaseWords.js';
 import { voiceCtxBlockLabels } from './voiceCtxLabels.js';
 import { forgetSubmittingComposer, markSubmittingComposer, registerComposerText, subscribeLiveComposer, takeStagedComposerDraft } from './composerSeed.js';
@@ -50,6 +51,10 @@ import type { ContentPart } from './hooks/useChatSession.js';
 // voice session is actually running. The dynamic import keeps the composer
 // voice-feature-agnostic at module-graph level (nothing loads until live starts).
 const VoiceWaveform = lazy(() => import('./voice/VoiceWaveform.js').then((m) => ({ default: m.VoiceWaveform })));
+// The picker-templates ADR — the template preflight / gallery overlay. LAZY for
+// the same entry-chunk reason, and because it reaches the builder's preflight
+// modal (the builder never enters the chat's static module graph).
+const ChatTemplateOverlay = lazy(() => import('./ChatTemplateOverlay.js').then((m) => ({ default: m.ChatTemplateOverlay })));
 
 /** Draft persistence (crash/refresh safety). The composer's in-progress text is
  *  mirrored to localStorage under a caller-supplied, surface-stable key so a tab
@@ -214,6 +219,10 @@ export function ChatInput({
   useEffect(() => (draftKey ? registerComposerText(draftKey, () => liveTextRef.current) : undefined), [draftKey]);
   // ADR 0768 B2 — a picked `/workflow`'s typed inputs, staged for the dispatch on send.
   const [slashInputs, setSlashInputs] = useState<SlashInputsState | null>(null);
+  // The picker-templates ADR — a template picked in `/` opens the shared
+  // preflight over the chat. `restoreText` puts the typed `/query` back if the
+  // person cancels, so they land where they were.
+  const [templateOverlay, setTemplateOverlay] = useState<{ intent: TemplateIntent; restoreText: string } | null>(null);
   const [pendingAudio, setPendingAudio] = useState<PendingAudio | null>(null);
   const [pendingFiles, setPendingFiles] = useState<readonly PendingFile[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
@@ -462,6 +471,9 @@ export function ChatInput({
           combobox={wiring.slash}
           onPick={(newText) => { setText(newText); taRef.current?.focus(); }}
           onDismiss={() => { /* dismiss is implicit on text change */ }}
+          // Clearing the `/query` closes the picker, so its window-level key
+          // handler cannot take the overlay's Enter or Esc.
+          onTemplateIntent={(intent) => { setTemplateOverlay({ intent, restoreText: text }); setText(intent.prefix); }}
         />
         {/* `@` picker — agents only (was workflows pre-2026-05-28).
             Workflows live under `/` in SlashAutocomplete above. In a CHANNEL the
@@ -505,6 +517,22 @@ export function ChatInput({
         />
       </div>
       <SlashInputsPanel text={text} onChange={setSlashInputs} />
+      {templateOverlay && (
+        <Suspense fallback={null}>
+          <ChatTemplateOverlay
+            intent={templateOverlay.intent}
+            onClose={() => {
+              const restore = templateOverlay.restoreText;
+              setTemplateOverlay(null);
+              placeCaret(restore, restore.length);
+            }}
+            onInstantiated={(next) => {
+              setTemplateOverlay(null);
+              placeCaret(next, next.length);
+            }}
+          />
+        </Suspense>
+      )}
       <AgentHandoffHint text={text} hasAttachments={pendingFiles.length > 0 || pendingAudio !== null} inChannel={mentionEntries !== undefined} entries={agentEntries} />
       {pendingAudio && (
         <div className="u-flex u-items-center u-gap-2 u-pad-6x10 u-mb-1-5 u-bg-surface-2 u-border u-radius u-fs-12">

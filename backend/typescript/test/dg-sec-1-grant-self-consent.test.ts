@@ -96,7 +96,7 @@ async function team() {
   const mate = client();
   const mateId = await signIn(mate);
   expect(mateId).not.toBe(ownerId);
-  const added = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(wsId)}/members`, {
+  const added = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(wsId)}/members`, {
     displayName: 'Colleague', subject: mateId, roles: ['admin'],
   });
   expect(added.status, `member add failed: ${JSON.stringify(added.body)}`).toBe(201);

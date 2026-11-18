@@ -127,7 +127,7 @@ export function AdminLayout(): JSX.Element {
     // UXDEF-2 — a visible skeleton beats a momentarily blank shell on slow
     // networks (one resolve per page load; usually sub-100ms).
     return (
-      <div className="admin-shell" aria-busy="true">
+      <div className="admin-shell admin-shell--bare" aria-busy="true">
         <div className="admin-content" role="status" aria-label={t('common:loading')}>
           <Skeleton width="40%" height={20} />
           <div className="u-mt-3"><Skeleton width="100%" height={14} /></div>
@@ -139,7 +139,7 @@ export function AdminLayout(): JSX.Element {
   }
   if (!isAdminCaller(access)) {
     return (
-      <div className="admin-shell">
+      <div className="admin-shell admin-shell--bare">
         <div className="admin-content">
           <StateCard
             icon={<ShieldIcon size={20} />}

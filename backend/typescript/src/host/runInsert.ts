@@ -52,7 +52,10 @@ registerInheritedRunMetadataKey(CLIENT_RUN_STAMP_KEY, (raw) => {
 });
 import { getNodeRegistry } from '../executor/nodeRegistry.js';
 import { pinMismatches } from './chainPinRule.js';
-import { requiredParamFindings, runPreflightMode, runPreflightRefusal, type ChainParamDecl } from './runPreflight.js';
+import {
+  childWorkflowIds, featureDisabledFindings, findingTag, parseFeatureNeeds, requiredFeatureIds, requiredParamFindings,
+  runPreflightMode, runPreflightRefusal, type ChainParamDecl, type FeatureAccessAnswer, type FeatureDisabledFinding, type RunPreflightFinding,
+} from './runPreflight.js';
 import { getChain } from './workflowChainPackLoader.js';
 import { createLogger } from '../observability/logger.js';
 
@@ -142,6 +145,61 @@ async function fireRunInsertedHooks(run: RunRecord, derivedFromRun: boolean): Pr
   }
 }
 
+/** How deep D3 follows child definitions (`core.subWorkflow` / `core.dispatch`). */
+const PREFLIGHT_CHILD_DEPTH = 4;
+
+/**
+ * The run admission preflight ADR (D3) — the run's required, toggle-gated
+ * features that are off for it. Resolves what the pure helpers need: the child
+ * definitions (registry, cross-instance), each node's declared reads, each
+ * chain's `x-requiresFeatures`, and each feature's access for the run's subject
+ * (`resolveOne`: toggle AND plan, with the run's ADR 1108 exemption re-checked,
+ * the same subject the in-run `ctx.features` gate uses). Modules are imported
+ * lazily so the admission seam takes on no static edge to the toggle service.
+ */
+async function requiredFeatureFindings(run: RunRecord, definition: WorkflowDefinition): Promise<FeatureDisabledFinding[]> {
+  const [{ getRegisteredWorkflowAsync }, { nodeFeatureDecl }, { resolveOne }, { getToggleDefault }, { planExemptScopeOfRun, scopeToggleSubject }] = await Promise.all([
+    import('./workflowsRegistry.js'),
+    import('./nodeFeatureRequirements.js'),
+    import('./featureToggles/service.js'),
+    import('./featureToggles/registry.js'),
+    import('./operatorPlanExemption.js'),
+  ]);
+  const defs: WorkflowDefinition[] = [definition];
+  const seen = new Set<string>([definition.workflowId]);
+  let frontier: WorkflowDefinition[] = [definition];
+  for (let depth = 0; depth < PREFLIGHT_CHILD_DEPTH && frontier.length > 0; depth++) {
+    const next: WorkflowDefinition[] = [];
+    for (const def of frontier) {
+      for (const id of childWorkflowIds(def)) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const child = await getRegisteredWorkflowAsync(id).catch(() => null);
+        if (child) { defs.push(child); next.push(child); }
+      }
+    }
+    frontier = next;
+  }
+  const required = requiredFeatureIds(defs, nodeFeatureDecl, (chainId) => parseFeatureNeeds(getChain(chainId)?.chain['x-requiresFeatures']));
+  if (required.length === 0) return [];
+  const subject = scopeToggleSubject(planExemptScopeOfRun(run.tenantId, run.metadata as Record<string, unknown> | undefined));
+  const answers = new Map<string, FeatureAccessAnswer | null>();
+  for (const id of required) {
+    const def = getToggleDefault(id);
+    if (!def) { answers.set(id, null); continue; } // always-on or unknown: drops out
+    const label = def.label ?? id;
+    try {
+      const a = await resolveOne(id, subject);
+      answers.set(id, a?.enabled
+        ? { label, enabled: true }
+        : { label, enabled: false, ...(a?.blockedBy === 'plan' || a?.blockedBy === 'unresolved' ? { blockedBy: a.blockedBy } : {}) });
+    } catch {
+      answers.set(id, { label, enabled: false, blockedBy: 'unresolved' });
+    }
+  }
+  return featureDisabledFindings(required, (id) => answers.get(id) ?? null);
+}
+
 export async function insertRunWithStartContext(
   storage: Storage,
   run: RunRecord,
@@ -205,23 +263,33 @@ export async function insertRunWithStartContext(
     const clientOrgId = (await getOwned(run.tenantId, run.workflowId))?.clientOrgId;
     if (clientOrgId) run.metadata = { ...(run.metadata ?? {}), ...clientRunStamp(clientOrgId) };
   }
-  // Run admission preflight D1/D2 (P0) — the run admission preflight, FRESH runs only: a replay
-  // reads recorded outputs and a fork inherits its parent's inputs, so neither is
-  // re-judged here. Shadow by default (see runPreflight.ts): the findings are
-  // recorded on the run and logged; only `OPENWOP_RUN_PREFLIGHT=enforce` refuses,
-  // and it refuses BEFORE the row is written.
+  // Run admission preflight D1/D2 (P0) + D3 (P1). Shadow by default (see
+  // runPreflight.ts): the findings are recorded on the run and logged; only
+  // `OPENWOP_RUN_PREFLIGHT=enforce` refuses, and it refuses BEFORE the row is
+  // written. Scope by run kind (D1):
+  //  - D2 required params: FRESH runs only. A replay reads recorded outputs, a
+  //    fork inherits its parent's inputs and a child receives them at dispatch.
+  //  - D3 required features: fresh runs, sub-workflow children and BRANCH forks
+  //    (they re-execute nodes, and a disabled feature would fail there too).
+  //    Never a replay (`forkMode: 'replay'`, or a derived run with no fork mode,
+  //    e.g. a redrive), which must stay deterministic.
   const preflightMode = runPreflightMode();
-  if (preflightMode !== 'off' && ctx.definition && !ctx.derivedFromRun && !run.parentRunId && !run.forkMode) {
-    const supplied = {
-      ...(run.configurable && typeof run.configurable === 'object' ? run.configurable : {}),
-      ...(run.inputs && typeof run.inputs === 'object' && !Array.isArray(run.inputs) ? (run.inputs as Record<string, unknown>) : {}),
-    };
-    const findings = requiredParamFindings(ctx.definition, supplied, (chainId) => {
-      const parameters = getChain(chainId)?.chain.parameters as ChainParamDecl | undefined;
-      return parameters ?? null;
-    });
+  if (preflightMode !== 'off' && ctx.definition) {
+    const findings: RunPreflightFinding[] = [];
+    if (!ctx.derivedFromRun && !run.parentRunId && !run.forkMode) {
+      const supplied = {
+        ...(run.configurable && typeof run.configurable === 'object' ? run.configurable : {}),
+        ...(run.inputs && typeof run.inputs === 'object' && !Array.isArray(run.inputs) ? (run.inputs as Record<string, unknown>) : {}),
+      };
+      findings.push(...requiredParamFindings(ctx.definition, supplied, (chainId) => {
+        const parameters = getChain(chainId)?.chain.parameters as ChainParamDecl | undefined;
+        return parameters ?? null;
+      }));
+    }
+    const featureScope = run.forkMode === 'branch' || (!run.forkMode && !ctx.derivedFromRun);
+    if (featureScope) findings.push(...await requiredFeatureFindings(run, ctx.definition));
     if (findings.length > 0) {
-      log.warn('run_preflight_findings', { runId: run.runId, workflowId: run.workflowId, mode: preflightMode, findings: findings.map((f) => `${f.kind}:${f.chainId}:${f.param}`) });
+      log.warn('run_preflight_findings', { runId: run.runId, workflowId: run.workflowId, mode: preflightMode, findings: findings.map(findingTag) });
       if (preflightMode === 'enforce') throw runPreflightRefusal(findings);
       run.metadata = { ...(run.metadata ?? {}), preflightFindings: findings };
     }

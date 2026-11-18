@@ -18,7 +18,8 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { sanitizeFreeText, sanitizeFreeTextDeep } from '../src/byok/textRedaction.js';
+import { __resetRecordIdPrefixesForTest, registerRecordIdPrefixes, sanitizeFreeText, sanitizeFreeTextDeep } from '../src/byok/textRedaction.js';
+import { computeArgsHash } from '../src/host/toolHooks.js';
 
 describe('sanitizeFreeText', () => {
   it('redacts sk-* prefixed keys', () => {
@@ -41,6 +42,41 @@ describe('sanitizeFreeText', () => {
     // The boundary: 32 hex chars is a digest, 31 is not (no other rule matches).
     expect(sanitizeFreeText('f'.repeat(32))).toBe('***');
     expect(sanitizeFreeText('f'.repeat(31))).toBe('f'.repeat(31));
+  });
+
+  it('keeps a DECLARED record id whole, so a model can pass it back to a tool (#5798)', () => {
+    registerRecordIdPrefixes('cvinq'); // an adopter's inquiry ids
+    try {
+      const id = `cvinq:${'0123456789abcdef'.repeat(2)}`;
+      const toolResult = JSON.stringify({ inquiries: [{ id, title: 'Kitchen remodel' }] });
+      expect(sanitizeFreeText(toolResult)).toBe(toolResult);
+      expect(sanitizeFreeText(`Opening ${id} now.`)).toBe(`Opening ${id} now.`);
+      expect(sanitizeFreeTextDeep({ input: { inquiryId: id } })).toEqual({ input: { inquiryId: id } });
+      // The tool-call hash scrubs through the same function. Masked, two different
+      // records hashed alike, and the repeat guard answered the second as a repeat.
+      const other = `cvinq:${'fedcba9876543210'.repeat(2)}`;
+      expect(computeArgsHash({ inquiryId: id })).not.toBe(computeArgsHash({ inquiryId: other }));
+      // A host prefix is declared without registration.
+      const invoice = `inv:${'ab'.repeat(16)}`;
+      expect(sanitizeFreeText(invoice)).toBe(invoice);
+    } finally {
+      __resetRecordIdPrefixesForTest();
+    }
+  });
+
+  it('masks a hex run after any undeclared prefix, secret carriers included (#5798)', () => {
+    const hex = 'a'.repeat(40);
+    for (const label of ['cvinq', 'session', 'sess', 'sid', 'cookie', 'csrf', 'hmac', 'salt', 'nonce', 'otp', 'priv', 'private', 'pk', 'sk', 'jwt', 'refresh', 'oauth', 'token', 'apikey', 'api_key', 'client_secret', 'password', 'auth', 'sig', 'sha', 'sha256', 'bearer', 'unknownthing']) {
+      expect(sanitizeFreeText(`${label}:${hex}`), label).toBe(`${label}:***`);
+    }
+    expect(sanitizeFreeText(`digest=${hex}`)).toBe('digest=***');
+    expect(sanitizeFreeText(`inv: ${hex}`), 'a space breaks the id shape').toBe('inv: ***');
+    expect(sanitizeFreeText(`INV:${hex}`)).toBe('INV:***');
+    expect(sanitizeFreeText(`::${hex}`)).toBe('::***');
+  });
+
+  it('refuses a prefix that is not a lowercase identifier', () => {
+    for (const bad of ['', 'Cvinq', '1abc', 'a:b', 'a b']) expect(() => registerRecordIdPrefixes(bad), JSON.stringify(bad)).toThrow();
   });
 
   it('leaves non-secret text alone', () => {

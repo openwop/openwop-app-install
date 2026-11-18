@@ -28,7 +28,7 @@ async function firm(): Promise<{ tenantId: string; owner: Client; ownerId: strin
   const orgId = (await owner.post(`${H}/orgs`, { name: 'Studio' })).body.orgId as string;
   const viewer = makeClient(() => BASE);
   const viewerId = (await viewer.post(`${H}/test/login`, { email: `v-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId as string;
-  await owner.post(`${H}/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Vic', subject: viewerId, roles: ['viewer'] });
+  await owner.post(`${H}/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Vic', subject: viewerId, roles: ['viewer'] });
   return { tenantId, owner, ownerId, orgId, viewer };
 }
 const reading = (level: string, reason = 'Two decisions are late.') => ({ level, reason, source: 'Test records', asOf: '2027-01-25' }) as never;

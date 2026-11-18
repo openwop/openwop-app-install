@@ -1183,6 +1183,13 @@ export const MIGRATIONS: Record<number, (db: Database) => void> = {
     const has = db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'notifications'`).get();
     if (has) db.exec(`CREATE INDEX IF NOT EXISTS idx_notifications_tenant_run_request ON notifications (tenant_id, run_id) WHERE interrupt_id IS NOT NULL;`);
   },
+  54: (db) => {
+    // ADR 1142 D7 (RFC 0260 §C) — the recipe-2 key of an LLM provider call,
+    // `"<recipe>:<digest>"`, projected as `cacheKey` on GET /runs/{runId}/effects.
+    // Mirrors postgres mig 52. NULLABLE WITH NO BACKFILL: a row recorded before,
+    // or with the flag off, projects no `cacheKey`, which §C.3 reads as RFC 0041's recipe.
+    addColumnIfTableExists(db, 'invocation_log', 'llm_cache_key', 'TEXT');
+  },
 };
 
 /** Highest defined migration — DERIVED from MIGRATIONS, never a hand-bumped cap

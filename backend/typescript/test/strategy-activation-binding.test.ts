@@ -76,7 +76,7 @@ async function signup(c: Client, tenantId: string): Promise<{ userId: string }> 
   return r.body.user;
 }
 const addMember = (owner: Client, orgId: string, subject: string, roles: string[]) =>
-  owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject, roles });
+  owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject, roles });
 
 async function ownerWithOrg(): Promise<{ owner: Client; ownerId: string; orgId: string; tenantId: string }> {
   const tenantId = `org:bind-${Date.now()}-${n++}`;

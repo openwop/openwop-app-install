@@ -197,7 +197,7 @@ describe('dealers PRM — partner portal + registration review', () => {
     // the SAME bar the demolished route enforced — reused here).
     const editor = client();
     const editorId = (await editor.post('/host/openwop-app/test/login', { email: `e-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: editorId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: editorId, roles: ['editor'] });
     const editorReviews = await editor.get('/host/openwop-app/reviews?status=pending');
     // the inbox READ succeeds — so an empty match is the audience filter, not a failed read
     expect(editorReviews.status).toBe(200);

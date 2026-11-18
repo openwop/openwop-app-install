@@ -16,7 +16,12 @@
  *    records the step `uncertain`, drops its read of the page, and so the
  *    next executor call is a fresh snapshot;
  *  - a result that fails its operation's shape ends the session `bad_result`;
- *  - a replaced or detached executor ends the session.
+ *  - a replaced or detached executor ends the session;
+ *  - an interact or observe step after which the executor reports a navigation
+ *    or a form submission ends the session `unapproved_effect` (ADR 1136 P2
+ *    entry criterion 3). A page script did something nobody approved: the step
+ *    is recorded `uncertain`, one final snapshot is taken for the record, and
+ *    the session never resumes. The person can start a new one.
  *
  * Session state is in memory, like the connection it rides. P2 adds a durable
  * record when a real executor exists to resume against.
@@ -120,7 +125,12 @@ export function hostLoopAdapter(opts: HostLoopOptions): ComputerUseAdapter {
       s.pending = undefined;
       if (!approve) { s.failed = 'action_denied'; return { ok: true, value: { accepted: true } }; }
       const r = await run(s, p.op);
-      if (r.ok) {
+      if (r.ok && p.tier !== 'commit' && (r.effects?.navigated || r.effects?.submitted)) {
+        s.history.push({ label: p.action.description, outcome: 'uncertain' });
+        s.snapshot = null;
+        await ensureSnapshot(s); // the record of where the page ended up; its own failure does not change the outcome
+        s.failed = 'unapproved_effect';
+      } else if (r.ok) {
         s.snapshot = r.snapshot ?? null;
         s.history.push({ label: p.action.description, outcome: 'done' });
       } else if (r.error === 'timeout') {

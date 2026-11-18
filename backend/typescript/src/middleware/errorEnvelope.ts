@@ -17,6 +17,7 @@ import type { HostErrorEnvelope } from '../types.js';
 import { OpenwopError } from '../types.js';
 import { createLogger } from '../observability/logger.js';
 import { sanitizeForErrorMessage, sanitizeDetails } from './sanitize.js';
+import { applyErrorCacheControl } from './errorCacheControl.js';
 import {
   hostI18nEnabled,
   hostSupportedLocales,
@@ -33,6 +34,15 @@ const log = createLogger('error-envelope');
  * are set only when a translation was actually applied — never merely requested.
  */
 function emitEnvelope(req: Request, res: Response, status: number, envelope: HostErrorEnvelope): void {
+  // #5841 — an error is an answer about THIS caller now (a 403 before a grant, a
+  // 404 before a workspace switch). With no Cache-Control, Firebase Hosting caches
+  // it for 10 minutes with no `Vary: cookie`, so it outlived the access change and
+  // could reach another caller. Overrides anything WEAKER a route set before it
+  // failed (`public, max-age=…`), but keeps a header that already forbids storing
+  // (the sharing routes' `private, no-store`, ADR 0887 D4): an error must never
+  // loosen what the route chose.
+  // The rule itself lives in errorCacheControl.ts (ADR 1147), shared with the exit guard.
+  applyErrorCacheControl(res);
   if (hostI18nEnabled()) {
     const locale = negotiateLocale(
       req.header('accept-language'),
@@ -89,6 +99,19 @@ export function sendError(
     ...(details ? { details: sanitizeDetails(details) } : {}),
   };
   emitEnvelope(res.req, res, status, envelope);
+}
+
+/**
+ * The same envelope as {@link sendError}, from a body already in the envelope's shape
+ * (`{ error, message, details? }`). The middleware refusals (auth, protocol version,
+ * rate limit, request timeout) used to write `res.status(n).json(body)` directly, which
+ * skipped this path and so the `Cache-Control: no-store` it sets: an unauthenticated
+ * 401 reached the CDN with no cache header (the #5841 class, measured live
+ * 2026-11-17). Routing them here keeps ONE place that decides an error's caching,
+ * scrub and locale.
+ */
+export function sendErrorBody(res: Response, status: number, body: { error: string; message: string; details?: Record<string, unknown> }): void {
+  sendError(res, status, body.error, body.message, body.details);
 }
 
 /**

@@ -75,8 +75,9 @@ const contentWords = (s: string): string[] => squash(s).split(/[^\p{L}\p{N}]+/u)
 
 /** A quote that negates or retracts a statement ("I don't live in Paris anymore") cannot
  *  support the positive fact a model makes of it. Conservative: a real "I don't eat meat" is
- *  lost too (MAE2CD-1). */
-const NEGATORS = /\b(not|no|never|none|nobody|nothing|neither|nor|anymore|longer|without|used to)\b|n['\u2019]t\b/;
+ *  lost too (MAE2CD-1). #5774: the fused "cannot" and the apostrophe-less contractions people
+ *  type in chat ("I dont", "I cant") negate too; a word boundary never saw them. */
+const NEGATORS = /\b(not|no|never|none|nobody|nothing|neither|nor|anymore|longer|without|used to|cannot|(?:do|does|did|ca|wo|is|are|was|were|have|has|had|would|should|could|must|need)nt)\b|n['\u2019]t\b/;
 
 /** ADR 0982 D4 — does `evidence` anchor `fact` in something the person actually typed?
  *  The evidence must sit inside ONE sent turn, be 8+ characters and two words, carry no negator

@@ -207,7 +207,7 @@ describe('ADR 0837 D6 — the smaller exits', () => {
     const t = await ownerOrg();
     const member = client();
     const memberId = await signup(member, t.tenantId);
-    expect((await t.owner.post(`/host/openwop-app/orgs/${encodeURIComponent(t.orgId)}/members`, { displayName: 'M', subject: memberId, roles: ['editor'] })).status).toBe(201);
+    expect((await t.owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(t.orgId)}/members`, { displayName: 'M', subject: memberId, roles: ['editor'] })).status).toBe(201);
     const base = { title: 'X', timezone: 'UTC', weeklyHours: ALL_DAYS, durations: [30] };
     const foreign = await t.owner.post(links(t.orgId), { ...base, ownerUserId: 'user:someone-elsewhere' });
     expect(foreign.status).toBe(400); // RED on origin/main: 201

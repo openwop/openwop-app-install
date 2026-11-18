@@ -12,6 +12,7 @@ import { OpenwopError } from '../../types.js';
 import type { BackendFeature } from '../types.js';
 import type { BundleScope, SurfaceFn } from '../../host/inMemorySurfaces.js';
 import { makeMockAdapter, type ComputerUseAdapter } from './adapter.js';
+import { registerBrowserDeviceHandlers } from './remoteExecutor.js';
 import { startTask, decide, sessionStatus, resumeSession, pollWaitSeconds } from './computerUseService.js';
 import { registerComputerUseRoutes } from './routes.js';
 import { registerComputerUseAgentTools } from './agentTools.js';
@@ -133,6 +134,7 @@ export function buildComputerUseSurface(scope: BundleScope): Record<string, Surf
       return {
         session: await decide(resolveAdapter(), {
           tenantId, sessionId: s.sessionId, approve, actor: scope.actingUserId ?? '',
+          ...(scope.runId ? { runId: scope.runId } : {}),
           ...(approvalInterruptId ? { approvalInterruptId } : {}),
         }),
       };
@@ -141,7 +143,7 @@ export function buildComputerUseSurface(scope: BundleScope): Record<string, Surf
     resume: async (args) => {
       const s = await sessionForRun(scope, str(args.sessionId));
       await assertRunScopeOrg(scope, s.orgId, 'runs:create');
-      return { session: await resumeSession(resolveAdapter(), { tenantId, sessionId: s.sessionId, actor: scope.actingUserId ?? '' }) };
+      return { session: await resumeSession(resolveAdapter(), { tenantId, sessionId: s.sessionId, actor: scope.actingUserId ?? '', ...(scope.runId ? { runId: scope.runId } : {}) }) };
     },
     status: async (args) => {
       const s = await sessionForRun(scope, str(args.sessionId));
@@ -160,6 +162,7 @@ export const computerUseFeature: BackendFeature = {
     registerComputerUseRoutes(deps);
     registerComputerUseRevocation(deps.storage); // ADR 0894 D4 + CU2UX-2/CU2CD-5 — membership loss, run end and the ceiling sweep end sessions
     registerComputerUseErasure(); // ADR 0894 D9
+    registerBrowserDeviceHandlers(); // ADR 1136 P2a — browser-attach/detach/result over the paired-device channel
     // CFP-1 — the Browser Operator agent's real STATUS read tool. Starting a task
     // and deciding a commit-tier action stay on the governed run (the decide
     // node raises the approval; not chat tools), so only the read is registered here.

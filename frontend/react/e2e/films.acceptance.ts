@@ -60,3 +60,27 @@ test('shared films: manual grouped cues, presenter privacy, paired audience and 
   await expect(audience.getByText(/Presenter disconnected/)).toBeVisible({ timeout: 7000 });
   expect(privateFetches).toEqual([]); expect(paidRequests).toEqual([]);
 });
+
+test('shared rehearsal: explicit silent capture, durable take and deterministic paused seek', async ({ page, context }, info) => {
+  const { exerciseFilmRehearsal } = await import('./support/filmRehearsal.js');
+  await login(context.request, `rehearsal-${Date.now()}@test.invalid`, `org:rehearsal-${Date.now()}`);
+  const org = await context.request.post(`${API}/orgs`, { data: { name: 'Rehearsal acceptance' } }); expect(org.status()).toBe(201);
+  const orgId = ((await org.json()) as { orgId: string }).orgId;
+  const root = `${API}/films/orgs/${orgId}/canvases`;
+  const made = await context.request.post(root, { data: { name: 'A timed story' } }); expect(made.status()).toBe(201);
+  const { canvasId } = await made.json() as { canvasId: string };
+  const data = await context.request.get(`${root}/${canvasId}/presenter`); expect(data.status()).toBe(200);
+  const source = await data.json() as { version: number; film: import('../../../contracts/films.js').FilmSpec };
+  const paid: string[] = []; context.on('request', r => { if (r.method() === 'POST' && /\/(runs|speech|synthesize|generate)(\/|\?|$)/.test(r.url())) paid.push(r.url()); });
+  await serveFontsLocally(page);
+  await page.goto(`/films/${canvasId}/present?org=${orgId}`);
+  await exerciseFilmRehearsal(page, context.request, `${root}/${canvasId}/performances?revision=${source.version}`, source.film);
+  for (const theme of ['light', 'dark']) {
+    await page.evaluate(value => { document.documentElement.classList.remove('theme-light', 'theme-dark'); document.documentElement.classList.add(`theme-${value}`); }, theme);
+    await page.screenshot({ path: info.outputPath(`rehearsal-replay-${theme}.png`), fullPage: true });
+  }
+  await page.setViewportSize({ width: 320, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: info.outputPath('rehearsal-replay-mobile.png'), fullPage: true });
+  expect(paid).toEqual([]);
+});

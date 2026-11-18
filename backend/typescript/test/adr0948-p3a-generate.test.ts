@@ -94,7 +94,7 @@ async function team() {
   const orgB = (await owner.post(`${H}/orgs`, { name: 'Client B' })).body.orgId as string;
   const viewer = makeClient(() => BASE);
   const viewerId = (await viewer.post(`${H}/test/login`, { email: uniqEmail('p3a-v'), tenantId })).body.user.userId as string;
-  expect((await owner.post(`${H}/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] })).status).toBeLessThan(300);
+  expect((await owner.post(`${H}/test/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] })).status).toBeLessThan(300);
   // `as never`: the brief input carries many optional fields; only these matter here.
   const brief = await createBrief(tenantId, orgA, ownerId, { name: 'Guide launch', productName: 'Guide' } as never);
   const briefB = await createBrief(tenantId, orgB, ownerId, { name: 'Other client', productName: 'X' } as never);

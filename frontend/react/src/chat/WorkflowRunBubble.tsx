@@ -93,7 +93,10 @@ export function WorkflowRunBubble({ message, onOpenProgress, isFocusedInPanel }:
   const progressHint = total > 0
     ? `${formatNumber(completed)}/${formatNumber(total)}`
     : t('steps', { count: completed });
-  const isSuspended = (message.activeInterrupts?.length ?? 0) > 0;
+  // CC-CHAT-6: a finished run is never suspended, even when an older saved
+  // message still carries the interrupt it ended on.
+  const finished = run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled';
+  const isSuspended = !finished && (message.activeInterrupts?.length ?? 0) > 0;
   // CC-ORCH-3 — suspended on an outside event or timer is not "awaiting your input".
   const needsInput = (message.activeInterrupts ?? []).some((i) => needsPersonInput(i.kind));
 

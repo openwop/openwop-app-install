@@ -82,7 +82,7 @@ test.describe('Collaborative project (ADR 0054) — end-to-end', () => {
 
     // ── Mate: a co-tenant org VIEWER (workspace:read), NOT yet a project member ──
     mateId = await login(mateCtx.request, 'mate@e2e.test', TENANT);
-    const addMate = await o.post(`${API}/orgs/${orgId}/members`, { data: { displayName: 'Mate', subject: mateId, roles: ['viewer'] } });
+    const addMate = await o.post(`${API}/test/orgs/${orgId}/members`, { data: { displayName: 'Mate', subject: mateId, roles: ['viewer'] } });
     expect(addMate.ok(), `add org member: ${await addMate.text()}`).toBe(true);
 
     // The ONE chat gates on a configured model (the BYOK provider picker renders

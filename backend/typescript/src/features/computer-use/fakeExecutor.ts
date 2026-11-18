@@ -5,6 +5,11 @@
  * return a malformed result, refuse a URL, lose or replace its connection), so
  * every rule of `hostLoopAdapter` is testable with no Chromium and no egress.
  *
+ * It reports effects as a real executor would: a step that changed the page's
+ * URL `navigated`, and a step that reached a `submitsTo` target `submitted`.
+ * So a `submitsTo` entry on a ref the tier table calls interact (a checkbox
+ * whose page script submits) stands in for a script-promoted step.
+ *
  * It cannot render, run scripts, submit a real form or change a page because
  * something was typed. Behaviour that needs those is witnessed in P2 against a
  * real Playwright page.
@@ -19,8 +24,11 @@ export interface FakeExecutorOptions {
   malformedOn?: (op: ExecutorOp) => boolean;
   /** Hosts the executor refuses on its own (it never trusts the host alone). */
   refusedHosts?: readonly string[];
-  /** Where a click on a `submits` element lands, by ref. */
+  /** Where activating a ref lands (a click, or Enter), by ref. On a ref the
+   *  tier table calls interact it models a page script that submits. */
   submitsTo?: Record<string, string>;
+  /** Any key (Tab, Escape) on a `submitsTo` ref submits too: a script-bound key handler. */
+  scriptSubmitsOnKey?: boolean;
 }
 
 export function makeFakeExecutor(opts: FakeExecutorOptions, executorId = 'fake-1'): BrowserExecutor & { calls: ExecutorOp[]; current(): string | null; detach(): void } {
@@ -65,14 +73,15 @@ export function makeFakeExecutor(opts: FakeExecutorOptions, executorId = 'fake-1
         case 'press': {
           const el = page()?.elements.find((e) => e.ref === op.ref);
           if (!el) return { ok: false, error: 'stale_ref' };
+          const before = current;
           if (op.op === 'click' && el.href) {
             const r = go(el.href);
-            return r.ok ? { ok: true } : r;
+            return r.ok ? { ok: true, effects: { navigated: current !== before, submitted: false } } : r;
           }
-          const target = (op.op === 'click' || (op.op === 'press' && op.key === 'Enter')) ? opts.submitsTo?.[op.ref] : undefined;
-          if (target) {
+          const target = op.op !== 'type' ? opts.submitsTo?.[op.ref] : undefined;
+          if (target && (op.op === 'click' || (op.op === 'press' && (op.key === 'Enter' || opts.scriptSubmitsOnKey === true)))) {
             const r = go(target);
-            return r.ok ? { ok: true } : r;
+            return r.ok ? { ok: true, effects: { navigated: current !== before, submitted: true } } : r;
           }
           return { ok: true };
         }

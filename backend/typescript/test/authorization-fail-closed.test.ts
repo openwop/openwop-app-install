@@ -202,7 +202,7 @@ describe('RBAC Phase 3 — enforcement ON (capability honored)', () => {
     const stranger = client();
     const sUser = await signup(stranger);
     const add = await owner.post(
-      `/host/openwop-app/orgs/${encodeURIComponent(ws.workspaceId)}/members`,
+      `/host/openwop-app/test/orgs/${encodeURIComponent(ws.workspaceId)}/members`,
       { displayName: 'S', subject: sUser.userId, roles: [] },
     );
     expect(add.status, JSON.stringify(add.body)).toBe(201);
@@ -241,9 +241,9 @@ describe('RBAC Phase 3 — enforcement ON (capability honored)', () => {
     const orgA = (await owner.post<Org>('/host/openwop-app/orgs', { name: 'OrgA' })).body;
     const orgB = (await owner.post<Org>('/host/openwop-app/orgs', { name: 'OrgB' })).body;
     const subject = 'multi-org-subject';
-    const mA = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgA.orgId)}/members`, { displayName: 'Multi', subject, roles: ['viewer'] });
+    const mA = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgA.orgId)}/members`, { displayName: 'Multi', subject, roles: ['viewer'] });
     expect(mA.status, JSON.stringify(mA.body)).toBe(201);
-    const mB = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgB.orgId)}/members`, { displayName: 'Multi', subject, roles: ['editor'] });
+    const mB = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgB.orgId)}/members`, { displayName: 'Multi', subject, roles: ['editor'] });
     expect(mB.status, JSON.stringify(mB.body)).toBe(201);
 
     const create = await owner.post<Decide>('/host/openwop-app/authorization/decide', { principal: subject, action: 'runs:create', resource: 'r' });
@@ -263,7 +263,7 @@ describe('RBAC Phase 3 — enforcement ON (capability honored)', () => {
     const member = client();
     const mUser = await signup(member);
     expect((await owner.post(
-      `/host/openwop-app/orgs/${encodeURIComponent(ws.workspaceId)}/members`,
+      `/host/openwop-app/test/orgs/${encodeURIComponent(ws.workspaceId)}/members`,
       { displayName: 'M', subject: mUser.userId, roles: [] },
     )).status).toBe(201);
     expect((await member.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.workspaceId)}/switch`)).status).toBe(200);

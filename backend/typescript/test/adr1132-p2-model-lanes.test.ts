@@ -85,7 +85,7 @@ async function agency() {
   const member = async (clientOrg: string, role = 'editor', rootRole = 'viewer'): Promise<Person> => {
     const p = await person();
     for (const [o, roles] of [[ws, [rootRole]], [clientOrg, [role]]] as const) {
-      const r = await owner.c.post(`${H}/orgs/${enc(o)}/members`, { displayName: 'P', subject: p.userId, roles });
+      const r = await owner.c.post(`${H}/test/orgs/${enc(o)}/members`, { displayName: 'P', subject: p.userId, roles });
       expect(r.status, JSON.stringify(r.body)).toBe(201);
     }
     expect((await p.c.post(`${H}/workspaces/${enc(ws)}/switch`)).status).toBe(200);

@@ -91,6 +91,9 @@ interface PackManifestNode {
   'x-ports'?: string;
   /** ADR 0917 — feature surfaces the node reads (RFC 0138 `x-` hatch). */
   'x-requiresFeatureSurfaces'?: unknown;
+  /** The run admission preflight ADR (D3) — feature surfaces the node reads but
+   *  skips cleanly without (RFC 0138 `x-` hatch). Never required at admission. */
+  'x-optionalFeatureSurfaces'?: unknown;
   'x-usesConnections'?: unknown;
   /** ADR 0937 — per-locale label/description (RFC 0138 `x-` hatch). */
   'x-localizations'?: unknown;
@@ -265,6 +268,48 @@ export function nodeRoleMap(): Map<string, string> {
     }
   }
   roleMapCache = { at: Date.now(), map };
+  return map;
+}
+
+const FEATURE_SURFACE_ID = /^[a-z][a-z0-9-]{0,63}$/;
+function featureSurfaceList(raw: unknown): string[] {
+  return Array.isArray(raw) ? [...new Set(raw.filter((x): x is string => typeof x === 'string' && FEATURE_SURFACE_ID.test(x)))] : [];
+}
+
+let featureDeclCache: { at: number; map: Map<string, { required: string[]; optional: string[] }> } | null = null;
+
+/**
+ * The run admission preflight ADR (D3) — typeId → the feature surfaces its
+ * manifest declares it reads: `x-requiresFeatureSurfaces` (required) and
+ * `x-optionalFeatureSurfaces` (skips cleanly without). Manifest-only scan behind
+ * the role map's short-lived cache, for the same reason (run admission must not
+ * read schema files). A typeId absent from the map declares nothing.
+ */
+export function nodeFeatureSurfaceMap(): Map<string, { required: string[]; optional: string[] }> {
+  if (featureDeclCache && Date.now() - featureDeclCache.at < ROLE_MAP_TTL_MS) return featureDeclCache.map;
+  const map = new Map<string, { required: string[]; optional: string[] }>();
+  const packDir = resolveDefaultPackDir();
+  if (existsSync(packDir)) {
+    for (const entry of readdirSync(packDir)) {
+      if (isTombstoned(entry)) continue;
+      if (isParkedPackDirName(entry)) continue;
+      const manifestPath = join(packDir, entry, 'pack.json');
+      if (!existsSync(manifestPath)) continue;
+      let manifest: PackManifest;
+      try {
+        manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as PackManifest;
+      } catch {
+        continue;
+      }
+      if (!Array.isArray(manifest.nodes)) continue;
+      for (const n of manifest.nodes) {
+        const required = featureSurfaceList(n['x-requiresFeatureSurfaces']);
+        const optional = featureSurfaceList(n['x-optionalFeatureSurfaces']);
+        if (required.length > 0 || optional.length > 0) map.set(n.typeId, { required, optional });
+      }
+    }
+  }
+  featureDeclCache = { at: Date.now(), map };
   return map;
 }
 

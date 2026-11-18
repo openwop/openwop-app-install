@@ -84,7 +84,7 @@ async function team() {
   }
   const [ownerId, editorId, viewerId] = ids as [string, string, string];
   // The editor is ALSO a workspace-root member (assignable as an owner).
-  const rootAdd = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(tenantId)}/members`, { displayName: 'Ed Itor', subject: editorId, roles: ['editor'] });
+  const rootAdd = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(tenantId)}/members`, { displayName: 'Ed Itor', subject: editorId, roles: ['editor'] });
   expect(rootAdd.status, JSON.stringify(rootAdd.body)).toBe(201);
   const editorRootMemberId = rootAdd.body.memberId;
   const orgIds: string[] = [];
@@ -96,7 +96,7 @@ async function team() {
   const [orgA, orgB] = orgIds as [string, string];
   // editor: member of A only; viewer: viewer of A.
   for (const [subject, role] of [[editorId, 'editor'], [viewerId, 'viewer']] as const) {
-    const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgA)}/members`, { displayName: role, subject, roles: [role] });
+    const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgA)}/members`, { displayName: role, subject, roles: [role] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
   }
   // an outsider: a real user whose home is a different tenant.

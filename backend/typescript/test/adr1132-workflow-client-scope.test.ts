@@ -73,7 +73,7 @@ async function agency() {
   const orgA = await org('Client A');
   const orgB = await org('Client B');
   const place = async (p: Person, orgId: string, roles: string[]): Promise<string> => {
-    const r = await owner.c.post<{ memberId: string }>(`${H}/orgs/${enc(orgId)}/members`, { displayName: 'P', subject: p.userId, roles });
+    const r = await owner.c.post<{ memberId: string }>(`${H}/test/orgs/${enc(orgId)}/members`, { displayName: 'P', subject: p.userId, roles });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
     return r.body.memberId;
   };

@@ -127,7 +127,7 @@ async function sharedWorkspaceWithZeroScopeMember(): Promise<{
   expect((await owner.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.workspaceId)}/switch`)).status).toBe(200);
   const member = client();
   const m = await signup(member);
-  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws.workspaceId)}/members`, { displayName: 'Z', subject: m.userId, roles: [] });
+  const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(ws.workspaceId)}/members`, { displayName: 'Z', subject: m.userId, roles: [] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   expect((await member.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.workspaceId)}/switch`)).status).toBe(200);
   return { owner, member, memberId: m.userId, workspaceId: ws.workspaceId };

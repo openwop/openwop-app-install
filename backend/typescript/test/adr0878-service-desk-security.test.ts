@@ -106,8 +106,8 @@ async function twoOrgTenant(): Promise<{ tenantId: string; owner: Client; mallor
   expect(a.status, JSON.stringify(a.body)).toBe(201);
   const orgA = a.body!.orgId as string;
   const orgB = b.body!.orgId as string;
-  expect((await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgB)}/members`, { displayName: 'M', subject: malloryId, roles: ['admin'] })).status).toBe(201);
-  expect((await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'A', subject: aliceId, roles: ['editor'] })).status).toBe(201);
+  expect((await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgB)}/members`, { displayName: 'M', subject: malloryId, roles: ['admin'] })).status).toBe(201);
+  expect((await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'A', subject: aliceId, roles: ['editor'] })).status).toBe(201);
   return { tenantId, owner, mallory, alice, aliceId, orgA, orgB };
 }
 

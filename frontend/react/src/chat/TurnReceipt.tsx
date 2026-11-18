@@ -32,6 +32,7 @@ import { ChevronDownIcon, GlobeIcon } from '../ui/icons/index.js';
 import { useToolEffects, type ToolEffect } from './lib/toolEffects.js';
 import { useWorkbenchActions } from './workbench/workbenchActions.js';
 import { RunArtifactCards, useChatTurnArtifacts } from './RunArtifactCards.js';
+import { useToolSummaries } from './lib/toolSummaries.js';
 
 /** The chat tools that save an artifact under the turn that ran them (ADR 1017 D2). */
 export const CHAT_ARTIFACT_TOOLS: ReadonlySet<string> = new Set([
@@ -96,10 +97,13 @@ export function TurnReceipt({ message }: { message: ChatMessage }): JSX.Element 
   const showMeta = settled && Boolean(message.meta) && !message.meta?.error;
   const hasEvents = s.tools + s.handoffs > 0 || (message.agentEvents?.decisions.length ?? 0) > 0 || (message.agentEvents?.verified?.length ?? 0) > 0;
   const hasDuration = settled && message.replyMs !== undefined;
-  if (!hasEvents && !(showMeta && s.hasDetails) && !hasDuration) return null;
-
   const troubled = s.failedTools > 0 || s.failedVerifications > 0;
   const open = userOpen ?? (!settled || troubled);
+  // ADR 1040 D7 F3 — per-call display summaries, read only once the receipt is
+  // OPEN on a settled turn that ran a tool (a host channel; plain text). Above
+  // the early return: it is a hook.
+  const summaries = useToolSummaries(message.turnRef, open && settled && s.tools > 0);
+  if (!hasEvents && !(showMeta && s.hasDetails) && !hasDuration) return null;
 
   const parts: string[] = [];
   if (showMeta && s.model) parts.push(s.model);
@@ -150,6 +154,8 @@ export function TurnReceipt({ message }: { message: ChatMessage }): JSX.Element 
               <div key={`tc-${tc.callId}`} className="turn-receipt-tool">
                 {e ? <span className={`turn-receipt-effect is-${e}`}>{t(e === 'write' ? 'receiptEffectChange' : 'receiptEffectRead')}</span> : null}
                 <ToolCallCard call={tc} />
+                {/* ADR 1040 D7 F3 — its own line, directly after its card, as text. */}
+                {summaries.get(tc.callId) ? <p className="turn-receipt-summary">{summaries.get(tc.callId)}</p> : null}
               </div>
             );
           })}

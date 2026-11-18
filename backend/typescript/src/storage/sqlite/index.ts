@@ -806,10 +806,16 @@ export function openSqliteStorage(dbPath: string): Storage {
   // rewrites the whole row, so a later put that carries no key would otherwise
   // erase the one an earlier put recorded for the same attempt.
   const putInvocationStmt = db.prepare(`
-    INSERT OR REPLACE INTO invocation_log (run_id, node_id, attempt, invocation_id, result, created_at, presented_key)
+    INSERT OR REPLACE INTO invocation_log (run_id, node_id, attempt, invocation_id, result, created_at, presented_key, llm_cache_key)
     VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, (
       SELECT presented_key FROM invocation_log
+       WHERE run_id = ? AND node_id = ? AND attempt = ? AND invocation_id = ?)), COALESCE(?, (
+      SELECT llm_cache_key FROM invocation_log
        WHERE run_id = ? AND node_id = ? AND attempt = ? AND invocation_id = ?)))
+  `);
+  const getInvocationLlmCacheKeyStmt = db.prepare(`
+    SELECT llm_cache_key AS k FROM invocation_log
+    WHERE run_id = ? AND node_id = ? AND attempt = ? AND invocation_id = ?
   `);
 
   // ADR 0591 — the escape ledger. Note the verb: plain INSERT, never INSERT OR
@@ -826,7 +832,7 @@ export function openSqliteStorage(dbPath: string): Storage {
   // not reported as a completed effect.
   const listRunEffectsStmt = db.prepare(`
     SELECT node_id AS nodeId, attempt, invocation_id AS invocationId,
-           presented_key AS presentedKey,
+           presented_key AS presentedKey, llm_cache_key AS llmCacheKey,
            CASE WHEN result IS NOT NULL THEN 1 ELSE 0 END AS completed,
            created_at AS at
       FROM invocation_log
@@ -2023,6 +2029,11 @@ export function openSqliteStorage(dbPath: string): Storage {
       return row?.result ? JSON.parse(row.result) : null;
     },
 
+    async getInvocationLlmCacheKey({ runId, nodeId, attempt, invocationId }) {
+      const row = getInvocationLlmCacheKeyStmt.get(runId, nodeId, attempt, invocationId) as { k: string | null } | undefined;
+      return row?.k ?? null;
+    },
+
     async getLatestInvocation({ runId, nodeId, invocationId }) {
       const row = getLatestInvocationStmt.get(runId, nodeId, invocationId) as
         | { result: string }
@@ -2039,6 +2050,11 @@ export function openSqliteStorage(dbPath: string): Storage {
         JSON.stringify(result ?? null),
         new Date().toISOString(),
         opts?.presentedKey ?? null,
+        runId,
+        nodeId,
+        attempt,
+        invocationId,
+        opts?.llmCacheKey ?? null,
         runId,
         nodeId,
         attempt,
@@ -2065,11 +2081,12 @@ export function openSqliteStorage(dbPath: string): Storage {
 
     listRunEffects(runId: string) {
       const rows = listRunEffectsStmt.all(runId) as Array<{
-        nodeId: string; attempt: number; invocationId: string; presentedKey: string | null; completed: number; at: string;
+        nodeId: string; attempt: number; invocationId: string; presentedKey: string | null; llmCacheKey: string | null; completed: number; at: string;
       }>;
       return Promise.resolve(rows.map((r) => ({
         nodeId: r.nodeId, attempt: r.attempt, invocationId: r.invocationId,
         ...(r.presentedKey ? { presentedKey: r.presentedKey } : {}),
+        ...(r.llmCacheKey ? { llmCacheKey: r.llmCacheKey } : {}),
         completed: r.completed === 1, at: r.at,
       })));
     },

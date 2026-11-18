@@ -94,7 +94,7 @@ describe('cms.localize-and-submit — end-to-end execution', () => {
     await putLocaleGrant(tenantId, orgId, 'user:translator-1', ['pt-BR'], 'test');
     // A grant NARROWS a member (ADR 0205 D1); the translator is in the org, as the
     // HTTP editor path requires and the seam's org floor now does too (ADR 0832).
-    const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'T', subject: 'user:translator-1', roles: ['editor'] });
+    const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'T', subject: 'user:translator-1', roles: ['editor'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
 
     // The run carries the translator's durable principal (scope.actingUserId).

@@ -26,6 +26,7 @@ import { getNotificationEmitter } from './emitter.js';
 import { deliverApprovalEmail } from '../host/emailApprovalDelivery.js';
 import { gateRequiresSession } from '../host/approvalGateDecide.js';
 import { gateApproverRefs, resolveNotificationRecipients } from '../host/approverResolution.js';
+import { splitRunReaders } from '../host/runClientAccess.js';
 import { resolveTenantWorkflow } from '../host/resolveLaunchDefinition.js';
 
 /**
@@ -188,12 +189,36 @@ export async function emitInterruptNotification(
     // notify delegates who could not vote on it.
     const gateRefs = gateApproverRefs(interrupt.data);
     const approverOrgId = (run.metadata as Record<string, unknown> | undefined)?.approverOrgId;
-    const recipients = (interrupt.kind === 'approval' || interrupt.kind === 'cancellation')
+    const named = (interrupt.kind === 'approval' || interrupt.kind === 'cancellation')
       ? await resolveNotificationRecipients(
           gateRefs,
           { tenantId: run.tenantId, ...(typeof approverOrgId === 'string' ? { orgId: approverOrgId } : {}) },
         )
       : null;
+    // ADR 1140 (#5951) — a named approver who cannot open this run (the ADR 1121
+    // client floor, the ADR 1133 private-project floor) is not asked: their card
+    // would answer `run_not_found`. The gate is misconfigured for them, so the
+    // run's operators are told once, and if nobody named can open it, the request
+    // goes to the operators instead of nobody.
+    const split = named && named.length > 0 ? await splitRunReaders(run, named) : null;
+    const recipients = split ? split.readers : named;
+    if (split && split.unreadable.length > 0) {
+      const audience = runNoticeAudience({ tenantId: run.tenantId, metadata: run.metadata });
+      const count = split.unreadable.length;
+      await getNotificationEmitter().emit({
+        tenantId: run.tenantId,
+        type: 'openwop-app.workflow.approver-unreadable',
+        priority: 'normal',
+        title: 'An approver cannot open this run',
+        message: `${asker ?? 'An automation'} — ${count === 1 ? '1 named approver' : `${count} named approvers`} cannot open this run, so ${count === 1 ? 'was' : 'were'} not asked. Check the step's approvers or their client access.`,
+        runId: interrupt.runId,
+        workflowId: run.workflowId,
+        nodeId: interrupt.nodeId,
+        actionUrl: '/inbox',
+        metadata: stripSecretsFromPersisted({ kind: interrupt.kind, unreadableApprovers: count }),
+        ...(audience.recipientRole ? { recipientRole: audience.recipientRole } : {}),
+      });
+    }
     if (recipients && recipients.length > 0) {
       for (const recipientUserId of recipients) {
         const rec = await getNotificationEmitter().emit({ ...base, recipientUserId, metadata: { ...base.metadata, reason: { kind: 'named' } } });

@@ -555,6 +555,9 @@ export function FormDetailPage(): JSX.Element {
    * is off on two independent default switches, so it cannot be the answer).
    * Offered on HELD rows only — deleting a real captured lead is a different
    * product decision, and the destructive-action ladder for it is `deleteForm`'s.
+   *
+   * CORRECTED (issue 5960): that decision was made (the user, 2026-11-17): a clean
+   * row gets its own Delete, `deleteCleanSubmission` below, with its own confirm.
    */
   /** FRM2UX-3 — the held row an action is in flight on: both buttons go busy
    *  (no second confirm, no Discard racing a Release that is delivering). */
@@ -583,6 +586,26 @@ export function FormDetailPage(): JSX.Element {
       refocusAfterRowAction(sub.submissionId);
     } catch (e) { toastFailure(e, 'discardHeldFailed'); }
     finally { setRowBusy(null); }
+  }, [form, orgId, t, toastFailure, rowBusy]);
+
+  /** Issue 5960 — delete ONE clean (not held) submission: a test entry or spam
+   *  that slipped past the guards. Permanent, so it confirms and says so, and says
+   *  what it does NOT undo (the contact or run the submission already created).
+   *  The abuse banner does not move: the row was never in the quarantine. Refused
+   *  while the workspace is under a legal hold (409 `legal_hold`). */
+  const deleteCleanSubmission = useCallback(async (sub: Submission) => {
+    if (!form || rowBusy) return;
+    if (!(await confirm({ title: t('deleteSubmissionConfirm'), body: t('deleteSubmissionBody'), danger: true, confirmLabel: t('common:delete') }))) return;
+    setRowBusy(sub.submissionId);
+    try {
+      await deleteSubmission(orgId, form.formId, sub.submissionId);
+      setSubs((prev) => (prev ?? []).filter((s) => s.submissionId !== sub.submissionId));
+      toast.success(t('deleteSubmissionDone'));
+      refocusAfterRowAction(sub.submissionId);
+    } catch (e) {
+      if (e instanceof FormsRequestError && e.reason === 'legal_hold') toast.error(t('deleteSubmissionLegalHold'));
+      else toastFailure(e, 'deleteSubmissionFailed');
+    } finally { setRowBusy(null); }
   }, [form, orgId, t, toastFailure, rowBusy]);
 
   /**
@@ -1186,7 +1209,13 @@ export function FormDetailPage(): JSX.Element {
                     <Button variant="secondary" size="sm" loading={rowBusy === s.submissionId} disabled={rowBusy !== null} onClick={() => void releaseHeld(s)}>{t('releaseHeld')}</Button>
                     <Button variant="danger" size="sm" disabled={rowBusy !== null} onClick={() => void discardHeld(s)}>{t('discardHeld')}</Button>
                   </div>
-                ) : null}
+                ) : (
+                  // Issue 5960 — a clean row's Delete, quiet rather than filled
+                  // red: it is a housekeeping action on a row that is not in trouble.
+                  <div className="u-flex u-justify-end u-gap-1 u-p-2">
+                    <Button variant="quiet" size="sm" loading={rowBusy === s.submissionId} disabled={rowBusy !== null} onClick={() => void deleteCleanSubmission(s)}>{t('deleteSubmission')}</Button>
+                  </div>
+                )}
               </details>
             );
           })}

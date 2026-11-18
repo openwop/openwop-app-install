@@ -18,7 +18,7 @@
 import { assertSynced, authedHeaders, config, fetchOpts, isOfflineError } from '../../client/config.js';
 import i18n from '../../i18n/index.js';
 import { getWorkflowDefinitionRaw } from '../../client/workflowsClient.js';
-import { listWorkflowSummaries } from '../../workflows/workflowsClient.js';
+import { listChainCatalog, listWorkflowSummaries } from '../../workflows/workflowsClient.js';
 import { serializeWorkflow } from '../schema/serialize.js';
 import { CanonicalParseError, fromCanonicalDefinition } from '../schema/deserialize.js';
 import { loadDynamicCatalog } from '../palette/catalogRegistry.js';
@@ -99,7 +99,6 @@ export interface ChainParamSpec {
   enum?: unknown[];
 }
 
-const CHAINS_URL = `${config.baseUrl}/host/openwop-app/workflow-chains`;
 const INSTALL_CHAIN_PACK_URL = `${config.baseUrl}/host/openwop-app/workflow-chain-packs/install`;
 const FROM_CHAIN_URL = `${config.baseUrl}/host/openwop-app/workflows/from-chain`;
 const LIST_URL = `${config.baseUrl}/host/openwop-app/workflows`;
@@ -397,9 +396,9 @@ export async function removeWorkflow(id: string): Promise<void> {
  *  401/5xx rendered the gallery's "no templates installed" empty state — a
  *  false statement about the host, with no way to retry. */
 export async function listChainTemplates(): Promise<ChainTemplate[]> {
-  const res = await fetch(CHAINS_URL, fetchOpts({ headers: authedHeaders() }));
-  await assertSynced(res);
-  return ((await res.json()) as { chains: ChainTemplate[] }).chains;
+  // The one catalog read lives in the neutral client, shared with the chat `/`
+  // picker (the picker-templates ADR), so the two can never drift.
+  return listChainCatalog();
 }
 
 export interface InstallPackResult {

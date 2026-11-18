@@ -50,7 +50,7 @@ const enable = (status: 'on' | 'off'): Promise<void> => enableToggle('strategy',
 const S = '/host/openwop-app/strategy';
 const mkOrg = (c: Client, name: string) => c.post('/host/openwop-app/orgs', { name });
 const addMember = (owner: Client, orgId: string, subject: string, roles: string[]) =>
-  owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject, roles });
+  owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject, roles });
 
 /** A tenant with an owner + one org. */
 async function ownerWithOrg(tenantId: string): Promise<{ owner: Client; userId: string; orgId: string }> {

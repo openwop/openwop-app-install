@@ -75,6 +75,8 @@ async function signup(c: Client, tenantId: string): Promise<string> {
 const errorOf = (r: Res): unknown => r.body?.['error'];
 const messageOf = (r: Res): unknown => r.body?.['message'];
 const members = (orgId: string): string => `/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`;
+/** #5945 — seeding binds a `user:` subject, so it goes through the auth test seam (same handler). */
+const seedMembers = (orgId: string): string => `/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`;
 const B = '/host/openwop-app/brand/brands';
 
 /** A shared tenant with two orgs. The owner admins both; `alice` is an editor of
@@ -94,9 +96,9 @@ async function twoOrgTenant() {
   expect(a.status, JSON.stringify(a.body)).toBe(201);
   const orgA = a.body!.orgId as string;
   const orgB = b.body!.orgId as string;
-  expect((await owner.post(members(orgA), { displayName: 'A', subject: aliceId, roles: ['editor'] })).status).toBe(201);
-  expect((await owner.post(members(orgA), { displayName: 'V', subject: veraId, roles: ['viewer'] })).status).toBe(201);
-  const bobRow = await owner.post(members(orgB), { displayName: 'B', subject: bobId, roles: ['editor'] });
+  expect((await owner.post(seedMembers(orgA), { displayName: 'A', subject: aliceId, roles: ['editor'] })).status).toBe(201);
+  expect((await owner.post(seedMembers(orgA), { displayName: 'V', subject: veraId, roles: ['viewer'] })).status).toBe(201);
+  const bobRow = await owner.post(seedMembers(orgB), { displayName: 'B', subject: bobId, roles: ['editor'] });
   expect(bobRow.status).toBe(201);
   const brandB = await createBrand(tenantId, orgB, ownerId, {
     name: 'Org B secret brand',

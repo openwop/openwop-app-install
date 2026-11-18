@@ -405,6 +405,7 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseScheduledChatsSubject',
   'eraseRouterConfigSubject', // ADR 1016 (MR66CD-8)
   'eraseSharingSubject',
+  'eraseSharingRecipientSubject', // ADR 1141 D4 — a recipient-bound share link's recipient
   'eraseSubjectAccessControl',
   // ADR 0910 — `workspace-operator-activation` (host/operatorAccess.ts).
   'eraseSubjectOperatorActivations',
@@ -455,6 +456,7 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseSubjectStrategy',
   'eraseSubjectTerritories',
   'eraseSubjectTickets',
+  'eraseSubjectToolSummaries',  // ADR 1040 D7 F3 — chat tool display summaries (deleted)
   'eraseSubjectTwinGrants',
   'eraseSubjectUcpPurchases',
   'eraseSubjectWorkflowBudgets',

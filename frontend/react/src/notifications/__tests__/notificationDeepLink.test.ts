@@ -67,11 +67,11 @@ describe('canonicalInboxTabFor', () => {
     expect(canonicalInboxTabFor(notif({ status: 'archived' }))).toBe('archived');
   });
   it('routes an action-needed row to action-needed', () => {
-    expect(canonicalInboxTabFor(notif({ type: 'openwop-app.workflow.approval-needed' }))).toBe('action-needed');
+    expect(canonicalInboxTabFor(notif({ type: 'openwop-app.workflow.approval-needed' }))).toBe('needs-you');
   });
   it('routes any other non-archived row to all', () => {
-    expect(canonicalInboxTabFor(notif({ type: 'agent.escalation' }))).toBe('all');
-    expect(canonicalInboxTabFor(notif({ type: 'workflow.completed' }))).toBe('all');
+    expect(canonicalInboxTabFor(notif({ type: 'agent.escalation' }))).toBe('updates');
+    expect(canonicalInboxTabFor(notif({ type: 'workflow.completed' }))).toBe('updates');
   });
 });
 
@@ -79,19 +79,25 @@ describe('inboxTabShows', () => {
   it('archived rows appear only under the archived tab', () => {
     const n = notif({ status: 'archived' });
     expect(inboxTabShows('archived', n)).toBe(true);
-    expect(inboxTabShows('all', n)).toBe(false);
-    expect(inboxTabShows('action-needed', n)).toBe(false);
+    expect(inboxTabShows('updates', n)).toBe(false);
+    expect(inboxTabShows('needs-you', n)).toBe(false);
   });
-  it('action-needed rows appear under action-needed and all', () => {
+  it('an open request is on Needs you only, never on Updates (ADR 1125 D4)', () => {
     const n = notif({ type: 'openwop-app.workflow.approval-needed' });
-    expect(inboxTabShows('action-needed', n)).toBe(true);
-    expect(inboxTabShows('all', n)).toBe(true);
+    expect(inboxTabShows('needs-you', n)).toBe(true);
+    expect(inboxTabShows('updates', n)).toBe(false);
     expect(inboxTabShows('archived', n)).toBe(false);
   });
-  it('a non-action-needed row (escalation) is hidden on the default action-needed tab', () => {
+  it('a finished request is on Updates, and its deep link opens Updates (ADR 1125 D4)', () => {
+    const n = notif({ type: 'openwop-app.workflow.approval-needed', metadata: { resolution: { state: 'approved', at: '2026-11-16T00:00:00.000Z' } } });
+    expect(inboxTabShows('needs-you', n)).toBe(false);
+    expect(inboxTabShows('updates', n)).toBe(true);
+    expect(canonicalInboxTabFor(n)).toBe('updates');
+  });
+  it('a news row (escalation) is hidden on the default Needs you tab', () => {
     const n = notif({ type: 'agent.escalation' });
-    expect(inboxTabShows('action-needed', n)).toBe(false); // ← why the auto-tab switch exists
-    expect(inboxTabShows('all', n)).toBe(true);
+    expect(inboxTabShows('needs-you', n)).toBe(false); // ← why the auto-tab switch exists
+    expect(inboxTabShows('updates', n)).toBe(true);
   });
 });
 

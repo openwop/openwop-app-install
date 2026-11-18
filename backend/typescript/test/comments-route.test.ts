@@ -174,7 +174,7 @@ describe('Comments: thread CRUD (RBAC) + IDOR + validation', () => {
     const other = client();
     const login = await other.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `cmt-other-${n++}@acme.test`, tenantId });
     expect(login.status).toBe(201);
-    const seat = await owner.post(`/host/openwop-app/orgs/${orgId}/members`, {
+    const seat = await owner.post(`/host/openwop-app/test/orgs/${orgId}/members`, {
       displayName: 'Other', subject: login.body.user.userId, roles: ['editor'],
     });
     expect(seat.status, JSON.stringify(seat.body)).toBe(201);

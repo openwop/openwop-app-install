@@ -73,6 +73,16 @@ export async function getMe(): Promise<User> {
   return asJson<User>(res, 'getMe');
 }
 
+/** Issue 5991 — the session PROBE: the caller's record, or null when nobody is signed
+ *  in. `?optional=1` makes "not signed in" a 204 rather than a 401, so a public page
+ *  logs no failed request for an anonymous visitor. A host without the parameter still
+ *  answers 401, which throws as `getMe` does; callers handle both. */
+export async function getMeIfSignedIn(): Promise<User | null> {
+  const res = await fetch(`${base}/me?optional=1`, fetchOpts({ headers: authedHeaders() }));
+  if (res.status === 204) return null;
+  return asJson<User>(res, 'getMe');
+}
+
 /** ADR 0389 P1 — session security posture for the Security panel. */
 export interface MySecurity {
   source: UserSource;

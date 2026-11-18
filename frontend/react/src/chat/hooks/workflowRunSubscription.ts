@@ -86,7 +86,7 @@ export async function reconcileWorkflowRunFromLog(
   ctx: WorkflowRunHandlerContext,
 ): Promise<ReconcileResult> {
   const {
-    runId, runMsgId, setSession, persistMessage, sessionId, sessionTitle,
+    runId, runMsgId, setSession,
     updateWorkflowRun, closeWorkflowSub,
   } = ctx;
 
@@ -151,6 +151,9 @@ export async function reconcileWorkflowRunFromLog(
         if (m.workflowRun.status === terminalStatus) return m; // already applied
         const updated: ChatMessage = {
           ...m,
+          // CC-CHAT-6: a finished run has nothing open. Cleared here, before the
+          // persist, so a reload cannot bring a stale wait or gate back.
+          activeInterrupts: [],
           workflowRun: {
             ...m.workflowRun,
             status: terminalStatus,
@@ -164,7 +167,11 @@ export async function reconcileWorkflowRunFromLog(
       });
       return finalized ? { ...s, messages: next } : s;
     });
-    if (finalized) void persistMessage(sessionId, sessionTitle, finalized);
+    // CC-CHAT-6: persist from INSIDE an updater (persistRunMessageSnapshot). The
+    // `finalized` capture above is only set when React runs the updater eagerly, so
+    // a check of it here skipped the terminal save and left the suspended copy
+    // (with its open wait) in the store.
+    persistRunMessageSnapshot(ctx);
     closeWorkflowSub(runMsgId);
   }
 
@@ -237,9 +244,6 @@ export function makeWorkflowRunHandlers(
     runId,
     runMsgId,
     setSession,
-    persistMessage,
-    sessionId,
-    sessionTitle,
     updateWorkflowRun,
     closeWorkflowSub,
   } = ctx;
@@ -404,17 +408,17 @@ export function makeWorkflowRunHandlers(
       } else if (ev.type === 'run.completed') {
         const outputs = (payload.outputs as Record<string, unknown>) ?? undefined;
         const skippedTerminals = readSkippedTerminals(payload);
-        // Inline setSession (rather than updateWorkflowRun) so we
-        // can capture the finalized message and write it through to
-        // the BE in the same step — without this, an @mention chat
-        // session is never persisted and the history drawer keeps
-        // showing "New chat — 0 messages" even after completion.
-        let finalized: ChatMessage | null = null;
+        // Inline setSession (rather than updateWorkflowRun) so the
+        // terminal state and the cleared interrupts land together; the
+        // snapshot persist below then writes it through to the BE —
+        // without it, an @mention chat session is never persisted and
+        // the history drawer keeps showing "New chat — 0 messages".
         setSession((s) => {
           const next = s.messages.map((m) => {
             if (m.id !== runMsgId || !m.workflowRun) return m;
             const updated: ChatMessage = {
               ...m,
+              activeInterrupts: [], // CC-CHAT-6: nothing stays open on a finished run
               workflowRun: {
                 ...m.workflowRun,
                 status: 'completed',
@@ -422,12 +426,15 @@ export function makeWorkflowRunHandlers(
                 ...(skippedTerminals ? { skippedTerminals } : {}),
               },
             };
-            finalized = updated;
             return updated;
           });
           return { ...s, messages: next };
         });
-        if (finalized) void persistMessage(sessionId, sessionTitle, finalized);
+        // CC-CHAT-6: persist from INSIDE an updater (persistRunMessageSnapshot). The
+    // `finalized` capture above is only set when React runs the updater eagerly, so
+    // a check of it here skipped the terminal save and left the suspended copy
+    // (with its open wait) in the store.
+    persistRunMessageSnapshot(ctx);
         closeWorkflowSub(runMsgId);
         // Final backfill: the run is done, so the log is now complete and
         // immutable — reconcile any node.completed the live stream skipped so
@@ -435,40 +442,46 @@ export function makeWorkflowRunHandlers(
         void reconcileWorkflowRunFromLog(ctx);
       } else if (ev.type === 'run.failed') {
         const err = (payload.error as Record<string, string>) ?? { code: 'unknown', message: 'unknown failure' };
-        let finalized: ChatMessage | null = null;
         setSession((s) => {
           const next = s.messages.map((m) => {
             if (m.id !== runMsgId || !m.workflowRun) return m;
             const updated: ChatMessage = {
               ...m,
+              activeInterrupts: [], // CC-CHAT-6
               workflowRun: {
                 ...m.workflowRun,
                 status: 'failed',
                 error: { code: err.code ?? 'unknown', message: err.message ?? 'unknown failure' },
               },
             };
-            finalized = updated;
             return updated;
           });
           return { ...s, messages: next };
         });
-        if (finalized) void persistMessage(sessionId, sessionTitle, finalized);
+        // CC-CHAT-6: persist from INSIDE an updater (persistRunMessageSnapshot). The
+    // `finalized` capture above is only set when React runs the updater eagerly, so
+    // a check of it here skipped the terminal save and left the suspended copy
+    // (with its open wait) in the store.
+    persistRunMessageSnapshot(ctx);
         closeWorkflowSub(runMsgId);
       } else if (ev.type === 'run.cancelled') {
-        let finalized: ChatMessage | null = null;
         setSession((s) => {
           const next = s.messages.map((m) => {
             if (m.id !== runMsgId || !m.workflowRun) return m;
             const updated: ChatMessage = {
               ...m,
+              activeInterrupts: [], // CC-CHAT-6
               workflowRun: { ...m.workflowRun, status: 'cancelled' },
             };
-            finalized = updated;
             return updated;
           });
           return { ...s, messages: next };
         });
-        if (finalized) void persistMessage(sessionId, sessionTitle, finalized);
+        // CC-CHAT-6: persist from INSIDE an updater (persistRunMessageSnapshot). The
+    // `finalized` capture above is only set when React runs the updater eagerly, so
+    // a check of it here skipped the terminal save and left the suspended copy
+    // (with its open wait) in the store.
+    persistRunMessageSnapshot(ctx);
         closeWorkflowSub(runMsgId);
       }
     },

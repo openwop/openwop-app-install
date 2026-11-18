@@ -67,9 +67,12 @@ describe('resolveSharedPublic — public viewer (ADR 0122 Phase 6)', () => {
   it('sends NO auth headers (the token is the credential)', async () => {
     const spy = stubFetch(async () => res(200, { resourceType: 'conversation', resource: {} }));
     await resolveSharedPublic('tok');
-    // plain fetch(url) — a single positional arg, no init/headers object
+    // No auth headers at all. ADR 1141: the init may carry `credentials` so a
+    // browser that verified a recipient-bound link presents its session cookie,
+    // but never a header the app would otherwise attach.
     expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy.mock.calls[0]!.length).toBe(1);
+    const init = spy.mock.calls[0]![1] as RequestInit | undefined;
+    expect(init?.headers).toBeUndefined();
   });
 });
 

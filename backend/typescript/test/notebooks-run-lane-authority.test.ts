@@ -85,7 +85,7 @@ async function fixture() {
   const orgA = (await owner.post(`${H}/orgs`, { name: 'Everyone' })).body.orgId as string;
   const orgB = (await owner.post(`${H}/orgs`, { name: 'Finance' })).body.orgId as string;
   for (const [subject, roles] of [[editorId, ['editor']], [viewerId, ['viewer']]] as const) {
-    const add = await owner.post(`${H}/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject, roles });
+    const add = await owner.post(`${H}/test/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject, roles });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
   }
   const mk = async (orgId: string, name: string, text: string): Promise<{ id: string; sourceId: string }> => {
@@ -186,7 +186,7 @@ describe('ADR 1103 D2 — the run lane gives the door\'s answer', () => {
     const f = await fixture();
     const outsider = client();
     const outsiderId = await login(outsider, f.tenantId, 'outsider');
-    const add = await f.owner.post(`${H}/orgs/${encodeURIComponent(f.orgB)}/members`, { displayName: 'O', subject: outsiderId, roles: ['editor'] });
+    const add = await f.owner.post(`${H}/test/orgs/${encodeURIComponent(f.orgB)}/members`, { displayName: 'O', subject: outsiderId, roles: ['editor'] });
     expect(add.status).toBe(201);
     const caused = buildNotebooksSurface({ tenantId: f.tenantId, runId: 'r', orgScopeSubject: outsiderId });
     expect(as<Refusal>(await caused.getSourceText({ notebookId: f.nbA.id, sourceId: f.nbA.sourceId })).error?.code).toBe('notebook_unavailable');

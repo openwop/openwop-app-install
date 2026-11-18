@@ -178,7 +178,7 @@ describe('ADR 1025 — behaviour through the real app', () => {
     const viewer = client();
     const viewerId = String((await viewer('POST', '/host/openwop-app/test/login', { email: 'mch1025-v@acme.test', tenantId })).body.user?.userId);
     const orgId = String((await owner('POST', '/host/openwop-app/orgs', { name: 'Store' })).body.orgId);
-    const added = await owner('POST', `/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] });
+    const added = await owner('POST', `/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] });
     expect(added.status, JSON.stringify(added.body)).toBe(201);
 
     const surfaces = (scope: BundleScope): Record<string, FeatureSurface> => buildFeatureSurfaces(scope);

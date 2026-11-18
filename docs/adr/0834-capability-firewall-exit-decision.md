@@ -196,6 +196,30 @@ read). A newly registered tool fails until it is adjudicated. Every
 population stays empty by design, and the baseline census is now the witness that
 off-host tools are covered.
 
+> **CORRECTED 2026-11-16 (#5908) — three things D4 left wrong. The baseline itself stands.**
+> A downstream deployment's agent in safe mode filed a todo (`kanban.add-todo`) and sent a
+> notification (`notifications.notify-me`) in a turn where the user had said not to change
+> anything. It then closed with "Nothing approved, nothing changed", directly under the turn's own
+> "2 changes" receipt. Both tools are deliberate no-ask writes under this decision, so nothing was
+> bypassed. Three parts of the design around them were wrong, and are fixed:
+>
+> - **The census's reason for `add-todo` was false.** It said SELF ("addressed only to the
+>   acting user"), but the card goes to the **agent's** board. The census now gives the true
+>   reason: the agent's own board, which the workspace's members see and can edit, and a card with
+>   no workflow that runs nothing until a person arms it.
+> - **The safe-mode copy promised more than D4 holds.** "Asks before running code or other
+>   consequential actions" reads as covering a todo and a notification. `permissionSafeTitle` (4
+>   locales) now names what is held: running code, running a workflow the agent wrote, and
+>   sending anything outside the app. It also says notes to the user and to-dos on the agent's
+>   own board need no ask.
+> - **Nothing stopped a reply from denying the turn's own writes.** After any round with a
+>   successful `write` call, the chat tool loop now adds a host note naming every write so far
+>   (`turnWritesNote`, `agentDispatch.ts`), so the reply is written in front of the receipt's
+>   facts. Pinned by `test/turn-writes-note.test.ts`.
+>
+> Holding every state-changing tool in safe mode was weighed and not done: it changes every
+> agent's behaviour, which is the user's call. It is listed for him as an option.
+
 ### D5 — Voice honours the conversation's scope
 
 The scope resolution in `conversationToolLoop.ts` (config ∩ approved intent ledger,

@@ -37,7 +37,7 @@ export const messages = {
   onSuffix: 'ativado',
   permissionSafeLabel: 'Perguntar antes',
   permissionBypassLabel: 'Agir direto',
-  permissionSafeTitle: 'Perguntar antes — o agente pede confirmação antes de executar código ou outras ações importantes (clique para deixá-lo agir direto)',
+  permissionSafeTitle: 'Perguntar antes — o agente pede confirmação antes de executar código, executar um fluxo de trabalho que escreveu ou enviar algo para fora do app. Notas para você e tarefas no próprio quadro dele não precisam de confirmação (clique para deixá-lo agir direto)',
   permissionBypassTitle: 'Agir direto — o agente age sem perguntar a você antes (as regras de aprovação do espaço de trabalho, o sandbox, as permissões e os limites continuam valendo; clique para perguntar antes)',
   togglePermissionMode: 'Alternar modo de permissão (seguro / liberado)',
   permissionOwnerOnlyTitle: 'Perguntar antes — só quem é dono da conversa pode deixar o agente agir direto',
@@ -227,6 +227,19 @@ export const messages = {
   slashCommandsAria: 'Comandos de barra e workflows',
   commandsSection: 'Comandos',
   workflowsSection: 'Workflows',
+  // — SlashAutocomplete Templates group (the picker-templates ADR) —
+  templatesSection: "Modelos",
+  templateBrowseAll: "Ver todos os modelos…",
+  templateAskAdmin: "Peça a um administrador para adicionar este modelo",
+  workflowFromTemplateChip: "De modelo",
+  templateGalleryTitle: "Adicionar um fluxo de trabalho a partir de um modelo",
+  templateYouHaveACopy: "Você já tem uma cópia",
+  templateAddAnotherCopy: "Adicionar outra cópia",
+  templateGalleryEmptyTitle: "Ainda não há modelos de fluxo de trabalho",
+  templateGalleryEmptyBody: "Ainda não há nada instalado neste espaço de trabalho. Um administrador pode adicionar pacotes de modelos.",
+  templateAddedToComposer: "“{{name}}” foi adicionado aos seus fluxos de trabalho. Preencha as entradas e pressione Enter para executá-lo.",
+  templateAddedNotListed: "“{{name}}” foi adicionado aos seus fluxos de trabalho, mas a lista do / ainda não o mostra. Digite / para procurar de novo.",
+  templateNotFound: "Esse modelo não está mais disponível.",
 
   // — BackendStatusCard —
   backendLoading: 'Carregando',
@@ -494,6 +507,7 @@ export const messages = {
   cardLabelExternalEvent: 'Aguardando um evento externo',
   externalEventWaitingBody: 'Esta etapa aguarda execuções vinculadas ou um evento externo e continua sozinha. Não há nada a fazer aqui.',
   waitingResumesOnItsOwn: 'Aguardando — continua sozinha',
+  decisionNotRecorded: "Não foi possível registrar sua decisão: {{reason}}",
 
   // — defaultCommands —
   cmdNewDescription: 'Iniciar uma nova sessão de chat (apaga a thread atual)',

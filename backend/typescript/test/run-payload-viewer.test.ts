@@ -103,7 +103,7 @@ async function sharedWorkspace(): Promise<{ owner: Client; join: (role: string) 
   const join = async (role: string): Promise<Client> => {
     const c = client();
     const u = await signup(c);
-    const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`, { displayName: role, subject: u.userId, roles: [role] });
+    const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(ws)}/members`, { displayName: role, subject: u.userId, roles: [role] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
     expect((await c.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
     return c;

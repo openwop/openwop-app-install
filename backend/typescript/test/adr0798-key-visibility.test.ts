@@ -18,7 +18,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
-import { API_KEY_SCAN_PATTERN, isWellFormedApiKey, issueApiKey, listApiKeys, purgeDeadKeys, revokeApiKey, verifyApiKey, keyHintOf, inventoryApiKeys, type ApiKeyPublic } from '../src/features/developer-keys/apiKeyService.js';
+import { __issueUndeclaredLegacyKeyForTest, API_KEY_SCAN_PATTERN, isWellFormedApiKey, issueApiKey, listApiKeys, purgeDeadKeys, revokeApiKey, verifyApiKey, keyHintOf, inventoryApiKeys, type ApiKeyPublic } from '../src/features/developer-keys/apiKeyService.js';
 import type { KeyMintPolicy } from '../src/features/developer-keys/keyPolicy.js';
 import { invalidateTenantKeyPolicyCache } from '../src/features/developer-keys/tenantKeyPolicyCache.js';
 import { listChain } from '../src/host/auditChainService.js';
@@ -159,8 +159,8 @@ describe('ADR 0798 KEY-12 — rotation with a bounded overlap', () => {
 describe('ADR 0798 KEY-14 — dead keys are kept for a while, then deleted', () => {
   it('a revoked key survives inside the retention window and is purged after it; a live key is never purged', async () => {
     const t = 'adr0798-retention';
-    const dead = await issueApiKey({ tenantId: t, name: 'dead', createdBy: 'user:r' });
-    const live = await issueApiKey({ tenantId: t, name: 'live', createdBy: 'user:r' });
+    const dead = await issueApiKey({ scopes: ['*'], tenantId: t, name: 'dead', createdBy: 'user:r' });
+    const live = await issueApiKey({ scopes: ['*'], tenantId: t, name: 'live', createdBy: 'user:r' });
     await revokeApiKey(t, dead.key.keyId, ALL);
     expect(await purgeDeadKeys(t, Date.now() + 30 * DAY)).toBe(0);
     expect((await listApiKeys(t, ALL)).length).toBe(2);
@@ -171,7 +171,7 @@ describe('ADR 0798 KEY-14 — dead keys are kept for a while, then deleted', () 
 
   it('an expired key ages from its expiry, not from its creation', async () => {
     const t = 'adr0798-retention-exp';
-    const k = await issueApiKey({ tenantId: t, name: 'e', createdBy: 'user:r', expiresAt: new Date(Date.now() + 10 * DAY).toISOString() });
+    const k = await issueApiKey({ scopes: ['*'], tenantId: t, name: 'e', createdBy: 'user:r', expiresAt: new Date(Date.now() + 10 * DAY).toISOString() });
     expect(await purgeDeadKeys(t, Date.now() + 95 * DAY), 'expired 85 days ago: kept').toBe(0);
     expect(await purgeDeadKeys(t, Date.now() + 101 * DAY), 'expired 91 days ago: purged').toBe(1);
     expect((await listApiKeys(t, ALL)).some((x) => x.keyId === k.key.keyId)).toBe(false);
@@ -260,7 +260,7 @@ describe('ADR 0798 KEY-11 — the host-wide inventory', () => {
   it('needs a superadmin, and reports shapes — no names, hashes, hints or tokens', async () => {
     expect((await call('GET', `${KEYS}/inventory`, OPERATOR)).status).toBe(403);
     process.env.OPENWOP_SUPERADMIN_TENANTS = TENANT;
-    await issueApiKey({ tenantId: 'ws:adr0798-inv', name: 'Secret Name', createdBy: 'apikey:dk:parent' });
+    await issueApiKey({ scopes: ['*'], tenantId: 'ws:adr0798-inv', name: 'Secret Name', createdBy: 'apikey:dk:parent' });
     const r = await call<Inventory>('GET', `${KEYS}/inventory`, OPERATOR);
     expect(r.status, JSON.stringify(r.body).slice(0, 200)).toBe(200);
     expect(r.body.total).toBeGreaterThan(0);
@@ -271,7 +271,8 @@ describe('ADR 0798 KEY-11 — the host-wide inventory', () => {
 
   it('counts what matters: undeclared, never-expiring, unparseable', async () => {
     const t = 'adr0798-inv-shapes';
-    const a = await issueApiKey({ tenantId: t, name: 'a', createdBy: 'user:i' });
+    // #6053 — an undeclared row is now only a legacy one; issueApiKey no longer mints it.
+    const a = await __issueUndeclaredLegacyKeyForTest({ tenantId: t, name: 'a', createdBy: 'user:i' });
     const b = await issueApiKey({ tenantId: t, name: 'b', createdBy: 'user:i', scopes: ['runs:read'], expiresAt: 'tomorrow' });
     const inv = await inventoryApiKeys();
     // THIS case's two keys, by id: other cases' keys must not be able to satisfy it.

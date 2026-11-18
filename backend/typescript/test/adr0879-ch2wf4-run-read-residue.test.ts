@@ -75,7 +75,7 @@ describe('CH2WF-4 residue — a private channel post is readable through the run
     expect((await owner.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
     const viewer = client();
     const vId = await signup(viewer);
-    expect((await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'v', subject: vId, roles: ['viewer'] })).status).toBe(201);
+    expect((await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'v', subject: vId, roles: ['viewer'] })).status).toBe(201);
     expect((await viewer.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
 
     const ch = await owner.post<{ channel: { conversationId: string } }>('/host/openwop-app/channels', { name: `secret-${n++}`, visibility: 'private', agentIds: ['ch2wf4.agent'] });

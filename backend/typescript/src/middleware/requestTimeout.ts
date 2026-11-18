@@ -15,6 +15,7 @@
  * set to `0` to disable (falls back to the Cloud Run outer timeout).
  */
 
+import { sendErrorBody } from './errorEnvelope.js';
 import type { Request, RequestHandler } from 'express';
 
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -94,7 +95,7 @@ export function requestTimeoutMiddleware(
       // Stream-safe: once headers are sent (every SSE route flushes immediately)
       // or the response already ended, do nothing — never interrupt a stream.
       if (res.headersSent || res.writableEnded) return;
-      res.status(503).json({
+      sendErrorBody(res, 503, {
         error: 'request_timeout',
         message: `Request exceeded the ${timeoutMs}ms server timeout.`,
       });

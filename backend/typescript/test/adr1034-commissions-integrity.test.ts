@@ -91,7 +91,7 @@ async function scenario(): Promise<{ admin: Client; adminId: string; rep: Client
   const rep2Id = (await rep2.post('/host/openwop-app/test/login', { email: `s-${Date.now()}-${n++}@acme.test`, tenantId })).body.user?.userId ?? '';
   const orgId = (await admin.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId ?? '';
   for (const [subject, name] of [[repId, 'Rita'], [rep2Id, 'Sam']] as const) {
-    await admin.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: name, subject, roles: ['editor'] });
+    await admin.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: name, subject, roles: ['editor'] });
   }
   return { admin, adminId, rep, repId, rep2Id, orgId, tenantId };
 }

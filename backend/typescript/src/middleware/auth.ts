@@ -48,6 +48,7 @@
  * @see plans/openwop-app-deployment-plan.md (P0.2)
  */
 
+import { sendErrorBody } from './errorEnvelope.js';
 import { isFeaturePublicRoute, setHostPublicPrefixes } from './featurePublicRoutes.js';
 import type { Request as ExpressRequest, RequestHandler } from 'express';
 import { isProtocolClient, isProtocolRequest, vendorPath } from './protocolVersion.js';
@@ -207,7 +208,7 @@ async function refuseIfMfaRequired(
   if (isMfaGateExempt(req.path)) return false;
   if (!(await mfaGap(activeTenant, personalTenant, req.mfaVerified === true))) return false;
   if (isAccessCheckedAssetRead(req.method, req.path)) { passAnonymous(req, next); return true; }
-  res.status(401).json({
+  sendErrorBody(res, 401, {
     error: 'unauthenticated',
     message: 'This workspace requires two-factor authentication. Enroll an authenticator app in Settings → Security, sign in again, and retry.',
     details: { reason: 'mfa_required', settingsUrl: '/settings#security' },
@@ -726,7 +727,7 @@ function isAccessCheckedAssetRead(method: string, path: string): boolean {
 export function requireNonAnonymousPrincipal(surface: string): RequestHandler {
   return (req, res, next) => {
     if (req.anonymousPrincipal === true || !req.principal) {
-      res.status(401).json({
+      sendErrorBody(res, 401, {
         error: 'unauthenticated',
         message: `${surface} requires an authenticated, non-anonymous principal.`,
         details: { reason: 'anonymous_principal_refused' },
@@ -1002,6 +1003,21 @@ export interface LiveCookieSession {
  * `verifySession` admitted a removed, disabled or signed-out member until the
  * cookie's `exp` (S1). `null` ⇒ no valid cookie.
  */
+/**
+ * ADR 1141 — the browser session id (`sid`) of a request on a PUBLIC path this
+ * middleware does not session (the share-link reads and code routes). The cookie
+ * is read here, inside middleware (ADR 0833 D1), and resolved through
+ * {@link resolveLiveCookieSession}, so a revoked or ended signed-in session is no
+ * viewer at all. Absent, unverifiable or refused ⇒ `undefined`, never a throw.
+ */
+export async function liveSessionSidOf(req: ExpressRequest): Promise<string | undefined> {
+  try {
+    return (await resolveLiveCookieSession(readCookie(req.header('cookie'), COOKIE_NAME)))?.session.sid;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function resolveLiveCookieSession(raw: string | undefined): Promise<LiveCookieSession | null> {
   if (!raw) return null;
   const session = verifySession(raw);
@@ -1227,7 +1243,7 @@ export function authMiddleware(): RequestHandler {
           reportKeyPolicy('query-param', 'unverified', { method: req.method, family: req.path.split('/').slice(0, 4).join('/') });
         } else if (mode === 'enforce') {
           setBearerChallenge(req, res, { presented: true });
-          res.status(401).json({
+          sendErrorBody(res, 401, {
             error: 'unauthenticated',
             message: 'Send an API key in the Authorization header (Bearer), not in the URL. Only the run-events stream accepts ?apiKey=.',
           });
@@ -1294,7 +1310,7 @@ export function authMiddleware(): RequestHandler {
         if (key && (await tenantKeysDisabled(key.tenantId))) {
           log.warn('api key refused', { keyId: key.keyId, reason: 'keys_disabled' });
           setBearerChallenge(req, res, { presented: true });
-          res.status(401).json({ error: 'unauthenticated', message: 'API keys are turned off for this workspace.' });
+          sendErrorBody(res, 401, { error: 'unauthenticated', message: 'API keys are turned off for this workspace.' });
           return;
         }
         // ADR 0795 D6 — a key stops when its issuer does. Checked HERE so it
@@ -1303,7 +1319,7 @@ export function authMiddleware(): RequestHandler {
         if (key && (await apiKeyIssuerRefused(key.keyId, key.tenantId))) {
           {
             setBearerChallenge(req, res, { presented: true });
-            res.status(401).json({
+            sendErrorBody(res, 401, {
               error: isProtocolRequest(req) ? 'credential_revoked' : 'unauthenticated',
               message: 'The person who created this API key no longer has access to this workspace.',
             });
@@ -1334,7 +1350,7 @@ export function authMiddleware(): RequestHandler {
           setBearerChallenge(req, res, { presented: true });
           // The CODE is the v2 contract's; a v1 caller keeps the `unauthenticated`
           // it has always received for this key (no v1 error-code change).
-          res.status(401).json({ error: isProtocolRequest(req) ? 'credential_revoked' : 'unauthenticated', message: 'This API key was revoked.' });
+          sendErrorBody(res, 401, { error: isProtocolRequest(req) ? 'credential_revoked' : 'unauthenticated', message: 'This API key was revoked.' });
           return;
         }
         // fall through — an invalid scoped key is treated like any bad bearer
@@ -1546,7 +1562,7 @@ export function authMiddleware(): RequestHandler {
           //     `readErrorCode`, so a generic envelope would fail the code leg.
           if (code === 'credential_lifetime_exceeded') {
             setBearerChallenge(req, res, { presented: true });
-            res.status(401).json({
+            sendErrorBody(res, 401, {
               error: 'credential_lifetime_exceeded',
               message: err instanceof Error ? err.message : 'Credential lifetime exceeds the advertised revocation window.',
             });
@@ -1559,7 +1575,7 @@ export function authMiddleware(): RequestHandler {
             // `unauthenticated`: `v2-oidc-id-token-audience` reads the top-level code,
             // and `details.reason` is not readable there. `details.reason` is kept so
             // the v1 shape (`auth-oidc.test.ts`) still names the verifier's reason.
-            res.status(401).json({
+            sendErrorBody(res, 401, {
               error: code === 'wrong_audience' ? 'audience_mismatch' : 'unauthenticated',
               message: 'OIDC token rejected.',
               details: { reason: code },
@@ -1579,7 +1595,7 @@ export function authMiddleware(): RequestHandler {
         // otherwise.
         if (cookiesDisabled) {
           setBearerChallenge(req, res, { presented: true });
-          res.status(401).json({
+          sendErrorBody(res, 401, {
             error: 'unauthenticated',
             message: 'Bearer token is not recognized by this host.',
           });
@@ -1598,7 +1614,7 @@ export function authMiddleware(): RequestHandler {
     // ─── 2. Session cookie (default for browsers) ───
     if (cookiesDisabled) {
       setBearerChallenge(req, res, { presented: bearerToken !== undefined });
-      res.status(401).json({
+      sendErrorBody(res, 401, {
         error: 'unauthenticated',
         message: 'Missing Bearer token (Authorization header) or apiKey query param.',
       });
@@ -1611,7 +1627,7 @@ export function authMiddleware(): RequestHandler {
         // (auth.md) + lets the conformance `auth.test.ts` "no Authorization → 401"
         // pass against the reference host without forcing NODE_ENV=production.
         setBearerChallenge(req, res, { presented: bearerToken !== undefined });
-        res.status(401).json({
+        sendErrorBody(res, 401, {
           error: 'unauthenticated',
           message: 'Missing Bearer token (Authorization header) or apiKey query param.',
         });
@@ -1644,7 +1660,7 @@ export function authMiddleware(): RequestHandler {
         // unchanged: a wrong-audience bearer beside a HEALTHY cookie still reaches
         // the cookie session, which is not a refusal at all.
         const audience = bearerRejectedReason === 'wrong_audience';
-        res.status(401).json({
+        sendErrorBody(res, 401, {
           error: audience ? 'audience_mismatch' : 'unauthenticated',
           message: audience
             ? 'The OIDC token verified but was minted for another relying party, and no valid session cookie is present.'
@@ -1661,7 +1677,7 @@ export function authMiddleware(): RequestHandler {
       // new error code — the envelope's `unauthenticated`, with a reason.
       if (rawCookie && endedUserSession(rawCookie)) {
         clearSessionCookie(res);
-        res.status(401).json({
+        sendErrorBody(res, 401, {
           error: 'unauthenticated',
           message: 'Your session has ended. Sign in again to continue.',
           details: { reason: 'session_expired' },
@@ -1709,7 +1725,7 @@ export function authMiddleware(): RequestHandler {
       // cookie-mode viewer's live run stream on either major.
       if (isProtocolClient(req) && !carriesRunStreamToken(req) && isProtocolRequest(req)) {
         setBearerChallenge(req, res, { presented: false });
-        res.status(401).json({
+        sendErrorBody(res, 401, {
           error: 'unauthenticated',
           message: 'No credential presented. Authenticate, or establish a session first.',
         });

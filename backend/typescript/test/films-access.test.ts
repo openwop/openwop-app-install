@@ -1,3 +1,7 @@
+import { randomUUID } from 'node:crypto';
+import { filmTimingHash, performanceEvent, type FilmPerformance } from '../../../contracts/filmPerformance.js';
+import type { FilmSpec } from '../../../contracts/films.js';
+import { addVersion, getVersion } from '../src/features/documents/documentsService.js';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -20,7 +24,7 @@ beforeAll(async () => {
 }, 60_000);
 afterAll(async () => { if (server) await new Promise<void>(resolve => server.close(() => resolve())); });
 
-interface Reply { canvasId?: string; orgId?: string; version?: number; ownerSubject?: { kind: string; id: string }; user?: { userId: string }; film?: unknown }
+interface Reply { canvasId?: string; orgId?: string; version?: number; ownerSubject?: { kind: string; id: string }; user?: { userId: string }; film?: FilmSpec; id?: string; performance?: FilmPerformance; takes?: { id: string }[] }
 async function login(tenantId: string, name: string) {
   let cookie = '';
   async function call(method: string, path: string, body?: unknown) {
@@ -80,5 +84,41 @@ describe('film canvas authority and lifecycle', () => {
     expect(slides.status).toBe(201); expect(slides.body.ownerSubject).toBeUndefined();
     const config = getToggleDefault('films')!; await saveConfig({ ...config, status: 'off' }, 'test');
     expect((await owner.call('GET', `${root}/${id}/presenter`)).status).toBe(404); // disabled features conceal their resources
+  }, 60_000);
+});
+
+
+describe('revision-bound private rehearsal takes', () => {
+  it('saves a new private first-version take, retries idempotently, and refuses stale sources or another recorder', async () => {
+    await saveConfig({ ...getToggleDefault('films')!, status: 'on' }, 'test');
+    const tenant = 'org:film-timing'; const owner = await login(tenant, 'timing-owner');
+    const org = await owner.call('POST', '/host/openwop-app/orgs', { name: 'Rehearsal' }); const orgId = org.body.orgId!;
+    const root = `/host/openwop-app/films/orgs/${orgId}/canvases`;
+    const created = await owner.call('POST', root, { name: 'Rehearsal story' }); const canvasId = created.body.canvasId!;
+    const projected = await owner.call('GET', `${root}/${canvasId}/presenter`); expect(projected.status).toBe(200);
+    const film = projected.body.film!, revision = String(projected.body.version);
+    const performance: FilmPerformance = { version: 1, filmHash: await filmTimingHash(film), durationMs: 1000, events: [performanceEvent(film, { step: 0, progress: 1, blank: false }, 0), performanceEvent(film, { step: 1, progress: 0, blank: false }, 500)] };
+    const endpoint = `${root}/${canvasId}/performances?revision=${revision}`;
+    const body = { requestId: randomUUID(), name: 'First rehearsal', performance };
+    // Documents is a storage primitive, not a new runtime lock on live films.
+    await saveConfig({ ...getToggleDefault('documents')!, status: 'off' }, 'test');
+    const saved = await owner.call('POST', endpoint, body); expect(saved.status).toBe(201);
+    await saveConfig({ ...getToggleDefault('documents')!, status: 'on' }, 'test');
+    expect((await owner.call('POST', endpoint, body)).body.id).toBe(saved.body.id);
+    expect((await owner.call('GET', endpoint)).body.takes).toEqual([expect.objectContaining({ id: saved.body.id })]);
+    const sameIdDifferentTake = await owner.call('POST', endpoint, { ...body, performance: { ...performance, durationMs: 2000 } }); expect(sameIdDifferentTake.status).toBe(409);
+    const second = await owner.call('POST', endpoint, { ...body, requestId: randomUUID(), name: 'Second rehearsal' }); expect(second.body.id).not.toBe(saved.body.id);
+    expect((await owner.call('GET', endpoint)).body.takes).toHaveLength(2);
+    const id = saved.body.id!;
+    const original = await getVersion(tenant, orgId, id, `${id}:1`); expect(original).not.toBeNull();
+    await addVersion(tenant, orgId, id, { content: '{}', baseVersionId: original!.versionId, producedBy: { kind: 'user', id: owner.userId } });
+    expect((await owner.call('GET', `${root}/${canvasId}/performances/${id}?revision=${revision}`)).body.performance).toEqual(performance);
+    const other = await login(tenant, 'timing-other'); await createMember({ tenantId: tenant, orgId, subject: other.userId, displayName: 'Editor', roles: ['editor'] });
+    expect((await other.call('GET', endpoint)).status).toBe(404);
+    expect((await other.call('POST', endpoint, { ...body, requestId: randomUUID() })).status).toBe(404);
+    const changed = structuredClone(film); changed.title = 'New visual revision';
+    expect((await owner.call('PATCH', `${root}/${canvasId}`, { state: changed, expectedVersion: Number(revision) })).status).toBe(200);
+    expect((await owner.call('GET', endpoint)).status).toBe(409);
+    expect((await owner.call('GET', `${root}/${canvasId}/performances?revision=${Number(revision) + 1}`)).body.takes).toEqual([]);
   }, 60_000);
 });

@@ -88,7 +88,7 @@ describe('#4511 — dashboard my-runs (HTTP)', () => {
     expect((await owner.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
     const member = client();
     const m = await signup(member);
-    const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'M', subject: m.userId, roles: ['editor'] });
+    const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'M', subject: m.userId, roles: ['editor'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
     expect((await member.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
 

@@ -53,7 +53,7 @@ vi.mock('../src/host/knowledgeSourceFetch.js', async (orig) => ({
 }));
 vi.mock('../src/features/kb/kbService.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
-  ingestDocument: vi.fn(async () => ({})),
+  upsertDocument: vi.fn(async () => ({})), // #5770: the runner upserts
   deleteDocument: vi.fn(async () => undefined),
 }));
 

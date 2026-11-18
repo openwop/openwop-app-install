@@ -86,7 +86,7 @@ describe('priority-matrix portfolio (ADR 0060)', () => {
     const memberUser = await signup(member, { tenantId });
     const orgA = (await owner.post('/host/openwop-app/orgs', { name: 'Alpha' })).body.orgId;
     const orgB = (await owner.post('/host/openwop-app/orgs', { name: 'Bravo' })).body.orgId;
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
     await listWithScoredIdea(owner, orgA, 'A-list', 'visible', HIGH);
     await listWithScoredIdea(owner, orgB, 'B-list', 'hidden', HIGH);
 

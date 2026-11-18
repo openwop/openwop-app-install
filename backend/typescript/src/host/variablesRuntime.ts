@@ -112,8 +112,10 @@ export async function readPersistedRunVariables(runId: string): Promise<Record<s
  * parameter name — the portable override key) onto the deferred workflow's
  * collision-safe prefixed variable names, producing an `inputs`-shaped overlay that
  * {@link seedRunVariables} consumes. A `configurable` override WINS over any
- * `inputs` value for the same materialized variable. Returns `inputs` unchanged for
- * a non-deferred workflow (no `metadata.deferredParameterAliases`) or no overlay.
+ * `inputs` value for the same materialized variable. A bare name in `inputs` binds
+ * the same way, unless `inputs` already carries the prefixed name (CC-JOURNEY-1).
+ * Returns `inputs` unchanged for a non-deferred workflow (no
+ * `metadata.deferredParameterAliases`) or when there is nothing to translate.
  *
  * This is what makes the deferred-mode bare-param override actually reach the bag:
  * `POST /v1/runs {configurable:{productIdea:'…'}}` → `variables[<prefixed>]` = '…',
@@ -126,13 +128,22 @@ export function deferredConfigurableInputs(
   inputs: unknown,
 ): unknown {
   const aliases = definition?.metadata?.deferredParameterAliases as Record<string, string> | undefined;
-  if (!aliases || !configurable || typeof configurable !== 'object') return inputs;
-  const base: Record<string, unknown> =
-    inputs && typeof inputs === 'object' && !Array.isArray(inputs)
-      ? { ...(inputs as Record<string, unknown>) }
-      : {};
+  if (!aliases) return inputs;
+  const inputsObj = inputs && typeof inputs === 'object' && !Array.isArray(inputs) ? (inputs as Record<string, unknown>) : undefined;
+  const hasConfigurable = Boolean(configurable) && typeof configurable === 'object';
+  const has = (o: Record<string, unknown>, k: string): boolean => Object.prototype.hasOwnProperty.call(o, k);
+  // CC-JOURNEY-1: a bare param name in `inputs` binds too. A dispatched child
+  // gets its per-item inputs keyed by the bare name (core.dispatch
+  // nextWorkerInputs), and a v2 caller cannot put a bare key in the closed
+  // `configurable`. Before this, both reached the bag as an unknown key and every
+  // node read undefined. An input already keyed by the prefixed variable wins
+  // over its bare alias, and `configurable` still wins over both.
+  const bareInInputs = inputsObj !== undefined && Object.entries(aliases).some(([bare, varName]) => has(inputsObj, bare) && !has(inputsObj, varName));
+  if (!hasConfigurable && !bareInInputs) return inputs;
+  const base: Record<string, unknown> = inputsObj ? { ...inputsObj } : {};
   for (const [bare, varName] of Object.entries(aliases)) {
-    if (Object.prototype.hasOwnProperty.call(configurable, bare)) base[varName] = configurable[bare];
+    if (inputsObj && has(inputsObj, bare) && !has(inputsObj, varName)) base[varName] = inputsObj[bare];
+    if (hasConfigurable && has(configurable!, bare)) base[varName] = configurable![bare];
   }
   return base;
 }

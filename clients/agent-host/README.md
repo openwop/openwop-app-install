@@ -80,6 +80,34 @@ current directory) and nowhere else. Closing the app tab stops the session; stop
 companion reconnects by itself; a session keeps running across a reconnect, and the tab
 catches up from a replay buffer.
 
+## Drive a browser for the app's browser agent (ADR 1136)
+
+The app's browser agent can work in a browser on your own machine, where you can
+watch it and close it. That is a separate pairing, and it can do nothing else: a
+browser device cannot run Claude Code or read the workspace.
+
+```
+npx @openwop/agent-host pair --browser --host https://your-app.example.com
+npx @openwop/agent-host browser
+```
+
+`browser` opens a separate Google Chrome window with its own profile for this
+workspace, never your everyday profile. Sign in to sites there yourself: the agent
+never types passwords, one-time codes or card numbers. Every submit, link to a new
+page, purchase or message waits for your approval in the app. If a page does
+something you did not approve, the task stops.
+
+On its own, whatever the app asks, the window refuses:
+- `file:`, `chrome:`, `data:` and `javascript:` pages;
+- addresses on your own machine or network;
+- URLs carrying a password.
+
+It also blocks downloads and file uploads.
+
+It needs Google Chrome and the optional dependency `playwright-core` (installed by
+default; it downloads no browser). Without `playwright-core`, `browser` says browser
+mode is unavailable, and everything else works as before.
+
 ## Test
 
 ```bash

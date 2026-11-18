@@ -31,7 +31,8 @@ vi.mock('../rosterClient.js', () => ({
   }),
   getFleetActivity: vi.fn(async () => { if (m.failuresThrow) throw new Error('activity read failed'); return m.failures; }),
 }));
-vi.mock('../../kanban/kanbanClient.js', () => ({
+vi.mock('../../kanban/kanbanClient.js', async (orig) => ({
+  ...(await orig<typeof import('../../kanban/kanbanClient.js')>()),
   listBoards: vi.fn(async () => m.boards),
   listBoardsWithCards: vi.fn(async () => m.boards),
   getBoard: vi.fn(async (boardId: string) => ({
@@ -100,6 +101,18 @@ describe('loadAgentViews — lane counts (laneOf / buildView)', () => {
     ];
     const [view] = await loadAgentViews();
     expect(view!.laneCounts).toEqual({ todo: 2, working: 1, waiting: 1, done: 0 + 1 });
+  });
+
+  it('#5965 — finds the board kanban.add-todo made, which names its owner only through ownerSubject', async () => {
+    m.roster = [entry()];
+    const { rosterId: _legacy, ...noRoster } = board(STD_COLUMNS);
+    m.boards = [
+      { ...board(STD_COLUMNS, { id: 'b-other', rosterId: 'other' }), cards: [card('done')] },
+      { ...noRoster, ownerSubject: { kind: 'agent', id: 'r1' }, cards: [card('todo')] },
+    ];
+    const [view] = await loadAgentViews();
+    expect(view!.board?.id, 'the agent board, though it carries no rosterId').toBe('b1');
+    expect(view!.laneCounts.todo).toBe(1);
   });
 
   it('classifies by case-insensitive display name when id is non-canonical', async () => {

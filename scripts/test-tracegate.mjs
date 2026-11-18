@@ -597,6 +597,54 @@ process.exit(0);
   fs.rmSync(probeDir, { recursive: true, force: true });
 }
 
+// #6063 — a recorder must never turn a passing file red. A boot-mark take that
+// never settles used to hold the afterAll past vitest's 30 s hook timeout and red
+// the file. Now the wait is bounded: the file gets a "no footprint" record, the
+// afterAll resolves, and ingest drops any older footprint so the file runs next time.
+{
+  const ST = 'backend/typescript/test/slow-take.test.ts';
+  w(ST, "export const x = 1;\n");
+  const H = commit('slow-take fixture');
+  const probeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tracegate-slow-take-'));
+  const out = path.join(probeDir, 'run'); fs.mkdirSync(out);
+  const recorder = new URL('./lib/tracegate-recorder.mjs', import.meta.url).href;
+  const probe = `import fs from 'node:fs';
+import { installRecorder } from ${JSON.stringify(recorder)};
+const [repoRoot, outDir] = process.argv.slice(2);
+process.env.OPENWOP_TRACEGATE_RECORD = outDir;
+process.env.OPENWOP_TRACEGATE_TAKE_BUDGET_MS = '200';
+let finish;
+await installRecorder({ afterAll: (fn) => { finish = fn; }, expect: { getState: () => ({ testPath: repoRoot + '/' + ${JSON.stringify(ST)} }) }, repoRoot, laneDir: 'backend/typescript' });
+globalThis.__tracegate.pending.push(new Promise(() => {})); // a take that never settles
+const t0 = Date.now();
+let threw = null;
+try { await finish(); } catch (e) { threw = String(e); }
+fs.writeFileSync(outDir + '/probe-result.json', JSON.stringify({ ms: Date.now() - t0, threw }));
+process.exit(0);
+`;
+  const probeFile = path.join(probeDir, 'probe.mjs'); fs.writeFileSync(probeFile, probe);
+  const stderr = execFileSync(process.execPath, [probeFile, repo, out], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  void stderr;
+  const res = JSON.parse(fs.readFileSync(path.join(out, 'probe-result.json'), 'utf8'));
+  check('a take that never settles does not fail the afterAll', res.threw === null, JSON.stringify(res));
+  check('the bounded wait returns within its budget', res.ms < 5000, JSON.stringify(res));
+  const raws = fs.readdirSync(path.join(out, 'raw')).map((f) => JSON.parse(fs.readFileSync(path.join(out, 'raw', f), 'utf8')));
+  const slow = raws.find((r) => r.testFile === ST);
+  check('the file is recorded as "no footprint", with the reason', Boolean(slow?.noFootprint?.reason?.includes('did not settle')), JSON.stringify(slow));
+  // An older footprint for the same file must not survive a no-footprint run.
+  fs.writeFileSync(path.join(out, 'raw', 'older.json'), JSON.stringify({ v: 3, testFile: ST, node: process.version, subprocess: false, loaded: [], exec: {}, unmapped: [], reads: [] }));
+  fs.writeFileSync(path.join(out, 'results.json'), JSON.stringify({ testResults: [{ name: path.join(repo, ST), status: 'passed', startTime: 0, endTime: 10, assertionResults: [] }] }));
+  const slowRaw = path.join(out, 'raw', fs.readdirSync(path.join(out, 'raw')).find((f) => f !== 'older.json'));
+  fs.renameSync(slowRaw, slowRaw + '.hold');
+  tg.ingest({ run: out });
+  check('(setup) an older footprint makes the file reusable', !tg.decide(ST, H, process.version, tg.lockHash()).run);
+  fs.rmSync(path.join(out, 'raw', 'older.json'));
+  fs.renameSync(slowRaw + '.hold', slowRaw);
+  tg.ingest({ run: out });
+  check('a no-footprint run drops the older footprint: the file runs next time', tg.decide(ST, H, process.version, tg.lockHash()).run);
+  fs.rmSync(probeDir, { recursive: true, force: true });
+}
+
 // ADR 0980 P1 — Red Reader packets and escalate-only opinions. Every guarantee
 // below is a reason the feature is safe to put in the gate: an opinion can only
 // make a lane STRICTER, only for a MISS, only above the confidence floor, never by

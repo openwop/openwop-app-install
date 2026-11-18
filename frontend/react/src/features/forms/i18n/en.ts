@@ -261,6 +261,12 @@ export const messages = {
   discardHeldBody: 'It is deleted permanently, and the form gets that much of its quarantine capacity back. Real leads are not affected.',
   discardHeldDone: 'Held submission discarded.',
   discardHeldFailed: 'Couldn’t discard that submission — try again.',
+  deleteSubmission: 'Delete submission',
+  deleteSubmissionConfirm: 'Delete this submission?',
+  deleteSubmissionBody: 'It is deleted permanently and can’t be undone. Anything it already created stays: a CRM contact, a ticket or a workflow run.',
+  deleteSubmissionDone: 'Submission deleted.',
+  deleteSubmissionFailed: 'Couldn’t delete that submission — try again.',
+  deleteSubmissionLegalHold: 'This workspace is under a legal hold, so its submissions can’t be deleted.',
   // ADR 0850 — held-lead release (D3), the burst hold reason (D5), the
   // consent-is-optional rule (D2) and the conditional-visibility editor (D7).
   submissionHeldBurst: "Held — submission burst",

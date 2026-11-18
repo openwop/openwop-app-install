@@ -29,12 +29,12 @@ import { loadWorkflowChainPacks, defaultWorkflowChainPackRoots } from '../src/ho
 
 vi.mock('../src/features/connections/connectionsService.js', () => ({ getConnection: vi.fn() }));
 vi.mock('../src/host/knowledgeSourceFetch.js', () => ({ listFolder: vi.fn(), fetchKnowledgeSource: vi.fn(), fetchKnowledgeSourceBytes: vi.fn(), MAX_LIST_FILES: 1000 }));
-vi.mock('../src/features/kb/kbService.js', () => ({ ingestDocument: vi.fn(), deleteDocument: vi.fn(), getCollection: vi.fn(async () => ({ collectionId: 'col' })) }));
+vi.mock('../src/features/kb/kbService.js', () => ({ upsertDocument: vi.fn(), deleteDocument: vi.fn(), getCollection: vi.fn(async () => ({ collectionId: 'col' })) }));
 vi.mock('../src/features/knowledge-sync/knowledgeSyncAccess.js', () => ({ passActorMayWrite: vi.fn(async () => true), holdsOrgScope: vi.fn(async () => true) }));
 
 import { getConnection, type Connection } from '../src/features/connections/connectionsService.js';
 import { listFolder, fetchKnowledgeSource, type SyncFolderListing } from '../src/host/knowledgeSourceFetch.js';
-import { ingestDocument, deleteDocument, type KnowledgeDocument } from '../src/features/kb/kbService.js';
+import { upsertDocument, deleteDocument, type KnowledgeDocument } from '../src/features/kb/kbService.js';
 import { passActorMayWrite } from '../src/features/knowledge-sync/knowledgeSyncAccess.js';
 import { syncNow } from '../src/features/knowledge-sync/knowledgeSyncRunner.js';
 import {
@@ -48,7 +48,7 @@ import { OpenwopError } from '../src/types.js';
 const mConn = vi.mocked(getConnection);
 const mList = vi.mocked(listFolder);
 const mFetch = vi.mocked(fetchKnowledgeSource);
-const mIngest = vi.mocked(ingestDocument);
+const mIngest = vi.mocked(upsertDocument); // #5770: the runner upserts
 const mDelete = vi.mocked(deleteDocument);
 const mMayWrite = vi.mocked(passActorMayWrite);
 const NOW = '2026-06-22T00:00:00.000Z';
@@ -215,8 +215,9 @@ describe('D1 — lease ownership and deletion during a pass', () => {
     await syncNow(deps(), T, source.id, NOW);
     expect(await getSyncSource(T, source.id)).toBeNull();
     expect(await listFileStates(source.id), 'the pass wrote a cursor for a source that no longer exists').toEqual([]);
-    // Once as the CHANGED-file clean re-ingest, once by the post-delete sweep.
-    expect(mDelete.mock.calls.filter((c) => c[3] === syncDocumentId(source.id, 'a')).length, 'and removed the document it wrote after the delete').toBe(2);
+    // Once, by the post-delete sweep. (It was twice while a CHANGED file was deleted
+    // before its re-ingest; #5770 made that an upsert, which deletes nothing.)
+    expect(mDelete.mock.calls.filter((c) => c[3] === syncDocumentId(source.id, 'a')).length, 'and removed the document it wrote after the delete').toBe(1);
   });
 
   it('mutateSource never inserts a missing row', async () => {

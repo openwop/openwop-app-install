@@ -25,6 +25,7 @@ import { registerOperatorAccessErasure } from './operatorAccess.js';
 import { registerWorkspaceJoinErasure } from './workspaceJoinLedger.js';
 import { registerConversationErasure } from './conversationStore.js';
 import { registerReadStateErasure } from './conversationReadState.js';
+import { registerToolSummaryErasure } from './chatToolSummaries.js';
 import { registerMessageFeedbackErasure } from './messageFeedbackStore.js';
 import { registerReactionsErasure } from './messageReactionsStore.js';
 import { registerChatPostErasure } from './chatPostErasure.js';
@@ -78,6 +79,7 @@ export function registerHostSubjectErasers(): void {
   registerCompensationErasure();
   registerConversationErasure();
   registerReadStateErasure();
+  registerToolSummaryErasure(); // ADR 1040 D7 F3
   registerMessageFeedbackErasure();
   registerReactionsErasure();
   // ADR 0879 D6 — the subject's chat POSTS (tombstoned + author redacted).

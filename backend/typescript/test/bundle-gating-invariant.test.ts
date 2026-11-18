@@ -119,6 +119,30 @@ function hasRequestSubjectSelfGate(featureId: string): { file: string; snippet: 
   return null;
 }
 
+const BUILTIN_GATE_HELPERS = ['requireFeatureEnabled', 'authorizeOrgScope', 'requireEntitledFeature', 'requireOrgScope', 'requireTenantScope', 'resolveOne', 'resolveToggle'];
+
+/** #6009 — a declared gate-helper id (`ratchetTables.json` `bundleGating.gateHelpers`) is
+ *  joined into the pattern, so it must be a plain identifier. Unchecked, a `.*`, an empty id
+ *  or a `|` matched every source and let a priced, ungated feature pass. Refuse it loudly. */
+function gateHelperPattern(declared: readonly string[]): RegExp {
+  const bad = declared.filter((id) => !/^[A-Za-z_$][\w$]*$/.test(id));
+  if (bad.length) throw new Error(`bundleGating.gateHelpers ids must be plain identifiers; got ${bad.map((b) => JSON.stringify(b)).join(', ')}`);
+  return new RegExp([...BUILTIN_GATE_HELPERS, ...declared].join('|'));
+}
+
+describe('#6009 — declared gate-helper ids cannot widen the gate pattern', () => {
+  it('refuses an id that is not a plain identifier (sabotage witness)', () => {
+    for (const id of ['.*', '', '.', 'require.Gate', 'a|b', 'x)(']) {
+      expect(() => gateHelperPattern([id]), JSON.stringify(id)).toThrow(/plain identifiers/);
+    }
+  });
+  it('a valid declared helper is matched, and an ungated source still is not', () => {
+    const re = gateHelperPattern(['requireKicktodoManage']);
+    expect(re.test('app.post(p, requireKicktodoManage, h)')).toBe(true);
+    expect(re.test('app.post(p, (req, res) => res.json({}))')).toBe(false);
+  });
+});
+
 describe('ADR 0419 — priced ⟹ gated (structural)', () => {
   const c = catalog();
   const bundleFeatures = Object.entries(c.bundles).flatMap(([bundle, def]) =>
@@ -185,7 +209,7 @@ describe('ADR 0419 — priced ⟹ gated (structural)', () => {
     // known residual, covered by the behavioural test, not this tripwire.
     // ADR 1031 P2 — plus each feature package's own gate helpers (`ratchetTables.json`
     // idTables `bundleGating.gateHelpers`, e.g. KickTodo's requireKicktodoManage).
-    const GATE_HELPERS = new RegExp(['requireFeatureEnabled', 'authorizeOrgScope', 'requireEntitledFeature', 'requireOrgScope', 'requireTenantScope', 'resolveOne', 'resolveToggle', ...Object.keys(declaredIdTable<string>('bundleGating.gateHelpers'))].join('|'));
+    const GATE_HELPERS = gateHelperPattern(Object.keys(declaredIdTable<string>('bundleGating.gateHelpers')));
     const GATE_FACTORIES = ['registerCanvasEditorRoutes'];
     // Matches `app.<verb>(` and the factory's `d.app.<verb>(`. A feature registering
     // on a passed-in sub-router (`router.get(`) would be missed — but no bundle

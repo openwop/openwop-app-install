@@ -24,6 +24,7 @@ import { runNoticeAudience } from '../notifications/runNoticeAudience.js';
 import { getApproval, listApprovals, resolveApproval, type PendingApproval } from './approvalService.js';
 import { hostExtStorage } from './hostExtPersistence.js';
 import { gateApproverRefs, resolveNotificationRecipients } from './approverResolution.js';
+import { splitRunReaders } from './runClientAccess.js';
 import { openInterruptsForSweep } from '../executor/openInterruptSweep.js';
 import { resumeRunsAwaitingApproval } from './autonomyPolicy/waiters.js';
 import { activeDelegations } from './approvalDelegations.js';
@@ -319,7 +320,10 @@ async function sweepAutonomyInterruptSla(now: Date): Promise<number> {
     const orgId = (run.metadata as Record<string, unknown> | undefined)?.approverOrgId;
     const title = typeof data.prompt === 'string' && data.prompt ? (data.prompt.length > 80 ? `${data.prompt.slice(0, 77)}…` : data.prompt) : 'A campaign step';
     fires += await fireOnce(interruptSla, existing, due, async (rung) => {
-      const refs = await resolveNotificationRecipients(gateApproverRefs(it.data), { tenantId: run.tenantId, ...(typeof orgId === 'string' ? { orgId } : {}) });
+      const named = await resolveNotificationRecipients(gateApproverRefs(it.data), { tenantId: run.tenantId, ...(typeof orgId === 'string' ? { orgId } : {}) });
+      // ADR 1140 (#5951) — a reminder goes only to approvers who can open the run,
+      // the same cut as the first request (notifications/notify.ts).
+      const refs = named && named.length > 0 ? (await splitRunReaders(run, named)).readers : named;
       const target = { approvalId: `interrupt:${it.interruptId}`, actionUrl: '/inbox' };
       if (rung === 'remind') {
         await notifyRefs(run.tenantId, refs ?? [], { type: 'approval.sla-reminder', priority: 'high', title: 'Still awaiting your review', message: `“${title}” has been waiting since ${it.createdAt}.`, approvalId: target.approvalId });

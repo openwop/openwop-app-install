@@ -900,8 +900,17 @@ export interface Storage {
      *  provider, when the caller put one on the wire. Recorded so the effect
      *  ledger can report it as `providerKey`; an update that omits it keeps the
      *  value already stored rather than clearing it. */
-    opts?: { presentedKey?: string },
+    opts?: {
+      presentedKey?: string;
+      /** RFC 0260 §C (ADR 1142 D7) — the recipe-2 key of an LLM provider call,
+       *  `"<recipe>:<digest>"`. Like `presentedKey`, an update that omits it
+       *  keeps the stored value. */
+      llmCacheKey?: string;
+    },
   ): Promise<void>;
+  /** RFC 0260 §C.3 (ADR 1142 D8) — the stored recipe-2 key of one record, so a
+   *  fork copies it verbatim instead of recomputing it. */
+  getInvocationLlmCacheKey(key: { runId: string; nodeId: string; attempt: number; invocationId: string }): Promise<string | null>;
 
   /**
    * ADR 0618 — the ATOMIC CLAIM the Layer-2 effect guard must be.
@@ -1004,6 +1013,8 @@ export interface Storage {
     invocationId: string;
     /** The key the attempt presented on the wire, when one was recorded. */
     presentedKey?: string;
+    /** RFC 0260 §C — the stored recipe-2 key, `"<recipe>:<digest>"`, when recorded. */
+    llmCacheKey?: string;
     completed: boolean;
     at: string;
   }>>;

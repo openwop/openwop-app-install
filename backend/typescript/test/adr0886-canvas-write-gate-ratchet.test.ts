@@ -76,7 +76,7 @@ const LOAD_NEEDS: Record<string, string[]> = {
   'features/cad/routes.ts': ['read', 'read'],
   'features/slides/routes.ts': ['read'],
   'features/document-editor/routes.ts': ['read'],
-  'features/films/feature.ts': ['read', 'read'], // presenter + notes-free audience projection
+  'features/films/feature.ts': ['write', 'read', 'read', 'read'], // explicit rehearsal save/read branches; presenter + notes-free audience
 };
 
 /** SL2CD-3 — file → the number of WRITE-PREDICATE calls it makes. The mutator

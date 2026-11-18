@@ -75,7 +75,7 @@ async function team() {
   const orgId = org.body.orgId ?? '';
   const member = async (roles: string[]): Promise<Client> => {
     const c = await signIn(tenantId);
-    const r = await owner.call('POST', `/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: c.userId, roles });
+    const r = await owner.call('POST', `/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: c.userId, roles });
     expect(r.status, JSON.stringify(r.body)).toBeLessThan(300);
     return c;
   };

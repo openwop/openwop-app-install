@@ -284,6 +284,41 @@ upstream … this repo holds what is MyndHyve-only"). MyndHyve gets it by re-pin
 
 Each phase is one PR through a train.
 
+### P2 entry criteria (release-manager review of P1, 2026-11-16)
+
+P2 attaches a real browser, so these hold before it merges:
+
+1. **Multi-instance.** P1's executor registry is in memory. With more than one Cloud
+   Run instance, an attach on instance A and a session step on instance B miss each
+   other. P2 needs instance affinity for the attachment, or a durable registry with
+   routing to the owning instance.
+2. **The tier table is not the credential boundary.** It trusts the page's own element
+   report, and a hostile allowlisted page can label a password field as a plain
+   textbox. The boundary is that the model never holds a secret (credentials stay
+   host-side under BYOK, and the person signs in, D5) and that typed text never
+   persists (labels are host-composed, D8). Field detection only refuses the honest
+   case early.
+3. **A script-promoted interact step.** A page script can turn any interact step into
+   a form submit or a request; the tier reads intent, not effect. When the executor
+   reports a navigation or a form submission after an interact step that had no
+   commit approval:
+   - the session stops fail-closed, with no further driver step;
+   - the step is recorded `uncertain` and is never retried;
+   - one final snapshot is taken for the record;
+   - the session ends `failed` with a typed `unapproved_effect`;
+   - it is never resumed, though the person may start a new one;
+   - the opener is told what happened in plain words.
+
+   P2's real-browser witness shows that a script-bound key or click handler cannot
+   turn an interact step into a submit without a commit approval.
+
+### Implementation record
+
+| Phase | PR | What landed | Witnesses |
+|---|---|---|---|
+| P1 | #6000 (train 285) | `executorProtocol` (ops, element reports, per-op result validation, id-only control frames), `browserTier` (closed-world tiers), `hostLoopAdapter` (behind the unchanged `ComputerUseAdapter`; `resolveAdapter` untouched, so production does not change), `executorRegistry`, `fakeExecutor`, `browserDriver` (`renderSnapshot`, `scriptedDriver`) | `adr1136-p1-browser-executor` (17 cases through the real `startTask`/`decide`; six sabotages red, then restored; the first stayed green and exposed a dead `uncertain` flag, which was removed) |
+| P2 | — | not started; entry criteria above | — |
+
 ## Open questions
 
 1. [x] **Default ON (D7).** Flip `computer-use` to ON for signed-in members in the default
@@ -300,3 +335,73 @@ Each phase is one PR through a train.
    which 0894 already allows; the case 0894 refuses is the public share link, `/shared/:token`, which
    is served from the host's own origin.
 4. **The everyday-browser extension.** Out of scope here; record it if a customer asks for it.
+5. [ ] **Browser pairing behind `computer-use` (before P6).** Pairing routes live under the
+   Claude Code feature and its operator gate, so with Claude Code off nobody can pair a
+   browser, and the default-on flip (D7) would reach no one. P6 moves browser pairing
+   behind `computer-use` (P2a-2 notes).
+
+## P2 conditions (release-manager review of the P2 design, 2026-11-16)
+
+These sit beside the P2 entry criteria (multi-instance, the credential boundary, and
+the `unapproved_effect` response).
+
+P2 splits in two:
+- **P2a** is the backend transport and these conditions. `resolveAdapter` stays untouched, so production still constructs no browser adapter. It lands in two PRs:
+  - **P2a-1:** `unapproved_effect` and condition 4;
+  - **P2a-2:** the device channel, pairing capabilities, presence, and the remote executor, covering conditions 1–3.
+- **P2b** is the companion's `browser` command.
+
+1. **The attach is authenticated.** A browser's presence is written only from an
+   attach on a device socket already authenticated by that device's key. The
+   device, tenant and person come from the socket's verified identity, never from
+   the frame. A forged attach naming another person's device is refused (tested).
+2. **Results are bound.** Each request id is cryptographically random. The receiving
+   side checks a result's session, tenant and executor against the pending request
+   before applying it; a mismatch is dropped and logged (tested).
+3. **Device frames are typed.** Each operation carries an explicit kind. The
+   companion checks its own capabilities on receipt as well as the host on send. A
+   capability change is a re-pair, never an in-place upgrade.
+4. **A fork or replay never drives the browser** (the WFAWF-24 lesson). A session is
+   driven only by the run that opened it (`drivableBy`). A session id is a hash of
+   the task's inputs, not of the run, so a fork re-executing its `task` node lands
+   on the same session. That run reads the recorded view and never polls, decides
+   or reaches the device (tested in P2a-1). A fork with DIFFERENT inputs hashes to a
+   new session. That session is fresh: it is budgeted, it starts its own browser
+   session, and every commit in it is approved again. It is never a silent re-drive
+   of the old session's device. The rule is asymmetric on purpose: it restricts
+   driving (approving or dispatching an op), never stopping. A deny, cancel or
+   abort from any authorised path still ends the session and reaches the device,
+   whether that is the run being cancelled, an admin's stop, a host kill switch or
+   a forked run's deny. An off-switch only the opening run could press would fail
+   the wrong way.
+5. **The trust boundary for effects.** `effects` (navigated, submitted) are
+   self-reported by the person's own companion. The `unapproved_effect` response
+   bounds an honest companion; it does not bound a tampered one. A tampered
+   companion is the person's own machine acting against them, and the visible
+   browser window is the human backstop.
+6. **P2b refusals.** Besides private, loopback and credentialed URLs, the companion
+   refuses `file:`, `chrome:`, `data:` and `javascript:` navigations. It blocks
+   downloads and file uploads unless the step's approval names them.
+
+### P2a-2 notes
+
+- **One capability per pairing.** A pairing is `terminal` (ADR 0785, the default) or
+  `browser`. A browser pairing:
+  - binds to its own consent text (`browser-device-consent-v1`);
+  - mints a key that declares only `device:browser`. An empty declaration would
+    permit every route, so the key must declare a scope that no route grants;
+  - cannot host a terminal or accept workflow tasks.
+
+  A terminal device cannot drive a browser. A capability change is a re-pair.
+- **The device channel is the seam** (`claude-code/deviceChannel.ts`). Computer-use
+  registers `browser-attach`, `browser-detach` and `browser-result` and sends
+  `browser-op`. It never touches the terminal relay's internals. That is
+  computer-use's one dependency on claude-code, and it is deliberate: ADR 1136 D4
+  reuses ADR 0785's companion.
+- **Open, before the P6 default-on flip.** Pairing routes still live under the Claude
+  Code feature, so pairing a browser needs that feature and its operator gate on.
+  A browser device's socket is gated by the `computer-use` toggle. P6 must move
+  browser pairing behind `computer-use`, or the default-on flip reaches no one.
+- **Consent text is English**, like the terminal consent. Localizing consent is the
+  same decision ADR 1125 left open for stored request text.
+

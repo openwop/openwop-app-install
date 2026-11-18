@@ -19,6 +19,7 @@ import { subjectKeyForms, ERASED_USER_REF } from '../../host/subjectErasureRedac
 import { createLogger } from '../../observability/logger.js';
 import type { CuAction } from './adapter.js';
 import { listSessions, putSession, type CuSession } from './sessionStore.js';
+import { eraseBrowserPresence } from './browserPresence.js';
 
 const log = createLogger('computer-use.erasure');
 
@@ -52,6 +53,8 @@ export async function eraseComputerUseSubject(tenantId: string, subjectKey: stri
     await putSession(scrubbed);
     rowsTouched += 1;
   }
+  // ADR 1136 P2a — the person's attached-browser row holds no audit value: delete it.
+  rowsTouched += await eraseBrowserPresence(tenantId, forms);
   if (rowsTouched > 0) log.info('computer_use_subject_erased', { tenantId, rowsTouched });
   return { rowsTouched };
 }

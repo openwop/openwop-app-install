@@ -214,7 +214,7 @@ describe('ADR 0942 D5 — the gate suspends as an approval decided by the policy
 
 describe('ADR 0942 recovery — requester aliases deny without granting authority', () => {
   it('uses actor before an unrelated cause and canonicalizes both sides of a delegated requester', async () => {
-    const { key } = await issueApiKey({ tenantId: TENANT, name: 'requester alias', createdBy: 'u-requester' });
+    const { key } = await issueApiKey({ scopes: ['*'], tenantId: TENANT, name: 'requester alias', createdBy: 'u-requester' });
     const run = { tenantId: TENANT, metadata: { actingUserId: `apikey:${key.keyId}`, orgScopeSubject: 'u-admin-2' } };
     expect(await isAutonomyRequester(run, ['u-requester'])).toBe(true);
     expect(await isAutonomyRequester(run, ['u-admin-2'])).toBe(false);
@@ -222,13 +222,13 @@ describe('ADR 0942 recovery — requester aliases deny without granting authorit
   });
 
   it('retains the raw API-key owner identity and refuses unresolved or cross-tenant delegation', async () => {
-    const { key } = await issueApiKey({ tenantId: TENANT, name: 'owner alias', createdBy: 'u-admin-2' });
+    const { key } = await issueApiKey({ scopes: ['*'], tenantId: TENANT, name: 'owner alias', createdBy: 'u-admin-2' });
     const subject = `apikey:${key.keyId}`;
     const principal = opaquePrincipal(subject);
     const run = { tenantId: TENANT, metadata: { owner: { principal, subject: { issuer: 'urn:openwop-app:api-key', subjectId: principal, lane: 'api-key', kind: 'workload' } } } };
     expect(await isAutonomyRequester(run, [subject])).toBe(true);
     expect(await isAutonomyRequester({ tenantId: TENANT }, ['apikey:missing'])).toBe(true);
-    const foreign = await issueApiKey({ tenantId: 'foreign-autonomy', name: 'foreign', createdBy: 'u-requester' });
+    const foreign = await issueApiKey({ scopes: ['*'], tenantId: 'foreign-autonomy', name: 'foreign', createdBy: 'u-requester' });
     expect(await isAutonomyRequester({ tenantId: TENANT, metadata: { orgScopeSubject: `apikey:${foreign.key.keyId}` } }, ['u-admin-2'])).toBe(true);
     expect(await isAutonomyRequester({ tenantId: TENANT }, [`apikey:${foreign.key.keyId}`])).toBe(true);
   });
@@ -262,7 +262,7 @@ describe('ADR 0942 recovery — requester aliases deny without granting authorit
     expect((await gateRun({ campaign: own })).interruptId).toBeUndefined(); // fresh parent gets the live edit
     const [gate] = await storage.listOpenInterrupts(child.runId);
     if (!gate) throw new Error('expected inherited Guarded gate');
-    const { key } = await issueApiKey({ tenantId: TENANT, name: `${method} requester`, createdBy: 'u-requester' });
+    const { key } = await issueApiKey({ scopes: ['*'], tenantId: TENANT, name: `${method} requester`, createdBy: 'u-requester' });
     for (const subjectRef of ['u-requester', `apikey:${key.keyId}`]) {
       await expect(resolveAndResume(storage, hostSuite, gate.interruptId, { action: 'approve' }, { subjectRef }))
         .rejects.toMatchObject({ httpStatus: 403, details: { reason: 'autonomy_self_approval_refused' } });

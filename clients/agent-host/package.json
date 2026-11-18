@@ -21,6 +21,7 @@
   },
   "files": [
     "src/",
+    "branding.json",
     "README.md"
   ],
   "scripts": {
@@ -38,5 +39,8 @@
   },
   "allowScripts": {
     "node-pty@1.1.0": true
+  },
+  "optionalDependencies": {
+    "playwright-core": "1.60.0"
   }
 }

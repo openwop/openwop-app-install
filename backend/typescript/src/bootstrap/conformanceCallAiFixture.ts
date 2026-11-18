@@ -26,6 +26,7 @@ import { getNodeRegistry } from '../executor/nodeRegistry.js';
 import { conformanceNodesEnabled } from './conformanceMockAgent.js';
 import { enterprisePosture } from '../host/deployPosture.js';
 import { createLogger } from '../observability/logger.js';
+import { CONFORMANCE_MOCK_MODEL, CONFORMANCE_MOCK_PROVIDER, llmCacheKeyRecipe2Enabled } from '../providers/llmCacheKey2.js';
 
 const log = createLogger('bootstrap.conformanceCallAiFixture');
 
@@ -91,6 +92,49 @@ export const callAiEchoAttemptsNode: NodeModule = {
   },
 };
 
+/**
+ * `conformance.callai.cache-key` — the node behind the `conformance-llm-cache-key`
+ * fixture (RFC 0260, ADR 1142 D6). It makes exactly one `ctx.callAI` call through
+ * the conformance mock under the fixture's provider id, `conformance-mock`, and
+ * model `conformance-mock-1`: one user message, the run's prompt, no tools, no
+ * toolChoice, no responseSchema, and exactly the named parameters in
+ * `request.params`. The call's effect record carries the recipe-2 `cacheKey`.
+ *
+ * A named parameter this host cannot send (`seed`, `topP`, `topK`, the two
+ * penalties) fails the node instead of being dropped, because a dropped
+ * parameter would make the key the suite recomputes describe a request that was
+ * never made. Registers under the RFC 0248 switch and only while recipe 2 is on;
+ * the fixture is advertised only when its node resolves.
+ */
+export const CALLAI_CACHE_KEY_TYPE_ID = 'conformance.callai.cache-key';
+const SENDABLE = new Set(['maxTokens', 'temperature', 'stop']);
+
+export const callAiCacheKeyNode: NodeModule = {
+  typeId: CALLAI_CACHE_KEY_TYPE_ID,
+  version: '1.0.0',
+  async execute(ctx) {
+    const inputs = isObj(ctx.inputs) ? ctx.inputs : {};
+    const runRequest = ctx.variables?.get('request') ?? inputs['request'];
+    const request = isObj(runRequest) ? runRequest : {};
+    const params = isObj(request['params']) ? request['params'] : {};
+    const unsendable = Object.keys(params).filter((k) => !SENDABLE.has(k));
+    if (unsendable.length > 0) {
+      return { status: 'failure', error: { code: 'validation_error', message: `this host cannot send ${unsendable.join(', ')} to a provider, so the fixture cannot make that call (ADR 1142 D6)` } };
+    }
+    if (!ctx.callAI) return { status: 'failure', error: { code: 'host_capability_missing', message: 'ctx.callAI is not available' } };
+    const stop = params['stop'];
+    const result = await ctx.callAI({
+      provider: CONFORMANCE_MOCK_PROVIDER,
+      model: CONFORMANCE_MOCK_MODEL,
+      messages: [{ role: 'user', content: typeof request['prompt'] === 'string' ? request['prompt'] : '' }],
+      ...(typeof params['maxTokens'] === 'number' ? { maxTokens: params['maxTokens'] } : {}),
+      ...(typeof params['temperature'] === 'number' ? { temperature: params['temperature'] } : {}),
+      ...(Array.isArray(stop) ? { stopSequences: stop.map(String) } : {}),
+    });
+    return { status: 'success', outputs: { text: result.content ?? '' } };
+  },
+};
+
 let registered = false;
 
 export function registerCallAiFixtureNode(): void {
@@ -102,6 +146,8 @@ export function registerCallAiFixtureNode(): void {
     return;
   }
   getNodeRegistry().register(callAiEchoAttemptsNode);
+  // ADR 1142 D6 — the RFC 0260 fixture node, only while recipe 2 is on.
+  if (llmCacheKeyRecipe2Enabled()) getNodeRegistry().register(callAiCacheKeyNode);
   registered = true;
 }
 

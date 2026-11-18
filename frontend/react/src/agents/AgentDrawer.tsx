@@ -5,7 +5,8 @@ import type { TFunction } from 'i18next';
 import { Link } from 'react-router-dom';
 import { claimApproval, rejectApproval, type PendingApproval } from './approvalsClient.js';
 import { statusMeta, statusRingColor, relativeTime, type AgentView } from './agentViewModel.js';
-import { workflowName, roleThemeForAgent } from './roleTemplates.js';
+import { roleThemeForAgent } from './roleTemplates.js';
+import { useWorkflowNames } from './useWorkflowNames.js';
 import { AgentAvatar } from './AgentAvatar.js';
 import { AgentBoardPanel } from './AgentBoardPanel.js';
 import { AgentActivityTab } from './AgentActivityTab.js';
@@ -72,6 +73,7 @@ export function AgentDrawer({ view, approvals, approvalsUnavailable, tab, onTab,
   onChat: () => void;
 }): JSX.Element {
   const { t } = useTranslation('agents');
+  const workflowName = useWorkflowNames(); // issue 5911 — the tenant's own names, not raw ids
   const { entry } = view;
   const sm = statusMeta(view.status);
   const theme = roleThemeForAgent(entry.agentRef?.agentId, entry.workflows, entry.roleKey);
@@ -235,8 +237,10 @@ export function AgentDrawer({ view, approvals, approvalsUnavailable, tab, onTab,
               {entry.description ? <Markdown className="u-fs-12">{entry.description}</Markdown> : null}
 
               <div className="agent-drawer-lanes">
-                {([['drawerLaneTodo', view.laneCounts.todo], ['drawerLaneWorking', view.laneCounts.working], ['drawerLaneWaiting', view.laneCounts.waiting], ['drawerLaneDone', view.laneCounts.done]] as const).map(([laneKey, n]) => (
-                  <div key={laneKey}><span className="agent-drawer-lane-n">{n}</span><span className="agent-drawer-lane-l">{t(laneKey)}</span></div>
+                {/* issue 5912 — literal keys, so the catalog checks see them. A key built from a
+                    variable was never added to the catalogs and rendered as itself. */}
+                {([['todo', t('drawerLaneTodo'), view.laneCounts.todo], ['working', t('drawerLaneWorking'), view.laneCounts.working], ['waiting', t('drawerLaneWaiting'), view.laneCounts.waiting], ['done', t('drawerLaneDone'), view.laneCounts.done]] as const).map(([lane, label, n]) => (
+                  <div key={lane}><span className="agent-drawer-lane-n">{n}</span><span className="agent-drawer-lane-l">{label}</span></div>
                 ))}
               </div>
 

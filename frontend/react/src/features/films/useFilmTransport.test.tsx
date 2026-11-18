@@ -1,0 +1,45 @@
+import { act, cleanup, renderHook } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { blankFilm } from '../../../../../contracts/films.js';
+import { validateFilmPerformance } from '../../../../../contracts/filmPerformance.js';
+import { useFilmTransport } from './useFilmTransport.js';
+beforeEach(() => vi.useFakeTimers());
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
+describe('explicit rehearsal and single-clock replay', () => {
+  it('captures nothing in live mode, records rewind/blank timing, and pauses/seeks without capture or side effects', () => {
+    const film = blankFilm('Timing'); const hash = 'a'.repeat(64), fetch = vi.spyOn(globalThis, 'fetch');
+    const { result, rerender } = renderHook(({ reduced }) => useFilmTransport(film, reduced), { initialProps: { reduced: false } });
+    act(() => vi.advanceTimersByTime(60_000)); expect(result.current.draft).toBeNull(); expect(result.current.capturing).toBe(false);
+    act(() => result.current.startCapture(hash));
+    act(() => vi.advanceTimersByTime(2000)); act(() => result.current.move('next'));
+    act(() => vi.advanceTimersByTime(250)); act(() => result.current.blank());
+    act(() => vi.advanceTimersByTime(750)); act(() => result.current.move('back'));
+    act(() => vi.advanceTimersByTime(1000)); act(() => result.current.stopCapture());
+    const draft = result.current.draft!;
+    expect(draft.interrupted).toBe(false); expect(draft.performance.durationMs).toBe(4000);
+    expect(validateFilmPerformance(film, draft.performance, hash)).toEqual([]);
+    expect(draft.performance.events).toHaveLength(4);
+    act(() => result.current.review(draft.performance)); act(() => result.current.seek(2250));
+    expect(result.current.position).toEqual({ step: 1, progress: .5, blank: true }); expect(result.current.playing).toBe(false);
+    act(() => vi.advanceTimersByTime(3000)); expect(result.current.position.progress).toBe(.5);
+    rerender({ reduced: true }); expect(result.current.position.progress).toBe(1); expect(result.current.playheadMs).toBe(2250);
+    rerender({ reduced: false }); expect(result.current.position.progress).toBe(.5);
+    act(() => result.current.togglePlay()); act(() => vi.advanceTimersByTime(100)); act(() => result.current.togglePlay());
+    const paused = result.current.playheadMs; act(() => vi.advanceTimersByTime(1000)); expect(result.current.playheadMs).toBe(paused);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it('keeps a reviewed take intact across a new rehearsal, and retains an interrupted draft', () => {
+    const film = blankFilm('Timing'); const { result } = renderHook(() => useFilmTransport(film, false));
+    act(() => result.current.startCapture('a'.repeat(64))); act(() => vi.advanceTimersByTime(1000)); act(() => result.current.stopCapture());
+    const previous = JSON.stringify(result.current.draft!.performance), oldId = result.current.draft!.requestId;
+    act(() => result.current.startCapture('a'.repeat(64))); expect(result.current.capturing).toBe(false);
+    act(() => result.current.saved()); act(() => result.current.startCapture('a'.repeat(64)));
+    expect(result.current.draft).toBeNull();
+    act(() => vi.advanceTimersByTime(1000));
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    expect(result.current.draft!.interrupted).toBe(true); expect(result.current.draft!.requestId).not.toBe(oldId);
+    expect(JSON.parse(previous).durationMs).toBe(1000);
+    const event = new Event('beforeunload', { cancelable: true }); window.dispatchEvent(event); expect(event.defaultPrevented).toBe(true);
+  });
+});

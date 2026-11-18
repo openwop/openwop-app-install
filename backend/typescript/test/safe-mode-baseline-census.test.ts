@@ -44,6 +44,9 @@ const DRAFT = 'writes a DRAFT or a canvas/artifact inside this workspace, scoped
 const IN_HOST = 'in-host workspace bookkeeping the user can see and undo; no off-host send, no model-written execution';
 const FIXED_RUN = 'starts a FIXED, code-reviewed feature workflow the user asked for by name; its sends carry node-level gates (core.email.send approval) — the arbitrary composer is the ask';
 const SELF = 'addressed only to the acting user (their inbox / their own board / their own later turn, which re-enters the always-safe run lane)';
+/** #5908 — SELF was the reason given for add-todo, and it was false: the card goes to
+ *  the AGENT's board, not the acting user's. The true reason (ADR 0834 D4 correction). */
+const AGENT_BOARD = "files onto the acting agent's own board in this workspace, which its members see and can edit or delete; a filed card carries no workflow, so nothing runs until a person arms it (ADR 0311, kanban-add-todo-tool.test.ts pins the no-workflow floor)";
 
 /** Writes that are NOT held in safe mode, with the reason. */
 const HOST_NO_ASK_WRITES: ReadonlyArray<readonly [string, string]> = [
@@ -88,7 +91,7 @@ const HOST_NO_ASK_WRITES: ReadonlyArray<readonly [string, string]> = [
   ['openwop:funnels.generate', 'starts a FIXED, code-reviewed funnel blueprint the user asked for; it drafts a funnel and pages, and publishing is a human funnel-publish review (ADR 0948)'],
   ['openwop:intent-ledger.draft-contract', 'a draft mission contract the user approves'],
   ['openwop:interactive-artifacts.render', DRAFT],
-  ['openwop:kanban.add-todo', SELF],
+  ['openwop:kanban.add-todo', AGENT_BOARD],
   ['openwop:notebooks.write-transformation', FIXED_RUN],
   ['openwop:notifications.notify-me', SELF],
   ['openwop:podcasts.produce', FIXED_RUN],

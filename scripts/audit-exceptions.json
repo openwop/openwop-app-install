@@ -29,5 +29,70 @@
     "ADVISORY, never the package name, so an entry cannot silently absorb a NEW",
     "advisory that lands on the same package."
   ],
-  "exceptions": []
+  "exceptions": [
+    {
+      "advisory": "GHSA-fc5q-39xc-vjpf",
+      "package": "picomatch",
+      "workspace": "clients/desktop",
+      "severity": "high",
+      "why": [
+        "ADDED 2026-11-17. picomatch ReDoS through single-branch repeated extglobs; vulnerable <=4.0.7.",
+        "Installed: 4.0.7, through tinyglobby/fdir under electron-builder 26.18.0's chain",
+        "(@electron/rebuild, node-gyp and app-builder-lib are reported as its transitive parents).",
+        "",
+        "THERE IS NO PATCHED RELEASE TO TAKE. Measured from the registry today: 4.0.7 is the",
+        "newest picomatch, so neither a bump nor an override can reach a fixed version. npm's",
+        "suggested fix is electron-builder 24.13.3, a MAJOR DOWNGRADE of the packager (26 → 24),",
+        "which would trade a build-time ReDoS for two years of packager fixes. Not taken."
+      ],
+      "reachability": [
+        "NOT REACHABLE FROM ANY SHIPPED ARTIFACT OR UNTRUSTED INPUT. A ReDoS needs an attacker to",
+        "supply the glob PATTERN. picomatch runs only inside electron-builder while it packages the",
+        "app, matching patterns from our own committed build config against our own files.",
+        "Evidence (2026-11-17, main ba48f05c9): clients/desktop has NO `dependencies` (package.json),",
+        "and `build.files` is [\"src/**/*\",\"setup/**/*\",\"branding.json\"], so electron-builder packs",
+        "none of node_modules into the app. Every flagged package is `dev: true` in",
+        "clients/desktop/package-lock.json. No file under clients/desktop/src or setup imports it,",
+        "and no .github workflow builds the desktop app: electron-builder runs only through",
+        "`npm run build:mac|linux|win` on a maintainer's machine.",
+        "The worst case is a slow local build on a maintainer's machine."
+      ],
+      "revisitAfter": "2026-12-01",
+      "removeWhen": "picomatch publishes a release above 4.0.7 that fixes GHSA-fc5q-39xc-vjpf (then bump or override it, and delete this entry), or electron-builder's chain stops depending on a vulnerable picomatch.",
+      "owner": "clients/desktop (ADR 0181, the Electron shell)",
+      "mitigation": "The packaged app contains none of this tooling (no runtime dependencies; build.files excludes node_modules). Packaging runs only on maintainer machines, against repo-controlled patterns. check-audit keeps desktop's devDependencies in scope, so a fixed release turns this entry STALE and forces its removal."
+    },
+    {
+      "advisory": "GHSA-g3hv-75wg-m249",
+      "package": "minimatch",
+      "workspace": "clients/desktop",
+      "severity": "moderate",
+      "why": [
+        "ADDED 2026-11-17. minimatch DoS via globparts amplification; vulnerable >=7.0.0 <11.0.1.",
+        "Installed in range: 9.0.9 at node_modules/@electron/universal/node_modules/minimatch. npm",
+        "reports it under app-builder-lib's high, beside GHSA-fc5q-39xc-vjpf.",
+        "",
+        "A fixed minimatch exists (11.0.1+), but @electron/universal requires ^9. Forcing 11 with an",
+        "override puts an untested MAJOR under the macOS universal-binary step. Proving that safe",
+        "needs a real packaging run (an Electron download and a signed build), which is a bigger",
+        "risk to the release than a build-time DoS. Not taken today."
+      ],
+      "reachability": [
+        "NOT REACHABLE FROM ANY SHIPPED ARTIFACT OR UNTRUSTED INPUT. The amplification needs an",
+        "attacker-supplied glob. @electron/universal uses minimatch only while merging the macOS",
+        "x64 and arm64 builds, on patterns from electron-builder's own config.",
+        "Evidence (2026-11-17, main ba48f05c9): clients/desktop has NO `dependencies` (package.json),",
+        "and `build.files` is [\"src/**/*\",\"setup/**/*\",\"branding.json\"], so electron-builder packs",
+        "none of node_modules into the app. Every flagged package is `dev: true` in",
+        "clients/desktop/package-lock.json. No file under clients/desktop/src or setup imports it,",
+        "and no .github workflow builds the desktop app: electron-builder runs only through",
+        "`npm run build:mac|linux|win` on a maintainer's machine.",
+        "The worst case is a slow local macOS build."
+      ],
+      "revisitAfter": "2026-12-01",
+      "removeWhen": "@electron/universal (via electron-builder) moves to minimatch >=11.0.1, or a packaging run proves an override to minimatch 11 safe for build:mac. Then delete this entry.",
+      "owner": "clients/desktop (ADR 0181, the Electron shell)",
+      "mitigation": "As for GHSA-fc5q-39xc-vjpf: no runtime dependencies, so node_modules is not packaged; packaging runs only on maintainer machines, against repo-controlled patterns; and the entry goes STALE (and must be deleted) once the advisory stops being reported."
+    }
+  ]
 }

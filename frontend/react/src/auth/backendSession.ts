@@ -11,7 +11,9 @@
  * through any of them re-renders them all.
  */
 import { useSyncExternalStore } from 'react';
-import { getMe, type User as DurableUser, UsersApiError } from '../features/users/usersClient.js';
+import { getMeIfSignedIn, type User as DurableUser, UsersApiError } from '../features/users/usersClient.js';
+import { isOwnSignOut } from './shellIdentity.js';
+import { reloadIntoSession } from './reloadIntoSession.js';
 
 interface BackendSession {
   user: DurableUser | null;
@@ -26,6 +28,44 @@ let inflight: Promise<void> | null = null;
 function publish(next: BackendSession): void {
   state = next;
   for (const fn of listeners) fn();
+}
+
+/**
+ * Issue 6043 — the cookie-session half of "signed out in another tab". A password or
+ * bound session has no auth-SDK emission to hear, so the tab re-checks `/me` when it
+ * comes back into view, and a move from a user to a DEFINITIVE "no user" that this
+ * tab did not cause reloads into the signed-out shell. It cannot loop: after the
+ * reload the previous user is null, so the transition never fires again.
+ */
+function settledSignedOut(): void {
+  const wasSignedIn = state.resolved && state.user !== null;
+  publish({ user: null, resolved: true });
+  if (wasSignedIn && !isOwnSignOut()) reloadIntoSession();
+}
+
+const RECHECK_MIN_MS = 15_000;
+let lastRecheck = 0;
+let recheckWired = false;
+function wireRecheckOnReturn(): void {
+  if (recheckWired || typeof window === 'undefined') return;
+  recheckWired = true;
+  const recheck = (): void => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    if (!state.resolved || state.user === null) return; // only a signed-in tab can be signed out
+    const now = Date.now();
+    if (now - lastRecheck < RECHECK_MIN_MS) return;
+    lastRecheck = now;
+    void refreshBackendSession();
+  };
+  window.addEventListener('focus', recheck);
+  document.addEventListener('visibilitychange', recheck);
+}
+
+/** For tests — reset the module state. */
+export function __resetBackendSessionForTest(): void {
+  state = { user: null, resolved: false };
+  inflight = null;
+  lastRecheck = 0;
 }
 
 /** Set the session directly (post-OIDC finalize, logout). */
@@ -52,12 +92,14 @@ export function setBackendSessionUser(user: DurableUser | null): void {
  */
 export function refreshBackendSession(): Promise<void> {
   if (!inflight) {
-    inflight = getMe()
-      .then((u) => publish({ user: u, resolved: true }))
+    // Issue 5991 — the probe form: no user is a 204 (null), not a logged 401.
+    // Issue 6043 — a null after a signed-in snapshot is a sign-out elsewhere.
+    inflight = getMeIfSignedIn()
+      .then((u) => (u === null ? settledSignedOut() : publish({ user: u, resolved: true })))
       .catch((err: unknown) => {
         const status = err instanceof UsersApiError ? err.status : 0;
         const definitive = status === 401 || status === 403 || status === 404;
-        if (definitive) publish({ user: null, resolved: true });
+        if (definitive) settledSignedOut();
         // else: keep whatever we last knew; unreadable is not an answer.
       })
       .finally(() => { inflight = null; });
@@ -67,7 +109,7 @@ export function refreshBackendSession(): Promise<void> {
 
 export function useBackendSession(): BackendSession {
   return useSyncExternalStore(
-    (fn) => { listeners.add(fn); return () => listeners.delete(fn); },
+    (fn) => { wireRecheckOnReturn(); listeners.add(fn); return () => listeners.delete(fn); },
     () => state,
   );
 }

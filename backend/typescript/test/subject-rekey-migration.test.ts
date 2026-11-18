@@ -117,7 +117,7 @@ describe('CE-15 — rekeyLegacyMemberSubjects never touches another tenant', () 
     const aliceA = await createUser({ tenantId: A, principalId: shared, source: 'scim' });
     for (const t of [A, B]) {
       await createMember({ orgId: t, tenantId: t, subject: shared, displayName: 'J Smith', roles: ['admin'] });
-      await issueApiKey({ tenantId: t, name: `k-${t}`, createdBy: shared });
+      await issueApiKey({ scopes: ['*'], tenantId: t, name: `k-${t}`, createdBy: shared });
     }
 
     const result = await rekeyLegacyMemberSubjects(A);

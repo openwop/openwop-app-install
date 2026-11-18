@@ -28,6 +28,7 @@
 import { useEffect, useState } from 'react';
 import i18n from '../../i18n/index.js';
 import { listAgents, type AgentEntry } from '../../client/agentsClient.js';
+import { handleName, isFixtureAgent } from '../../client/agentHandles.js';
 
 export interface AgentMentionEntry {
   /** Persona name as shown in the popover row ("Code Reviewer"). */
@@ -59,7 +60,7 @@ export function projectAgentEntry(
   agent: AgentEntry,
   usedSlugs: Set<string>,
 ): AgentMentionEntry {
-  const baseSlug = slugify(agent.persona) || 'agent';
+  const baseSlug = slugify(handleName(agent)) || 'agent';
   let slug = baseSlug;
   let n = 2;
   while (usedSlugs.has(slug)) {
@@ -101,6 +102,7 @@ function agentSignature(a: AgentEntry): string {
 export function projectAgents(agents: readonly AgentEntry[]): AgentMentionEntry[] {
   const bySig = new Map<string, AgentEntry>();
   for (const a of agents) {
+    if (isFixtureAgent(a)) continue; // issue 5799 — smoke fixtures are never a person's pick
     const sig = agentSignature(a);
     const kept = bySig.get(sig);
     if (!kept) {

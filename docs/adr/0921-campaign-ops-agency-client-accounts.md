@@ -67,6 +67,20 @@ An agency is a shared `ws:` workspace. Each retained client is a non-root org in
 that workspace. The root org is the agency's own house account (its staff, its
 billing, its default brand). **No hierarchy is added to `accessControl`.**
 
+> **CORRECTION 2026-11-16 (the house-client ADR, Proposed, PR #6054).** A firm
+> could not register its own business as a client, so a solo founder had to
+> invent one. The fix is a **house client**: "Set up your own business" creates
+> a real non-root org through `createClient` with no `orgId`, flagged
+> `house: true` for display, one per workspace (a create-if-absent claim on the
+> `campaign-ops:house` pointer). The root's brand may be copied to it once;
+> connections are never shared. **The root itself stays non-client, and the
+> `root_org_not_client` guard must not be "fixed".** With `orgId === tenantId`:
+> every tenant-wide row would read as the house client's (G5); client and
+> workspace connections become indistinguishable (G4); every root member's
+> tenant-wide role would apply to the house client, because tenant-wide
+> authority IS the root membership (ADR 0815 D1b), which reopens G2; and a
+> client run stamp could no longer tell house work from tenant-wide work.
+
 A **client account** is an org plus a campaign-ops record:
 
 ```ts

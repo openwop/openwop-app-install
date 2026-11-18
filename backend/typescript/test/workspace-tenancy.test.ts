@@ -94,6 +94,8 @@ async function signup(c: Client): Promise<{ userId: string }> {
 const myWorkspaces = (c: Client) => c.get<WorkspacesBody>('/host/openwop-app/me/workspaces');
 const wsPath = (ws: string) => `/host/openwop-app/workspaces/${encodeURIComponent(ws)}`;
 const orgMembers = (ws: string) => `/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`;
+/** #5945 — seeding a `user:` member goes through the auth test seam (same handler). */
+const seedOrgMembers = (ws: string) => `/host/openwop-app/test/orgs/${encodeURIComponent(ws)}/members`;
 async function sharedWorkspace(owner: Client, name: string): Promise<string> {
   const created = await owner.post<CreatedBody>('/host/openwop-app/workspaces', { name });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
@@ -146,7 +148,7 @@ describe('ADR 0015 — workspace-as-tenant', () => {
     // Owner adds member B (editor) bound to B's subject.
     const memberC = client();
     const b = await signup(memberC);
-    const add = await owner.post(orgMembers(ws), { displayName: 'B', subject: b.userId, roles: ['editor'] });
+    const add = await owner.post(seedOrgMembers(ws), { displayName: 'B', subject: b.userId, roles: ['editor'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
 
     // B can switch into the shared workspace and sees it in their list.
@@ -191,7 +193,7 @@ describe('ADR 0015 — workspace-as-tenant', () => {
 
     const member = client();
     const b = await signup(member);
-    const add = await owner.post<{ memberId: string }>(orgMembers(ws), { displayName: 'B', subject: b.userId, roles: ['editor'] });
+    const add = await owner.post<{ memberId: string }>(seedOrgMembers(ws), { displayName: 'B', subject: b.userId, roles: ['editor'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
     const memberId = add.body.memberId;
     // B switches in — active workspace is the shared one.
@@ -246,7 +248,7 @@ describe('ADR 0015 — workspace-as-tenant', () => {
     // Add member B (editor).
     const memberB = client();
     const b = await signup(memberB);
-    const add = await owner.post<{ memberId: string }>(orgMembers(ws), { displayName: 'B', subject: b.userId, roles: ['editor'] });
+    const add = await owner.post<{ memberId: string }>(seedOrgMembers(ws), { displayName: 'B', subject: b.userId, roles: ['editor'] });
     const bMemberId = add.body.memberId;
 
     // Transfer ownership to B with stepDown — owner relinquishes in the same call.

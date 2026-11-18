@@ -95,7 +95,7 @@ async function workspace(k: number) {
   for (let i = 0; i < k; i++) {
     const c = client();
     const l = await c.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `e${i}-${n++}@acme.test`, tenantId });
-    const seat = await owner.post(`/host/openwop-app/orgs/${org.body.orgId}/members`, { displayName: `Ed ${i}`, subject: l.body.user.userId, roles: ['editor'] });
+    const seat = await owner.post(`/host/openwop-app/test/orgs/${org.body.orgId}/members`, { displayName: `Ed ${i}`, subject: l.body.user.userId, roles: ['editor'] });
     expect(seat.status).toBe(201);
     editors.push({ c, userId: l.body.user.userId });
   }

@@ -11,6 +11,7 @@
  * implementations that make external calls).
  */
 
+import { projectLlmCacheKey } from '../providers/llmCacheKey2.js';
 import { takeIdempotencyHold } from '../host/idempotencyHold.js';
 import { assertDispatchFanOutAdmitted } from '../host/workflowDefinitionValidation.js';
 import { randomUUID } from 'node:crypto';
@@ -1458,6 +1459,10 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
           // Suite 2.42.5's retry leg compares this value with the
           // `Idempotency-Key` its own receiver saw, so it must be the wire value.
           ...(r.presentedKey ? { providerKey: r.presentedKey } : {}),
+          // RFC 0260 §C (ADR 1142 D7) — the recipe-2 key of an LLM provider call,
+          // recorded while `replay.llmCacheKeyRecipe` is advertised. A digest, never
+          // the preimage (§C.2); a row without one projects nothing.
+          ...(projectLlmCacheKey(r.llmCacheKey) ? { cacheKey: projectLlmCacheKey(r.llmCacheKey) } : {}),
           invocationId: r.invocationId,
           // Only two states are reachable from this table, and that is a
           // faithful report rather than a gap: `state`'s own description says

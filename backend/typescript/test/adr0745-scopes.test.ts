@@ -26,7 +26,7 @@ import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { toWireRunId } from '../src/host/v2Ids.js';
 import { PROPOSAL_KEY_SCOPES, SCOPES_SUPPORTED } from '../src/host/protocolAuthorization.js';
-import { issueApiKey } from '../src/features/developer-keys/apiKeyService.js';
+import { __issueUndeclaredLegacyKeyForTest, issueApiKey } from '../src/features/developer-keys/apiKeyService.js';
 import { stripComments } from './helpers/stripComments.js';
 
 const SRC = resolve(import.meta.dirname, '..', 'src');
@@ -94,7 +94,9 @@ afterAll(async () => {
 });
 
 async function key(scopes: string[] | undefined): Promise<string> {
-  const { token } = await issueApiKey({ tenantId: TENANT, name: 'adr0745', createdBy: 'user:adr0745', ...(scopes ? { scopes } : {}) });
+  // #6053 — no scopes means a LEGACY undeclared key, which `issueApiKey` no longer mints.
+  const base = { tenantId: TENANT, name: 'adr0745', createdBy: 'user:adr0745' };
+  const { token } = scopes ? await issueApiKey({ ...base, scopes }) : await __issueUndeclaredLegacyKeyForTest(base);
   return token;
 }
 

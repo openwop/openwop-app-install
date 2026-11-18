@@ -21,6 +21,19 @@ afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(
 /** Max first backoff = 1000 ms (cap/2 + jitter over [cap/2, cap], cap = 1 s). */
 const PAST_FIRST_BACKOFF_MS = 1000;
 const drain = async (): Promise<void> => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); };
+/** #5972 — wait for `check` WITHOUT moving the fake clock. `vi.waitFor` calls
+ *  `vi.advanceTimersByTime(interval)` on every failed poll under fake timers, so a slow
+ *  machine polled its way through the next backoff and the reconnect test saw two
+ *  extra reconnects (`user:bob` three times). This yields to real `setImmediate` (only
+ *  setTimeout/clearTimeout are faked), so only `advanceTimersByTimeAsync` moves time. */
+const until = async (check: () => void, tries = 500): Promise<void> => {
+  for (let i = 0; ; i++) {
+    try { check(); return; } catch (err) {
+      if (i >= tries) throw err;
+      await new Promise((r) => setImmediate(r));
+    }
+  }
+};
 
 function sseBody(text: string): ReadableStream<Uint8Array> {
   const enc = new TextEncoder();
@@ -66,13 +79,26 @@ describe('subscribeChannelPresence reconnect (ADR 0126 hardening)', () => {
     vi.stubGlobal('fetch', fetchMock);
     const seen: string[] = [];
     const unsub = subscribeChannelPresence('c1', (snap) => { if (snap.connected) seen.push(snap.present[0]!); });
-    await vi.waitFor(() => expect(seen).toEqual(['user:alice']));
+    await until(() => expect(seen).toEqual(['user:alice']));
     await drain(); // the stream has ended; the loop is parked in the backoff sleep
     expect(fetchMock).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(PAST_FIRST_BACKOFF_MS);
-    await vi.waitFor(() => expect(seen).toEqual(['user:alice', 'user:bob']));
+    await until(() => expect(seen).toEqual(['user:alice', 'user:bob']));
     unsub();
     expect(fetchMock).toHaveBeenCalledTimes(2); // reconnected once, not a tight loop
+  });
+
+  it('#5972 — the test wait never moves the fake clock (the cause of the duplicate reconnects)', async () => {
+    // `vi.waitFor` advances fake time by its interval on every failed poll, so waiting
+    // through a slow delivery ran the next reconnect's backoff. `until` must not: a
+    // timer due in 100 ms stays pending through several failed checks.
+    let fired = false;
+    setTimeout(() => { fired = true; }, 100);
+    let checks = 0;
+    await until(() => { checks += 1; expect(checks).toBeGreaterThan(5); });
+    expect(fired, 'the wait advanced the fake clock').toBe(false);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fired).toBe(true);
   });
 
   // One case per terminal status: silent (no callback, not even `connected:false`) AND no retry.
@@ -84,7 +110,7 @@ describe('subscribeChannelPresence reconnect (ADR 0126 hardening)', () => {
     vi.stubGlobal('fetch', fetchMock);
     const snaps: unknown[] = [];
     const unsub = subscribeChannelPresence('c1', (snap) => { snaps.push(snap); });
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    await until(() => expect(fetchMock).toHaveBeenCalled());
     await drain();
     await vi.advanceTimersByTimeAsync(PAST_FIRST_BACKOFF_MS);
     await drain();
@@ -97,7 +123,7 @@ describe('subscribeChannelPresence reconnect (ADR 0126 hardening)', () => {
     const fetchMock = fetchReturning(() => new Response(null, { status: 404 }));
     vi.stubGlobal('fetch', fetchMock);
     const unsub = subscribeChannelPresence('c1', () => {});
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    await until(() => expect(fetchMock).toHaveBeenCalled());
     unsub();
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(String(url)).toBe(`${config.sseBaseUrl}/host/openwop-app/channels/c1/presence`);
@@ -121,10 +147,10 @@ describe('ADR 0897 — bounded close', () => {
     const snaps: boolean[] = [];
     // The stream lives 11 s: the clock moves while its first frame is read.
     const unsub = subscribeChannelPresence('c1', (snap) => { snaps.push(snap.connected); if (call === 1) now += 11_000; });
-    await vi.waitFor(() => expect(snaps).toEqual([true]));
+    await until(() => expect(snaps).toEqual([true]));
     await drain();
     await vi.advanceTimersByTimeAsync(PAST_FIRST_BACKOFF_MS);
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await until(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     await drain();
     unsub();
     expect(snaps).not.toContain(false);
@@ -135,7 +161,7 @@ describe('ADR 0897 — bounded close', () => {
     vi.stubGlobal('fetch', fetchReturning(() => new Response(sseBody(frame(['user:alice'])), { status: 200 })));
     const snaps: boolean[] = [];
     const unsub = subscribeChannelPresence('c1', (snap) => { snaps.push(snap.connected); });
-    await vi.waitFor(() => expect(snaps).toEqual([true, false]));
+    await until(() => expect(snaps).toEqual([true, false]));
     unsub();
   });
 
@@ -152,11 +178,11 @@ describe('ADR 0897 — bounded close', () => {
     vi.stubGlobal('fetch', fetchMock);
     const refreshes: unknown[][] = [];
     const unsub = subscribeChannelMessages('c1', (...args: unknown[]) => { refreshes.push(args); });
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await until(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     await drain();
     expect(refreshes, 'the first connect does not refresh').toEqual([]);
     await vi.advanceTimersByTimeAsync(PAST_FIRST_BACKOFF_MS);
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await until(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     await drain();
     unsub();
     expect(refreshes, 'exactly one plain refresh (no messageId) on the reconnect').toEqual([[]]);

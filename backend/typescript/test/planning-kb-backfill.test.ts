@@ -193,7 +193,7 @@ describe('ADR 0100 P3 — backfill routes', () => {
     const viewer = client();
     const v = await viewer.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: uniqEmail('viewer'), tenantId });
     expect(v.status).toBe(201);
-    const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: v.body.user.userId, roles: ['viewer'] });
+    const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: v.body.user.userId, roles: ['viewer'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
     const refused = await viewer.post<ErrBody>(`${S}/reindex-kb`, { orgId });
     expect(refused.status).toBe(403);

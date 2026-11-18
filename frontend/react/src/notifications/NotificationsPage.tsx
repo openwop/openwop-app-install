@@ -81,6 +81,9 @@ const RESOLUTION_KEYS: Record<RequestResolutionState, string> = {
 
 type Tab = InboxTab;
 
+/** ADR 1125 D4 — the endings that are someone's decision. */
+const DECISION_STATES: ReadonlySet<RequestResolutionState> = new Set<RequestResolutionState>(['approved', 'rejected', 'changes-requested', 'answered']);
+
 /** Tab → i18n key. Resolved via the page's `t()` so the strip stays localized. */
 
 /** Attribute-selector escape that survives environments without `CSS.escape`
@@ -91,9 +94,9 @@ function escAttr(v: string): string {
 }
 
 const TAB_LABEL_KEYS: Record<Tab, string> = {
-  'action-needed': 'tabActionNeeded',
-  'all':           'tabPageAll',
-  'archived':      'tabPageArchived',
+  'needs-you': 'tabNeedsYou',
+  'updates':   'tabUpdates',
+  'archived':  'tabPageArchived',
 };
 
 /** Map a notification type to its scanning glyph. Unknown (open-wire) types
@@ -118,7 +121,10 @@ export function NotificationsPage(): JSX.Element {
   const loading = useNotificationStore((s) => s.loading);
 
   const navigate = useNavigate();
-  const [tab, setTab] = useState<Tab>('action-needed');
+  const [tab, setTab] = useState<Tab>('needs-you');
+  // ADR 1125 D4 (issue 5909) — the approval queue reports its own item count, so the
+  // Needs-you count is the cards that tab shows: open requests plus the queue.
+  const [queueCount, setQueueCount] = useState(0);
   const { search } = useLocation();
 
   useEffect(() => { void refresh(); }, [refresh]);
@@ -180,8 +186,10 @@ export function NotificationsPage(): JSX.Element {
   const inTab = useMemo<Notification[]>(() => {
     if (tab === 'archived') return notifications.filter((n) => n.status === 'archived');
     const nonArchived = notifications.filter((n) => n.status !== 'archived');
-    if (tab === 'action-needed') return nonArchived.filter(isActionNeeded);
-    return nonArchived;
+    // ADR 1125 D4 — each row is on one tab: an open request on Needs you, news and
+    // finished requests on Updates.
+    if (tab === 'needs-you') return nonArchived.filter(isActionNeeded);
+    return nonArchived.filter((n) => !isActionNeeded(n));
   }, [notifications, tab]);
 
   const urgentInTab = useMemo(
@@ -285,14 +293,27 @@ export function NotificationsPage(): JSX.Element {
 
   const counts = useMemo(() => {
     const nonArchived = notifications.filter((n) => n.status !== 'archived');
+    const open = nonArchived.filter(isActionNeeded).length;
     return {
-      'action-needed': nonArchived.filter(isActionNeeded).length,
-      'all':           nonArchived.length,
-      'archived':      notifications.filter((n) => n.status === 'archived').length,
+      'needs-you': open + queueCount,
+      'updates':   nonArchived.length - open,
+      'archived':  notifications.filter((n) => n.status === 'archived').length,
     } satisfies Record<Tab, number>;
-  }, [notifications]);
+  }, [notifications, queueCount]);
 
-  const actionNeededCount = counts['action-needed'];
+  const needsYouCount = counts['needs-you'];
+  // The empty Needs-you state names the newest decision, when there is one.
+  const lastDecision = useMemo(() => {
+    let best: { n: Notification; at: string; state: RequestResolutionState } | null = null;
+    for (const n of notifications) {
+      const r = requestResolutionOf(n);
+      // A person's decision, not a run that ended or a request that was withdrawn.
+      if (!r || !DECISION_STATES.has(r.state)) continue;
+      const at = r.at || n.createdAt;
+      if (!best || at > best.at) best = { n, at, state: r.state };
+    }
+    return best;
+  }, [notifications]);
 
   // ADR 1109 D4 — names come from the projects THIS reader can list, never from the
   // notification: a project they cannot see stays "a project", with no link.
@@ -310,13 +331,13 @@ export function NotificationsPage(): JSX.Element {
   // The tab strip IS the key-figure band: each count both reports and filters
   // the queue below it (DESIGN §4.5 "stats are filters"). Action-needed reads
   // amber when there's anything waiting on the human.
-  const figures: KeyFigureItem[] = (['action-needed', 'all', 'archived'] as const).map((key) => ({
+  const figures: KeyFigureItem[] = (['needs-you', 'updates', 'archived'] as const).map((key) => ({
     key,
     label: t(TAB_LABEL_KEYS[key]),
     value: counts[key],
-    ...(key === 'action-needed' && actionNeededCount > 0 ? { tone: 'attention' as const } : {}),
+    ...(key === 'needs-you' && needsYouCount > 0 ? { tone: 'attention' as const } : {}),
     glyph:
-      key === 'action-needed' ? <ScaleIcon size={13} />
+      key === 'needs-you' ? <ScaleIcon size={13} />
       : key === 'archived'    ? <InboxIcon size={13} />
       :                          <CheckSquareIcon size={13} />,
   }));
@@ -363,8 +384,6 @@ export function NotificationsPage(): JSX.Element {
         <Notice variant="warning" announce={t('staleConnectionNotice')}>{t('staleConnectionNotice')}</Notice>
       ) : null}
 
-      <NeedsYouInbox onResolved={() => void refresh()} focusApprovalId={deepLink.approvalId} onApprovalFocused={onApprovalFocused} workflowRequests={actionNeededCount} />
-
       {!(error && notifications.length === 0) && <KeyFigureBand
         figures={figures}
         activeKey={tab}
@@ -374,7 +393,7 @@ export function NotificationsPage(): JSX.Element {
 
       {/* R3 IB-R2-2 — the scoped bulk verbs (Notion "Archive read" / the
           in-tab read sweep), offered only when they would DO something, ONE
-          request each. "Mark tab read" appears only on action-needed — on All
+          request each. "Mark tab read" appears only on Needs you — on Updates
           it would duplicate the header's Mark-all-read. */}
       {(() => {
         const unreadInTab = tab !== 'archived' ? inTab.filter((n) => n.status === 'unread') : [];
@@ -385,10 +404,10 @@ export function NotificationsPage(): JSX.Element {
         // ADR 1114 — offered while any request row is still in the inbox; the
         // server decides which are over (older rows carry no resolution yet).
         const hasRequests = tab !== 'archived' && notifications.some((n) => n.status !== 'archived' && Boolean(n.interruptId));
-        if ((tab !== 'action-needed' || unreadInTab.length === 0) && (tab === 'archived' || readCount === 0) && !hasRequests) return null;
+        if ((tab !== 'needs-you' || unreadInTab.length === 0) && (tab === 'archived' || readCount === 0) && !hasRequests) return null;
         return (
           <div className="action-bar u-items-center u-gap-2 u-mb-2">
-            {tab === 'action-needed' && unreadInTab.length > 0 ? (
+            {tab === 'needs-you' && unreadInTab.length > 0 ? (
               <Button variant="quiet" size="sm" onClick={() => void markRead(unreadInTab.map((n) => n.notificationId))}>
                 <CheckIcon size={13} /> {t('markTabRead', { count: unreadInTab.length })}
               </Button>
@@ -426,35 +445,43 @@ export function NotificationsPage(): JSX.Element {
         </div>
       ) : null}
 
+      {/* ADR 1125 D4 — the approval queue is the first section of Needs you. It stays
+          mounted on every tab so its count is always in the band above. */}
+      <div hidden={tab !== 'needs-you'}>
+        <NeedsYouInbox onResolved={() => void refresh()} focusApprovalId={deepLink.approvalId} onApprovalFocused={onApprovalFocused} onCountChange={setQueueCount} />
+      </div>
+
       {loading && filtered.length === 0 && (
         <StateCard loading icon={<InboxIcon size={28} />} title={t('loadingInbox')} />
       )}
-      {!loading && !(error && notifications.length === 0) && filtered.length === 0 && (
+      {!loading && !(error && notifications.length === 0) && filtered.length === 0 && (tab !== 'needs-you' || queueCount === 0) && (
         tab === 'archived' ? (
           <StateCard
             icon={<InboxIcon size={28} />}
             title={t('emptyArchivedTitle')}
             body={t('emptyArchivedBody')}
             action={
-              <Button variant="secondary" onClick={() => setTab('action-needed')}>
-                {t('backToActionNeeded')}
+              <Button variant="secondary" onClick={() => setTab('needs-you')}>
+                {t('backToNeedsYou')}
               </Button>
             }
           />
-        ) : tab === 'action-needed' ? (
+        ) : tab === 'needs-you' ? (
+          // ADR 1125 D4 — good news, with the last decision when there is one.
           <StateCard
             icon={<CheckSquareIcon size={28} />}
-            title={t('emptyActionNeededTitle')}
-            body={t('emptyActionNeededBody')}
-            action={
-              <Link to="/runs" className="inline-link">{t('viewRuns')}</Link>
-            }
+            title={t('emptyNeedsYouTitle')}
+            {...(lastDecision ? { body: t('emptyNeedsYouLast', {
+              decision: t(RESOLUTION_KEYS[lastDecision.state]),
+              title: lastDecision.n.title,
+              when: relativeLabel(lastDecision.at, t) ?? formatDateTime(lastDecision.at),
+            }) } : {})}
           />
         ) : (
           <StateCard
             icon={<InboxIcon size={28} />}
-            title={t('emptyAllTitle')}
-            body={t('emptyAllBody')}
+            title={t('emptyUpdatesTitle')}
+            body={t('emptyUpdatesBody')}
             action={
               <Link to="/workflows" className="inline-link">{t('browseWorkflows')}</Link>
             }

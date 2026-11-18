@@ -194,6 +194,48 @@ test.describe('narrow viewport — no horizontal overflow', () => {
 });
 
 /**
+ * The public header with a CMS nav CTA (`nav.cta`, PublicShell.tsx). A long CTA
+ * label made the header wider than a 360px phone: the actions box was sized to its
+ * content, so the CTA's `white-space: normal` never got a narrower box to wrap in.
+ * MEASURED on app.openwop.dev with this label injected: scrollWidth 368; a
+ * white-label (CasaVoga, longer brand) shipped it at 375.
+ *
+ * The CTA is injected into the real rendered header rather than seeded as a CMS
+ * page: what is under test is the header's CSS at 360px, and the CMS nav path has
+ * its own tests. The positive control asserts the CTA is in the header, visible,
+ * and wider than the bare menu, so an injection that silently missed cannot pass.
+ */
+test.describe('narrow viewport — public header with a long CTA', () => {
+  test.describe.configure({ timeout: 90_000 });
+
+  test(`/ public header CTA @${NARROW.width}px`, async ({ page }) => {
+    await page.setViewportSize(NARROW);
+    await page.goto('/');
+    const actions = page.locator('.public-shell:not(.site-shell) .public-shell-actions').first();
+    await expect(actions).toBeVisible({ timeout: 60_000 });
+
+    const m = await page.evaluate((label) => {
+      const host = document.querySelector('.public-shell:not(.site-shell) .public-shell-actions');
+      if (!host) return null;
+      const a = document.createElement('a');
+      a.className = 'btn public-shell-cta';
+      a.href = '#';
+      a.textContent = label;
+      host.append(a);
+      const r = a.getBoundingClientRect();
+      const doc = document.documentElement;
+      return { scrollWidth: doc.scrollWidth, clientWidth: doc.clientWidth, ctaWidth: r.width, ctaRight: r.right, ctaVisible: r.width > 0 && r.height > 0 };
+    }, 'Book a free consultation with our team');
+
+    if (!m) throw new Error('no public-shell header actions on / — the page under test did not render');
+    expect(m.ctaVisible, 'the injected CTA must render (positive control)').toBe(true);
+    expect(m.ctaWidth, 'the CTA must take real width, not collapse').toBeGreaterThan(60);
+    expect(m.ctaRight, 'the CTA must end inside the viewport').toBeLessThanOrEqual(m.clientWidth);
+    expect(m.scrollWidth, `the page scrolls sideways (scrollWidth ${m.scrollWidth} > clientWidth ${m.clientWidth})`).toBeLessThanOrEqual(m.clientWidth);
+  });
+});
+
+/**
  * The DETAIL-route shape — where the overflow actually was.
  *
  * The list routes above are a real gate, but they miss the two page shapes that
@@ -223,19 +265,24 @@ test.describe('narrow viewport — detail routes', () => {
     await page.setViewportSize(NARROW);
     const tenantId = await loginPersonal(page.request, 'viewport-detail@e2e.test');
 
-    // The route 404s behind the toggle. `forms` ships in this build
-    // (backend features/forms), so a failed write is a FAILURE, not a skip.
-    const undoForms = await pinTenantToggle(page.request, 'forms', tenantId);
-    try {
+    const orgs = await page.request.get(`${API}/orgs`);
+    expect(orgs.status(), `orgs: ${await orgs.text()}`).toBe(200);
+    const orgsBody = (await orgs.json()) as { orgs?: { orgId?: string }[] };
+    const orgId = orgsBody.orgs?.[0]?.orgId;
+    // A throw rather than `expect(...).toBeTruthy()`: the expect asserts but does
+    // NOT narrow the type, and a non-null assertion would trade a compile error
+    // for a runtime one. This keeps the same diagnostic and narrows honestly.
+    if (!orgId) throw new Error(`no org for this session — cannot reach an org-scoped detail route (got ${JSON.stringify(orgsBody).slice(0, 200)})`);
 
-      const orgs = await page.request.get(`${API}/orgs`);
-      expect(orgs.status(), `orgs: ${await orgs.text()}`).toBe(200);
-      const orgsBody = (await orgs.json()) as { orgs?: { orgId?: string }[] };
-      const orgId = orgsBody.orgs?.[0]?.orgId;
-      // A throw rather than `expect(...).toBeTruthy()`: the expect asserts but does
-      // NOT narrow the type, and a non-null assertion would trade a compile error
-      // for a runtime one. This keeps the same diagnostic and narrows honestly.
-      if (!orgId) throw new Error(`no org for this session — cannot reach an org-scoped detail route (got ${JSON.stringify(orgsBody).slice(0, 200)})`);
+    // The route 404s behind the toggle. Pin it on for this tenant only when it is
+    // not already on. A build where an enabled feature REQUIRES `forms` (an adopter's
+    // intake feature, #6093) has it on, and there the host refuses any write that
+    // leaves `forms` off (the ADR 0194 disable-lock, 409), so writing would fail a
+    // test whose precondition already holds. `forms` ships in this build (backend
+    // features/forms), so a failed write is still a FAILURE, not a skip.
+    const formsReachable = (await page.request.get(`${API}/forms/orgs/${orgId}/forms`)).status() === 200;
+    const undoForms = formsReachable ? async (): Promise<void> => {} : await pinTenantToggle(page.request, 'forms', tenantId);
+    try {
 
       const created = await page.request.post(`${API}/forms/orgs/${orgId}/forms`, {
         data: {

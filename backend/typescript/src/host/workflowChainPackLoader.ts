@@ -218,6 +218,11 @@ export interface WorkflowChain {
    *  reduced to its bare id (`normalizeChainPins`), and the pins move here so no
    *  downstream reader has to parse `typeId@x.y.z`. */
   nodePins?: Readonly<Record<string, string>>;
+  /** The run admission preflight ADR (D3.3) — features this chain needs that no
+   *  node names: strings, or `{ id, optional: true }`. Host-local, carried in the
+   *  schema's `^(x-|vendor\.)` hatch, so no wire change; read with
+   *  `parseFeatureNeeds` (runPreflight.ts). */
+  'x-requiresFeatures'?: unknown;
 }
 interface ChainPackManifest {
   name: string;

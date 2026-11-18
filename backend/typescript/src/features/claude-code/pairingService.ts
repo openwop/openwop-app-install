@@ -35,10 +35,12 @@ import { OpenwopError } from '../../types.js';
 // substrate, always-on per ADR 0434).
 import { issueApiKey, listApiKeys, revokeApiKey } from '../developer-keys/apiKeyService.js';
 import {
-  CONSENT_VERSION,
   DEVICE_KEY_NAME_PREFIX,
-  DEVICE_KEY_SCOPES,
   DEVICE_KEY_TTL_MS,
+  consentTextFor,
+  deviceKeyScopesFor,
+  parseDeviceCapability,
+  type DeviceCapability,
   PAIRING_POLL_INTERVAL_S,
   PAIRING_TTL_MS,
   consentHash,
@@ -71,6 +73,8 @@ export interface PairingRecord {
   decidedAt?: string;
   /** Set on consume: the device the mint produced. */
   deviceId?: string;
+  /** ADR 1136 P2a — the one thing this pairing grants. Absent = `terminal`. */
+  capability?: DeviceCapability;
 }
 
 export interface DeviceRecord {
@@ -92,6 +96,14 @@ export interface DeviceRecord {
    *  `claude-code.task` step). Absent = off, which is every device until its owner
    *  turns it on: pairing consents to a terminal, not to unattended work. */
   workflowTasks?: { enabledAt: string; enabledBy: string };
+  /** ADR 1136 P2a — what this device may do. Absent = `terminal` (paired before
+   *  capabilities existed). Fixed at pairing; a change is a re-pair. */
+  capability?: DeviceCapability;
+}
+
+/** A device's capability, with pre-P2a rows read as `terminal`. */
+export function deviceCapabilityOf(d: Pick<DeviceRecord, 'capability'>): DeviceCapability {
+  return d.capability ?? 'terminal';
 }
 
 export interface DeviceView extends Omit<DeviceRecord, 'keyId'> {
@@ -144,9 +156,14 @@ function clean(value: unknown, max: number, fallback: string): string {
   return s || fallback;
 }
 
-export async function startPairing(input: { label?: unknown; platform?: unknown; requesterIp?: string }): Promise<{
+export async function startPairing(input: { label?: unknown; platform?: unknown; requesterIp?: string; capability?: unknown }): Promise<{
   deviceCode: string; userCode: string; expiresIn: number; interval: number;
+  /** ADR 1136 P2b — echoed, so a companion asking for a browser pairing can tell a
+   *  host that granted one from an older host that ignored the field. */
+  capability: DeviceCapability;
 }> {
+  const capability = parseDeviceCapability(input.capability);
+  if (!capability) throw new OpenwopError('validation_error', 'Field `capability` must be "terminal" or "browser".', 400, { field: 'capability' });
   const now = Date.now();
   const expiresAt = new Date(now + PAIRING_TTL_MS).toISOString();
   const { raw: deviceCode, hash: pairingId } = mintToken('owdc');
@@ -170,8 +187,9 @@ export async function startPairing(input: { label?: unknown; platform?: unknown;
     status: 'pending',
     createdAt: new Date(now).toISOString(),
     expiresAt,
+    capability,
   });
-  return { deviceCode, userCode, expiresIn: Math.floor(PAIRING_TTL_MS / 1000), interval: PAIRING_POLL_INTERVAL_S };
+  return { deviceCode, userCode, expiresIn: Math.floor(PAIRING_TTL_MS / 1000), interval: PAIRING_POLL_INTERVAL_S, capability };
 }
 
 /** The live pairing a user code points at, or null (unknown, expired, or reassigned). */
@@ -184,12 +202,13 @@ async function livePairingByUserCode(rawUserCode: string): Promise<PairingRecord
 }
 
 /** What the approval page shows. Only a PENDING pairing is approvable; anything else is 404. */
-export async function getPendingPairing(userCode: string): Promise<Pick<PairingRecord, 'userCode' | 'label' | 'platform' | 'requestedFrom' | 'createdAt' | 'expiresAt'> | null> {
+export async function getPendingPairing(userCode: string): Promise<(Pick<PairingRecord, 'userCode' | 'label' | 'platform' | 'requestedFrom' | 'createdAt' | 'expiresAt'> & { capability: DeviceCapability }) | null> {
   const rec = await livePairingByUserCode(userCode);
   if (!rec || rec.status !== 'pending') return null;
   return {
     userCode: rec.userCode, label: rec.label, platform: rec.platform,
     requestedFrom: rec.requestedFrom ?? 'unknown', createdAt: rec.createdAt, expiresAt: rec.expiresAt,
+    capability: rec.capability ?? 'terminal',
   };
 }
 
@@ -210,7 +229,9 @@ export async function decidePairing(
   if (decision.approve) {
     // ADR 0785 D2 lever 2 — an approval binds to the consent text the user saw.
     // A stale page (older text) is refused, never silently upgraded.
-    if (decision.consentHash !== consentHash()) {
+    // ADR 1136 P2a — and to the text for THIS pairing's capability.
+    const expected = consentHash(consentTextFor(rec.capability ?? 'terminal'));
+    if (decision.consentHash !== expected) {
       throw new OpenwopError('conflict', 'The consent text has changed. Reload the page and review it again.', 409, { reason: 'consent_outdated' });
     }
     // Refuse HERE, where a person can read the reason, rather than let the mint
@@ -220,7 +241,7 @@ export async function decidePairing(
       throw new OpenwopError('conflict', `This workspace already has ${ACTIVE_KEYS_PER_TENANT} active API keys. Revoke one, then approve again.`, 409, { reason: 'key_limit' });
     }
     next = {
-      ...rec, status: 'approved', approvedBy: decision.subject, tenantId: decision.tenantId, consentHash: consentHash(), decidedAt,
+      ...rec, status: 'approved', approvedBy: decision.subject, tenantId: decision.tenantId, consentHash: expected, decidedAt,
       ...(decision.personalTenant ? { personalTenant: decision.personalTenant } : {}),
       ...(decision.ownerUserId ? { ownerUserId: decision.ownerUserId } : {}),
     };
@@ -274,7 +295,7 @@ export async function pollPairing(deviceCode: unknown): Promise<PollResult | nul
       tenantId: rec.tenantId,
       name: `${DEVICE_KEY_NAME_PREFIX}${rec.label}`,
       createdBy: rec.approvedBy,
-      scopes: [...DEVICE_KEY_SCOPES],
+      scopes: [...deviceKeyScopesFor(rec.capability ?? 'terminal')],
       expiresAt,
     });
   } catch (err) {
@@ -291,8 +312,9 @@ export async function pollPairing(deviceCode: unknown): Promise<PollResult | nul
     label: rec.label,
     platform: rec.platform,
     createdAt: new Date().toISOString(),
-    consentVersion: CONSENT_VERSION,
+    consentVersion: consentTextFor(rec.capability ?? 'terminal').version,
     consentHash: rec.consentHash,
+    capability: rec.capability ?? 'terminal',
     ...(rec.personalTenant ? { personalTenant: rec.personalTenant } : {}),
     ...(rec.ownerUserId ? { ownerUserId: rec.ownerUserId } : {}),
   });
@@ -349,6 +371,10 @@ export async function setWorkflowTasks(tenantId: string, deviceId: string, subje
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const rec = await ownedDevice(tenantId, deviceId, subject);
     if (!rec) return null;
+    // ADR 1136 P2a — a browser device cannot accept Claude Code tasks.
+    if (enabled && deviceCapabilityOf(rec) !== 'terminal') {
+      throw new OpenwopError('conflict', 'That device was paired as a browser. Only a Claude Code device can accept workflow tasks.', 409, { reason: 'device_capability' });
+    }
     const { workflowTasks: _drop, ...rest } = rec;
     const next: DeviceRecord = enabled ? { ...rest, workflowTasks: { enabledAt: new Date().toISOString(), enabledBy: subject } } : rest;
     if (await devices.compareAndSwap(rec, next)) return next;

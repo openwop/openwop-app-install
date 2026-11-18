@@ -112,7 +112,7 @@ async function sharedTenant(who: string): Promise<{ owner: Client; viewer: Clien
   const orgId = (await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
   const viewer = client();
   const vu = await viewer.post<LoginBody>('/host/openwop-app/test/login', { email: uniqEmail(`${who}-viewer`), tenantId });
-  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: vu.body.user.userId, roles: ['viewer'] });
+  const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: vu.body.user.userId, roles: ['viewer'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   const outsider = client();
   expect((await outsider.post<LoginBody>('/host/openwop-app/test/login', { email: uniqEmail(`${who}-outsider`), tenantId })).status).toBe(201);

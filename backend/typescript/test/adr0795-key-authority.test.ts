@@ -27,7 +27,7 @@ import {
   resolveSubjectScopesUnion,
   resolveTenantLevelScopes,
 } from '../src/host/accessControlService.js';
-import { issueApiKey, revokeApiKey, verifyApiKey } from '../src/features/developer-keys/apiKeyService.js';
+import { __issueUndeclaredLegacyKeyForTest, issueApiKey, revokeApiKey, verifyApiKey } from '../src/features/developer-keys/apiKeyService.js';
 import { envKeyPrincipalId } from '../src/middleware/envKeyPrincipal.js';
 
 const PERSONAL = 'user:adr0795personal';
@@ -46,7 +46,9 @@ afterEach(() => { for (const k of ENV) { if (saved[k] === undefined) delete proc
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 async function mint(tenantId: string, createdBy: string, scopes?: string[], expiresAt?: string): Promise<{ subject: string; keyId: string; token: string }> {
-  const { key, token } = await issueApiKey({ tenantId, name: 'k', createdBy, ...(scopes ? { scopes } : {}), ...(expiresAt ? { expiresAt } : {}) });
+  // #6053 — no scopes means a LEGACY undeclared key, which `issueApiKey` no longer mints.
+  const base = { tenantId, name: 'k', createdBy, ...(expiresAt ? { expiresAt } : {}) };
+  const { key, token } = scopes ? await issueApiKey({ ...base, scopes }) : await __issueUndeclaredLegacyKeyForTest(base);
   return { subject: `apikey:${key.keyId}`, keyId: key.keyId, token };
 }
 

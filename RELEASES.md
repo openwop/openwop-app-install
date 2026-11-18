@@ -48,6 +48,29 @@ upgrade is neither: list it in `breakingConfig`.
 
 ## Version log
 
+### v0.16.0 — 2026-11-18
+
+- **Required stop:** no. **Rolling-safe:** yes.
+- **Schema:** sqlite 54 / postgres 52, one additive nullable column
+  (`invocation_log.llm_cache_key`). **App migrations:** 26 (unchanged).
+- **Breaking for API callers:** adding a person to an org by `user:` subject now
+  answers `409 use_add_existing` / `use_link`. Use `…/members/add-existing` and
+  `…/members/:memberId/link` (#5945).
+- **New optional settings, all off or unchanged by default:**
+  - `OPENWOP_API_KEY_EMPTY_SCOPES` (default permit);
+  - `OPENWOP_API_KEY_UNDECLARED_REWRITE` (`report` | `apply`, default off);
+  - `OPENWOP_MEDIA_ORG_MAX_ASSETS|BYTES|COLLECTIONS`;
+  - `OPENWOP_LLM_CACHE_KEY_RECIPE_2`;
+  - `OPENWOP_TELEMETRY_FAMILY`.
+
+  No setting changes meaning.
+- Every error response is `no-store` (ADR 1147).
+- Approval requests reach only people who can open the run (ADR 1140).
+- Share links can verify their recipient by emailed code (ADR 1141, off by default).
+- Inbox: Needs you / Updates / Archived with one count (ADR 1125).
+- Collaboration projections (ADR 1099), RFC 0260 recipe 2, RFC 0262 telemetry, Kanban
+  due reminders, per-org media caps, and browser-agent groundwork (ADR 1136).
+
 ### v0.15.0 — 2026-11-16
 
 - **Required stop:** no. **Rolling-safe:** yes. From before 0.14.0, land on

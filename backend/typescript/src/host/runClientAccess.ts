@@ -33,11 +33,36 @@
 import type { Request } from 'express';
 import type { RunRecord } from '../types.js';
 import { OpenwopError } from '../types.js';
-import type { Scope } from './accessControlService.js';
-import { callerSubject, tenantOf } from './requestSubject.js';
+import { assertOrgScope, membershipDefinesPresence, type Scope } from './accessControlService.js';
+import { decideProtocolAuthorization } from './protocolAuthorization.js';
+import { callerSubject, isPersonalTenantId, tenantOf } from './requestSubject.js';
 import { runClientStamp } from './runClientOrg.js';
 import { clientOrgGate, hasTenantWideClientAccess } from './clientOrgGate.js';
 import { runProjectReader } from './runProjectAccess.js';
+import { createLogger } from '../observability/logger.js';
+
+const log = createLogger('host.runClientAccess');
+
+/** Decide, once per request, which client runs in `tenantId` the caller may
+ *  read. One membership resolve per distinct client org, cached for the request. */
+/** The ONE run-read decision, shared by the request reader and the person reader
+ *  (ADR 1140) so the two cannot drift: the client stamp first (an unreadable
+ *  stamp needs a tenant-level grant), then the ADR 1133 project check behind the
+ *  same grants. `mayActIn` must include the tenant-level grants itself. */
+async function decideRunRead(
+  metadata: Record<string, unknown> | undefined,
+  deps: { tenantWide: () => Promise<boolean>; mayActIn: (orgId: string) => Promise<boolean>; projectOk: (metadata: Record<string, unknown> | undefined) => Promise<boolean> },
+): Promise<boolean> {
+  const stamp = runClientStamp(metadata);
+  if (stamp !== undefined) {
+    // An unreadable or self-contradicting stamp: the tenant-level grants only.
+    if (!(await ('refused' in stamp ? deps.tenantWide() : deps.mayActIn(stamp.orgId)))) return false;
+  }
+  // ADR 1133 — and the project the run is working on, after the client check and
+  // behind the same tenant-wide grants. Derived, never stamped (runProjectAccess.ts).
+  if (!(await deps.projectOk(metadata))) return deps.tenantWide();
+  return true;
+}
 
 /** Decide, once per request, which client runs in `tenantId` the caller may
  *  read. One membership resolve per distinct client org, cached for the request. */
@@ -45,27 +70,12 @@ export async function runClientReader(req: Request, tenantId: string = tenantOf(
   // ADR 1132 — the floor itself is `clientOrgGate`, shared with workflow definitions.
   const mayActIn = clientOrgGate(req, tenantId, scope);
   let tenantWide: Promise<boolean> | undefined;
-  const clientOk = async (run: Pick<RunRecord, 'metadata'>): Promise<boolean> => {
-    const stamp = runClientStamp(run.metadata as Record<string, unknown> | undefined);
-    if (stamp === undefined) return true;
-    if ('refused' in stamp) {
-      // An unreadable or self-contradicting stamp: the tenant-level grants only.
-      tenantWide ??= hasTenantWideClientAccess(req, tenantId);
-      return tenantWide;
-    }
-    return mayActIn(stamp.orgId);
+  const deps = {
+    tenantWide: () => (tenantWide ??= hasTenantWideClientAccess(req, tenantId)),
+    mayActIn,
+    projectOk: runProjectReader(tenantId, callerSubject(req)),
   };
-  // ADR 1133 — and the project the run is working on, after the client check and
-  // behind the same tenant-wide grants. Derived, never stamped (runProjectAccess.ts).
-  const projectOk = runProjectReader(tenantId, callerSubject(req));
-  return async (run) => {
-    if (!(await clientOk(run))) return false;
-    if (!(await projectOk(run.metadata as Record<string, unknown> | undefined))) {
-      tenantWide ??= hasTenantWideClientAccess(req, tenantId);
-      return tenantWide;
-    }
-    return true;
-  };
+  return (run) => decideRunRead(run.metadata as Record<string, unknown> | undefined, deps);
 }
 
 /** {@link runClientReader} for ONE run: throws `run_not_found` (404) when the
@@ -91,4 +101,62 @@ export async function filterClientReadableRuns<T extends Pick<RunRecord, 'tenant
     if (await read(r)) out.push(r);
   }
   return out;
+}
+
+/**
+ * ADR 1140 (#5951) — {@link runClientReader}'s rule for a PERSON with no request:
+ * may `userId` open this run? Used when a run's request is addressed (the
+ * interrupt notification and its SLA reminders), so nobody is asked about a run
+ * whose page answers them `run_not_found`. Keyed on the same id the run doors
+ * key on (`callerSubject(req)`, the userId). The tenant-level grants are the
+ * request rule's, less the two a person cannot carry without a request (a
+ * wildcard principal, and "this is my own personal workspace", which a personal
+ * tenant answers by construction, so a personal tenant is never filtered).
+ */
+export function runUserReader(run: Pick<RunRecord, 'tenantId' | 'metadata'>): (userId: string) => Promise<boolean> {
+  const tenantId = run.tenantId;
+  if (isPersonalTenantId(tenantId) || !membershipDefinesPresence(tenantId)) return async () => true;
+  const metadata = run.metadata as Record<string, unknown> | undefined;
+  return (userId) => {
+    let admin: Promise<boolean> | undefined;
+    const tenantWide = (): Promise<boolean> =>
+      (admin ??= decideProtocolAuthorization(tenantId, userId, 'host:members:manage').then((d) => d.allowed, () => false));
+    const mayActIn = async (orgId: string): Promise<boolean> => {
+      if (await tenantWide()) return true;
+      return assertOrgScope(tenantId, userId, orgId, 'runs:read').then(
+        () => true,
+        (err: unknown) => {
+          if (err instanceof OpenwopError && (err.code === 'not_found' || err.code === 'forbidden_scope')) return false;
+          throw err; // a storage error is not "you may not": surface it
+        },
+      );
+    };
+    return decideRunRead(metadata, { tenantWide, mayActIn, projectOk: runProjectReader(tenantId, userId) });
+  };
+}
+
+let userReaderFor: typeof runUserReader = runUserReader;
+/** Test seam: replace the person reader (undefined restores it). */
+export function __setRunUserReaderForTest(f: typeof runUserReader | undefined): void {
+  userReaderFor = f ?? runUserReader;
+}
+
+/** Split addressed recipients into those who may open the run and those who may
+ *  not. Fails closed PER RECIPIENT: a read that throws (a storage error) counts
+ *  that one person as unreadable and is logged, so one failed check never
+ *  silences the request for everyone else or skips the operators' notice. */
+export async function splitRunReaders(run: Pick<RunRecord, 'tenantId' | 'metadata'>, userIds: readonly string[]): Promise<{ readers: string[]; unreadable: string[] }> {
+  const may = userReaderFor(run);
+  const readers: string[] = [];
+  const unreadable: string[] = [];
+  for (const u of userIds) {
+    let ok = false;
+    try {
+      ok = await may(u);
+    } catch (err) {
+      log.warn('run_recipient_read_check_failed', { tenantId: run.tenantId, code: err instanceof OpenwopError ? err.code : 'error' });
+    }
+    (ok ? readers : unreadable).push(u);
+  }
+  return { readers, unreadable };
 }

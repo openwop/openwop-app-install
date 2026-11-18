@@ -179,7 +179,7 @@ describe('ADR 0946 P3 — routes', () => {
     const ed = client();
     const login = await ed.call('POST', '/host/openwop-app/test/login', { email: `ed-${Date.now()}@t.test`, tenantId });
     const userId = String((login.body.user as { userId: string }).userId);
-    expect((await c.call('POST', `/host/openwop-app/orgs/${orgId}/members`, { displayName: 'Ed', subject: userId, roles: ['editor'] })).status).toBeLessThan(300);
+    expect((await c.call('POST', `/host/openwop-app/test/orgs/${orgId}/members`, { displayName: 'Ed', subject: userId, roles: ['editor'] })).status).toBeLessThan(300);
     const blocked = await ed.call('PATCH', `/host/openwop-app/brand/brands/${brandId}`, { creativeLocks: null });
     expect(blocked.status, JSON.stringify(blocked.body)).toBe(403);
     expect(blocked.body).toMatchObject({ error: 'forbidden_scope', details: { requiredScope: 'host:org:manage' } });

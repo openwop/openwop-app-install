@@ -25,11 +25,11 @@ beforeAll(async () => {
 
 describe('ADR 0823 — an owk_ key can never be a wildcard principal', () => {
   it('issuing a key for tenant "*" is refused', async () => {
-    await expect(issueApiKey({ tenantId: '*', name: 'x', createdBy: 'u1' })).rejects.toMatchObject({ httpStatus: 400, message: 'a self-service key cannot be cross-tenant.' });
+    await expect(issueApiKey({ scopes: ['*'], tenantId: '*', name: 'x', createdBy: 'u1' })).rejects.toMatchObject({ httpStatus: 400, message: 'a self-service key cannot be cross-tenant.' });
   });
 
   it('a stored "*" key row never verifies (and the same row verifies under a real tenant)', async () => {
-    const { token } = await issueApiKey({ tenantId: 'org:owk-wild', name: 'k', createdBy: 'u1' });
+    const { token } = await issueApiKey({ scopes: ['*'], tenantId: 'org:owk-wild', name: 'k', createdBy: 'u1' });
     expect((await verifyApiKey(token))?.tenantId).toBe('org:owk-wild'); // control
 
     const storage = __hostExtStorage()!;

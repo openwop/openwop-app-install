@@ -459,11 +459,12 @@ describe('ADR 0464 — host fan-out wiring (eraseSubject reaches host stores)', 
     const res = await eraseSubject(T, A);
     // ADR 0942 adds autonomy-policy attribution to the 31 existing erasers, and
     // ADR 1014 D8 adds user-agent revisions, and ADR 1030 P2 the site-brand
-    // pointer, and ADR 1042 D8 the relay-device owner, and ADR 1043
-    // RELAY-LOG-RETENTION-1 the delivery log: exactly 36 erasers `registerHostSubjectErasers`
+    // pointer, ADR 1042 D8 the relay-device owner, ADR 1043 RELAY-LOG-RETENTION-1
+    // the delivery log, and ADR 1040 D7 F3 the chat tool summaries: exactly 37
+    // erasers `registerHostSubjectErasers`
     // registers (host/hostSubjectErasers.ts). Adding or removing one there must
     // update this number — a dropped eraser is no longer silently tolerated.
-    expect(res.total).toBe(36);
+    expect(res.total).toBe(37);
     expect(res.failed).toBe(0);
 
     expect((await kanban.getCard(card.id))?.assigneeId).toBe(ERASED);

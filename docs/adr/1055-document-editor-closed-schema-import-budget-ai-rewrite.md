@@ -463,3 +463,14 @@ deterministic in the suite; it is a defense in depth beside the counted budget).
   transaction in jsdom, with up to 200 suggestions. That is linear per keystroke,
   not quadratic. `markRangeAt` is O(k²) in the suggestions it touches, only while
   the cursor sits in one.
+- Filed (2026-11-16, recovered from the row-87 grading notes before their worktree was
+  removed): live checks the graders asked for, none run yet.
+  - `DE87UX-34`: in the slash menu, NVDA or JAWS may read the active option twice, once
+    for the `aria-activedescendant` change and once for the live-region text. The code
+    comment documents the trade-off. Verify it live with NVDA, JAWS and VoiceOver; if it
+    doubles, keep one channel.
+  - Accept several suggestions in a row using only the keyboard.
+  - Copy and paste a suggested deletion, and confirm it is still a suggestion.
+  - Run "Improve with AI" on a slow connection.
+  - Type in a shared (collab) session on a document of about 50 pages, and watch the
+    re-render cost (`DE87UX-27` measured it only in jsdom).

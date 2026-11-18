@@ -1,6 +1,6 @@
 # ADR 1040 — Agent-scoped, persisted embedded chat; feature-registered focus kinds
 
-Status: Accepted (openwop-app-88 for the requesting sessions, 2026-11-03); PR A in progress
+Status: Accepted (openwop-app-88 for the requesting sessions, 2026-11-03). PRs A (#5537), B (#5538), D (#5542) and E (#5545) are merged; PR C (D5) is not built. See "Status and follow-ups (2026-11-17)" at the end.
 
 ## Context
 
@@ -417,3 +417,37 @@ explicitly, with and without a conversation) passes on unmodified source and
 goes red when `get-design` reads through `getCanvasForTenant` instead. The fix
 (D4 re-authorizes explicit ids in the helper itself) therefore stays in PR B,
 with that test.
+
+## Status and follow-ups (2026-11-17)
+
+The session that built this ADR ended before writing its addenda. They were recovered from its
+handoff notes before its worktree was removed.
+
+**Merged:**
+
+| PR | Decisions | Merge |
+|---|---|---|
+| A #5537 | D1–D3 | `d343485bb`, 2026-11-09 |
+| B #5538 | D4, D6 row 1 | `c6c94b18e`, 2026-11-09 |
+| D #5542 | D7 F1 + F2 | `10e02b90b`, 2026-11-14 |
+| E #5545 | D7 F3 + F4 | `8a3793dbc`, 2026-11-17 |
+
+**Not built: PR C (D5).** The mountable, agent-scoped full-page chat and `chat/public.ts` were
+never started. The ADR 1031 P2 hook test that rides it waits on #5502.
+
+**D7 F3, the host channel (decided in PR E).** A tool's display summary never rides the RFC 0064
+tool-return event. The host records it beside the turn (`host/chatToolSummaries.ts`), and the
+chat reads it through `GET /host/openwop-app/chat/tool-summaries?conversationRunId&turnMessageId`
+(`routes/chatToolSummaries.ts`). That route is gated by `canReadChatTurn`, the predicate a turn's
+artifacts are read under. A caller who can't read the conversation gets `{ summaries: [] }`, so
+no wire change and no RFC are needed.
+
+**Follow-ups, none built yet:**
+- F3: render the summary inside `ToolCallCard`, linked by `aria-describedby`
+  (`chat/AgentEventCards.tsx`), not beside it.
+- F4: in an ephemeral embed (`EmbeddedConversation.tsx`), a feature link should open in a new
+  tab, so following it doesn't throw away the unsaved conversation.
+- D7: a "Declined" completion state for expected declines, so they don't read as failures.
+- F2: run-result renderers that match on chain origin, not only on output artifact type.
+- D4/D6 implementation notes were not written. The D6 steward rows `RESBY-VOTER-1` and
+  `RESBY-CAP-1` are in `docs/steward/TODO.md` and ADR 1059.

@@ -27,7 +27,7 @@ import { createApp } from '../src/index.js';
 import { _resetOidcVerifier } from '../src/middleware/auth.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { isWorkspaceMember, listMembers } from '../src/host/accessControlService.js';
+import { createMember, isWorkspaceMember, listMembers } from '../src/host/accessControlService.js';
 
 function b64url(buf: Buffer | string): string {
   return Buffer.from(buf).toString('base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
@@ -174,7 +174,9 @@ describe('ADR 0774 D5 — legacy oidc:<sub> callers are judged by their canonica
     // raw spelling stays green (w37g1-oidc-raw-only): once bound, the raw subject IS the
     // canonical id, so this case cannot separate the two spellings — the shared-workspace
     // owner case above is the one that needs the legacy spelling.
-    expect((await owner.c.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'editor', subject: editor.canonical, roles: ['editor'] })).status).toBe(201);
+    // #5945 — a typed `user:` subject is refused on the members route, and this file tests real
+    // OIDC-bearer identity, so the editor is seeded in the store rather than through the auth seam.
+    await createMember({ orgId: ws, tenantId: ws, displayName: 'editor', subject: editor.canonical, roles: ['editor'] });
     expect((await editor.c.post('/host/openwop-app/users/auth/oidc/bind')).status).toBe(200);
     const sw = await editor.c.post(`${WS}/${encodeURIComponent(ws)}/switch`);
     expect(sw.status, JSON.stringify(sw.body)).toBe(200);

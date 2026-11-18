@@ -97,7 +97,7 @@ describe('publish route (ADR 0306)', () => {
     // A viewer holds workspace:read — enough to see the app, not to publish it.
     const viewer = client();
     const viewerUser = (await viewer.post('/host/openwop-app/test/login', { email: `abp-v-${Date.now()}-${n++}@acme.test`, tenantId })).body.user as { userId: string };
-    const add = await c.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Vi', subject: viewerUser.userId, roles: ['viewer'] });
+    const add = await c.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Vi', subject: viewerUser.userId, roles: ['viewer'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
     await setPublishToggle('on');
     try {

@@ -6,6 +6,7 @@
  */
 
 import { useCallback } from 'react';
+import i18n from '../../../i18n/index.js';
 import { resolveByRun } from '../../../client/interruptsClient.js';
 import { chatSessionReducer } from '../../lib/chatSessionReducer.js';
 import { planInterruptResolution, removeInterruptByNode } from '../../lib/interruptResolution.js';
@@ -48,7 +49,9 @@ export function useInterruptResolution(core: ChatSessionCore) {
           : [...existing, plan.interrupt];
         return chatSessionReducer(s, { type: 'updateMessage', id: messageId, patch: { activeInterrupts: restored } });
       });
-      setError(`Could not resolve interrupt: ${message}`);
+      // CC-GATE-4: the server's message is already plain language ("You requested
+      // this step, so someone else has to approve it."); never prefix it with jargon.
+      setError(i18n.t('chat:decisionNotRecorded', { reason: message }));
     }
   }, [sessionRef, setError, setSession]);
 

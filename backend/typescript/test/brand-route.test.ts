@@ -102,7 +102,7 @@ async function nonMemberOf(tenantId: string): Promise<Client> {
 async function editorOf(t: { tenantId: string; owner: Client; orgId: string }): Promise<Client> {
   const c = client();
   const u = await signup(c, { tenantId: t.tenantId });
-  const add = await t.owner.post(`/host/openwop-app/orgs/${encodeURIComponent(t.orgId)}/members`, { displayName: 'Ed', subject: u.userId, roles: ['editor'] });
+  const add = await t.owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(t.orgId)}/members`, { displayName: 'Ed', subject: u.userId, roles: ['editor'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return c;
 }

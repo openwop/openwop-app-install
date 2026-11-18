@@ -290,7 +290,7 @@ describe('projects — knowledge (cited documents, generic subject binding)', ()
     const viewer = client();
     const vlogin = await viewer.post<LoginBody>('/host/openwop-app/test/login', { email: uniqEmail('pjv-viewer'), tenantId });
     const viewerSubject = vlogin.body.user.userId;
-    const add = await owner.post(`/host/openwop-app/orgs/${orgId}/members`, { displayName: 'Viewer', subject: viewerSubject, roles: ['viewer'] });
+    const add = await owner.post(`/host/openwop-app/test/orgs/${orgId}/members`, { displayName: 'Viewer', subject: viewerSubject, roles: ['viewer'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
 
     // READ is allowed (workspace:read) ...
@@ -324,7 +324,7 @@ describe('projects — write-capability projection (ADR 0063)', () => {
     // A read-only org viewer can READ the project, but canWrite is false …
     const viewer = client();
     const vlogin = await viewer.post<LoginBody>('/host/openwop-app/test/login', { email: uniqEmail('pjw-viewer'), tenantId });
-    await owner.post(`/host/openwop-app/orgs/${orgId}/members`, { displayName: 'V', subject: vlogin.body.user.userId, roles: ['viewer'] });
+    await owner.post(`/host/openwop-app/test/orgs/${orgId}/members`, { displayName: 'V', subject: vlogin.body.user.userId, roles: ['viewer'] });
     const vget = await viewer.get<ProjectBody>(`${P}/${id}`);
     expect(vget.status).toBe(200);
     expect(vget.body.canWrite).toBe(false);
@@ -429,7 +429,7 @@ describe('projects — board read-privacy (org-scoped board visibility, ADR 0046
 
     const viewer = client();
     const vlogin = await viewer.post<LoginBody>('/host/openwop-app/test/login', { email: uniqEmail('pjb2-viewer'), tenantId });
-    await owner.post(`/host/openwop-app/orgs/${orgId}/members`, { displayName: 'V', subject: vlogin.body.user.userId, roles: ['viewer'] });
+    await owner.post(`/host/openwop-app/test/orgs/${orgId}/members`, { displayName: 'V', subject: vlogin.body.user.userId, roles: ['viewer'] });
 
     // READ (workspace:read): the viewer sees the board + it lists.
     expect((await viewer.get<BoardBody>(`${B}/${boardId}`)).status).toBe(200);

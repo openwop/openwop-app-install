@@ -82,7 +82,8 @@ async function agency() {
   const orgB = await org('Client B');
   /** Put a person in `orgId` directly (the owner's existing POST lane), and into the workspace if asked. */
   const place = async (p: Person, orgId: string, roles: string[]): Promise<void> => {
-    const r = await owner.c.post(`${M(orgId)}/members`, { displayName: p.email, subject: p.userId, email: p.email, roles });
+    // #5945 — the old lane now refuses a `user:` subject, so seeding uses the auth test seam (same handler).
+    const r = await owner.c.post(`/host/openwop-app/test/orgs/${enc(orgId)}/members`, { displayName: p.email, subject: p.userId, email: p.email, roles });
     expect(r.status, JSON.stringify(r.body)).toBe(201);
   };
   const enter = async (p: Person) => { expect((await p.c.post(`/host/openwop-app/workspaces/${enc(ws)}/switch`)).status).toBe(200); };
@@ -229,10 +230,12 @@ describe('ADR 1123 — add an existing person to an org', () => {
     expect(svc.status).toBe(201);
     expect((await chain()).some((e) => e.payload.subject === 'oidc:svc-1123'), 'a service subject is no person to notify').toBe(false);
 
-    // PATCH binding a sub-org placeholder to a person: recorded as a link.
+    // PATCH binding a sub-org placeholder to a person: recorded as a link. Since #5945 only an exempt
+    // caller reaches this lane (a superadmin, the wildcard, or the auth test seam used here); the
+    // refusal itself is pinned in adr1123-legacy-subject-refusal.
     const q = await person();
     const ph = (await a.owner.c.post<Member>(`${M(a.orgB)}/members`, { displayName: 'Quinn', roles: ['viewer'] })).body;
-    const res = await a.owner.c.patch(`${M(a.orgB)}/members/${enc(ph.memberId)}`, { subject: q.userId });
+    const res = await a.owner.c.patch(`/host/openwop-app/test/orgs/${enc(a.orgB)}/members/${enc(ph.memberId)}`, { subject: q.userId });
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect((await chain()).find((e) => e.kind === 'security.org.member-linked')?.payload).toMatchObject({ orgId: a.orgB, memberId: ph.memberId, placeholderMemberId: ph.memberId, subject: q.userId });
   });

@@ -33,6 +33,7 @@ import {
   deleteTemplate, getTemplate, listOrgs, updateTemplate, restoreTemplateVersion, TemplateVersionConflictError,
   type EmailBodyFormat, smsSegments, type EmailTemplate,
 } from './emailClient.js';
+import { isEmailNotFound } from './emailErrors.js';
 import { EmailBodyPreview } from './EmailBodyPreview.js';
 import { EmailTemplateVersionHistory } from './EmailTemplateVersionHistory.js';
 
@@ -89,7 +90,7 @@ export function EmailTemplateDetailPage(): JSX.Element {
       .catch((e) => {
         if (!live) return;
         // A 404 IS the answer ("no such template here"), not a failure to read.
-        if (e instanceof Error && /\b404\b/.test(e.message)) setNotFound(true);
+        if (isEmailNotFound(e)) setNotFound(true); // issue 5962 — by status or code, never by message text
         else { setError(e instanceof Error ? e.message : t('loadFailed')); setLoadFailed(true); }
       });
     return () => { live = false; };

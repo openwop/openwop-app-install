@@ -503,8 +503,8 @@ describe('ADR 0952 P1 — cap routes: lowering is workspace:write, raising/remov
     const editor = client(); const editorUser = await signup(editor, tenantId);
     const viewer = client(); const viewerUser = await signup(viewer, tenantId);
     const orgId = (await owner<{ orgId: string }>('POST', '/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-    await owner('POST', `/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: editorUser.userId, roles: ['editor'] });
-    await owner('POST', `/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: viewerUser.userId, roles: ['viewer'] });
+    await owner('POST', `/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: editorUser.userId, roles: ['editor'] });
+    await owner('POST', `/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: viewerUser.userId, roles: ['viewer'] });
     const CAPS = '/host/openwop-app/campaign-intel/caps';
 
     expect((await viewer('POST', CAPS, { orgId, scope: { kind: 'client' }, limitMinor: 1000, currency: 'USD' })).status).toBe(403);
@@ -542,7 +542,7 @@ describe('ADR 0952 D4 — alerts carry staged actions; the page confirms them', 
     const owner = client(); await signup(owner, tenantId);
     const viewer = client(); const viewerUser = await signup(viewer, tenantId);
     const orgId = (await owner<{ orgId: string }>('POST', '/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-    await owner('POST', `/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: viewerUser.userId, roles: ['viewer'] });
+    await owner('POST', `/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: viewerUser.userId, roles: ['viewer'] });
     const c = await makeCampaign(tenantId, orgId, 'Paused one');
     dispatch(tenantId, c.briefId, '111');
     dispatch(tenantId, c.briefId, '222', '123', 'google');

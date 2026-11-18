@@ -60,7 +60,7 @@ describe('CDP-H verifyApiKey durability', () => {
   });
 
   it('an expired key never authenticates', async () => {
-    const { token } = await issueApiKey({ tenantId: 'org:kv2', name: 'exp', createdBy: 'u1', expiresAt: '2000-01-01T00:00:00.000Z' });
+    const { token } = await issueApiKey({ scopes: ['*'], tenantId: 'org:kv2', name: 'exp', createdBy: 'u1', expiresAt: '2000-01-01T00:00:00.000Z' });
     expect(await verifyApiKey(token)).toBeNull();
   });
   it('TOK-D-2 (ADR 0448) — a legacy hashidx pointer without tenantId is lazily healed on the next verify', async () => {

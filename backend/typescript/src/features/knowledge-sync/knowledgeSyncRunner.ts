@@ -3,10 +3,10 @@
  * → prune, over the EXISTING owners (no parallel infra):
  *   - list   : `knowledgeSourceFetch.listFolder` (Phase 1, SSRF-guarded broker)
  *   - diff   : the pure `diffFolder` (Phase 3 core)
- *   - ingest : `kbService.ingestDocument` with the STABLE `sync:<source>:<file>`
+ *   - ingest : `kbService.upsertDocument` with the STABLE `sync:<source>:<file>`
  *              documentId + `contentTrust:'untrusted'` (ADR 0027 fence). A CHANGED
- *              file is delete-then-ingested so no stale chunks survive.
- *   - prune  : `kbService.deleteDocument` for files gone from the folder.
+ *              file is replaced in place (#5770), so a failed ingest keeps the old one.
+ *   - prune  : `deleteSyncedFile` (document, then cursor) for files gone from the folder.
  * Per-file failures are isolated (counted, not fatal) so one bad file can't abort
  * the sweep. The drive is the source of truth (one-way, OQ-5).
  */
@@ -17,7 +17,7 @@ import {
   listFolder, fetchKnowledgeSource, fetchKnowledgeSourceBytes, MAX_LIST_FILES,
   type KnowledgeFetchDeps, type ListingIncompleteReason,
 } from '../../host/knowledgeSourceFetch.js';
-import { ingestDocument, deleteDocument, getCollection } from '../kb/kbService.js'; // `deleteDocument`: the CHANGED-file clean re-ingest
+import { upsertDocument, getCollection } from '../kb/kbService.js';
 import { kbMutated } from '../kb/emit.js'; // ADR 0643 D3 — silent per-file re-ingest + ONE batch event
 import { getConnection } from '../connections/connectionsService.js';
 import { OpenwopError } from '../../types.js';
@@ -195,7 +195,7 @@ export async function runKnowledgeSyncOnce(deps: { storage: Storage }, source: S
   // on an ordinary org collection.
   const caller: SubjectCaller = { subject: conn.userId };
   // R4 review (Should 3) — RESOLVE BEFORE PAYING. Readability used to be checked only
-  // inside the per-file `deleteDocument`/`ingestDocument`, so a source whose owner had
+  // inside the per-file `deleteDocument`/`ingestDocument` (now `upsertDocument`), so a source whose owner had
   // left the project still listed the folder and fetched/downloaded/transcribed every
   // changed file on every pass, forever, then recorded N errors. One read here, one
   // error, no fetch. Thrown (not recorded) so it rides the whole-run failure
@@ -247,13 +247,16 @@ export async function runKnowledgeSyncOnce(deps: { storage: Storage }, source: S
             const t = await fetchKnowledgeSource(fetchDeps, { provider: source.provider, ref: f.fileId });
             return { title: f.name || t.title, text: t.text };
           })();
-      // Clean re-ingest: drop any prior doc (CHANGED) so no stale chunks remain.
+      // #5770 — a CHANGED file is REPLACED, never deleted then re-ingested. The
+      // upsert gates and validates before it touches the prior row, restores it on a
+      // failed commit, and keeps the revision log and vector cache (KB-CODE-9/10), so
+      // a failed ingest leaves the old document readable and the next pass retries.
+      // A first-time file has no prior row, so the upsert is an ingest.
       // ADR 0643 D3 — silent per file (a BULK lane); ONE `document.ingested { count }`
       // is emitted for the pass below.
-      await deleteDocument(source.tenantId, source.orgId, source.collectionId, f.documentId, caller, { silent: true }).catch(() => undefined); // KBC-1
-      await ingestDocument(source.tenantId, source.orgId, actor, source.collectionId, ingestInput, {
+      await upsertDocument(source.tenantId, source.orgId, source.collectionId, f.documentId, actor, {
+        ...ingestInput,
         contentTrust: 'untrusted', // ADR 0027 — synced drive content is never trusted
-        documentId: f.documentId,
         silent: true,
       }, caller); // KBC-1
       // ADR 0605 Tier 2 — stamp the owning tenant so teardown can find this row.

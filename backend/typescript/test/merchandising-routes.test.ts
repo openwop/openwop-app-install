@@ -63,7 +63,7 @@ async function ownerWithMember(role: string): Promise<{ owner: ReturnType<typeof
   const owner = client(); await owner.post('/host/openwop-app/test/login', { email: `co-${Date.now()}-${n++}@acme.test`, tenantId });
   const member = client(); const mr = await member.post('/host/openwop-app/test/login', { email: `co-${Date.now()}-${n++}@acme.test`, tenantId });
   const org = await owner.post('/host/openwop-app/orgs', { name: 'Shop' }); const orgId = org.body.orgId!;
-  await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: mr.body.user!.userId, roles: [role] });
+  await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: mr.body.user!.userId, roles: [role] });
   return { owner, member, orgId, tenantId };
 }
 const commerce = (orgId: string, s = ''): string => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${s}`;

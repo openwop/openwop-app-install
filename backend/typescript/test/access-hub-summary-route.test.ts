@@ -102,7 +102,7 @@ describe('access hub summary (ADR 0864)', () => {
     // Grow both counts past their login baseline (the founding workspace root + its
     // owner), so neither a constant nor the baseline can satisfy the assertions.
     expect((await c.post('/host/openwop-app/orgs', { name: 'O2' })).status).toBe(201);
-    expect((await c.post(`/host/openwop-app/orgs/${tenantId}/members`, { displayName: 'Second', subject: `user:ahs-second-${n}`, roles: ['viewer'] })).status).toBe(201);
+    expect((await c.post(`/host/openwop-app/test/orgs/${tenantId}/members`, { displayName: 'Second', subject: `user:ahs-second-${n}`, roles: ['viewer'] })).status).toBe(201);
     expect((await c.post('/host/openwop-app/byok/secrets', { credentialRef: `ahs-model-${n}`, value: 'sk-ahs-model-key' })).status).toBe(201);
     const orgs = await c.get<{ orgs: { orgId: string }[] }>('/host/openwop-app/orgs');
     const members = await c.get<{ members: unknown[] }>(`/host/openwop-app/orgs/${tenantId}/members`);
@@ -170,7 +170,7 @@ describe('access hub summary (ADR 0864)', () => {
     // so no member row) given `viewer` in orgA ONLY: authenticated, in the tenant, able to
     // list every org, and refused `workspace:read` in orgB and the workspace root.
     const peer = await login(tenantId);
-    expect((await c.post(`/host/openwop-app/orgs/${orgA}/members`, { displayName: 'Peer', subject: peer.userId, roles: ['viewer'] })).status).toBe(201);
+    expect((await c.post(`/host/openwop-app/test/orgs/${orgA}/members`, { displayName: 'Peer', subject: peer.userId, roles: ['viewer'] })).status).toBe(201);
     delete process.env.OPENWOP_COMPAT_PROVIDER_ENABLED;
     const off = await c.summary();
     expect(off.status).toBe(200);

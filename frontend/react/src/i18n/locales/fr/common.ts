@@ -98,4 +98,6 @@ export const messages = {
   comboboxResults_other: '{{count}} résultats',
   comboboxResultsMore_one: "Plus de {{count}} résultat ; précisez votre saisie",
   comboboxResultsMore_other: "Plus de {{count}} résultats ; précisez votre saisie",
+  // Issue 5911 — a workflow the caller's own list does not name (shared by several areas).
+  workflowUnnamed: 'Workflow sans nom',
 } as const;

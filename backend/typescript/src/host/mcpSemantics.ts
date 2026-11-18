@@ -38,7 +38,7 @@ import { randomUUID } from 'node:crypto';
 import { chargedAdmission, insertRunWithStartContext } from './runInsert.js';
 import { resolveLaunchWorkflow } from './resolveLaunchDefinition.js';
 import { WorkflowFeatureRefusedError } from './workflowFeatureGate.js';
-import { seedRunVariables } from './variablesRuntime.js';
+import { deferredConfigurableInputs, seedRunVariables } from './variablesRuntime.js';
 import type { Storage } from '../storage/storage.js';
 import type { HostAdapterSuite } from './index.js';
 import type { InterruptRecord, Principal, RunRecord } from '../types.js';
@@ -440,7 +440,7 @@ async function runWorkflow(input: {
   // subWorkflowDispatcher precedent. Without this, an expose-tool workflow whose
   // backing node reads tool args via variables (e.g. the ADR 0087 notebook tools)
   // would see them undefined (executeRun only HYDRATES a previously-seeded bag).
-  seedRunVariables(runId, wf.definition.variables, inputs);
+  seedRunVariables(runId, wf.definition.variables, deferredConfigurableInputs(wf.definition, undefined, inputs)); // CC-JOURNEY-1
 
   await executeRun(deps.storage, run, wf.definition, {
     policyResolver: deps.hostSuite.providerPolicyResolver,

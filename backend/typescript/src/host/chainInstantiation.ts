@@ -259,6 +259,10 @@ export async function instantiateOwnedChain(input: InstantiateOwnedChainInput): 
     // would let one subject's erasure delete another's child.
     ...(input.subject ? { subject: input.subject } : {}),
     ...(input.clientOrgId ? { clientOrgId: input.clientOrgId } : {}),
+    // The picker-templates ADR — the chain of origin, on the PARENT only (a
+    // sub-chain child is shared across instantiations), so the `/` picker can
+    // offer the owned copy instead of the template again.
+    fromChainId: input.chain.chainId,
   });
   return { def, workflowId, name, coRegisteredChildIds, reusedChildIds };
 }

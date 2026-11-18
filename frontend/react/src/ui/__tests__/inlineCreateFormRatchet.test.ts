@@ -72,6 +72,7 @@ const BASELINE: Record<string, number> = {
   'features/promotions/PromotionsPage.tsx': 1,
   'features/recommendations/RecommendationsPage.tsx': 2,
   'features/settings-shell/SecurityPanel.tsx': 1,
+  'features/sharing/SharedVerifyPanel.tsx': 1, // ADR 1141 — a visitor's one-time-code entry on the public share page, not a create action (the PublicSignPage class)
   'features/sharing/SharingPage.tsx': 2,
   'features/site/BlogPage.tsx': 1,
   'features/strategy/StrategyPage.tsx': 1,

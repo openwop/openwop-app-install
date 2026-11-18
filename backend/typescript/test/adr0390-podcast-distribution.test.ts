@@ -532,7 +532,7 @@ describe('SP-9 (round 3) — shows/episodes lists carry the caller\'s canWrite f
     // viewer's actual write on this surface 403s on the same predicate).
     const viewer = client();
     const vlogin = await viewer.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: uniqEmail('pcw-viewer'), tenantId });
-    const add = await owner.post(`/host/openwop-app/orgs/${orgId}/members`, { displayName: 'V', subject: vlogin.body.user.userId, roles: ['viewer'] });
+    const add = await owner.post(`/host/openwop-app/test/orgs/${orgId}/members`, { displayName: 'V', subject: vlogin.body.user.userId, roles: ['viewer'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
     const vShows = await viewer.get<ListBody>(`${P}/shows?orgId=${encodeURIComponent(orgId)}`);
     expect(vShows.status).toBe(200);

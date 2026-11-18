@@ -94,7 +94,7 @@ async function sharedWorkspaceWith(role: 'viewer' | 'editor'): Promise<{ owner: 
   expect((await owner.post(`${WS}/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
   const member = client();
   const m = await signup(member);
-  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`, { displayName: role, subject: m.userId, roles: [role] });
+  const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(ws)}/members`, { displayName: role, subject: m.userId, roles: [role] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   expect((await member.post(`${WS}/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
   return { owner, member, memberId: m.userId, ws };
@@ -178,7 +178,7 @@ describe('ADR 0774 D4 — a role-addressed card is claimed exactly once', () => 
     const a = client(); const ua = await signup(a);
     const b = client(); const ub = await signup(b);
     for (const [c, u] of [[a, ua], [b, ub]] as const) {
-      expect((await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`, { displayName: u.userId, subject: u.userId, roles: ['editor'] })).status).toBe(201);
+      expect((await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(ws)}/members`, { displayName: u.userId, subject: u.userId, roles: ['editor'] })).status).toBe(201);
       await c.post(`${WS}/${encodeURIComponent(ws)}/switch`);
     }
     const board = (await owner.post<BoardBody>(`${K}/boards`, { name: 'Queue' })).body;
@@ -214,7 +214,7 @@ describe('grade-code fixes inside the ADR 0774 cut (routes)', () => {
 
     const guest = client();
     const g = await signup(guest);
-    const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(personal)}/members`, { displayName: 'guest', subject: g.userId, roles: ['viewer'] });
+    const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(personal)}/members`, { displayName: 'guest', subject: g.userId, roles: ['viewer'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
     expect((await guest.post(`${WS}/${encodeURIComponent(personal)}/switch`)).status).toBe(200);
 

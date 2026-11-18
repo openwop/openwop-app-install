@@ -110,8 +110,8 @@ beforeAll(async () => {
   await createMember({ tenantId: TENANT, orgId: TENANT, subject: EDITOR_SUBJECT, displayName: 'Editor', roles: ['editor'] });
   await createMember({ tenantId: TENANT, orgId: TENANT, subject: SUBADMIN_SUBJECT, displayName: 'Sub admin', roles: ['viewer'] });
   await createMember({ tenantId: TENANT, orgId: SUB_ORG, subject: SUBADMIN_SUBJECT, displayName: 'Sub admin', roles: ['admin'] });
-  EDITOR = (await issueApiKey({ tenantId: TENANT, name: 'editor', createdBy: EDITOR_SUBJECT })).token;
-  SUBADMIN = (await issueApiKey({ tenantId: TENANT, name: 'subadmin', createdBy: SUBADMIN_SUBJECT })).token;
+  EDITOR = (await issueApiKey({ scopes: ['*'], tenantId: TENANT, name: 'editor', createdBy: EDITOR_SUBJECT })).token;
+  SUBADMIN = (await issueApiKey({ scopes: ['*'], tenantId: TENANT, name: 'subadmin', createdBy: SUBADMIN_SUBJECT })).token;
 });
 
 afterAll(async () => {
@@ -192,7 +192,7 @@ describe('ADR 0755 — content admin authority on real members', () => {
     // "a key acts as its issuer" is only safe if it narrows the moment the issuer does.
     const subject = 'user:leaver-0755';
     const m = await createMember({ tenantId: TENANT, orgId: TENANT, subject, displayName: 'Leaver', roles: ['editor'] });
-    const { token } = await issueApiKey({ tenantId: TENANT, name: 'leaver', createdBy: subject });
+    const { token } = await issueApiKey({ scopes: ['*'], tenantId: TENANT, name: 'leaver', createdBy: subject });
     expect((await call('POST', '/content/pages', { key: token, body: draft('leaver-1') })).status).toBe(201);
     await updateMember(m.memberId, { roles: ['viewer'] });
     const down = await call('POST', '/content/pages', { key: token, body: draft('leaver-2') });
@@ -206,7 +206,7 @@ describe('ADR 0755 — content admin authority on real members', () => {
   });
 
   it('a revoked owk_ key is refused at the auth boundary (401), before any content authority', async () => {
-    const { token, key } = await issueApiKey({ tenantId: TENANT, name: 'revoked', createdBy: EDITOR_SUBJECT });
+    const { token, key } = await issueApiKey({ scopes: ['*'], tenantId: TENANT, name: 'revoked', createdBy: EDITOR_SUBJECT });
     expect(await revokeApiKey(TENANT, key.keyId, { callerSubject: EDITOR_SUBJECT, isAdmin: false })).toBe(true);
     expect((await call('POST', '/content/pages', { key: token, body: draft('revoked-1') })).status).toBe(401);
   });

@@ -84,7 +84,7 @@ async function workspaceWithEditor() {
   const other = client();
   const login = await other.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `cmt2-other-${n++}@acme.test`, tenantId });
   expect(login.status).toBe(201);
-  const seat = await owner.post<{ memberId: string }>(`/host/openwop-app/orgs/${org.body.orgId}/members`, {
+  const seat = await owner.post<{ memberId: string }>(`/host/openwop-app/test/orgs/${org.body.orgId}/members`, {
     displayName: 'Other', subject: login.body.user.userId, roles: ['editor'],
   });
   expect(seat.status, JSON.stringify(seat.body)).toBe(201);

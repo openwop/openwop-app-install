@@ -142,7 +142,7 @@ async function fixture() {
   const orgA = (await owner.post(`${H}/orgs`, { name: 'Client A' })).body.orgId ?? '';
   const orgB = (await owner.post(`${H}/orgs`, { name: 'Client B' })).body.orgId ?? '';
   expect(ownerId && viewerId && orgA && orgB, 'fixture: two users and two clients exist').toBeTruthy();
-  expect((await owner.post(`${H}/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] })).status).toBe(201);
+  expect((await owner.post(`${H}/test/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] })).status).toBe(201);
   return { tenantId, ownerId, viewerId, orgA, orgB, owner, viewer };
 }
 

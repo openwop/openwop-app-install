@@ -35,6 +35,7 @@ import { verifyApiKey } from '../developer-keys/apiKeyService.js';
 import { CLAUDE_CODE_TOGGLE, claudeCodeOperatorEnabled } from './constants.js';
 import { deviceForKey } from './pairingService.js';
 import { TerminalRelay, type DeviceFrame, type RelayConn } from './terminalRelay.js';
+import { dispatchDeviceFrame, identityOf, ownsDeviceFrame } from './deviceChannel.js';
 import { clearPresence, getTerminalSession, markPresent, setTerminalStatus } from './terminalStore.js';
 
 const log = createLogger('claude-code.terminal');
@@ -161,7 +162,10 @@ async function handleDevice(req: IncomingMessage, socket: Duplex, head: Buffer):
   if (!key || (await apiKeyIssuerRefused(key.keyId, key.tenantId))) { denyUpgrade(socket, 401, 'Unauthorized'); return; }
   const device = await deviceForKey(key.keyId, key.tenantId);
   if (!device) { denyUpgrade(socket, 403, 'Forbidden'); return; } // a key, but not a paired device's
-  const toggle = await resolveOne(CLAUDE_CODE_TOGGLE, { tenantId: device.tenantId, userId: device.subject });
+  // ADR 1136 P2a — a browser device serves computer-use, so its toggle is that
+  // feature's; a terminal device's is Claude Code's.
+  const toggleId = (device.capability ?? 'terminal') === 'browser' ? 'computer-use' : CLAUDE_CODE_TOGGLE;
+  const toggle = await resolveOne(toggleId, { tenantId: device.tenantId, userId: device.subject });
   if (!toggle?.enabled) { denyUpgrade(socket, 404, 'Not Found'); return; }
 
   wss.handleUpgrade(req, socket, head, (ws) => {
@@ -188,9 +192,21 @@ async function handleDevice(req: IncomingMessage, socket: Duplex, head: Buffer):
       }
       return v;
     };
+    // ADR 1136 P2a — who this socket is, from its key, for every feature frame.
+    const who = identityOf(device);
     ws.on('message', (data, isBinary) => {
       if (isBinary) return; // devices speak JSON frames only
-      const frame = parseDeviceFrame(toBuffer(data));
+      const raw = toBuffer(data);
+      let peek: Record<string, unknown> | null = null;
+      try { peek = JSON.parse(raw.toString('utf8')) as Record<string, unknown>; } catch { return; }
+      if (peek && typeof peek === 'object' && ownsDeviceFrame(peek.type)) {
+        void Promise.resolve(dispatchDeviceFrame(peek, who))
+          .catch((err: unknown) => log.warn('device_feature_frame_failed', { error: err instanceof Error ? err.message : String(err) }));
+        return;
+      }
+      // Terminal frames come only from a terminal device.
+      if (who.capability !== 'terminal') return;
+      const frame = parseDeviceFrame(raw);
       if (!frame) return;
       void (async () => {
         if (!(await ownsSession(frame.sessionId))) return;

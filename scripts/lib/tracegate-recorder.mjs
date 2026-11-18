@@ -157,6 +157,13 @@ function resolveAcc(st, ...accs) {
 }
 const execJson = (r) => Object.fromEntries([...r.exec].map(([f, e]) => [f, { code: e.code, offs: [...e.offs].sort((x, y) => x - y) }]));
 
+/** #6063 — how long a file's coverage takes may take before the file is recorded
+ *  as "no footprint". Under vitest's default 30 s hook timeout, with room to write. */
+function takeBudgetMs() {
+  const n = Number(process.env.OPENWOP_TRACEGATE_TAKE_BUDGET_MS);
+  return Number.isFinite(n) && n > 0 ? n : 20_000;
+}
+
 export async function installRecorder({ afterAll, expect, repoRoot, laneDir, bootDigest, bootDigestFile }) {
   const outDir = process.env.OPENWOP_TRACEGATE_RECORD;
   if (!outDir) return;
@@ -186,8 +193,30 @@ export async function installRecorder({ afterAll, expect, repoRoot, laneDir, boo
 
   afterAll(async () => {
     const testPath = expect.getState().testPath ?? '';
-    await Promise.all(st.pending); // every boot mark's take has been folded
-    const { result } = await st.session.post('Profiler.takePreciseCoverage');
+    const testFileEarly = testPath.startsWith(st.repoRoot + '/') ? testPath.slice(st.repoRoot.length + 1) : testPath;
+    // #6063 — a recorder must never turn a passing file red. The takes are V8
+    // coverage snapshots, serialised on one inspector session, each costing time in
+    // proportion to the app's function count: a file that boots the app several
+    // times queues several, and under load they outran vitest's 30 s hook timeout
+    // (trains 284 and 288b). So the wait is BOUNDED, under that timeout. A file whose
+    // takes do not settle in time gets an explicit "no footprint" record (ingest then
+    // drops its footprints, so it runs next time) and one log line saying why; the
+    // test file's own verdict is untouched.
+    const budgetMs = takeBudgetMs();
+    const TIMEOUT = Symbol('timeout');
+    let timer;
+    const settled = await Promise.race([
+      Promise.all(st.pending).then(() => st.session.post('Profiler.takePreciseCoverage')), // every boot mark's take has been folded, then the test's own
+      new Promise((resolve) => { timer = setTimeout(() => resolve(TIMEOUT), budgetMs); }), // NOT unref'd: we await it, so it must hold the loop
+    ]).finally(() => clearTimeout(timer));
+    if (settled === TIMEOUT) {
+      const reason = `coverage takes did not settle within ${budgetMs} ms (${st.pending.length} boot-mark take(s) pending)`;
+      process.stderr.write(`tracegate: ${testFileEarly}: no footprint recorded: ${reason}\n`);
+      const name = createHash('sha256').update(testFileEarly).digest('hex').slice(0, 24) + '.json';
+      st.write(path.join(st.outDir, 'raw', name), JSON.stringify({ v: 3, testFile: testFileEarly, node: process.version, noFootprint: { reason } }));
+      return;
+    }
+    const { result } = settled;
     fold(st, result, st.test);
     for (const r of st.reads) st.testReads.add(r);
     const all = resolveAcc(st, st.test, st.boot, st.imp); // the footprint is the union of every window

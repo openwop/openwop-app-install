@@ -34,6 +34,8 @@ export interface ClientAccount {
   synthetic?: boolean; createdAt: string; updatedAt: string;
   /** ADR 0962 D7 — what outside agents (MCP) may do for this client. Absent ⇒ off. */
   externalAgents?: ExternalAgentsAccess;
+  /** The house-client ADR — the firm's own business (display only; sorts first). */
+  house?: boolean;
 }
 
 export interface CampaignAsset {
@@ -117,9 +119,24 @@ const send = async <T>(method: 'POST' | 'PATCH', url: string, body: unknown): Pr
 export async function listClients(): Promise<{ clients: ClientAccount[]; agencyAdmin: boolean }> {
   return get('/clients');
 }
-/** Register an existing organization; orgId is required to avoid creating another org. */
-export async function createClient(input: { name: string; orgId: string }): Promise<ClientAccount> {
+/** Register a client. With `orgId`, an existing organization; without it, the
+ *  server creates a new organization for the client (the house-client ADR D3). */
+export async function createClient(input: { name: string; orgId?: string }): Promise<ClientAccount> {
   return (await send<{ client: ClientAccount }>('POST', `${base}/clients`, input)).client;
+}
+/** The house-client ADR — the brand-kit copy's outcome. */
+export type HouseBrandKitOutcome =
+  | { copied: true; brandId: string }
+  | { copied: false; reason: 'already_copied' | 'house_has_brand' | 'no_workspace_brand' | 'in_progress'; brandId?: string };
+/** The house-client ADR — "Set up your own business". Idempotent: a repeat returns
+ *  the existing house client (`created: false`). `copyBrandKit` also copies the
+ *  workspace brand kit to it, once. */
+export async function setUpHouseClient(input: { name?: string; copyBrandKit?: boolean } = {}): Promise<{ client: ClientAccount; created: boolean; brandKit?: HouseBrandKitOutcome }> {
+  return send('POST', `${base}/house`, input);
+}
+/** House client first, then by name: the switcher order (the house-client ADR D1). */
+export function orderClients(clients: readonly ClientAccount[]): ClientAccount[] {
+  return [...clients].sort((a, b) => Number(b.house === true) - Number(a.house === true) || a.displayName.localeCompare(b.displayName));
 }
 export async function updateClient(orgId: string, patch: { mode?: ClientMode; status?: ClientStatus; name?: string; approvalPolicy?: ApprovalPolicyMode; externalAgents?: ExternalAgentsAccess }): Promise<ClientAccount> {
   return (await send<{ client: ClientAccount }>('PATCH', `${base}/clients/${enc(orgId)}`, patch)).client;

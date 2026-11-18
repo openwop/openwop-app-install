@@ -322,6 +322,48 @@ describe('FORM-BUDGET-1 — the quarantine budget is OCCUPANCY, so the recovery 
   });
 });
 
+describe('issue 5960 — deleting a CLEAN submission, and the tenant legal hold', () => {
+  it('with no hold a clean row deletes (204) and credits the lead bucket, not the quarantine', async () => {
+    const { submissionStatsOf } = await import('../src/features/forms/formsService.js');
+    const { user, F, formId } = await fixture();
+    await submit(formId, { values: { name: 'Test Entry', email: 'test-entry@x.com' } });
+    await submit(formId, { values: { name: 'Bot', email: 'bot-5960@x.com', _hp_ref: 'x' } });
+    const clean = (await user.get(`${F}/submissions?limit=50`)).body.submissions!.find((s) => !s.flagged)!;
+    expect(await submissionStatsOf(formId)).toMatchObject({ count: 1, flaggedCount: 1 });
+    expect((await user.del(`${F}/submissions/${clean.submissionId}`)).status).toBe(204);
+    expect(await submissionStatsOf(formId)).toMatchObject({ count: 0, flaggedCount: 1 });
+    expect((await user.get(`${F}/submissions?limit=50`)).body.submissions!.map((s) => s.submissionId)).not.toContain(clean.submissionId);
+  });
+
+  it('under a legal hold a clean row is refused (409 legal_hold) and kept; a held row is still discarded', async () => {
+    const { submissionStatsOf } = await import('../src/features/forms/formsService.js');
+    const { setRetentionHold, clearRetentionHold } = await import('../src/host/retentionHold.js');
+    const { user, F, formId } = await fixture();
+    // The tenant the FORM lives in (the one the route deletes in), read from the form.
+    const tenantId = (await user.get(F)).body.tenantId!;
+    await submit(formId, { values: { name: 'Real Lead', email: 'real-5960@x.com' } });
+    await submit(formId, { values: { name: 'Bot', email: 'bot2-5960@x.com', _hp_ref: 'x' } });
+    const rows = (await user.get(`${F}/submissions?limit=50`)).body.submissions!;
+    const clean = rows.find((s) => !s.flagged)!;
+    const held = rows.find((s) => s.flagged)!;
+    await setRetentionHold(tenantId, 'litigation (test)');
+    try {
+      const refused = await user.del(`${F}/submissions/${clean.submissionId}`);
+      expect(refused.status).toBe(409);
+      expect((refused.body as { details?: { reason?: string } }).details?.reason).toBe('legal_hold');
+      expect((await user.get(`${F}/submissions?limit=50`)).body.submissions!.map((s) => s.submissionId)).toContain(clean.submissionId);
+      expect((await submissionStatsOf(formId)).count).toBe(1);
+      // The abuse quarantine is not evidence the hold protects: its discard still works.
+      expect((await user.del(`${F}/submissions/${held.submissionId}`)).status).toBe(204);
+      // A row that does not exist is still the uniform 404, hold or not.
+      expect((await user.del(`${F}/submissions/sub_does-not-exist`)).status).toBe(404);
+    } finally {
+      await clearRetentionHold(tenantId);
+    }
+    expect((await user.del(`${F}/submissions/${clean.submissionId}`)).status, 'the hold lifted: the delete goes through').toBe(204);
+  });
+});
+
 describe('FORM-FUNNEL-1 — a quarantined submission fires no funnel-completion event', () => {
   it('`isSubmissionHeld` is true only for a held row in the SAME tenant', async () => {
     const { isSubmissionHeld } = await import('../src/features/forms/formsService.js');

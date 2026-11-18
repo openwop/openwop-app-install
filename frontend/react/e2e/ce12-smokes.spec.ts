@@ -131,7 +131,7 @@ test.describe('CE-12 smokes', () => {
     const member = await browser.newContext();
     const memberPage = await member.newPage();
     const memberId = await loginAs(memberPage.request, { email: `ce12-member-${uniq()}@e2e.test`, tenantId: ws, sharedWorkspace: true });
-    await ok(await ownerPage.request.post(`${API}/orgs/${encodeURIComponent(ws)}/members`, {
+    await ok(await ownerPage.request.post(`${API}/test/orgs/${encodeURIComponent(ws)}/members`, {
       data: { subject: memberId, displayName: 'CE-12 member', roles: ['editor'] },
     }), 'owner adds the member as an editor');
     // No re-login: membership is re-checked per request (ADR 0015), so the same

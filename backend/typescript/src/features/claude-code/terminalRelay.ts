@@ -128,6 +128,16 @@ export class TerminalRelay {
     await this.publish(`cc:dev:${deviceId}`, JSON.stringify(msg));
   }
 
+  /** ADR 1136 P2a — a feature's typed message (the device channel). Same
+   *  routing as `sendToDevice`: the local socket, else `cc:dev:<deviceId>`, which
+   *  only the holding instance listens on. Callers go through `deviceChannel`,
+   *  which checks the device's capability first. */
+  async sendFeatureMessage(deviceId: string, msg: { type: string } & Record<string, unknown>): Promise<void> {
+    const local = this.devices.get(deviceId);
+    if (local) { local.conn.sendJson(msg); return; }
+    await this.publish(`cc:dev:${deviceId}`, JSON.stringify(msg));
+  }
+
   private onDeviceBus(deviceId: string, payload: string): void {
     const local = this.devices.get(deviceId);
     if (!local) return;

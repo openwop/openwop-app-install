@@ -137,8 +137,8 @@ async function world() {
   const viewerAId = userIdOf(await viewerA.post('/host/openwop-app/test/login', { email: `v-${Date.now()}-${n++}@acme.test`, tenantId }));
   const orgA = orgIdOf(await owner.post('/host/openwop-app/orgs', { name: 'A' }));
   const orgB = orgIdOf(await owner.post('/host/openwop-app/orgs', { name: 'B' }));
-  expect((await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'Admin A', subject: adminAId, roles: ['admin'] })).status).toBeLessThan(300);
-  expect((await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'Viewer A', subject: viewerAId, roles: ['viewer'] })).status).toBeLessThan(300);
+  expect((await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'Admin A', subject: adminAId, roles: ['admin'] })).status).toBeLessThan(300);
+  expect((await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'Viewer A', subject: viewerAId, roles: ['viewer'] })).status).toBeLessThan(300);
   // Mints the kernel `crm.deal` type for the tenant (metrics over it validate against it).
   await createDeal({ tenantId, orgId: orgB, title: 'seed', amount: 1, status: 'won', createdBy: ownerId, validateCompany: ok, validateContact: ok });
   return { tenantId, owner, ownerId, adminA, adminAId, viewerA, orgA, orgB };

@@ -19,7 +19,8 @@ import { StateCard } from '../../ui/StateCard.js';
 import { Skeleton } from '../../ui/Skeleton.js';
 import { LinkIcon } from '../../ui/icons/index.js';
 import { Button } from '../../ui/Button.js';
-import { resolveSharedPublic, type SharedResolveFailure, type SharedResource } from './sharingClient.js';
+import { resolveSharedPublic, type SharedResolveFailure, type SharedResource, type ShareVerifyPrompt } from './sharingClient.js';
+import { SharedLockedCard, SharedVerifyPanel } from './SharedVerifyPanel.js';
 import { SharedQuoteView } from './SharedQuoteView.js';
 
 // ADR 0305 Phase D — the interactive app-design walkthrough. Lazy: the public
@@ -108,7 +109,9 @@ export function SharedSharePage({ token }: { token: string }): JSX.Element {
   // Hook above the early returns (rules-of-hooks).
   const brand = useBrand();
   const [shared, setShared] = useState<SharedResource | null>(null);
-  const [status, setStatus] = useState<'loading' | 'ready' | 'gone' | 'resourceGone' | 'expired' | 'failed'>('loading');
+  const [status, setStatus] = useState<'loading' | 'ready' | 'gone' | 'resourceGone' | 'expired' | 'failed' | 'verify' | 'locked'>('loading');
+  // ADR 1141 — a recipient-bound link's neutral prompt (firm + masked address only).
+  const [prompt, setPrompt] = useState<ShareVerifyPrompt | null>(null);
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
@@ -129,13 +132,18 @@ export function SharedSharePage({ token }: { token: string }): JSX.Element {
         setShared(s);
         setStatus('ready');
       })
-      .catch((e: Error & { kind?: SharedResolveFailure }) => {
+      .catch((e: Error & { kind?: SharedResolveFailure; prompt?: ShareVerifyPrompt }) => {
         // R2 SR-2 — the client discriminates; the page must not throw that
         // away: a network blip told a quote recipient the offer was revoked.
         // SHARE-UX-1 adds the fourth case: the link is FINE and the content it
         // pointed at was deleted. Blaming the owner for that was a false claim,
         // and one they could not correct because nothing told them either.
         if (!active) return;
+        if ((e.kind === 'verify' || e.kind === 'locked') && e.prompt) {
+          setPrompt(e.prompt);
+          setStatus(e.kind);
+          return;
+        }
         setStatus(
           e.kind === 'expired' ? 'expired'
             : e.kind === 'resourceGone' ? 'resourceGone'
@@ -166,6 +174,26 @@ export function SharedSharePage({ token }: { token: string }): JSX.Element {
       </div>
     );
   }
+
+  // ADR 1141 — a recipient-bound link: the code step, or its lock. Nothing from
+  // the resource is on screen in either.
+  if (status === 'verify' && prompt) {
+    return (
+      <SharedVerifyPanel
+        token={token}
+        prompt={prompt}
+        onVerified={() => setAttempt((a) => a + 1)}
+        // A quiet re-read after a miss: only a lock changes the screen, so the panel
+        // keeps its field and message otherwise (setAttempt would show the skeleton).
+        onWrongCode={() => {
+          void resolveSharedPublic(token).catch((e: Error & { kind?: SharedResolveFailure; prompt?: ShareVerifyPrompt }) => {
+            if (e.kind === 'locked' && e.prompt) { setPrompt(e.prompt); setStatus('locked'); }
+          });
+        }}
+      />
+    );
+  }
+  if (status === 'locked' && prompt) return <SharedLockedCard prompt={prompt} />;
 
   // R2 SR-2 — a failed READ is not a dead link: designed retryable state.
   if (status === 'failed') {

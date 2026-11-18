@@ -79,7 +79,7 @@ async function ownerWithViewer() {
   const viewer = client();
   const v = await viewer.post<LoginBody>('/host/openwop-app/test/login', { email: `img-viewer-${uniq()}@t.test`, tenantId });
   expect(v.status).toBe(201);
-  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Viewer', subject: v.body.user.userId, roles: ['viewer'] });
+  const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Viewer', subject: v.body.user.userId, roles: ['viewer'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, viewer, orgId };
 }

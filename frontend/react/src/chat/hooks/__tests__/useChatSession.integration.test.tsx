@@ -117,7 +117,7 @@ import { createRun, cancelRun, pollEvents } from '../../../client/runsClient.js'
 import { getWorkflowRunInputs } from '../../../workflows/workflowsClient.js';
 import { stageSlashInputs, takeStagedSlashInputs } from '../../lib/slashInputs.js';
 import { getActiveConfig } from '../../../byok/lib/byokClient.js';
-import { listOpenInterrupts } from '../../../client/interruptsClient.js';
+import { listOpenInterrupts, resolveByRun } from '../../../client/interruptsClient.js';
 import { createChatSession, appendChatMessage, listChatSessionMessagesPage, updateChatMessage, getSessionFeedback } from '../../../client/chatSessionsClient.js';
 
 const CONFIG: BYOKActiveConfig = { provider: 'demo', model: 'demo-model', credentialRef: 'managed:demo' };
@@ -1100,6 +1100,59 @@ describe('useChatSession workflow_run lifecycle (integration)', () => {
     const run = wfRun(result) as { workflowRun?: { status?: string } };
     expect(run.workflowRun?.status).toBe('cancelled');
   });
+
+  // CC-GATE-4 (prod 2026-11-16, run 7ec4505e): the refusal banner read "Could not
+  // resolve interrupt: You requested this step, …". The server's reason is plain
+  // language; the banner must not wrap it in internal jargon.
+  it('CC-GATE-4 — a refused decision shows the server reason without "interrupt" jargon', async () => {
+    const { result } = renderHook(() => useChatSession());
+    await act(async () => { await result.current.runWorkflowMention(MENTION); await new Promise((r) => setTimeout(r, 0)); });
+    vi.mocked(listOpenInterrupts).mockResolvedValueOnce([
+      { interruptId: 'i-gate', nodeId: 'kernel-approve', kind: 'approval', data: null, createdAt: '2026-01-01T00:00:00Z' },
+    ]);
+    await act(async () => { await captured!.onEvent(evt('node.suspended', { nodeId: 'kernel-approve' })); await new Promise((r) => setTimeout(r, 0)); });
+    const id = (wfRun(result) as { id: string }).id;
+    const reason = 'You requested this step, so someone else has to approve it.';
+    vi.mocked(resolveByRun).mockRejectedValueOnce(new Error(reason));
+    await act(async () => { await result.current.resolveInterrupt(id, { action: 'approve' }, 'kernel-approve'); });
+    expect(result.current.error).toContain(reason);
+    expect(result.current.error ?? '').not.toMatch(/interrupt/i);
+  });
+
+  // CC-CHAT-6 (prod 2026-11-16, run 0a4c0701): a run cancelled while a step waited
+  // kept that wait in `activeInterrupts`, and the saved copy brought "Needs you"
+  // and "Waiting — continues on its own" back after a reload.
+  for (const terminal of ['run.cancelled', 'run.completed', 'run.failed'] as const) {
+    it(`CC-CHAT-6 — ${terminal} clears the open interrupts, in state AND in the saved message`, async () => {
+      const { result } = renderHook(() => useChatSession());
+      await act(async () => { await result.current.runWorkflowMention(MENTION); await new Promise((r) => setTimeout(r, 0)); });
+      vi.mocked(listOpenInterrupts).mockResolvedValueOnce([
+        { interruptId: 'i-wait', nodeId: 'channel-dispatch', kind: 'external-event', data: null, createdAt: '2026-01-01T00:00:00Z' },
+      ]);
+      await act(async () => { await captured!.onEvent(evt('node.suspended', { nodeId: 'channel-dispatch' })); await new Promise((r) => setTimeout(r, 0)); });
+      expect((wfRun(result) as { activeInterrupts?: unknown[] }).activeInterrupts?.length).toBe(1);
+
+      vi.mocked(appendChatMessage).mockClear();
+      vi.mocked(updateChatMessage).mockClear();
+      await act(async () => {
+        await captured!.onEvent(evt(terminal, terminal === 'run.failed' ? { error: { code: 'x', message: 'boom' } } : terminal === 'run.completed' ? { outputs: {} } : {}));
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      const run = wfRun(result) as { activeInterrupts?: unknown[]; workflowRun?: { status?: string } };
+      expect(run.workflowRun?.status).toBe(terminal.slice(4));
+      expect(run.activeInterrupts ?? []).toEqual([]);
+      const saved = [
+        ...vi.mocked(appendChatMessage).mock.calls.map((c) => c[1].content),
+        ...vi.mocked(updateChatMessage).mock.calls.map((c) => c[2].content),
+      ].filter((c): c is string => typeof c === 'string' && c.includes('"workflowRun"'));
+      expect(saved.length).toBeGreaterThan(0);
+      // The LAST save is the terminal snapshot: terminal status, nothing open. (The
+      // decision history keeps the wait, on purpose.)
+      const last = JSON.parse(saved[saved.length - 1]!) as { activeInterrupts?: unknown[]; workflowRun?: { status?: string } };
+      expect(last.workflowRun?.status).toBe(terminal.slice(4));
+      expect(last.activeInterrupts ?? []).toEqual([]);
+    });
+  }
 
   it('ADR 0764 (CHATWF-6) — a FAILED cancel does not mark the run failed or stop its updates', async () => {
     const { result } = renderHook(() => useChatSession());

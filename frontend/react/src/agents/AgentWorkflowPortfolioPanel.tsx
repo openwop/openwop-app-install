@@ -22,7 +22,8 @@ import { createRun } from '../client/runsClient.js';
 import { classifyHttpError } from '../client/classifyHttpError.js';
 import { listWorkflowSummaries, getWorkflowRunInputs, getWorkflowAvailability, type RunVariable, type WorkflowAvailability } from '../workflows/workflowsClient.js';
 import { RunInputsDialog } from '../ui/RunInputsForm.js';
-import { ALL_WORKFLOW_OPTIONS, isKnownWorkflow, workflowName, workflowPurpose } from './roleTemplates.js';
+import { ALL_WORKFLOW_OPTIONS, isKnownWorkflow, workflowPurpose } from './roleTemplates.js';
+import { useWorkflowNames } from './useWorkflowNames.js';
 import { Notice } from '../ui/Notice.js';
 import { AlertIcon, FlaskIcon, PlayIcon } from '../ui/icons/index.js';
 import type { ScheduledJob } from './scheduleClient.js';
@@ -41,6 +42,7 @@ export function AgentWorkflowPortfolioPanel({
   onChanged: () => void;
 }): JSX.Element {
   const { t } = useTranslation('agents');
+  const workflowName = useWorkflowNames(); // issue 5911 — the tenant's own names, not raw ids
   // ADR 0775 P3 (`ARUX-18`) — a viewer sees the portfolio, not assign/remove controls.
   const canWrite = useAgentWriteAccess();
   const [error, setError] = useState<string | null>(null);

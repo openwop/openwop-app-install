@@ -81,6 +81,18 @@ describe('ADR 0311 P1 — openwop:kanban.add-todo', () => {
     expect(card?.workflowId).toBeUndefined();
   });
 
+  it('#5965 — an agent that already has a board gets the todo there, not on a second board', async () => {
+    const { createBoard, listBoardsForSubject } = await import('../src/host/kanbanService.js');
+    const entry = await createRosterEntry({ tenantId: TENANT, persona: 'Riley Legacy', agentRef: { agentId: 'user.default.riley-legacy' } });
+    const legacy = await createBoard({ tenantId: TENANT, name: 'Riley board', rosterId: entry.rosterId });
+    const out = await runTool({ title: 'Follow up on the brief' }, { actingUserId: 'u-filer', agentProfileId: entry.rosterId });
+    expect(out.isError, out.content).toBeFalsy();
+    const { cardId } = JSON.parse(out.content) as { cardId: string };
+    expect((await listCards(legacy.id)).some((c) => c.id === cardId), 'filed on the board the agent already had').toBe(true);
+    expect(await getBoard(subjectBoardId(TENANT, { kind: 'agent', id: entry.rosterId })), 'no second board').toBeNull();
+    expect((await listBoardsForSubject(TENANT, { kind: 'agent', id: entry.rosterId })).map((b) => b.id)).toEqual([legacy.id]);
+  });
+
   it('ADR 0774 D7 — a deduped call says so, and reports the column the card is ACTUALLY in', async () => {
     const entry = await createRosterEntry({ tenantId: TENANT, persona: 'Receipt Agent', agentRef: { agentId: 'user.default.receipt-todo' } });
     const scope = { actingUserId: 'u-filer', agentProfileId: entry.rosterId };

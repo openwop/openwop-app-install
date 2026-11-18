@@ -94,7 +94,7 @@ async function scenario(memberRole: string): Promise<{ owner: Client; rep: Clien
   const rep = client();
   const repId = (await rep.post<LoginBody>('/host/openwop-app/test/login', { email: `r-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
   const orgId = (await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-  await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Rep', subject: repId, roles: [memberRole] });
+  await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Rep', subject: repId, roles: [memberRole] });
 
   const pipe = (await owner.get<{ pipelines: Pipeline[] }>(`${crm(orgId)}/pipelines`)).body.pipelines[0]!;
   const stageId = pipe.stages.find((s) => s.probability === 30)!.stageId;
@@ -258,7 +258,7 @@ describe('territories P4 — CRM record visibility', () => {
     const u = client();
     const uid = (await u.post<LoginBody>('/host/openwop-app/test/login', { email: `u-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
     const orgId = (await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'U', subject: uid, roles: ['viewer'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'U', subject: uid, roles: ['viewer'] });
     const pipe = (await owner.get<{ pipelines: Pipeline[] }>(`${crm(orgId)}/pipelines`)).body.pipelines[0]!;
     const stageId = pipe.stages.find((x) => x.probability === 30)!.stageId;
     const modelId = (await owner.post<{ modelId: string }>(`${t(orgId)}/models`, { name: 'M' })).body.modelId;
@@ -282,7 +282,7 @@ describe('territories P4 — CRM record visibility', () => {
     const m = client();
     const mid = (await m.post<LoginBody>('/host/openwop-app/test/login', { email: `m-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
     const orgId = (await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: mid, roles: ['viewer'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: mid, roles: ['viewer'] });
     const pipe = (await owner.get<{ pipelines: Pipeline[] }>(`${crm(orgId)}/pipelines`)).body.pipelines[0]!;
     const stageId = pipe.stages.find((x) => x.probability === 30)!.stageId;
     const modelId = (await owner.post<{ modelId: string }>(`${t(orgId)}/models`, { name: 'M' })).body.modelId;
@@ -307,7 +307,7 @@ describe('territories P4 — CRM record visibility', () => {
     const mgr = client();
     const mgrId = (await mgr.post<LoginBody>('/host/openwop-app/test/login', { email: `m-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
     const orgId = (await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Mgr', subject: mgrId, roles: ['viewer'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Mgr', subject: mgrId, roles: ['viewer'] });
     const pipe = (await owner.get<{ pipelines: Pipeline[] }>(`${crm(orgId)}/pipelines`)).body.pipelines[0]!;
     const stageId = pipe.stages.find((x) => x.probability === 30)!.stageId;
     const modelId = (await owner.post<{ modelId: string }>(`${t(orgId)}/models`, { name: 'M' })).body.modelId;

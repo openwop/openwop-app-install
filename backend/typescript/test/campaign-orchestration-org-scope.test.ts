@@ -94,8 +94,8 @@ async function fixture() {
   const viewerId = userIdOf((await viewer.post(`${H}/test/login`, { email: `os-v-${n++}@acme.test`, tenantId })).body);
   const orgA = orgIdOf((await owner.post(`${H}/orgs`, { name: 'Client A' })).body);
   const orgB = orgIdOf((await owner.post(`${H}/orgs`, { name: 'Client B' })).body);
-  expect((await owner.post(`${H}/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberId, roles: ['editor'] })).status).toBe(201);
-  expect((await owner.post(`${H}/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] })).status).toBe(201);
+  expect((await owner.post(`${H}/test/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberId, roles: ['editor'] })).status).toBe(201);
+  expect((await owner.post(`${H}/test/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] })).status).toBe(201);
   const briefA = await createBrief(tenantId, orgA, ownerId, { name: 'Client A launch', productName: 'Widget' });
   const briefB = await createBrief(tenantId, orgB, ownerId, { name: SECRET, productName: SECRET });
   const campA = await finalizeFromBrief(tenantId, briefA, ownerId);

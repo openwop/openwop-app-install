@@ -1,7 +1,11 @@
 # ADR 1099 — Project-scoped client collaboration
 
-Status: Accepted (2026-11-11, the user's decision: option A′). Phases P0–P5 below;
-nothing is built yet.
+Status: Accepted (2026-11-11, the user's decision: option A′). P0, P0b and P0c are
+implemented (see the implementation record at the end); P1–P5 are not built.
+
+> **CORRECTED 2026-11-17:** this line said "nothing is built yet" after P0 had
+> merged (#5773, `b81316cab3`). It read as if the per-kind gate (D1) still had to
+> be built, and a peer was asked to build it.
 
 Host-extension work under `/host/openwop-app/*`. It adds no run-event field,
 capability, event type or endpoint contract on the OpenWOP wire, so it needs no
@@ -270,3 +274,11 @@ A′, accepted by the user on 2026-11-11.
 - If `checkGrantUse` cannot run inside a turn without a member session (unproven
   here), D5 needs a grant-bound turn session first. P2's first task is to prove
   this.
+
+## Implementation record
+
+| Phase | What shipped | Witness |
+|---|---|---|
+| P0 (#5773, `b81316cab3`) | D1: `GrantResourceKind.surface` (`enabledFor`, `orgOpen`), the default surface campaign-ops registers, every check on the KIND's surface. D2, the collaborator's half: shared, grant view, invite accept moved to `routes/externalCollaborators.ts`. | `adr1099-p0-collab-surfaces.test.ts`; all `adr0958-*` unchanged |
+| P0b | D2, the firm's half, which P0 left behind campaign-ops' toggles and a client account (so a kind with its own surface could be used but never minted): `/host/openwop-app/orgs/:orgId/collaborators{,/audit,/grantable,/:id/grants,/:id/grants/:gid}`. Invite and admin reads need `host:members:manage` and some surface that takes the org. A grant or revoke needs the kind's new `grantScope` (default `host:members:manage`), floored at registration to `workspace:write` or a management scope, and the per-use granter re-check uses the same scope. Two gaps found on the way: `grantAccess` checks the kind surface's org rule but not its switch (its callers had each checked their own toggles), so the host mint route checks the switch itself; and `collab_invite` links were gated on the campaign-ops toggle, and now go through the surfaces. `grantAccess` is unchanged for its existing callers: putting the switch check there refused the client portal's system mint. Grant and revoke audit name the granter (`by`) and the kind. The campaign-ops agency routes are unchanged. | `adr1099-p0b-member-routes.test.ts`, with six sabotages, each red: route authorizing with the default scope, route without authority, re-check with the default scope, no floor, no `by` in the audit, no switch check at mint |
+| P0c | Per-viewer projections and a recipient check, found while CasaVoga drafted its purchase-order kind. A grant names one id, so a second vendor's grant never projected the first vendor's PO. But a kind could not show each recipient only its own rows of a SHARED resource (`project` had no viewer), and nothing stopped a member granting one vendor's PO to another. `project(tenantId, orgId, id, viewer?)` now receives `{collaboratorId, grantId}` on every collaborator read (`projectForGrant`). A `requiresViewer` kind's projection is never called without one, and `grantResourceKind()` hands out only the guarded projection, so no host path reaches it. `mayGrantTo` runs at mint: false or a fault is 400 `grant_recipient_refused`. All three are optional; existing kinds are unchanged. | `adr1099-p0c-project-viewer.test.ts`, with four sabotages, each red: the guard ignoring `requiresViewer`, `projectForGrant` with no viewer, the read route projecting without a viewer, no `mayGrantTo` at mint |

@@ -84,7 +84,7 @@ async function members() {
   }
   const orgId = (await owner.post<{ orgId: string }>(`${H}/orgs`, { name: 'Acme' })).body.orgId;
   for (const role of ['editor', 'viewer']) {
-    const add = await owner.post(`${H}/orgs/${encodeURIComponent(orgId)}/members`, { displayName: role, subject: ids[role], roles: [role] });
+    const add = await owner.post(`${H}/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: role, subject: ids[role], roles: [role] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
   }
   return { tenantId, editorId: ids.editor!, viewerId: ids.viewer! };

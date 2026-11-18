@@ -9,7 +9,7 @@
  */
 
 import { listRoster, getRosterEntry, getFleetActivity, type RosterEntry } from './rosterClient.js';
-import { listBoards, listBoardsWithCards, getBoard, type KanbanBoard, type KanbanCard } from '../kanban/kanbanClient.js';
+import { listBoards, listBoardsWithCards, getBoard, isAgentBoard, type KanbanBoard, type KanbanCard } from '../kanban/kanbanClient.js';
 import { listJobs, type ScheduledJob } from './scheduleClient.js';
 import { columnLaneKind } from '../kanban/laneKind.js';
 
@@ -143,7 +143,7 @@ export async function loadAgentViews(): Promise<AgentView[]> {
   ]);
   const failedRosterIds = new Set((failures?.items ?? []).map((i) => i.rosterId).filter((id): id is string => !!id));
   return roster.map((entry) => {
-    const board = boards.find((b) => b.rosterId === entry.rosterId) ?? null;
+    const board = boards.find((b) => isAgentBoard(b, entry.rosterId)) ?? null;
     return buildView(entry, board, board?.cards ?? [], jobs, failedRosterIds.has(entry.rosterId), failures === null);
   });
 }
@@ -161,7 +161,7 @@ export async function loadAgentView(rosterId: string): Promise<AgentView | null>
     listJobs(rosterId),
     getFleetActivity({ status: 'failed', rosterId, limit: 1 }).catch(() => null),
   ]);
-  const board = boards.find((b) => b.rosterId === entry.rosterId) ?? null;
+  const board = boards.find((b) => isAgentBoard(b, entry.rosterId)) ?? null;
   let cards: KanbanCard[] = [];
   if (board) {
     try {

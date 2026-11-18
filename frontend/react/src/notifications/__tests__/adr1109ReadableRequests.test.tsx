@@ -51,9 +51,9 @@ describe('D5 — features declare their action-needed types', () => {
   });
 
   it('a deep link to a declared type lands on, and is shown by, "Action needed"', () => {
-    expect(canonicalInboxTabFor(note('casavoga.check-in'), adopter)).toBe('action-needed');
-    expect(inboxTabShows('action-needed', note('casavoga.check-in'), adopter)).toBe(true);
-    expect(canonicalInboxTabFor(note('casavoga.check-in'))).toBe('all');
+    expect(canonicalInboxTabFor(note('casavoga.check-in'), adopter)).toBe('needs-you');
+    expect(inboxTabShows('needs-you', note('casavoga.check-in'), adopter)).toBe(true);
+    expect(canonicalInboxTabFor(note('casavoga.check-in'))).toBe('updates');
   });
 
   it('the registry reads the composed features (a set, never the host pair twice)', () => {
@@ -63,14 +63,18 @@ describe('D5 — features declare their action-needed types', () => {
   });
 });
 
-describe('D6 — "all caught up" counts workflow requests', () => {
-  it('says all clear when nothing waits anywhere', async () => {
-    render(<MemoryRouter><NeedsYouInbox /></MemoryRouter>);
-    expect(await screen.findByText(/all caught up/)).toBeTruthy();
+// ADR 1125 D4 (issue 5909) — the queue no longer decides "all caught up" on its own: it
+// reports its count, and the PAGE shows the one empty state (adr1125InboxTabs).
+describe('D6 — the queue reports its count and never says "all caught up" itself', () => {
+  it('an empty queue reports 0 and renders nothing', async () => {
+    const counts: number[] = [];
+    const { container } = render(<MemoryRouter><NeedsYouInbox onCountChange={(n) => counts.push(n)} /></MemoryRouter>);
+    await vi.waitFor(() => expect(counts).toContain(0));
+    await vi.waitFor(() => expect(container.firstChild).toBeNull());
   });
 
-  it('never says all clear while the page holds workflow requests', async () => {
-    const { container } = render(<MemoryRouter><NeedsYouInbox workflowRequests={11} /></MemoryRouter>);
+  it('never renders an all-clear line', async () => {
+    const { container } = render(<MemoryRouter><NeedsYouInbox /></MemoryRouter>);
     // While loading it renders its full card; once the (empty) loads settle with
     // requests waiting, it renders nothing and the list below carries them. An
     // empty container is therefore the settled state, not the initial one.

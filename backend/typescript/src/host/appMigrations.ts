@@ -1002,6 +1002,23 @@ export const BACKGROUND_APP_JOBS: readonly BackgroundAppJob[] = [
       return { complete: mode === 'apply' };
     },
   },
+  {
+    // #6053 step 1 — rewrite stored undeclared (`[]`) API keys to `['*']`: the same
+    // authority, now declared. A prod data write, so OFF unless
+    // OPENWOP_API_KEY_UNDECLARED_REWRITE is `report` (counts per tenant, writes
+    // nothing, stays pending) or `apply` (rewrites; done when the scan finishes).
+    // Idempotent: a rewritten row no longer matches.
+    id: 'api-key-undeclared-rewrite',
+    async run(): Promise<{ complete: boolean }> {
+      const { rewriteUndeclaredKeys, undeclaredRewriteMode } = await import('../features/developer-keys/apiKeyService.js');
+      const mode = undeclaredRewriteMode();
+      if (mode === null) return { complete: false };
+      const r = await rewriteUndeclaredKeys(mode);
+      log.info('app_bg_job_api_key_undeclared_rewrite', { mode, scanned: r.scanned, undeclared: r.undeclared, rewritten: r.rewritten, tenants: Object.keys(r.byTenant).length });
+      for (const [tenantId, count] of Object.entries(r.byTenant)) log.info('app_bg_job_api_key_undeclared_rewrite_tenant', { mode, tenantId, undeclared: count });
+      return { complete: mode === 'apply' };
+    },
+  },
 ];
 
 const bgMarkerKey = (id: string): string => `app_bg_job:${id}`;

@@ -86,11 +86,18 @@ async function postJson(fetchFn, url, body) {
   return { status: res.status, json };
 }
 
-export async function startPairing({ host, apiBase, label, platform, fetchFn = fetch }) {
-  const { status, json } = await postJson(fetchFn, apiUrl(host, apiBase, `${PAIR_PREFIX}/start`), { label, platform });
+export async function startPairing({ host, apiBase, label, platform, capability = 'terminal', fetchFn = fetch }) {
+  // ADR 1136 P2b — a browser pairing names its capability. A terminal pairing
+  // sends nothing new, so it works against every host.
+  const body = capability === 'browser' ? { label, platform, capability } : { label, platform };
+  const { status, json } = await postJson(fetchFn, apiUrl(host, apiBase, `${PAIR_PREFIX}/start`), body);
   if (status === 404) throw new Error('This host does not offer Claude Code pairing (the operator has not enabled it).');
   if (status === 429) throw new Error('Too many pairing attempts from this network. Wait a few minutes and try again.');
+  if (status === 400 && capability === 'browser') throw new Error('This host does not offer browser pairing yet.');
   if (status !== 201 || !json?.deviceCode) throw new Error(`Pairing could not start (HTTP ${status}).`);
+  // An older host ignores `capability` and would mint a Claude Code key. Refuse
+  // unless the host says it granted a browser pairing.
+  if (capability === 'browser' && json.capability !== 'browser') throw new Error('This host does not offer browser pairing yet, so nothing was paired.');
   return { ...json, verificationUrl: `${host}${json.verificationPath}` };
 }
 

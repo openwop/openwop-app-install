@@ -114,7 +114,7 @@ async function member(owner: Client, role: 'editor' | 'viewer' | 'admin'): Promi
   const r = await c('POST', '/host/openwop-app/test/login', { email: `${role}-${n++}@il896.test`, tenantId: T });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   const userId = r.body.user!.userId;
-  const add = await owner('POST', `/host/openwop-app/orgs/${encodeURIComponent(T)}/members`, { displayName: role, subject: userId, roles: [role] });
+  const add = await owner('POST', `/host/openwop-app/test/orgs/${encodeURIComponent(T)}/members`, { displayName: role, subject: userId, roles: [role] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { c, userId, memberId: add.body.memberId! };
 }
@@ -469,7 +469,7 @@ describe('floors — viewer and removed member', () => {
     }
     const [, editorId, viewerId] = ids as [string, string, string];
     const add = async (subject: string, role: string) => {
-      const a = await owner('POST', `/host/openwop-app/orgs/${encodeURIComponent(tenantId)}/members`, { displayName: role, subject, roles: [role] });
+      const a = await owner('POST', `/host/openwop-app/test/orgs/${encodeURIComponent(tenantId)}/members`, { displayName: role, subject, roles: [role] });
       expect(a.status, JSON.stringify(a.body)).toBe(201);
       return a.body.memberId!;
     };

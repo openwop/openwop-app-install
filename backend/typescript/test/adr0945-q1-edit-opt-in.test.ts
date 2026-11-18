@@ -136,7 +136,7 @@ describe('edit mode is a per-client opt-in', () => {
     const login = await vcall('POST', '/host/openwop-app/test/login', { email: `g945q1-viewer-${Date.now()}@acme.test`, tenantId: TENANT });
     const viewerId = login.body.user?.userId;
     if (!viewerId) throw new Error(`login returned ${JSON.stringify(login.body)}`);
-    const add = await call('POST', `/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Viewer', subject: viewerId, roles: ['viewer'] });
+    const add = await call('POST', `/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Viewer', subject: viewerId, roles: ['viewer'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
     expect((await vcall('GET', S())).status).toBe(200);
     expect(await vcall('PUT', S(), { editModeEnabled: true })).toMatchObject({ status: 403, body: { error: 'forbidden_scope' } });

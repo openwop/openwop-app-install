@@ -71,7 +71,7 @@ async function scenario(role: string): Promise<{ owner: Client; member: Client; 
   const member = client();
   const memberId = ((await member.post('/host/openwop-app/test/login', { email: `m-${Date.now()}-${n++}@acme.test`, tenantId })).body as { user: { userId: string } }).user.userId;
   const orgId = await newOrg(owner, 'Acme');
-  await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberId, roles: [role] });
+  await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberId, roles: [role] });
   return { owner, member, orgId };
 }
 const G = (orgId: string): string => `/host/openwop-app/sales-maps/orgs/${encodeURIComponent(orgId)}/geocode`;

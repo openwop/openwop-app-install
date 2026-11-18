@@ -177,7 +177,7 @@ describe('a translator grant cannot place a page in the site nav (ADR 0205 D1 ch
     const org = await owner('POST', '/host/openwop-app/orgs', { name: 'Acme' });
     expect(org.status, JSON.stringify(org.body)).toBe(201);
     const base = `/host/openwop-app/cms/orgs/${encodeURIComponent(org.body.orgId)}`;
-    expect((await owner('POST', `/host/openwop-app/orgs/${encodeURIComponent(org.body.orgId)}/members`, { displayName: 'T', subject: ed.body.user.userId, roles: ['editor'] })).status).toBe(201);
+    expect((await owner('POST', `/host/openwop-app/test/orgs/${encodeURIComponent(org.body.orgId)}/members`, { displayName: 'T', subject: ed.body.user.userId, roles: ['editor'] })).status).toBe(201);
     expect((await owner('PUT', `${base}/language-settings`, { supportedLocales: ['pt-BR'] })).status).toBe(200);
     const page = await owner('POST', `${base}/pages`, { title: 'About' });
     expect(page.status).toBe(201);

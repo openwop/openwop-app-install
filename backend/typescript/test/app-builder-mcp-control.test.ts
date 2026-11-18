@@ -205,7 +205,7 @@ describe('app-builder MCP control tools — ADR 0087 gating', () => {
     const { canvasId } = JSON.parse(resultText(created)) as { canvasId: string };
 
     const viewer = await joinAs(tenantId, 'viewer');
-    const add = await own.c.post(`/host/openwop-app/orgs/${encodeURIComponent(own.orgId)}/members`, { displayName: 'Vi', subject: viewer.userId, roles: ['viewer'] });
+    const add = await own.c.post(`/host/openwop-app/test/orgs/${encodeURIComponent(own.orgId)}/members`, { displayName: 'Vi', subject: viewer.userId, roles: ['viewer'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
     const stranger = await joinAs(tenantId, 'stranger');
 

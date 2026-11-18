@@ -321,7 +321,7 @@ describe('strategy activation gate (ADR 0230 §B3)', () => {
     const tenantId = freshTenant();
     const { owner, orgId } = await ownerWithOrg(tenantId);
     const editor = client(); const editorUser = await signup(editor, tenantId);
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: editorUser.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: editorUser.userId, roles: ['editor'] });
     await setToggle('strategy-approval-gate', 'on');
     try {
       const s = (await owner.post(S, { orgId, title: 'Sensitive' })).body;

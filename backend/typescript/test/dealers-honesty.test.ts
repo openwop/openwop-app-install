@@ -350,7 +350,7 @@ describe('R3 — the repair never writes for a viewer (the R2 deferral)', () => 
     // A same-tenant read-only viewer (the projects-route precedent).
     const viewer = client();
     const vlogin = await viewer.post('/host/openwop-app/test/login', { email: `v-${Date.now()}-${n++}@acme.test`, tenantId });
-    expect((await owner.post(`/host/openwop-app/orgs/${orgId}/members`, { displayName: 'V', subject: vlogin.body.user.userId, roles: ['viewer'] })).status).toBe(201);
+    expect((await owner.post(`/host/openwop-app/test/orgs/${orgId}/members`, { displayName: 'V', subject: vlogin.body.user.userId, roles: ['viewer'] })).status).toBe(201);
 
     const { listApprovals } = await import('../src/host/approvalService.js');
     // The viewer's GET returns the rows but performs NO repair.

@@ -57,7 +57,7 @@ import { assertInstallable, installFromConfiguredRegistry } from '../packs/insta
 import { isSuperadmin, requireSuperadmin } from '../host/superadmin.js';
 
 import type { WorkflowDefinition } from '../executor/types.js';
-import { isServerMintedWorkflowId, workflowKind } from '../host/workflowId.js';
+import { isServerMintedWorkflowId, workflowIdOrigin, workflowKind } from '../host/workflowId.js';
 import { createLogger } from '../observability/logger.js';
 import { getChainBackedWorkflow } from '../host/chainBackedWorkflows.js';
 import { resolveCallerDisplayName } from '../host/chatContext.js';
@@ -256,6 +256,24 @@ function headMovedConflict(res: Response, workflowId: string, headRevision: stri
   );
 }
 
+/**
+ * The picker-templates ADR (extends ADR 0163) — the chain template an owned
+ * workflow was instantiated from, for the summary list. The instantiate lane
+ * stamps it on the ownership row; a template copy minted before that stamp
+ * existed (a `wf.copy.*` id with no stamp) falls back to the head definition's
+ * `metadata.expandedFrom.chainId`, the record expansion has always written. A
+ * hand-made workflow has neither and carries no `fromChainId`.
+ */
+async function summaryFromChainId(o: { workflowId: string; fromChainId?: string }): Promise<string | undefined> {
+  if (o.fromChainId) return o.fromChainId;
+  if (workflowIdOrigin(o.workflowId) !== 'copy') return undefined;
+  const head = await getRegisteredWorkflowAsync(o.workflowId).catch(() => null);
+  const expandedFrom = head?.metadata?.expandedFrom;
+  if (!expandedFrom || typeof expandedFrom !== 'object') return undefined;
+  const chainId = (expandedFrom as Record<string, unknown>).chainId;
+  return typeof chainId === 'string' && chainId.length > 0 ? chainId : undefined;
+}
+
 
 export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdapterSuite; storage: Storage }): void {
   // ADR 0369 §6 — the compose-and-run agent tool registers here because this
@@ -304,6 +322,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
           const head = await getRegisteredWorkflowAsync(o.workflowId);
           publishedBehindHead = head ? revisionHashOf(head) !== o.publishedRevision : undefined;
         }
+        const fromChainId = await summaryFromChainId(o);
         return {
           workflowId: o.workflowId,
           // ADR 0794 — what the id IS, so no client reads its spelling to find out.
@@ -321,6 +340,9 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
           // content a model wrote was indistinguishable from a hand-built one
           // everywhere in the product.
           ...(o.authoredVia ? { authoredVia: o.authoredVia } : {}),
+          // The picker-templates ADR — the chain template this copy came from, so
+          // the `/` picker offers the owned copy instead of the template again.
+          ...(fromChainId ? { fromChainId } : {}),
           // ADR 0482 §6 — the budget chip payload (spend disclosed only when a
           // budget exists; the chip's tooltip discloses debug/eval inclusion).
           ...((): { budget?: { dailyUsd: number; hardCap: boolean }; spentTodayUsd?: number } => {

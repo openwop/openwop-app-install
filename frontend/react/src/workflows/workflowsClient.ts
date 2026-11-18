@@ -10,6 +10,9 @@
 
 import { getWorkflowDefinitionRaw } from '../client/workflowsClient.js';
 import { assertSynced, authedHeaders, config, fetchOpts } from '../client/config.js';
+// Type-only: erased at build, so the builder's module graph stays out of every
+// consumer of this neutral client (the chat entry chunk among them).
+import type { ChainTemplate } from '../builder/persistence/backendStore.js';
 
 export interface WorkflowSummaryDTO {
   workflowId: string;
@@ -35,6 +38,9 @@ export interface WorkflowSummaryDTO {
   /** ADR 0482 — today's folded spend (present only beside `budget`; includes
    *  debug/eval spend — the counter is money-truth, never segmented). */
   spentTodayUsd?: number;
+  /** The picker-templates ADR (extends ADR 0163) — the chain template this
+   *  workflow was instantiated from. Absent on a hand-made workflow. */
+  fromChainId?: string;
 }
 
 /** The caller's owned workflows (scoped + IDOR-safe on the backend). Throws on
@@ -48,6 +54,18 @@ export async function listWorkflowSummaries(opts: { includeArchived?: boolean } 
   // device-local drafts as the account's workflow list.
   await assertSynced(res);
   return ((await res.json()) as { workflows: WorkflowSummaryDTO[] }).workflows;
+}
+
+/** The installed workflow-chain templates (RFC 0013, ADR 0163), host-global
+ *  and authed (`GET /host/openwop-app/workflow-chains`; internal chains and
+ *  retired aliases are already left out by the server). The ONE catalog read:
+ *  the builder gallery (`backendStore.listChainTemplates`) and the chat `/`
+ *  picker both call it. Throws the typed `SyncFailureError` on a refusal. */
+export async function listChainCatalog(): Promise<ChainTemplate[]> {
+  const res = await fetch(`${config.baseUrl}/host/openwop-app/workflow-chains`, fetchOpts({ headers: authedHeaders() }));
+  await assertSynced(res);
+  const body = (await res.json()) as { chains?: unknown };
+  return Array.isArray(body.chains) ? (body.chains as ChainTemplate[]) : [];
 }
 
 /** ADR 0870 §Stopgap — the host's answer to "is this a demo, and can it run

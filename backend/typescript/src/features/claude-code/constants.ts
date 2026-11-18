@@ -40,6 +40,32 @@ export const CLAUDE_CODE_PUBLIC_PREFIX = `${CLAUDE_CODE_BASE}/pair/device`;
  */
 export const DEVICE_KEY_SCOPES: readonly string[] = ['workspace:read', 'workspace:write'];
 
+/**
+ * ADR 1136 P2a — what a paired device may do. A pairing grants exactly ONE:
+ * a terminal device hosts Claude Code (ADR 0785), and a browser device hosts
+ * the person's own browser for computer-use (ADR 1136 lane A). A key paired for
+ * the terminal cannot drive a browser and the reverse; a change is a re-pair.
+ * Rows paired before this have no capabilities and read as `terminal`.
+ */
+export const DEVICE_CAPABILITIES = ['terminal', 'browser'] as const;
+export type DeviceCapability = (typeof DEVICE_CAPABILITIES)[number];
+
+/** A browser device's key declares only this scope. No route grants it, so the
+ *  key can open its device socket and nothing else. (An EMPTY declaration would
+ *  permit everything; see `keyDeclarationPermits`.) */
+export const BROWSER_DEVICE_KEY_SCOPES: readonly string[] = ['device:browser'];
+
+export function deviceKeyScopesFor(capability: DeviceCapability): readonly string[] {
+  return capability === 'browser' ? BROWSER_DEVICE_KEY_SCOPES : DEVICE_KEY_SCOPES;
+}
+
+/** The one capability a pairing asked for: `terminal` when absent, null when
+ *  the value is anything other than one known capability. */
+export function parseDeviceCapability(raw: unknown): DeviceCapability | null {
+  if (raw === undefined || raw === null) return 'terminal';
+  return typeof raw === 'string' && (DEVICE_CAPABILITIES as readonly string[]).includes(raw) ? raw as DeviceCapability : null;
+}
+
 /** Paired-device key lifetime (ADR 0785 D3: 90 days by default). */
 export const DEVICE_KEY_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 
@@ -75,6 +101,27 @@ export const CONSENT_TEXT: ConsentText = {
     'Letting this app send work to Claude Code on its own is a separate choice I make per device, later.',
   ],
 };
+
+export const BROWSER_CONSENT_VERSION = 'browser-device-consent-v1';
+
+/** ADR 1136 D4/D5 — what a person accepts when they pair a browser device. */
+export const BROWSER_CONSENT_TEXT: ConsentText = {
+  version: BROWSER_CONSENT_VERSION,
+  quote: 'The browser agent works in a browser window on your own machine, which you can watch and close at any time.',
+  source: 'https://github.com/openwop/openwop-app/blob/main/docs/adr/1136-browser-executors-for-computer-use.md',
+  fetchedAt: '2026-11-16',
+  acknowledgements: [
+    'A separate browser window opens on this machine, with its own profile for this workspace. The agent reads and acts only inside that window, and only on the sites each task allows.',
+    'I sign in to sites myself. The agent never types passwords, one-time codes or card numbers.',
+    'Each submit, link to a new page, purchase or message waits for my approval in the app. If a page does something I did not approve, the task stops.',
+    'This device can drive a browser only. It cannot run Claude Code or read this workspace\'s data.',
+  ],
+};
+
+/** The consent a pairing for `capability` shows and binds to. */
+export function consentTextFor(capability: DeviceCapability): ConsentText {
+  return capability === 'browser' ? BROWSER_CONSENT_TEXT : CONSENT_TEXT;
+}
 
 /** sha256 over a stable serialization of the consent text — what an acknowledgement binds to. */
 export function consentHash(text: ConsentText = CONSENT_TEXT): string {

@@ -150,7 +150,7 @@ async function fixture() {
   const orgA = (await owner.c.post<{ orgId: string }>(`${H}/orgs`, { name: 'Apps' })).body.orgId;
   const orgB = (await owner.c.post<{ orgId: string }>(`${H}/orgs`, { name: 'Other' })).body.orgId;
   for (const [who, roles] of [[admin, ['admin']], [editor, ['editor']]] as const) {
-    const add = await owner.c.post(`${H}/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: who.id, roles });
+    const add = await owner.c.post(`${H}/test/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: who.id, roles });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
   }
   return { tenantId, adminId: admin.id, editorId: editor.id, orgA, orgB };

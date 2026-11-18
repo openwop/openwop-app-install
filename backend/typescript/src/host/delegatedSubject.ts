@@ -210,13 +210,27 @@ export function isConfiguredOperatorIssuerFor(issuer: string, tenantId: string):
  * The ONE reading, shared by every lane. Empty means UNDECLARED, i.e. the
  * issuer's own authority; a declared `'*'` is read the same way.
  */
-export function keyDeclarationPermits(declared: readonly string[], scope: string): boolean {
-  return declared.length === 0 || declared.includes('*') || declared.includes(scope);
+/**
+ * #6053 step 2 — what an EMPTY declaration means. `permit` (the default until the
+ * step 1 rewrite has run in a deployment) keeps ADR 0795 D3's legacy "undeclared"
+ * reading: every scope. `deny` makes empty the narrowest declaration: no scope. Set
+ * `OPENWOP_API_KEY_EMPTY_SCOPES=deny` only after `OPENWOP_API_KEY_UNDECLARED_REWRITE=apply`
+ * has finished, or every legacy key loses access at once.
+ */
+export function emptyDeclarationDenies(): boolean {
+  return process.env.OPENWOP_API_KEY_EMPTY_SCOPES?.trim().toLowerCase() === 'deny';
 }
 
-/** True when the declaration narrows at all (it names scopes and none is `*`). */
+export function keyDeclarationPermits(declared: readonly string[], scope: string): boolean {
+  if (declared.length === 0) return !emptyDeclarationDenies();
+  return declared.includes('*') || declared.includes(scope);
+}
+
+/** True when the declaration narrows at all (it names scopes and none is `*`). Under
+ *  #6053 `deny`, an empty declaration is the narrowest of all. */
 export function isNarrowingDeclaration(declared: readonly string[]): boolean {
-  return declared.length > 0 && !declared.includes('*');
+  if (declared.length === 0) return emptyDeclarationDenies();
+  return !declared.includes('*');
 }
 
 /**

@@ -325,7 +325,7 @@ describe('ADR 0946 P0 — VariantSet routes', () => {
     const email = uniqEmail();
     const login = await viewer.call<{ user: { userId: string } }>('POST', '/host/openwop-app/test/login', { email, tenantId: campaign.tenantId });
     expect(login.status).toBe(201);
-    const add = await owner.call('POST', `/host/openwop-app/orgs/${orgId}/members`, { displayName: 'Viewer', subject: login.body.user.userId, roles: ['viewer'] });
+    const add = await owner.call('POST', `/host/openwop-app/test/orgs/${orgId}/members`, { displayName: 'Viewer', subject: login.body.user.userId, roles: ['viewer'] });
     expect(add.status, 'add viewer').toBe(201);
     expect((await viewer.call('GET', path(campaign.id))).status).toBe(200);
     expect(await viewer.call<ErrBody>('POST', path(campaign.id), { concepts: CONCEPTS })).toMatchObject({ status: 403, body: { error: 'forbidden_scope' } });

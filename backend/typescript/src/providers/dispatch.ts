@@ -57,6 +57,12 @@ export interface DispatchRequest {
   apiKey: string;
   messages: readonly ChatMessage[];
   maxTokens?: number;
+  /** ADR 1142 D4 — set only for a provider whose adapter forwards it
+   *  (`providers/llmCacheKey2.ts` `SENT_PARAMS`): today the conformance mock.
+   *  The recipe-2 key hashes exactly these, so a real provider never receives
+   *  a field its key does not name, or the reverse. */
+  temperature?: number;
+  stopSequences?: string[];
   /** Enable provider-native web search for this turn. */
   webSearch?: boolean;
   /** ADR 0912 (Book AI P22) — the JSON Schema a structured-output call must

@@ -697,6 +697,23 @@ export async function resolveAssignments(subject: ToggleSubject): Promise<Resolv
  * OPEN on a lapsed plan. Every caller is listed in
  * `test/feature-toggle-access-ratchet.test.ts`; adding one is a reviewed diff.
  */
+/**
+ * The tenants a tenant-bucket toggle MAY be on for, read from its config alone:
+ * every listed tenant when it is on globally, plus its `on` tenant overrides and
+ * its beta cohort. Empty when the toggle is missing or killed. A candidate is not
+ * an answer: callers still ask {@link resolveOne} per tenant (ADR 1138 D4, the
+ * due sweep, finds its tenants without reading any feature data).
+ */
+export async function toggleCandidateTenants(id: string, listAll: () => Promise<string[]>): Promise<string[]> {
+  const config = await getEffectiveConfig(id);
+  if (!config || config.killed) return [];
+  const out = new Set<string>();
+  if (config.status === 'on') for (const t of await listAll()) out.add(t);
+  for (const [tenantId, o] of Object.entries(config.tenantOverrides ?? {})) if (o.status === 'on') out.add(tenantId);
+  if (config.status === 'beta') for (const t of config.betaCohort ?? []) out.add(t);
+  return [...out].sort();
+}
+
 export async function resolveToggle(id: string, subject: ToggleSubject): Promise<ResolvedAssignment | null> {
   const config = await getEffectiveConfig(id);
   return config ? resolveConfig(config, subject) : null;

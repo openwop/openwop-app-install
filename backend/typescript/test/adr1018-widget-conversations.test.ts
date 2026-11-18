@@ -101,7 +101,7 @@ async function setup(): Promise<{ owner: Client; viewer: Client; orgId: string; 
   const viewerId = await signup(viewer, tenantId);
   const org = await owner.call('POST', '/host/openwop-app/orgs', { name: 'Acme' });
   const orgId = org.body!.orgId as string;
-  const add = await owner.call('POST', `/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] });
+  const add = await owner.call('POST', `/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   const w = await owner.call('POST', `/host/openwop-app/chat-widget/orgs/${encodeURIComponent(orgId)}/widgets`, { agentId: AGENT, allowedDomains: ['acme.com'] });
   expect(w.status, JSON.stringify(w.body)).toBe(201);

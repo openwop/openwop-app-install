@@ -42,7 +42,7 @@ import { subjectKeyForms } from './subjectErasureRedaction.js';
 import { getRetentionHold } from './retentionHold.js';
 import { createLogger } from '../observability/logger.js';
 import { resolveOne } from './featureToggles/service.js';
-import { assertOrgScope, isSharedWorkspaceTenant, isWorkspaceMember, onMemberAuthorityLost } from './accessControlService.js';
+import { assertOrgScope, getOrg, isSharedWorkspaceTenant, isWorkspaceMember, managementScopes, onMemberAuthorityLost, type Scope } from './accessControlService.js';
 import { isSessionAuthorityRegistered, resolveSessionSubject } from './sessionAuthority.js';
 import { getNotificationEmitter } from '../notifications/emitter.js';
 
@@ -132,8 +132,23 @@ export interface GrantResourceKind {
   contains?(tenantId: string, orgId: string, parentId: string, child: { kind: string; id: string }): Promise<boolean>;
   /** What a collaborator sees of the resource (ADR 0958 P2): a closed, minimal
    *  projection the OWNING feature decides, never the stored row. `null` = it is
-   *  not presentable right now (e.g. a brief demoted from approved), read as a 404. */
-  project(tenantId: string, orgId: string, id: string): Promise<{ title: string; body: Record<string, unknown> } | null>;
+   *  not presentable right now (e.g. a brief demoted from approved), read as a 404.
+   *
+   *  ADR 1099 P0c — `viewer` is the collaborator asking, through which grant. The
+   *  host passes it on every collaborator read, so a kind whose resource holds
+   *  several recipients' rows (a purchase order with several vendors' lines)
+   *  shows each only its own. A kind that relies on it declares `requiresViewer`:
+   *  the host then never calls this without one. */
+  project(tenantId: string, orgId: string, id: string, viewer?: GrantViewer): Promise<{ title: string; body: Record<string, unknown> } | null>;
+  /** ADR 1099 P0c — `project` filters by `viewer`, so the host refuses (`null`) any
+   *  call without one: a host path that projects with no collaborator gets nothing,
+   *  never the whole resource. */
+  requiresViewer?: boolean;
+  /** ADR 1099 P0c — may THIS collaborator be granted this resource? Checked at
+   *  mint; `false` (or a fault) refuses with 400 `grant_recipient_refused`. Lets a
+   *  kind refuse a member granting one vendor's purchase order to another vendor,
+   *  rather than only hiding it at view. Absent ⇒ any collaborator of the org. */
+  mayGrantTo?(tenantId: string, orgId: string, id: string, collaborator: GrantRecipient): Promise<boolean>;
   /** ADR 0958 P1 — only the owning feature mints grants of this kind, as a
    *  `system:` actor (the ADR 0924 approval link). The member grant route refuses
    *  it, so no person can hand a vendor a decision the feature never offered. */
@@ -146,13 +161,49 @@ export interface GrantResourceKind {
    *  DEFAULT surface (campaign-ops: its toggles and an active client account), so
    *  every pre-1099 kind behaves exactly as before. */
   surface?: CollaborationSurface;
+  /** ADR 1099 P0b — the member scope that may grant (and revoke) this kind, held
+   *  on the org or the tenant root, and re-checked for the granter on every use.
+   *  Absent ⇒ `host:members:manage`, as before. Floored at registration
+   *  (`GRANT_SCOPE_FLOOR`): never a read-only scope. */
+  grantScope?: Scope;
 }
 const kinds = new Map<string, GrantResourceKind>();
+
+/** ADR 1099 P0c — who is reading a projection: the collaborator and the grant. */
+export interface GrantViewer { collaboratorId: string; grantId: string }
+/** ADR 1099 P0c — who a grant is being minted for (`mayGrantTo`). Ids and the
+ *  firm's own labels only; never the email. */
+export interface GrantRecipient { collaboratorId: string; kind: string; displayName: string; company?: string }
+
+/** ADR 1099 P0c — the ONE way to call a kind's projection: a `requiresViewer`
+ *  kind without a viewer is `null`, before the kind's code runs. */
+function guardedProject(def: GrantResourceKind): GrantResourceKind['project'] {
+  return async (tenantId, orgId, id, viewer) => {
+    if (def.requiresViewer && !(viewer && viewer.collaboratorId && viewer.grantId)) return null;
+    return def.project(tenantId, orgId, id, viewer);
+  };
+}
+
+const DEFAULT_GRANT_SCOPE: Scope = 'host:members:manage';
+/** ADR 1099 P0b — the lowest scope a kind may let mint: `workspace:write`. Above it,
+ *  only management scopes, so no read-only scope (and no narrower write such as
+ *  `host:comments:write`) can ever hand an outsider access. */
+function meetsGrantScopeFloor(scope: string): boolean {
+  return scope === 'workspace:write' || managementScopes().includes(scope);
+}
 
 /** Feature registration seam — called once at boot per resource kind. */
 export function registerGrantResourceKind(kind: string, def: GrantResourceKind): void {
   if (!/^[a-z][a-z0-9-]{1,40}$/.test(kind)) throw new Error(`grant resource kind '${kind}' is not a lower-case slug`);
+  if (def.grantScope !== undefined && !meetsGrantScopeFloor(def.grantScope)) {
+    throw new Error(`grant resource kind '${kind}': grantScope '${def.grantScope}' is below the floor (workspace:write or a management scope)`);
+  }
   kinds.set(kind, def);
+}
+
+/** ADR 1099 P0b — the scope that grants and revokes `kind` (absent kind ⇒ the default). */
+export function grantScopeOf(kind: GrantResourceKind | undefined): Scope {
+  return kind?.grantScope ?? DEFAULT_GRANT_SCOPE;
 }
 
 /**
@@ -205,6 +256,15 @@ export async function anySurfaceAdmits(tenantId: string, orgId: string): Promise
     if (await safely(() => s.enabledFor(tenantId)) && await safely(() => s.orgOpen(tenantId, orgId))) return true;
   }
   return false;
+}
+
+/** ADR 1099 P0b — may kind `kindName` be granted in this tenant and org right now:
+ *  its surface's switch and org rule, and its owning feature? Unknown kind ⇒ false.
+ *  For the grantable picker; `grantAccess` makes the same checks itself. */
+export async function kindAdmits(kindName: string, tenantId: string, orgId: string): Promise<boolean> {
+  const kind = kinds.get(kindName);
+  if (!kind) return false;
+  return (await kindCollaborationOn(kindName, tenantId)) && (await kindOrgOpen(kind, tenantId, orgId)) && (await ownerOn(kind, tenantId));
 }
 
 async function ownerOn(kind: GrantResourceKind, tenantId: string): Promise<boolean> {
@@ -474,6 +534,14 @@ export async function grantAccess(input: {
     days = input.expiresInDays;
   }
   if (!(await ownerOn(kind, input.tenantId)) || !(await kindOrgOpen(kind, input.tenantId, input.orgId)) || !(await kind.exists(input.tenantId, input.orgId, id))) throw notFound();
+  // ADR 1099 P0c — the kind may refuse this recipient (a fault refuses too).
+  const mayGrantTo = kind.mayGrantTo;
+  if (mayGrantTo) {
+    const recipient: GrantRecipient = { collaboratorId: collaborator.collaboratorId, kind: collaborator.kind, displayName: collaborator.displayName, ...(collaborator.company ? { company: collaborator.company } : {}) };
+    if (!(await safely(() => mayGrantTo(input.tenantId, input.orgId, id, recipient)))) {
+      throw new OpenwopError('validation_error', `This ${kindName} cannot be granted to this collaborator.`, 400, { field: 'collaboratorId', reason: 'grant_recipient_refused' });
+    }
+  }
   const now = new Date();
   const row: CollaboratorGrant = {
     grantId: `cgr_${randomUUID()}`,
@@ -485,7 +553,7 @@ export async function grantAccess(input: {
     createdBy: input.createdBy, createdAt: now.toISOString(),
   };
   if (!(await grants.compareAndSwap(null, row))) throw new OpenwopError('conflict', 'Try again.', 409, {});
-  await audit(input.tenantId, { action: 'grant.create', grantId: row.grantId, collaboratorId: row.collaboratorId, orgId: row.orgId, resource: row.resource, actions: row.actions });
+  await audit(input.tenantId, { action: 'grant.create', grantId: row.grantId, collaboratorId: row.collaboratorId, orgId: row.orgId, resource: row.resource, actions: row.actions, by: row.createdBy });
   return row;
 }
 
@@ -495,7 +563,7 @@ export async function revokeGrant(tenantId: string, orgId: string, grantId: stri
   if (cur.status === 'revoked') return cur;
   const next: CollaboratorGrant = { ...cur, status: 'revoked', revokedAt: nowIso(), revokedBy: actor };
   if (!(await grants.compareAndSwap(cur, next))) throw new OpenwopError('conflict', 'The grant changed. Reload and try again.', 409, { reason: 'grant_changed' });
-  await audit(tenantId, { action: 'grant.revoke', grantId, collaboratorId: cur.collaboratorId, orgId });
+  await audit(tenantId, { action: 'grant.revoke', grantId, collaboratorId: cur.collaboratorId, orgId, resource: cur.resource, by: actor });
   return next;
 }
 
@@ -508,20 +576,27 @@ function isRefusal(err: unknown): boolean {
   return err instanceof OpenwopError && (err.httpStatus === 403 || err.httpStatus === 404);
 }
 
-/** May `subject` still hold `host:members:manage` for this client? The grant route
- *  admits an agency admin (the scope on the agency root) OR a member holding it on
- *  the client org (`campaign-ops` `authorizeClient`), so either answer counts. A
- *  fault (not a refusal) propagates. */
-async function holdsGrantScope(tenantId: string, orgId: string, subject: string): Promise<boolean> {
+/** May `subject` hold `scope` for this org? Held on the tenant root (an agency
+ *  admin) OR on the org itself, so either answer counts. The ONE predicate: the
+ *  host mint routes authorize with it, and every use re-checks the granter with
+ *  it. A fault (not a refusal) propagates. */
+async function holdsGrantScope(tenantId: string, orgId: string, subject: string, scope: Scope): Promise<boolean> {
   for (const scopeOrg of orgId === tenantId ? [tenantId] : [tenantId, orgId]) {
     try {
-      await assertOrgScope(tenantId, subject, scopeOrg, 'host:members:manage');
+      await assertOrgScope(tenantId, subject, scopeOrg, scope);
       return true;
     } catch (err) {
       if (!isRefusal(err)) throw err;
     }
   }
   return false;
+}
+
+/** ADR 1099 P0b — the mint routes' authority: `subject` holds `scope` on the org
+ *  or the tenant root, and the org is this tenant's. Refused ⇒ uniform 404. */
+export async function assertGrantAuthority(tenantId: string, orgId: string, subject: string, scope: Scope): Promise<void> {
+  const org = await getOrg(orgId);
+  if (!org || org.tenantId !== tenantId || !(await holdsGrantScope(tenantId, orgId, subject, scope))) throw notFound();
 }
 
 /** Is `userId` disabled? Read LIVE on every use (one point read), never memoized:
@@ -539,9 +614,9 @@ async function userDisabled(userId: string): Promise<boolean> {
  * member of a shared `ws:` workspace, still holding the mint's scope. (Disabled is
  * checked live, separately.) Returns true when present. A fault propagates.
  */
-async function granterPresent(tenantId: string, orgId: string, subject: string): Promise<boolean> {
+async function granterPresent(tenantId: string, orgId: string, subject: string, scope: Scope): Promise<boolean> {
   if (isSharedWorkspaceTenant(tenantId) && !(await isWorkspaceMember(subject, tenantId))) return false;
-  return holdsGrantScope(tenantId, orgId, subject);
+  return holdsGrantScope(tenantId, orgId, subject, scope);
 }
 
 /**
@@ -562,13 +637,13 @@ const GRANTER_ALLOW_TTL_MS = 30_000;
 const GRANTER_ALLOW_MAX = 5_000;
 const granterAllows = new Map<string, { tenantId: string; subject: string; at: number }>();
 
-async function granterPresentMemo(tenantId: string, orgId: string, subject: string): Promise<boolean> {
+async function granterPresentMemo(tenantId: string, orgId: string, subject: string, scope: Scope): Promise<boolean> {
   const nowMs = Date.now();
-  const key = `${tenantId}\u0000${orgId}\u0000${subject}`;
+  const key = `${tenantId}\u0000${orgId}\u0000${subject}\u0000${scope}`;
   const hit = granterAllows.get(key);
   if (hit && nowMs - hit.at < GRANTER_ALLOW_TTL_MS) return true;
   granterAllows.delete(key);
-  if (!(await granterPresent(tenantId, orgId, subject))) return false;
+  if (!(await granterPresent(tenantId, orgId, subject, scope))) return false;
   if (granterAllows.size >= GRANTER_ALLOW_MAX) {
     let victim: string | undefined;
     for (const [k, v] of granterAllows) { if (nowMs - v.at >= GRANTER_ALLOW_TTL_MS) { victim = k; break; } }
@@ -613,7 +688,7 @@ async function peopleStillAllowed(grant: CollaboratorGrant, collaborator: Extern
     const by = grant.createdBy;
     if (!by || by.startsWith('system:')) return true;
     if (await userDisabled(by)) return false;
-    return await granterPresentMemo(grant.tenantId, grant.orgId, by);
+    return await granterPresentMemo(grant.tenantId, grant.orgId, by, grantScopeOf(kinds.get(grant.resource.kind)));
   } catch (err) {
     log.warn('extcollab_check_fault_refused', { grantId: grant.grantId, error: err instanceof Error ? err.message : String(err) });
     return false;
@@ -826,9 +901,18 @@ export async function listGrantableResources(tenantId: string, orgId: string): P
   return out;
 }
 
-/** The kind registry, read-only (the collab router projects through it). */
+/** The kind registry, read-only (the collab router projects through it). Its
+ *  `project` is the guarded one (ADR 1099 P0c), so no caller can reach a
+ *  `requiresViewer` kind's projection without a viewer. */
 export function grantResourceKind(kind: string): GrantResourceKind | undefined {
-  return kinds.get(kind);
+  const def = kinds.get(kind);
+  return def ? { ...def, project: guardedProject(def) } : undefined;
+}
+
+/** ADR 1099 P0c — project a usable grant's resource FOR its collaborator. */
+export async function projectForGrant(use: GrantUse): Promise<{ title: string; body: Record<string, unknown> } | null> {
+  const def = kinds.get(use.grant.resource.kind);
+  return def ? guardedProject(def)(use.tenantId, use.orgId, use.grant.resource.id, { collaboratorId: use.collaborator.collaboratorId, grantId: use.grant.grantId }) : null;
 }
 
 /**
@@ -881,6 +965,8 @@ export interface CollaborationAuditEvent {
   actions?: string[];
   files?: number;
   assets?: number;
+  /** ADR 1099 P0b — who granted or revoked: a member's user id or a `system:` actor. */
+  by?: string;
 }
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v ? v : undefined);
@@ -910,6 +996,7 @@ export async function listCollaborationAudit(tenantId: string, orgId: string): P
       ...(Array.isArray(p.actions) ? { actions: p.actions.filter((a): a is string => typeof a === 'string') } : {}),
       ...(typeof p.files === 'number' ? { files: p.files } : {}),
       ...(Array.isArray(p.assetIds) ? { assets: p.assetIds.length } : {}),
+      ...(str(p.by) ? { by: str(p.by) } : {}),
     });
     if (events.length >= AUDIT_REVIEW_LIMIT) return { events, truncated: true };
   }

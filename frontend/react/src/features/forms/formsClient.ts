@@ -207,7 +207,8 @@ export async function listSubmissions(orgId: string, formId: string): Promise<Su
  *  org, wrong row) — it does not distinguish, by design. */
 export async function deleteSubmission(orgId: string, formId: string, submissionId: string): Promise<void> {
   const res = await fetch(`${base(orgId)}/${encodeURIComponent(formId)}/submissions/${encodeURIComponent(submissionId)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
-  if (!res.ok) throw new FormsRequestError('deleteSubmission', res.status);
+  // Issue 5960 — read the body, so a 409 `legal_hold` arrives with its reason.
+  if (!res.ok) await asJson<never>(res, 'deleteSubmission');
 }
 
 /** ADR 0850 D3 — release ONE held submission: clear its flag and deliver it as a

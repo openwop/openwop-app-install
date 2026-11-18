@@ -81,7 +81,7 @@ async function fixture() {
   const orgA: string = (await owner.post(`${H}/orgs`, { name: 'Everyone' })).body.orgId ?? '';
   const orgB: string = (await owner.post(`${H}/orgs`, { name: 'Finance' })).body.orgId ?? '';
   expect(ownerId && memberId && orgA && orgB, 'fixture: both users and both orgs exist').toBeTruthy();
-  const add = await owner.post(`${H}/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberId, roles: ['editor'] });
+  const add = await owner.post(`${H}/test/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberId, roles: ['editor'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
 
   const asOwner = surfaces({ tenantId, runId: 'seed', actingUserId: ownerId });

@@ -149,7 +149,7 @@ describe('ADR 1103 D9 — one room, two doors', () => {
     const viewer = client();
     const vu = await viewer.post<LoginBody>('/host/openwop-app/test/login', { email: uniqEmail('nbchat-viewer'), tenantId });
     expect(vu.status).toBe(201);
-    const add = await c.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: vu.body.user.userId, roles: ['viewer'] });
+    const add = await c.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: vu.body.user.userId, roles: ['viewer'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
     // The viewer is refused writes (the control that they ARE a viewer)…
     expect((await viewer.post(`${NB}/${id}/notes`, { text: 'x', origin: 'authored' })).status).toBe(403);

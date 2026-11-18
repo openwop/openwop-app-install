@@ -141,11 +141,11 @@ describe('ADR 0490 — the eager/lazy namespace split stays safe', () => {
   });
 
   // NSSPLIT-BORROW-1 — the raw-key half of case 1's claim, with a scanner that sees the
-  // BARE borrow forms case 1 is blind to. RED today on one `file:ns` pair
-  // (profiles/ProfilePage:twin; cms/SectionRenderer:site was fixed, see the header), so
-  // it is pinned as `it.fails`; the fix flips it to `it`. An array hook that LOADS the other namespace
+  // BARE borrow forms case 1 is blind to. Flipped from `it.fails` to `it` by #5775, which
+  // fixed the last `file:ns` pair (profiles/ProfilePage:twin; cms/SectionRenderer:site
+  // was fixed earlier, see the header). An array hook that LOADS the other namespace
   // is the sanctioned fix (BILLUX-1 chose it for BundleShopPage) and is not counted.
-  it.fails('no feature reads another feature namespace it does not load (NSSPLIT-BORROW-1)', () => {
+  it('no feature reads another feature namespace it does not load (NSSPLIT-BORROW-1)', () => {
     const feats = new Set(featureDirs());
     const offenders: string[] = [];
     for (const feat of feats) {

@@ -25,7 +25,7 @@ import type { AddressInfo } from 'node:net';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { createMember, createOrg, deleteMember, deleteOrg, listMembers, rekeyMemberSubject } from '../src/host/accessControlService.js';
-import { eraseDeveloperKeysForSubject, issueApiKey, listApiKeys, verifyApiKey } from '../src/features/developer-keys/apiKeyService.js';
+import { __issueUndeclaredLegacyKeyForTest, eraseDeveloperKeysForSubject, issueApiKey, listApiKeys, verifyApiKey } from '../src/features/developer-keys/apiKeyService.js';
 import { ownsKeyGate } from '../src/middleware/keyVendorGate.js';
 import { resetIssuerLiveCacheForTests } from '../src/middleware/auth.js';
 import { bareRunId } from './support/bareRunId.js';
@@ -83,7 +83,8 @@ function isResBody(v: unknown): v is ResBody {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 async function key(scopes?: string[], tenantId: string = TENANT, createdBy = 'user:adr0795'): Promise<string> {
-  return (await issueApiKey({ tenantId, name: 'k', createdBy, ...(scopes ? { scopes } : {}) })).token;
+  // #6053 — no scopes means a LEGACY undeclared key, which `issueApiKey` no longer mints.
+  return (scopes ? await issueApiKey({ tenantId, name: 'k', createdBy, scopes }) : await __issueUndeclaredLegacyKeyForTest({ tenantId, name: 'k', createdBy })).token;
 }
 const refusedByGate = (r: Res): boolean => r.status === 403 && r.body?.details?.code === 'key_scope_required';
 
@@ -112,6 +113,21 @@ describe('ADR 0795 D2 — the vendor floor', () => {
       expect((await call('GET', `${H}/roster`, k)).status).toBe(200);
       passed(await call('POST', `${H}/crm/contacts`, k, { name: 'x' }));
     }
+  });
+
+  it('#6053 step 2 — under OPENWOP_API_KEY_EMPTY_SCOPES=deny an undeclared key is refused; `*` still passes', async () => {
+    const undeclared = await key(undefined);
+    const star = await key(['*']);
+    process.env.OPENWOP_API_KEY_EMPTY_SCOPES = 'deny';
+    try {
+      const r = await call('GET', `${H}/roster`, undeclared);
+      expect(refusedByGate(r), JSON.stringify(r)).toBe(true);
+      expect((await call('GET', `${H}/roster`, star)).status).toBe(200);
+    } finally {
+      delete process.env.OPENWOP_API_KEY_EMPTY_SCOPES;
+    }
+    // The default is still the legacy reading, until a deployment has run the rewrite.
+    expect((await call('GET', `${H}/roster`, undeclared)).status).toBe(200);
   });
 
   it('a vendor mirror of a protocol operation is left to its own scope gate (runs:read reaches the review inbox)', async () => {
@@ -294,7 +310,7 @@ describe('ADR 0795 D4 — a validated, defaulted, capped lifetime', () => {
   });
 
   it('a stored expiry that does not parse is EXPIRED (it used to mean never)', async () => {
-    const { token } = await issueApiKey({ tenantId: TENANT, name: 'legacy', createdBy: 'user:adr0795', expiresAt: 'tomorrow' });
+    const { token } = await __issueUndeclaredLegacyKeyForTest({ tenantId: TENANT, name: 'legacy', createdBy: 'user:adr0795', expiresAt: 'tomorrow' });
     expect(await verifyApiKey(token)).toBeNull();
     expect((await call('GET', '/runs', token)).status).toBe(401);
   });
@@ -402,8 +418,8 @@ describe('ADR 0795 D6 — a key stops when its issuer does', () => {
 
   it('erasing a subject deletes their keys: the token no longer verifies and the row is gone', async () => {
     const t = 'adr0795-erase';
-    const mine = await issueApiKey({ tenantId: t, name: 'mine', createdBy: 'user:erased' });
-    const theirs = await issueApiKey({ tenantId: t, name: 'theirs', createdBy: 'user:kept' });
+    const mine = await __issueUndeclaredLegacyKeyForTest({ tenantId: t, name: 'mine', createdBy: 'user:erased' });
+    const theirs = await __issueUndeclaredLegacyKeyForTest({ tenantId: t, name: 'theirs', createdBy: 'user:kept' });
     await eraseDeveloperKeysForSubject(t, 'user:erased');
     expect(await verifyApiKey(mine.token)).toBeNull();
     expect(await verifyApiKey(theirs.token)).not.toBeNull();
@@ -423,8 +439,8 @@ describe('ADR 0795 D4 — expiry is not a surprise, and use is not a write per r
 
   it('a key USED inside its last 14 days is MARKED for one notice; a key with months left is not (delivery itself is not asserted here)', async () => {
     const t = 'adr0795-notice';
-    const soon = await issueApiKey({ tenantId: t, name: 'soon', createdBy: 'user:n', expiresAt: new Date(Date.now() + 5 * DAY).toISOString() });
-    const later = await issueApiKey({ tenantId: t, name: 'later', createdBy: 'user:n', expiresAt: new Date(Date.now() + 60 * DAY).toISOString() });
+    const soon = await __issueUndeclaredLegacyKeyForTest({ tenantId: t, name: 'soon', createdBy: 'user:n', expiresAt: new Date(Date.now() + 5 * DAY).toISOString() });
+    const later = await __issueUndeclaredLegacyKeyForTest({ tenantId: t, name: 'later', createdBy: 'user:n', expiresAt: new Date(Date.now() + 60 * DAY).toISOString() });
     expect((await rowOf(t, soon.key.keyId)).expiryNoticeAt, 'not before it is used').toBeUndefined();
     await verifyApiKey(soon.token);
     await verifyApiKey(later.token);
@@ -445,7 +461,7 @@ describe('ADR 0795 D4 — expiry is not a surprise, and use is not a write per r
 
   it('lastUsedAt has five-minute resolution: a second use moments later writes nothing', async () => {
     const t = 'adr0795-lastused';
-    const k = await issueApiKey({ tenantId: t, name: 'k', createdBy: 'user:n' });
+    const k = await __issueUndeclaredLegacyKeyForTest({ tenantId: t, name: 'k', createdBy: 'user:n' });
     const t0 = Date.now();
     await verifyApiKey(k.token, t0, { ip: '10.0.0.1' });
     await settle(async () => (await rowOf(t, k.key.keyId)).lastUsedAt !== undefined);

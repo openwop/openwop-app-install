@@ -31,7 +31,7 @@ import { createApp } from '../src/index.js';
 import { _resetOidcVerifier } from '../src/middleware/auth.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { listMembers } from '../src/host/accessControlService.js';
+import { createMember, listMembers } from '../src/host/accessControlService.js';
 import { getRosterEntry } from '../src/host/rosterService.js';
 import { getChart } from '../src/host/orgChartService.js';
 import { getWorkforce, seedWorkforceEntities } from '../src/host/workforceService.js';
@@ -222,7 +222,9 @@ describe('ADR 0775 D1 — agent-area writes need workspace:write', () => {
     expect(ws).not.toBe('');
     expect((await owner.c.post(`${WS}/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
     expect((await owner.c.post(`${H}/roster`, { persona: 'By Owner', agentRef: { agentId: 'user.by-owner' } })).status).toBe(201);
-    expect((await owner.c.post(`${H}/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'editor', subject: editor.canonical, roles: ['editor'] })).status).toBe(201);
+    // #5945 — a typed `user:` subject is refused on the members route, and this file tests real
+    // OIDC-bearer identity, so the editor is seeded in the store rather than through the auth seam.
+    await createMember({ orgId: ws, tenantId: ws, displayName: 'editor', subject: editor.canonical, roles: ['editor'] });
     expect((await editor.c.post(`${H}/users/auth/oidc/bind`)).status).toBe(200);
     expect((await editor.c.post(`${WS}/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
     const made = await editor.c.post(`${H}/roster`, { persona: 'By Editor', agentRef: { agentId: 'user.by-editor' } });

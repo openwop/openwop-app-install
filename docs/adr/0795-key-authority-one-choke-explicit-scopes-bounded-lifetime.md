@@ -110,6 +110,39 @@ an entry that is too wide exempts a sibling that checks nothing.
   ADR 0601 reading), is labelled Unrestricted in the tab, and is reported by
   the Phase 0 inventory.
 
+> **Correction (2026-11-16, #6053 — "`issueApiKey` stays permissive" was a fail-open
+> default under every scoped key).** Its claim that the host's callers "declare
+> their own scopes" was not true of all of them, measured on `main`. Rotate copied a
+> legacy `[]`, so a rotation minted a NEW undeclared key and extended the legacy
+> authority for another lifetime. The conformance mint seam passed no scopes.
+> `issueApiKey` itself defaulted a missing `scopes` to `[]`. Since an empty
+> declaration permits every route (`keyDeclarationPermits`), any future caller
+> that forgot `scopes` would have minted its issuer's full authority, silently.
+>
+> Now (steps 3–4 of #6053):
+> - `issueApiKey` requires `scopes` and refuses `undefined` and `[]` with a 400;
+>   `['*']` is the explicit "everything".
+> - Rotate turns a legacy `[]` into `['*']`, the same authority, now declared.
+> - The conformance seam declares `['*']`.
+> - A ratchet fails any `src/` call to `issueApiKey` that omits `scopes`
+>   (`test/issue-6053-api-key-scopes-required.test.ts`).
+>
+> Stored keys are still not rewritten here, and `[]` still means "undeclared". The
+> one-time rewrite of stored `[]` to `['*']` (step 1) and making empty deny (step
+> 2) change live keys, so they wait for the owner's go. Step 1 must land and run
+> before step 2, or every legacy key loses access at once.
+>
+> **Steps 1–2 (built, merged only on the owner's go).** Step 1 is the background job
+> `api-key-undeclared-rewrite`. It is off unless
+> `OPENWOP_API_KEY_UNDECLARED_REWRITE` is set:
+> - `report` logs the undeclared count per tenant and writes nothing;
+> - `apply` rewrites every stored `[]` to `['*']`, once (idempotent).
+>
+> Step 2 is `OPENWOP_API_KEY_EMPTY_SCOPES`. Its default `permit` keeps the legacy
+> reading; `deny` makes an empty declaration the narrowest (no scope). Run them in
+> this order: `report`, read the counts, `apply`, then `deny`. Once every deployment
+> has run `apply`, the default can become `deny` in a later change.
+
 ### D4 — lifetime is validated, defaulted and capped (`KEY-4`)
 
 **Decided (2026-10-01): 90 days by default, 366 at most, both the operator's to

@@ -469,6 +469,7 @@ describe('ADR 0551 P1 — forward migration onto a real pre-outbox database', ()
     // ADR 0987 D2: bumped to 51 (`runs.admission_key` + its index).
     // ADR 1043 RELAY-LOG-RETENTION-1: bumped to 52 (`idx_messaging_delivery_log_at`).
     // ADR 1114: bumped to 53 (`idx_notifications_tenant_run_request` partial index).
-    expect(LATEST_SCHEMA_VERSION).toBe(53);
+    // ADR 1142 D7 (RFC 0260): bumped to 54 (`invocation_log.llm_cache_key`).
+    expect(LATEST_SCHEMA_VERSION).toBe(54);
   });
 });

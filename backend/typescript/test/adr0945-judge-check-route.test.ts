@@ -76,7 +76,7 @@ describe('judge check route', () => {
     const viewer: Jar = { v: '' };
     const login = await call(viewer, 'POST', '/host/openwop-app/test/login', { email: `g945jc-viewer-${Date.now()}@acme.test`, tenantId: TENANT });
     const viewerId = (login.body as { user: { userId: string } }).user.userId;
-    expect((await call(owner, 'POST', `/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] })).status).toBe(201);
+    expect((await call(owner, 'POST', `/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] })).status).toBe(201);
     specCalls.length = 0;
     const r = await call(viewer, 'POST', P(), { provider: 'anthropic', model: 'm', credentialRef: 'k' });
     expect(r.status).toBe(403);

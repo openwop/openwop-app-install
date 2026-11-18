@@ -50,6 +50,12 @@ describe('ADR 0887 — every share-link mint names its lane', () => {
       // binds an identity and grants nothing. Every grant is minted separately by a
       // member and re-checks that member on each use (`checkGrantUse` granter check).
       'features/campaign-ops/collaboration/routes.ts': ['system:campaign-ops-collab'],
+      // ADR 1099 P0b — the same invite from the host route, for kinds with their own
+      // surface, and system-minted for the same reason. The inviting member is the
+      // collaborator row's `createdBy` and its `collaborator.invite` audit, and was
+      // authorized by the route (`host:members:manage`). A person actor here would
+      // tie a pending invite to that member's link entitlement, not to the invite.
+      'routes/externalCollaborators.ts': ['system:host-collab'],
     });
   });
 });

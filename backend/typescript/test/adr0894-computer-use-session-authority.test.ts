@@ -130,14 +130,14 @@ async function team(): Promise<{ tenantId: string; orgA: string; orgB: string; o
   return { tenantId, orgA, orgB, opener, peer, viewer, outsider };
 }
 
-const surfaceFor = (tenantId: string, actingUserId?: string) =>
-  buildFeatureSurfaces({ tenantId, runId: `run-${n++}`, ...(actingUserId ? { actingUserId } : {}) })['computer-use']!;
+const surfaceFor = (tenantId: string, actingUserId?: string, runId = `run-${n++}`) =>
+  buildFeatureSurfaces({ tenantId, runId, ...(actingUserId ? { actingUserId } : {}) })['computer-use']!;
 
 const startArgs = (orgId: string, task: string) => ({ orgId, task, startUrl: `${ORIGIN}/form`, allowedOrigins: [ORIGIN] });
 
 /** A session halted at one commit action, opened by `opener` through the real surface. */
-async function haltedSession(t: Awaited<ReturnType<typeof team>>, label: string): Promise<string> {
-  const out = await surfaceFor(t.tenantId, t.opener).startTask!(startArgs(t.orgA, mockTask([act('a1', 'screenshot'), act('a2', 'submit', `${ORIGIN}/send`)], label))) as { session: { sessionId: string; status: string } };
+async function haltedSession(t: Awaited<ReturnType<typeof team>>, label: string, runId?: string): Promise<string> {
+  const out = await surfaceFor(t.tenantId, t.opener, runId).startTask!(startArgs(t.orgA, mockTask([act('a1', 'screenshot'), act('a2', 'submit', `${ORIGIN}/send`)], label))) as { session: { sessionId: string; status: string } };
   expect(out.session.status).toBe('awaiting_approval');
   return out.session.sessionId;
 }
@@ -197,7 +197,9 @@ describe('D3 — approve is a human resolution of THIS action, used once', () =>
   });
   it('control: the opener may always DENY (the safe direction needs no approval)', async () => {
     const t = await team();
-    const sessionId = await haltedSession(t, 'deny');
+    const sessionId = await haltedSession(t, 'deny', 'run-deny-opener');
+    // ADR 1136 P2a — condition 4 restricts driving, not stopping: a deny from a
+    // DIFFERENT run of the opener (a fork) still ends the session.
     const out = await surfaceFor(t.tenantId, t.opener).decide!({ sessionId, approve: false }) as { session: { status: string } };
     expect(out.session.status).toBe('denied');
   });
@@ -252,7 +254,7 @@ describe('D3 — end to end: the run suspends on an approval the decide node rai
     const peerLogin = await fetch(`${BASE}/host/openwop-app/test/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: `cu894-peer-${Date.now()}@acme.test`, tenantId }) });
     for (const c of getSetCookies(peerLogin.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) peerCookie = m[1]!; }
     const peerId = ((await peerLogin.json()) as { user: { userId: string } }).user.userId;
-    const added = await call('POST', `/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'peer', subject: peerId, roles: ['editor'] });
+    const added = await call('POST', `/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'peer', subject: peerId, roles: ['editor'] });
     expect(added.status, JSON.stringify(added.json)).toBe(201);
     const peerTry = await fetch(`${BASE}/runs/${runId}/interrupts/${open[0]!.nodeId}`, {
       method: 'POST', headers: { 'content-type': 'application/json', cookie: peerCookie }, body: JSON.stringify({ resumeValue: { action: 'approve' } }),
@@ -510,7 +512,7 @@ describe('CU2CD-2 — a token-lane resolution naming the opener as `voter` does 
     const peerLogin = await fetch(`${BASE}/host/openwop-app/test/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: `cu894-tok-${Date.now()}@acme.test`, tenantId: r.tenantId }) });
     for (const c of getSetCookies(peerLogin.headers) as string[]) { const m = /(__session=[^;]+)/.exec(c); if (m) peerCookie = m[1]!; }
     const peerId = ((await peerLogin.json()) as { user: { userId: string } }).user.userId;
-    expect((await r.call('POST', `/host/openwop-app/orgs/${encodeURIComponent(r.orgId)}/members`, { displayName: 'peer', subject: peerId, roles: ['editor'] })).status).toBe(201);
+    expect((await r.call('POST', `/host/openwop-app/test/orgs/${encodeURIComponent(r.orgId)}/members`, { displayName: 'peer', subject: peerId, roles: ['editor'] })).status).toBe(201);
     const listing = await fetch(`${BASE}/host/openwop-app/runs/${bareRunId(r.runId)}/interrupts`, { headers: { cookie: peerCookie } });
     const token = ((await listing.json()) as { interrupts?: Array<{ token?: string }> }).interrupts?.[0]?.token;
     expect(token, 'the peer is handed the gate token (approvals:respond)').toMatch(/.+/);
@@ -545,11 +547,11 @@ describe('CU2CD-3/4 — every lifecycle write is a compare-and-swap', () => {
   });
   it('two concurrent decides on one approval: exactly one commit step, one provider approve', async () => {
     const t = await team();
-    const sessionId = await haltedSession(t, 'race-decide');
+    const sessionId = await haltedSession(t, 'race-decide', 'run-race');
     const { decide } = await import('../src/features/computer-use/computerUseService.js');
     const approves: string[] = [];
     const adapter = { ...makeMockAdapter(), submitDecision: async (_p: string, actionId: string, approve: boolean) => { if (approve) approves.push(actionId); return { ok: true as const, value: { accepted: true } }; }, pollSession: async () => ({ ok: true as const, value: { status: 'completed' as const, resultSummary: 'x' } }) };
-    const input = { tenantId: t.tenantId, sessionId, approve: true, actor: t.opener, approvalInterruptId: 'itr-race' };
+    const input = { tenantId: t.tenantId, sessionId, approve: true, actor: t.opener, runId: 'run-race', approvalInterruptId: 'itr-race' };
     const results = await Promise.allSettled([decide(adapter, input), decide(adapter, input)]);
     expect(results.filter((x) => x.status === 'fulfilled').length).toBe(1);
     expect(approves).toEqual(['a2']);

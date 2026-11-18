@@ -68,8 +68,14 @@ export type ExecutorErrorCode =
   /** The result did not match its operation's shape. Never retried. */
   | 'bad_result';
 
+/** What the executor saw happen while an operation ran (ADR 1136 P2 entry
+ *  criterion 3): a main-frame navigation, a form submission. The loop compares
+ *  this with the step's tier, because a page script can turn an interact step
+ *  into a submit. */
+export interface ExecutorEffects { navigated: boolean; submitted: boolean }
+
 export type ExecutorResult =
-  | { ok: true; snapshot?: PageSnapshot }
+  | { ok: true; snapshot?: PageSnapshot; effects?: ExecutorEffects }
   | { ok: false; error: ExecutorErrorCode };
 
 export interface BrowserExecutor {
@@ -147,7 +153,14 @@ export function validateResult(op: ExecutorOp, raw: unknown): ExecutorResult {
   }
   if (r.ok !== true) return { ok: false, error: 'bad_result' };
   const wants = RETURNS_SNAPSHOT[op.op];
-  if (!wants) return r.snapshot === undefined && Object.keys(r).length === 1 ? { ok: true } : { ok: false, error: 'bad_result' };
+  if (!wants) {
+    if (r.snapshot !== undefined) return { ok: false, error: 'bad_result' };
+    if (r.effects === undefined) return Object.keys(r).length === 1 ? { ok: true } : { ok: false, error: 'bad_result' };
+    const e = r.effects as Record<string, unknown> | null;
+    const valid = !!e && typeof e === 'object' && Object.keys(e).sort().join(',') === 'navigated,submitted'
+      && typeof e.navigated === 'boolean' && typeof e.submitted === 'boolean' && Object.keys(r).length === 2;
+    return valid ? { ok: true, effects: { navigated: e!.navigated as boolean, submitted: e!.submitted as boolean } } : { ok: false, error: 'bad_result' };
+  }
   const snapshot = parseSnapshot(r.snapshot);
   return snapshot && Object.keys(r).length === 2 ? { ok: true, snapshot } : { ok: false, error: 'bad_result' };
 }

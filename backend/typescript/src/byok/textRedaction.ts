@@ -18,7 +18,8 @@
  *   - `xai-*`    — xAI
  *   - `Bearer *` — generic OAuth-style bearer tokens
  *   - 32+ char hex — anthropic + miniMax sometimes echo the rejected
- *                    key as a hex digest in error payloads
+ *                    key as a hex digest in error payloads. Not when it is
+ *                    the id part of a declared `<prefix>:<hex>` record id (#5798)
  *
  * Intentionally NOT exhaustive: this is defense-in-depth, not a
  * substitute for the executor's `stripSecretsFromPersisted` at every
@@ -30,12 +31,57 @@
  * to stay zero-overhead in the common case.
  */
 
+/**
+ * #5798 — the record-id prefixes whose `<prefix>:<hex>` ids are kept whole, so a
+ * model can name a record back to a tool. An ALLOWLIST, not a denylist of
+ * credential words: this scrub also feeds logs and persisted payloads, and secret
+ * carriers come under too many names (`session:`, `sid:`, `csrf:`, `hmac:`, …) for
+ * a denylist to stay complete. A hex run after any other prefix is masked.
+ *
+ * The host's own ids are declared here, by the modules that mint them. There is
+ * no single registry of id prefixes in this host, so a feature or an adopter that
+ * mints its own declares it with {@link registerRecordIdPrefixes} at init (an
+ * adopter's `cvinq:` inquiry ids, for example). Hash-, HMAC- and signature-shaped
+ * prefixes (`sha:`, `sha256:`, `bearer:`) are deliberately not here.
+ */
+const HOST_RECORD_ID_PREFIXES = [
+  'ads', 'adscatalog', 'adsbudget', 'adslaunch', 'adsaud', // host/adsAdapter.ts
+  'ticket', 'erp', // bootstrap/nodes.ts
+  'cjob', // features/campaign-ops/execution.ts
+  'fvd', // host/creativeFidelity/verdictStore.ts
+  'commerce-order', // features/commerce/commerceService.ts
+  'pver', // features/cms/cmsService.ts
+  'inv', // features/billing/billingService.ts invoices
+] as const;
+const recordIdPrefixes = new Set<string>(HOST_RECORD_ID_PREFIXES);
+const PREFIX_SHAPE = /^[a-z][a-z0-9_.-]{0,31}$/;
+
+/** Declare record-id prefixes a feature or adopter mints as `<prefix>:<hex>`. A
+ *  prefix must be lowercase and start with a letter; anything else throws. */
+export function registerRecordIdPrefixes(...prefixes: string[]): void {
+  for (const p of prefixes) {
+    if (!PREFIX_SHAPE.test(p)) throw new Error(`record-id prefix must match ${PREFIX_SHAPE}: ${JSON.stringify(p)}`);
+    recordIdPrefixes.add(p);
+  }
+}
+
+/** Test seam: forget every prefix registered beyond the host's own. */
+export function __resetRecordIdPrefixesForTest(): void {
+  recordIdPrefixes.clear();
+  for (const p of HOST_RECORD_ID_PREFIXES) recordIdPrefixes.add(p);
+}
+
+const RECORD_ID_PREFIX = /(?:^|[^A-Za-z0-9_.-])([a-z][a-z0-9_.-]{0,31}):$/;
+
 export function sanitizeFreeText(s: string): string {
   return s
     .replace(/\bsk-[A-Za-z0-9_-]{16,}/g, 'sk-***')
     .replace(/\bxai-[A-Za-z0-9_-]{16,}/g, 'xai-***')
     .replace(/\bBearer\s+[A-Za-z0-9._-]{16,}/g, 'Bearer ***')
-    .replace(/\b[A-Fa-f0-9]{32,}\b/g, '***');
+    .replace(/\b[A-Fa-f0-9]{32,}\b/g, (hex: string, at: number, all: string) => {
+      const prefix = RECORD_ID_PREFIX.exec(all.slice(Math.max(0, at - 34), at))?.[1];
+      return prefix !== undefined && recordIdPrefixes.has(prefix) ? hex : '***';
+    });
 }
 
 /**

@@ -117,20 +117,27 @@ export async function saveModelVersion(input: {
   return publicRow(await publishAttribution(versions, row, actor, 'createdBy'));
 }
 
-/** Point the client's scoring at one saved version. `expected` is the pointer
- *  the caller saw (`null` when none), so two admins cannot silently race. */
+/** Point the client's scoring at one saved version, or back at the built-in v0
+ *  (`modelId: 'v0', version: 0`). `expected` is the pointer the caller saw,
+ *  either as GET /models/active reports it (v0@0 when none) or as `null` when
+ *  none, so two admins cannot silently race (CC-LEAD-2). */
 export async function activateModel(input: {
   tenantId: string; orgId: string; modelId: string; version: number; actor: string;
   expected: { modelId: string; version: number } | null;
 }): Promise<ActiveModelPointer> {
   const { tenantId, orgId, modelId, version, actor } = input;
-  if (!(await getModelVersion(tenantId, orgId, modelId, version))) {
+  // CC-LEAD-2: the built-in v0 is never stored, so it is restorable by name.
+  // A v0 pointer resolves to v0 through resolveActiveModel's fallback.
+  const isV0 = modelId === V0_MODEL_ID && version === 0;
+  if (!isV0 && !(await getModelVersion(tenantId, orgId, modelId, version))) {
     throw new OpenwopError('not_found', 'Model version not found.', 404, { modelId, version });
   }
   const current = await active.get(`${tenantId}::${orgId}`);
-  const sameAsExpected = input.expected === null
-    ? current === null
-    : current !== null && current.modelId === input.expected.modelId && current.version === input.expected.version;
+  // CC-LEAD-2: compare what the caller saw with what GET /models/active reports.
+  // No pointer reads as v0@0, so `expected` may be null or v0@0 there.
+  const seen = current === null ? { modelId: V0_MODEL_ID, version: 0 } : { modelId: current.modelId, version: current.version };
+  const want = input.expected ?? { modelId: V0_MODEL_ID, version: 0 };
+  const sameAsExpected = seen.modelId === want.modelId && seen.version === want.version;
   if (!sameAsExpected) {
     throw new OpenwopError('conflict', 'The active model changed since you opened it.', 409, { reason: 'active_model_conflict' });
   }

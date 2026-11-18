@@ -73,7 +73,7 @@ async function fixture(): Promise<{ tenantId: string; orgId: string; ownerId: st
   const orgId = (await owner.post(`${H}/orgs`, { name: 'Studio' })).body.orgId ?? '';
   expect(ownerId && readerId && editorId && orgId, 'fixture: users and the org exist').toBeTruthy();
   for (const [subject, role] of [[readerId, 'viewer'], [editorId, 'editor']] as const) {
-    const add = await owner.post(`${H}/orgs/${encodeURIComponent(orgId)}/members`, { displayName: role, subject, roles: [role] });
+    const add = await owner.post(`${H}/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: role, subject, roles: [role] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
   }
   return { tenantId, orgId, ownerId, readerId, editorId, editor };

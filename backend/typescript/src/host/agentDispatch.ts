@@ -374,6 +374,8 @@ export type ExecuteAgentTool = (
   hostMessage?: true;
   /** ADR 1001 D7 — end the turn after this call, replying `text`. */
   endTurn?: { text: string };
+  /** ADR 1040 D7 F3 — a display summary; the chat transport strips it (never model text). */
+  display?: { summary: string };
 }>;
 
 /** Bound `ctx.callAIWithTools` (a single Anthropic tool-calling round). */
@@ -1246,6 +1248,19 @@ export const ANNOUNCED_WITHOUT_CALL_NUDGE =
 
 /** ADR 0975 D6 — the note a model gets instead of a re-run when it repeats a
  *  call it already made with the same arguments and nothing ran in between. */
+/** #5908 (ADR 0834 D4 correction) — the host's record of what THIS turn changed, sent
+ *  after any round with a successful `write` call. A model that read a tool's own
+ *  "filed" result could still close with "nothing changed" directly under the
+ *  turn's "2 changes" receipt; the note puts the receipt's facts in front of the
+ *  model it is written from, so the reply has to own them. */
+export function turnWritesNote(writes: readonly string[]): string {
+  const counts = new Map<string, number>();
+  for (const w of writes) counts.set(w, (counts.get(w) ?? 0) + 1);
+  const list = [...counts].map(([name, n]) => (n > 1 ? `${name} (${n} calls)` : name)).join(', ');
+  return `Host record of this turn so far: these calls changed state: ${list}. `
+    + 'Your reply must say what each of them changed. Never say that nothing changed or that nothing was done.';
+}
+
 export function repeatedCallNote(toolName: string): string {
   return `You already called ${toolName} with exactly these arguments, and nothing has run since, so its result above is unchanged. `
     + 'Do not call it again. Use that result: call a different tool, or give your answer.';
@@ -1341,22 +1356,25 @@ export async function runChatToolLoop(
   let endTurnText: string | undefined;
   // ADR 0796 — the one-per-turn "you announced it, now call it" follow-up.
   let announceNudged = false;
-  // ADR 0975 D6 — the last call that RAN successfully (name + args hash). A
-  // repeat of it is answered with a note, not re-executed; any other tool
-  // running clears it, because a read after a write may legitimately differ.
-  // MEASURED on kicktodo.com (2026-10-25): the managed model called
-  // `openwop:kicktodo.candidates` five times with identical arguments, spent
-  // every round, and the turn ended with no reply at all.
-  let lastRanCall: string | undefined;
-  // CC-AGENT-3 — the READ calls that ran successfully since the last write this
-  // turn. A repeat of any of them (same tool, same args) is answered with the
-  // note too, not only a repeat of the LAST call: MEASURED on prod f1b882654
-  // (2026-11-13), the Brief Strategist alternated get-brief / validate with
-  // identical arguments for all five rounds — each call differed from the one
-  // before it, so `lastRanCall` never matched. Any write (or a tool whose effect
-  // is unknown) clears the set, because a read after a write may differ.
-  const readsSinceWrite = new Set<string>();
+  // ADR 0975 D6 / CC-AGENT-3 / #5932 — the repeat guard. Each call that RAN to a
+  // finished success (name + args hash) is remembered with the turn's write
+  // generation at that point. A later identical call is answered with a note, not
+  // re-executed, while that generation still holds: nothing has written since, so
+  // the earlier result still stands. Any write (or a tool whose effect is unknown)
+  // starts a new generation, because a read after a write may differ.
+  // MEASURED: kicktodo.com 2026-10-25, five identical `kicktodo.candidates` calls
+  // (ADR 0975 D6); prod f1b882654 2026-11-13, get-brief / validate alternating
+  // (CC-AGENT-3); casavoga-prod 370f6666, A,B,A,B for all five rounds (#5932). The
+  // last case passed the old pair of rules whenever one of the two calls was a
+  // write: the write cleared the read set, and each call differed from the one
+  // before. Under this rule the repeated write meets an unchanged generation.
+  // Residual: two DIFFERENT writes alternating (A,B,A,B, both writes) still run,
+  // because each changes what the other reads; the round budget ends that turn
+  // with the typed `tool_rounds_exhausted`.
+  const ranAtGeneration = new Map<string, number>();
+  let writeGeneration = 0;
   const effectOf = opts.toolEffect ?? ((name: string) => builtinAgentTool(name)?.effect);
+  const turnWrites: string[] = []; // #5908 — successful `write` calls this turn, for turnWritesNote
   // CC-CHAN-1 — refusals this turn. A plan/feature refusal does not depend on the
   // arguments, so a later call to that TOOL is answered from it; any other
   // `forbidden` answers only an identical repeat. MEASURED live on 373d4863a: the
@@ -1457,6 +1475,7 @@ export async function runChatToolLoop(
     // "Result of X" as something the person pasted, and after an approved gated
     // call the agent denied making it (casavoga-prod, 2026-11-13, three runs).
     messages.push({ role: 'assistant', content: defangUntrustedFence(toolCallTurn(out.content, calls)) });
+    const roundWrites: string[] = [];
     for (const call of calls) {
       // ADR 1001 D7 — the turn already ended on an earlier call this round: the
       // rest are recorded as not performed, never run behind the person's back.
@@ -1637,7 +1656,7 @@ export async function runChatToolLoop(
         }
       }
       const callKey = `${call.name}\u0000${computeArgsHash(call.input)}`;
-      if (callKey === lastRanCall || (readsSinceWrite.has(callKey) && effectOf(call.name) === 'read')) {
+      if (ranAtGeneration.get(callKey) === writeGeneration) {
         await emit({ type: 'agent.reasoned', agentId, reasoning: `${persona} repeated ${call.name} with the same arguments; the earlier result was kept, not re-run.` });
         log.info('tool_call_repeat_suppressed', { agentId, toolName: call.name, round });
         messages.push({ role: 'user', content: repeatedCallNote(call.name) });
@@ -1667,10 +1686,10 @@ export async function runChatToolLoop(
       if (!execOut.isError && execOut.endTurn) endTurnText = execOut.endTurn.text;
       // A failed call may be retried as-is (transient), and a call that reported
       // unfinished work (`continueTurn`, ADR 0773 B.7) is MEANT to be made again;
-      // only a finished success counts as "already answered".
-      lastRanCall = execOut.isError || execOut.continueTurn ? undefined : callKey;
-      if (effectOf(call.name) !== 'read') readsSinceWrite.clear();
-      else if (!execOut.isError && !execOut.continueTurn) readsSinceWrite.add(callKey);
+      // only a finished success counts as "already answered". A write (even a
+      // failed one, which may have half-applied) starts a new generation.
+      if (effectOf(call.name) !== 'read') writeGeneration += 1;
+      if (!execOut.isError && !execOut.continueTurn) ranAtGeneration.set(callKey, writeGeneration);
       if (execOut.isError) {
         // RFC 0064 §F — a failure MUST carry `error` populated + `status:'error'`
         // (a bare `status:'error'` with no `error` is the WFAU-4 gap: a failure a
@@ -1690,6 +1709,7 @@ export async function runChatToolLoop(
         await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'error', error: { code, message: scrubSecretShaped(execOut.content) }, ...(toolRan ? { durationMs: Date.now() - startedAt } : {}) });
       } else {
         await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'ok', durationMs: Date.now() - startedAt });
+        if (effectOf(call.name) === 'write') roundWrites.push(call.name);
       }
       const compactedContent = toModelToolResult(
         call.name,
@@ -1716,6 +1736,10 @@ export async function runChatToolLoop(
       // `app-builder.catalog`) in a distrust warning about the very vocabulary
       // the model must author against.
       messages.push({ role: 'user', content: `Result of ${call.name}: ${compactedContent}` });
+    }
+    if (roundWrites.length > 0) {
+      turnWrites.push(...roundWrites);
+      messages.push({ role: 'user', content: turnWritesNote(turnWrites) });
     }
     // ADR 1006 — a run-lane ask ends the loop and the node suspends on it. A tool
     // the firewall HELD this turn must still escalate (ADR 0150): the caller

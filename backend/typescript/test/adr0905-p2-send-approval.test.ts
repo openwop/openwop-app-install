@@ -52,7 +52,7 @@ async function signup(c: Client, tenantId: string): Promise<string> {
   return r.body.user.userId as string;
 }
 async function addMember(owner: Client, orgId: string, subject: string, roles: string[]): Promise<void> {
-  const r = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject, roles });
+  const r = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject, roles });
   expect(r.status, JSON.stringify(r.body)).toBeLessThan(300);
 }
 

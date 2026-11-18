@@ -20,7 +20,8 @@ import { useNavigate } from 'react-router-dom';
 import { Notice } from '../ui/Notice.js';
 import { toast } from '../ui/toast.js';
 import { AgentAvatar } from '../agents/AgentAvatar.js';
-import { roleThemeForAgent, workflowName } from '../agents/roleTemplates.js';
+import { roleThemeForAgent } from '../agents/roleTemplates.js';
+import { useWorkflowNames } from '../agents/useWorkflowNames.js';
 import { loadAgentViews, statusRingColor, type AgentView } from '../agents/agentViewModel.js';
 import { relativeLabel } from './relativeLabel.js';
 import {
@@ -71,12 +72,12 @@ function ItemHead({ persona, role, ringColor, avatarUrl, theme, age }: {
   );
 }
 
-export function NeedsYouInbox({ onResolved, focusApprovalId, onApprovalFocused, workflowRequests = 0 }: {
+export function NeedsYouInbox({ onResolved, focusApprovalId, onApprovalFocused, onCountChange }: {
   onResolved?: () => void;
-  /** ADR 1109 D6 — the page's own "Action needed" count (workflow requests). The
-   *  all-clear line counted roster approvals and waiting agents only, so it read
-   *  "all caught up" beside a tab showing eleven. */
-  workflowRequests?: number;
+  /** ADR 1125 D4 (issue 5909) — this queue's item count, reported up so the page shows
+   *  ONE count (open requests plus these) and owns the "nothing needs you" state.
+   *  The queue used to decide "all caught up" alone, beside a tab showing three. */
+  onCountChange?: (count: number) => void;
   /** ADR 0862 — `/inbox?approval=<id>`: scroll to + focus THIS approval's card (the one
    *  that shows its fields and its decide buttons), once the list has loaded. */
   focusApprovalId?: string;
@@ -84,6 +85,7 @@ export function NeedsYouInbox({ onResolved, focusApprovalId, onApprovalFocused, 
   onApprovalFocused?: () => void;
 }): JSX.Element | null {
   const { t } = useTranslation('notifications');
+  const workflowName = useWorkflowNames(); // issue 5911 — the tenant's own names, not raw ids
   // ADR 0862 — load the lazy `assistantAction` namespace (its decide-failure copy) WITHOUT
   // suspending: listing it in the main hook blanked the whole page on a first visit.
   useTranslation('assistantAction', { useSuspense: false });
@@ -207,19 +209,10 @@ export function NeedsYouInbox({ onResolved, focusApprovalId, onApprovalFocused, 
   const viewByRoster = new Map(views.map((v) => [v.entry.rosterId, v]));
   const blockers = views.filter((v) => v.status === 'waiting');
   const total = (approvals?.length ?? 0) + blockers.length;
+  useEffect(() => { if (approvals !== null) onCountChange?.(total); }, [approvals, total, onCountChange]);
 
-  // All clear → a single quiet line (don't dominate the inbox with an empty card).
-  // ADR 1109 D6 — only when no workflow request waits either; those render in the
-  // list below, so with none of this card's own items there is nothing to show.
-  if (approvals !== null && total === 0 && !error && workflowRequests > 0) return null;
-  if (approvals !== null && total === 0 && !error) {
-    return (
-      <div className="surface-card u-flex u-flex-row u-items-center u-gap-2 u-fs-12">
-        <CheckIcon size={14} />
-        <span className="muted">{t('needsYouAllClear')}</span>
-      </div>
-    );
-  }
+  // Nothing of its own: the page shows the one empty state (ADR 1125 D4).
+  if (approvals !== null && total === 0 && !error) return null;
 
   /** One approval as a card whose body is a horizontal row (list/grid agnostic). */
   const ApprovalItem = (a: PendingApproval): JSX.Element => {

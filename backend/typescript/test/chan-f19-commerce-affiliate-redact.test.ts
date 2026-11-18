@@ -62,7 +62,7 @@ async function workspace(): Promise<{ owner: Client; editor: Client; orgId: stri
   const owner = client(); await owner.post('/host/openwop-app/test/login', { email: `aff-${Date.now()}-${n++}@acme.test`, tenantId });
   const editor = client(); const er = await editor.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `aff-${Date.now()}-${n++}@acme.test`, tenantId });
   const orgId = (await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Shop' })).body.orgId;
-  await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: er.body.user.userId, roles: ['editor'] });
+  await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: er.body.user.userId, roles: ['editor'] });
   return { owner, editor, orgId };
 }
 const c = (orgId: string, suffix: string) => `/host/openwop-app/commerce/orgs/${encodeURIComponent(orgId)}${suffix}`;

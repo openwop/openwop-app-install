@@ -52,6 +52,7 @@ import { registerAnonSurfaceSeamRoutes } from './anonSurfaceSeam.js';
 import { registerPurposePropagationSeamRoutes } from './purposePropagationSeam.js';
 import { registerCompatEndpointRoutes } from './compatEndpoints.js';
 import { registerChatSessionRoutes } from './chatSessions.js';
+import { registerChatToolSummaryRoutes } from './chatToolSummaries.js';
 import { registerPromptRoutes } from './prompts.js';
 import { registerMigrateRoute } from './migrate.js';
 import { registerSubjectRekeyRoute } from './subjectRekey.js';
@@ -221,6 +222,8 @@ const ROUTE_MODULES: RouteModule[] = [
   // Env-gated (OPENWOP_COMPAT_PROVIDER_ENABLED, default OFF); routes 404 when unset.
   { name: 'compat-endpoints', register: ({ app }) => registerCompatEndpointRoutes(app) },
   { name: 'chatSessions', register: ({ app, storage }) => registerChatSessionRoutes(app, { storage }) },
+  // ADR 1040 D7 F3 — per-call display summaries for the turn receipt (host-only).
+  { name: 'chatToolSummaries', register: ({ app }) => registerChatToolSummaryRoutes(app) },
   {
     name: 'prompts',
     register: ({ app }) => registerPromptRoutes(app, {

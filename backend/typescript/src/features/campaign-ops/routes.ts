@@ -21,7 +21,7 @@ import { publicBaseUrl, requireByokManage, requireFeatureEnabled, requireOrgScop
 import { clientIp } from '../../host/clientIp.js';
 import { suspendCollaboratorsForOrg } from '../../host/externalCollaborators.js';
 import { resolveCallerUser } from '../users/usersGuards.js';
-import { createClient, getClient, listClients, updateClient } from './clientService.js';
+import { copyWorkspaceBrandKitToHouse, createClient, getClient, listClients, setUpHouseClient, updateClient } from './clientService.js';
 import { addAsset, getAsset, listAssets, listPageCandidates, refreshAsset, removeAsset } from './assetService.js';
 import { adapterFor } from './adapters/registry.js';
 import { APPROVAL_POLICY_MODES, EXTERNAL_AGENTS_LEVELS, type ApprovalPolicyMode, type ClientAccount, type ClientMode, type ClientStatus, type ExternalAgentsAccess } from './types.js';
@@ -132,6 +132,29 @@ export function registerCampaignOpsRoutes(deps: RouteDeps): void {
         createdBy: await callerUserId(req),
       });
       res.status(201).json({ client });
+    } catch (err) { next(err); }
+  });
+
+  // The house-client ADR — "Set up your own business". Gated like client creation.
+  // Idempotent: a repeat returns the existing house client (200, created:false).
+  // `copyBrandKit: true` also makes the one-time copy of the root org's brand.
+  app.post(`${BASE}/house`, async (req, res, next) => {
+    try {
+      await requireFeatureEnabled(req, CAMPAIGN_OPS_TOGGLE, LABEL);
+      await requireAgencyAdmin(req);
+      const body = (req.body ?? {}) as { name?: unknown; copyBrandKit?: unknown };
+      if (body.copyBrandKit !== undefined && typeof body.copyBrandKit !== 'boolean') {
+        throw new OpenwopError('validation_error', 'copyBrandKit MUST be a boolean.', 400, { field: 'copyBrandKit' });
+      }
+      const tenantId = tenantOf(req);
+      const createdBy = await callerUserId(req);
+      const { client, created } = await setUpHouseClient({
+        tenantId,
+        createdBy,
+        ...(typeof body.name === 'string' ? { name: body.name } : {}),
+      });
+      const brandKit = body.copyBrandKit === true ? await copyWorkspaceBrandKitToHouse({ tenantId, createdBy }) : undefined;
+      res.status(created ? 201 : 200).json({ client, created, ...(brandKit ? { brandKit } : {}) });
     } catch (err) { next(err); }
   });
 

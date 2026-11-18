@@ -22,6 +22,7 @@ import { StateCard } from '../ui/StateCard.js';
 import { Notice } from '../ui/Notice.js';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { deleteUserAgent, getAgent, type AgentEntry } from '../client/agentsClient.js';
+import { handleName } from '../client/agentHandles.js';
 import { ArrowLeftIcon, CheckIcon, CircleIcon } from '../ui/icons/index.js';
 import { formatNumber } from '../i18n/format.js';
 import { writeErrorMessage } from './agentWriteAccess.js';
@@ -126,7 +127,7 @@ function AgentDetail({ agent }: { agent: AgentEntry }): JSX.Element {
         >
           {agent.label || agent.persona}
           <code className="muted u-fs-13 u-fw-400">
-            @{slugify(agent.persona)}
+            @{slugify(handleName(agent))}
           </code>
         </h2>
         {agent.description && (

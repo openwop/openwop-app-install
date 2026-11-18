@@ -86,7 +86,7 @@ async function fixture() {
   const memberId: string = (await member.post(`${H}/test/login`, { email: `kb830-m-${n++}@acme.test`, tenantId })).body.user.userId;
   const orgA: string = (await owner.post(`${H}/orgs`, { name: 'Everyone' })).body.orgId;
   const orgB: string = (await owner.post(`${H}/orgs`, { name: 'Finance' })).body.orgId;
-  const add = await owner.post(`${H}/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberId, roles: ['editor'] });
+  const add = await owner.post(`${H}/test/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberId, roles: ['editor'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
 
   const mk = async (orgId: string, name: string, text: string): Promise<string> => {

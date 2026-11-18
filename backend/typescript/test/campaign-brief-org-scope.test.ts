@@ -78,11 +78,11 @@ async function fixture() {
   const memberId: string = (await member.post<LoginBody>(`${H}/test/login`, { email: `bs-m-${n++}@acme.test`, tenantId })).body.user.userId;
   const orgA: string = (await owner.post<OrgBody>(`${H}/orgs`, { name: 'Client A' })).body.orgId;
   const orgB: string = (await owner.post<OrgBody>(`${H}/orgs`, { name: 'Client B' })).body.orgId;
-  const add = await owner.post(`${H}/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberId, roles: ['editor'] });
+  const add = await owner.post(`${H}/test/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberId, roles: ['editor'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   const viewer = client();
   const viewerId: string = (await viewer.post<LoginBody>(`${H}/test/login`, { email: `bs-v-${n++}@acme.test`, tenantId })).body.user.userId;
-  const addV = await owner.post(`${H}/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] });
+  const addV = await owner.post(`${H}/test/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] });
   expect(addV.status, JSON.stringify(addV.body)).toBe(201);
   // BriefInput / PersonaInput are all-optional, so no cast is needed.
   const briefA = await createBrief(tenantId, orgA, ownerId, { name: 'Client A launch', productName: 'Widget' });

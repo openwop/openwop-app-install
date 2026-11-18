@@ -16,7 +16,9 @@
 import type { Notification } from './types.js';
 import { isActionNeeded } from './types.js';
 
-export type InboxTab = 'action-needed' | 'all' | 'archived';
+/** ADR 1125 D4 — Needs you (open requests, plus the approval queue), Updates
+ *  (news and finished requests) and Archived. Each row is on exactly one tab. */
+export type InboxTab = 'needs-you' | 'updates' | 'archived';
 
 export interface InboxDeepLink {
   notificationId: string;
@@ -37,18 +39,17 @@ export function matchesInboxDeepLink(n: Notification, link: InboxDeepLink): bool
   return false;
 }
 
-/** The tab whose filter is guaranteed to include `n` — so a deep-link never
- *  lands on a tab that hides its target (an `agent.escalation` is NOT
- *  action-needed and would be invisible on the default action-needed tab). */
+/** The tab whose filter includes `n`, so a deep link never lands on a tab that
+ *  hides its target. A finished request opens Updates (ADR 1125 D4). */
 export function canonicalInboxTabFor(n: Notification, featureTypes?: ReadonlySet<string>): InboxTab {
   if (n.status === 'archived') return 'archived';
-  return isActionNeeded(n, featureTypes) ? 'action-needed' : 'all';
+  return isActionNeeded(n, featureTypes) ? 'needs-you' : 'updates';
 }
 
 /** Whether the given tab's filter currently surfaces `n`. */
 export function inboxTabShows(tab: InboxTab, n: Notification, featureTypes?: ReadonlySet<string>): boolean {
   if (n.status === 'archived') return tab === 'archived';
   if (tab === 'archived') return false;
-  if (tab === 'action-needed') return isActionNeeded(n, featureTypes);
-  return true; // 'all'
+  const open = isActionNeeded(n, featureTypes);
+  return tab === 'needs-you' ? open : !open;
 }

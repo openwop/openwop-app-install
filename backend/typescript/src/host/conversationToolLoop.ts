@@ -41,6 +41,7 @@ import { createAiProvidersAdapter, providerSupportsToolCalling, toolRoundResult,
 import { explicitRefNamesOtherProvider } from '../aiProviders/credentialRefLadder.js';
 import { createScopedAgentToolProvider, builtinAgentToolIds, builtinAgentTool } from './agentToolProvider.js';
 import { resolveToolCapability } from '../features/capability-firewall/toolCapabilityResolver.js';
+import { withToolSummaryChannel } from './chatToolSummaries.js';
 import { createTurnRunDispatchCollector, type TurnRunDispatch } from './turnRunDispatch.js';
 import { createChatClarificationCollector, isChatAskEnabled, type ChatClarificationAsk } from './clarificationChat.js';
 import { ASK_USER_TOOL } from './clarificationLift.js';
@@ -750,7 +751,16 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   // toggle read at turn time is exactly what the freeze exists to prevent.
   const compaction = readCompactionDecision(run.metadata);
   // ADR 0889 D9 — opt-in tool-boundary capture for eval cases (off ⇒ the same executor).
-  const chatExecuteTool = await maybeCaptureExecuteTool(toolProvider.executeTool, { tenantId: run.tenantId, runId, agentId: agent.agentId, segment: nodeId, lane: 'chat' });
+  // ADR 1040 D7 F3 — a tool's display summary goes to its own host channel and
+  // is STRIPPED innermost (before eval capture, before the loop): never model
+  // text, never compacted, never in a replay digest or an eval case.
+  const summaryStrippedExecuteTool = withToolSummaryChannel(toolProvider.executeTool, {
+    tenantId: run.tenantId, conversationRunId: runId,
+    ...(params.turnMessageId ? { turnMessageId: params.turnMessageId } : {}),
+    ...(typeof chatSessionId === 'string' && chatSessionId ? { conversationId: chatSessionId } : {}),
+    ...(typeof actingUserId === 'string' && actingUserId ? { actingUserId } : {}),
+  });
+  const chatExecuteTool = await maybeCaptureExecuteTool(summaryStrippedExecuteTool, { tenantId: run.tenantId, runId, agentId: agent.agentId, segment: nodeId, lane: 'chat' });
 
   const runOnce = (model: string) => runChatToolLoop(
     {

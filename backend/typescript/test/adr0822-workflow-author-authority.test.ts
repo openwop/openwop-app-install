@@ -107,8 +107,8 @@ beforeAll(async () => {
   await createOrg({ tenantId: TENANT, orgId: TENANT, name: 'Root', createdBy: 'test' });
   await createMember({ tenantId: TENANT, orgId: TENANT, subject: EDITOR_SUBJECT, displayName: 'Editor', roles: ['editor'] });
   await createMember({ tenantId: TENANT, orgId: TENANT, subject: VIEWER_SUBJECT, displayName: 'Viewer', roles: ['viewer'] });
-  EDITOR = (await issueApiKey({ tenantId: TENANT, name: 'editor', createdBy: EDITOR_SUBJECT })).token;
-  VIEWER = (await issueApiKey({ tenantId: TENANT, name: 'viewer', createdBy: VIEWER_SUBJECT })).token;
+  EDITOR = (await issueApiKey({ scopes: ['*'], tenantId: TENANT, name: 'editor', createdBy: EDITOR_SUBJECT })).token;
+  VIEWER = (await issueApiKey({ scopes: ['*'], tenantId: TENANT, name: 'viewer', createdBy: VIEWER_SUBJECT })).token;
   WRITE_ONLY = (await issueApiKey({ tenantId: TENANT, name: 'write-only', createdBy: EDITOR_SUBJECT, scopes: ['workspace:write'] })).token;
 });
 

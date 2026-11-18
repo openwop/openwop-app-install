@@ -68,7 +68,7 @@ describe('ADR 1124 D3 — a card whose run cannot be opened', () => {
     window.history.replaceState({}, '', '/inbox?notification=n-1');
     render(<MemoryRouter initialEntries={['/inbox?notification=n-1']}><NotificationsPage /></MemoryRouter>);
     expect(screen.getByText(en.endRunDeleted)).toBeTruthy();
-    expect(screen.queryByText(en.cardRunLink)).toBeNull();
+    expect(screen.queryByText(/Open the run/)).toBeNull();
     expect(listOpenInterrupts).not.toHaveBeenCalled();
   });
 });

@@ -376,6 +376,38 @@ export async function canReadChatToolArtifact(
   return canReadChatArtifact(row, subject);
 }
 
+/** ADR 1017 D2 / ADR 1040 D7 F3 — the chat scope of a conversation run in this
+ *  tenant (its chat session + acting user), or null for an unknown or foreign
+ *  run. ONE derivation for every per-turn chat read (turn artifacts, tool
+ *  summaries), so the two cannot disagree about whose turn it is. */
+export async function chatTurnScope(
+  tenantId: string,
+  conversationRunId: string,
+): Promise<{ tenantId: string; conversationId?: string; actingUserId?: string } | null> {
+  const run = await hostExtStorage().getRun(conversationRunId);
+  if (!run || run.tenantId !== tenantId) return null;
+  const meta = (run.metadata ?? {}) as { chatSessionId?: unknown; actingUserId?: unknown };
+  return {
+    tenantId,
+    ...(typeof meta.chatSessionId === 'string' && meta.chatSessionId ? { conversationId: meta.chatSessionId } : {}),
+    ...(typeof meta.actingUserId === 'string' && meta.actingUserId ? { actingUserId: meta.actingUserId } : {}),
+  };
+}
+
+/** ADR 1040 D7 F3 — may `subject` read per-turn chat data of this scope? EXACTLY
+ *  the predicate a chat turn's artifacts are read under (`canReadChatToolArtifact`
+ *  on that scope's chat lane: the `workspace:read` floor or the own-personal-tenant
+ *  exit, then the conversation rule), for data that has no artifact row. */
+export async function canReadChatTurn(
+  tenantId: string,
+  subject: string,
+  scope: { tenantId: string; conversationId?: string; actingUserId?: string },
+  ctx: { personalTenant?: string | undefined } = {},
+): Promise<boolean> {
+  // Chat-tool rows are stored with `orgId = tenantId` (chatArtifactScope.ts).
+  return canReadChatToolArtifact(tenantId, subject, { tenantId, runId: chatArtifactRunId('chat-viz', scope), orgId: tenantId }, ctx);
+}
+
 /** The chat tools that save an artifact under the turn that ran them (ADR 1017 D2). */
 const CHAT_TURN_LANES: readonly ChatArtifactLane[] = ['chat-viz', 'chat-code'];
 
@@ -395,14 +427,8 @@ export async function listArtifactsForChatTurn(
   conversationRunId: string,
   turnMessageId: string,
 ): Promise<Array<ArtifactProjection & { runNodeId: string }>> {
-  const run = await hostExtStorage().getRun(conversationRunId);
-  if (!run || run.tenantId !== tenantId) return [];
-  const meta = (run.metadata ?? {}) as { chatSessionId?: unknown; actingUserId?: unknown };
-  const scope = {
-    tenantId,
-    ...(typeof meta.chatSessionId === 'string' && meta.chatSessionId ? { conversationId: meta.chatSessionId } : {}),
-    ...(typeof meta.actingUserId === 'string' && meta.actingUserId ? { actingUserId: meta.actingUserId } : {}),
-  };
+  const scope = await chatTurnScope(tenantId, conversationRunId);
+  if (!scope) return [];
   const out: Array<ArtifactProjection & { runNodeId: string }> = [];
   for (const lane of CHAT_TURN_LANES) {
     const laneRunId = chatArtifactRunId(lane, scope);

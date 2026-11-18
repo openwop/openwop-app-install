@@ -30,7 +30,7 @@ import {
 import { useAuth } from './useAuth.js';
 import { finalizeFirebaseSession } from './finalizeSession.js';
 import { reloadIntoSession } from './reloadIntoSession.js';
-import { isShellIdentity } from './shellIdentity.js';
+import { beginInPageSignIn, isShellIdentity } from './shellIdentity.js';
 import { logout } from '../features/users/usersClient.js';
 import { useDemoMode } from '../client/useDemoMode.js';
 import { brand } from '../brand/brand.js';
@@ -102,6 +102,9 @@ export function SignInButton() {
   // per-instance /me state used to split-brain the accountPresence signal).
   const backendUser = useBackendSession().user;
   const [modalOpen, setModalOpen] = useState(false);
+  // Issue 5842 — while this tab's own sign-in dialog is open, an identity change is
+  // ours: `onAuthed` handles it, and the cross-tab reload in `useAuth` stands aside.
+  useEffect(() => (modalOpen ? beginInPageSignIn() : undefined), [modalOpen]);
   const [menuOpen, setMenuOpen] = useState(false);
   // AUTH-2: the popover declares role=menu — give it the matching keyboard
   // contract (Escape + outside-click close, ↑↓ roving) without forcing the

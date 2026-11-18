@@ -31,7 +31,7 @@ import type { NodeContext } from '../executor/types.js';
 import { createSandboxRunner } from './sandboxAdapter.js';
 import { getAgentProfile } from './agentProfileService.js';
 import { createHash } from 'node:crypto';
-import { createCard, ensureSubjectBoard, getCard, notifyBoardChanged, todoColumnOf } from './kanbanService.js';
+import { createCard, ensureSubjectBoard, getCard, listBoardsForSubject, notifyBoardChanged, todoColumnOf } from './kanbanService.js';
 import { getRosterEntry } from './rosterService.js';
 import { persistRunArtifact } from './runArtifactStore.js';
 import { chatArtifactRunId } from './chatArtifactScope.js';
@@ -141,7 +141,10 @@ export interface BuiltinTool {
    *  `test/toc2cd11-tool-error-message-ratchet.test.ts` holds every such call. */
   /** `endTurn` (ADR 1001 D7): host-internal. The turn ENDS after this call and
    *  its reply is `text`; later calls in the same round do not run. */
-  run(input: Record<string, unknown>, scope: BundleScope): Promise<{ content: string; isError?: boolean; continueTurn?: string | null; hostMessage?: true; fromThrow?: true; endTurn?: { text: string } }>;
+  run(input: Record<string, unknown>, scope: BundleScope): Promise<{ content: string; isError?: boolean; continueTurn?: string | null; hostMessage?: true; fromThrow?: true; endTurn?: { text: string };
+    /** ADR 1040 D7 F3 — a one-line DISPLAY summary for the turn receipt. Never
+     *  model text: the chat transport records it and strips it before the loop. */
+    display?: { summary: string } }>;
 }
 
 /**
@@ -501,9 +504,13 @@ const KANBAN_ADD_TODO: BuiltinTool = {
     if (dueAtISO && (!/(Z|[+-]\d{2}:?\d{2})$/.test(dueAtISO) || !Number.isFinite(Date.parse(dueAtISO)))) {
       return err('validation_error', '`dueAtISO` must be a valid ISO-8601 timestamp WITH an explicit timezone.');
     }
-    // The agent's own board (idempotent, deterministic id) — its `todo` column is
-    // the roster heartbeat's work-intake contract.
-    const board = await ensureSubjectBoard(scope.tenantId, { kind: 'agent', id: agentId });
+    // The agent's own board — its `todo` column is the roster heartbeat's work-intake
+    // contract. #5965: an agent may already have a board (a legacy `rosterId` board, or one
+    // made in the UI); file onto it, as the heartbeat reads every board the agent owns
+    // (`listBoardsForSubject`), rather than minting a second one. Only an agent with none
+    // gets the deterministic subject board.
+    const board = (await listBoardsForSubject(scope.tenantId, { kind: 'agent', id: agentId })).find((b) => todoColumnOf(b) !== undefined)
+      ?? await ensureSubjectBoard(scope.tenantId, { kind: 'agent', id: agentId });
     const todo = todoColumnOf(board);
     if (!todo) return err('no_todo_column', 'This agent\'s board has no To Do column — ask the user to add one.');
     const persona = (await getRosterEntry(scope.tenantId, agentId).catch(() => null))?.persona ?? 'Agent';

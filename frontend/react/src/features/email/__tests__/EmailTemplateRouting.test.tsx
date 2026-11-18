@@ -16,12 +16,11 @@
  * hub's CREATE form has a multiline Body now; what must stay off the hub is the
  * stacked editor and any control inside a collection cell.
  *
- * The not-found case rejects with the message `asJson` builds for a 404 whose
- * body carries no `message`. The server's real 404 body DOES carry one
- * ("Template not found."), and the page classifies by `/\b404\b/` in the
- * message, so a real stale link renders the load-failed state instead
- * (`TST-NZP-1`, EM2-UX-7; BLOCKED-ON-PRODUCT, the case is titled for what it
- * exercises).
+ * The not-found cases reject with what `asJson` throws: an `EmailApiError` with the
+ * server's real 404 body ("Template not found.", code `not_found`) and with a bare
+ * proxy 404. Before issue 5962 (`TST-NZP-1`, EM2-UX-7) the page looked for `404` in the
+ * message, so the real body rendered the load-failed state; it now decides by the
+ * status or the code, and a 500 stays a load failure.
  *
  * Sabotage-witnessed (/grade-tests wave 9 `w9g4-tr-*`, wave 112 `w112g4-etr-*`):
  * dropping `?org=` from the href, a delete button beside or a control inside a
@@ -58,6 +57,7 @@ const client = vi.hoisted(() => ({
 }));
 const confirmMock = vi.hoisted(() => vi.fn(async () => true));
 import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
+import { EmailApiError } from '../emailErrors.js';
 vi.mock('../emailClient.js', () => client);
 vi.mock('../../../ui/confirm.js', () => ({ confirm: confirmMock }));
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
@@ -151,10 +151,11 @@ describe('the template detail page', () => {
     expect(client.listTemplates).not.toHaveBeenCalled();
   });
 
-  it('a 404 without a server message renders the not-found state instead of an empty editor', async () => {
-    // What `asJson` throws for a 404 whose body has no `message` (TST-NZP-1:
-    // the server's own 404 body has one, and that path renders load-failed).
-    client.getTemplate.mockRejectedValue(new Error('getTemplate returned 404'));
+  it.each([
+    ['the server\'s real 404 body', new EmailApiError('Template not found.', 404, 'not_found')],
+    ['a 404 with no body (a proxy)', new EmailApiError('getTemplate returned 404', 404)],
+  ])('issue 5962 — %s renders the not-found state instead of an empty editor', async (_label, err) => {
+    client.getTemplate.mockRejectedValue(err);
     renderDetail('/email/templates/gone?org=o1');
     await waitFor(() => expect(client.getTemplate).toHaveBeenCalledWith('o1', 'gone'));
     // Let the rejection reach its catch before reading the settled page.
@@ -164,6 +165,14 @@ describe('the template detail page', () => {
     // 404 on save.
     expect(screen.queryByRole('button', { name: /^save$/i })).toBeNull();
     expect(screen.queryByRole('textbox', { name: 'Body' })).toBeNull();
+  });
+
+  it('issue 5962 — a server error (500) is a load failure, not not-found', async () => {
+    client.getTemplate.mockRejectedValue(new EmailApiError('Storage unavailable.', 500, 'internal'));
+    renderDetail('/email/templates/tpl1?org=o1');
+    await waitFor(() => expect(client.getTemplate).toHaveBeenCalled());
+    await act(async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); });
+    expect(screen.queryByRole('heading', { level: 1, name: 'Template not found' })).toBeNull();
   });
 
   it('owns the delete action: Delete removes THIS template and returns to its workspace on the hub', async () => {

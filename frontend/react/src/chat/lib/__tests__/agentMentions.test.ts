@@ -75,3 +75,35 @@ describe('slugToName — humanize a handle for attribution', () => {
     expect(slugToName('')).toBe('');
   });
 });
+
+describe('issue 5800 — a role-token persona does not become the handle', () => {
+  it('builds the handle from the label when persona is a bare upper-case role token', () => {
+    const rows = projectAgents([
+      agent({ agentId: 'p.extractor', persona: 'RESEARCH', label: 'Commitment Extractor', description: 'a' }),
+      agent({ agentId: 'p.chief', persona: 'SUPERVISOR', label: 'Chief of Staff', description: 'b' }),
+      agent({ agentId: 'p.r2', persona: 'RESEARCH', label: 'Market Scan', description: 'c' }),
+    ]);
+    expect(rows.map((r) => r.slug)).toEqual(['commitment-extractor', 'chief-of-staff', 'market-scan']);
+  });
+
+  it('keeps a real persona name as the handle, label or not, so existing handles do not move', () => {
+    const rows = projectAgents([agent({ agentId: 'p.cr', persona: 'Code Reviewer', label: 'Reviewer', description: 'x' })]);
+    expect(rows[0]!.slug).toBe('code-reviewer');
+  });
+
+  it('a role token with no label still slugs the token', () => {
+    const rows = projectAgents([agent({ agentId: 'p.g', persona: 'GENERAL', label: '', description: 'y' })]);
+    expect(rows[0]!.slug).toBe('general');
+  });
+});
+
+describe('issue 5799 — smoke-fixture agents are not offered', () => {
+  it('drops every agent of a fixture pack from the picker, and keeps the rest', () => {
+    const rows = projectAgents([
+      agent({ agentId: 'core.openwop.agent-examples.echo-agent', persona: 'Echo', packName: 'core.openwop.agent-examples', description: 'e' }),
+      agent({ agentId: 'core.openwop.agent-examples.tool-caller', persona: 'Tool Caller', packName: 'core.openwop.agent-examples', description: 't' }),
+      agent({ agentId: 'p.real', persona: 'Real Agent', packName: 'p', description: 'r' }),
+    ]);
+    expect(rows.map((r) => r.agentId)).toEqual(['p.real']);
+  });
+});

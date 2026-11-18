@@ -29,8 +29,12 @@ import { getQuote, projectQuotePublic, SHAREABLE_QUOTE_STATUSES } from '../comme
 import { getOrder } from '../commerce/commerceService.js';
 import { bookingShareValidate, bookingShareLoad } from '../crm/bookingService.js';
 import { signShareValidate, signShareLoad } from '../crm/signService.js';
+import { resolveContactSurvivor } from '../crm/contactsService.js';
+import { shareCodeMailReady } from './shareCodeMail.js';
+import { clearVerification, isVerified, maskEmail, SESSION_HOURS_DEFAULT, SESSION_HOURS_MAX } from './verificationStore.js';
+import { createHash } from 'node:crypto';
 import { approvalShareValidate, approvalShareLoad } from '../campaign-ops/portal.js';
-import { getCollaborator } from '../../host/externalCollaborators.js';
+import { anySurfaceAdmits, getCollaborator, normalizeEmail } from '../../host/externalCollaborators.js';
 import { getCollection, listDocuments } from '../kb/kbService.js';
 import { publicDocumentView, getDocument, canReadDocument } from '../documents/documentsService.js';
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
@@ -99,7 +103,19 @@ export interface ShareLink {
    *  boot by `backfillLinkDeadAt`). A row with no `deadAt` is SKIPPED by the
    *  sweep, never deleted on a guess. */
   deadAt?: string;
+  /** ADR 1141 D1 — the ONE person this link is for, never in the URL. A contact's
+   *  address is resolved at send time (it can change or be erased); an email
+   *  recipient's address is kept because it must be, and is declared to the eraser. */
+  recipient?: ShareRecipient;
+  /** ADR 1141 D4 — sha256 of the normalised address at mint, for erasure matching. */
+  recipientEmailHash?: string;
+  /** ADR 1141 D1 — present ⇒ a view needs a verified browser session for this link. */
+  verify?: { sessionHours: number; lockedAt?: string };
+  /** ADR 1141 D5 — the owner's view of verification. Never the code. */
+  verification?: { sentCount: number; lastSentAt?: string; verifiedCount: number; lastVerifiedAt?: string; failedAttempts: number };
 }
+
+export type ShareRecipient = { kind: 'contact'; contactId: string } | { kind: 'email'; email: string };
 
 interface Card { title: string; description: string; imageToken?: string }
 
@@ -627,13 +643,23 @@ const RESOLVERS: Record<ResourceType, ShareResolver> = {
   // POST that re-checks everything (`campaign-ops/collaboration`). The
   // sub-toggle `campaign-ops.external-collab` is AND-gated in that route; this
   // gate is the parent feature, on the LINK's tenant.
+  //
+  // CORRECTED (ADR 1099 P0b): an invite no longer belongs to campaign-ops. It is
+  // gated by the collaboration SURFACES (`anySurfaceAdmits`, the same check the
+  // accept route makes): some surface's switch AND org rule, on the LINK's tenant
+  // and org. For campaign-ops (the default surface) that is still its two toggles
+  // plus an active client, so nothing changes where campaign-ops is the only
+  // surface; a kind with its own surface (a firm with no campaign-ops) can now
+  // invite. `toggleId: null` because no single toggle owns the type, not because
+  // it is ungated.
   collab_invite: {
-    toggleId: 'campaign-ops',
+    toggleId: null,
     async validate(tenantId, orgId, resourceId) {
       const c = await getCollaborator(tenantId, orgId, resourceId);
-      if (!c || c.status !== 'invited') throw new OpenwopError('not_found', 'Invite not found.', 404, {});
+      if (!c || c.status !== 'invited' || !(await anySurfaceAdmits(tenantId, orgId))) throw new OpenwopError('not_found', 'Invite not found.', 404, {});
     },
     async load(tenantId, orgId, resourceId) {
+      if (!(await anySurfaceAdmits(tenantId, orgId))) return null;
       const c = await getCollaborator(tenantId, orgId, resourceId);
       if (!c || c.status !== 'invited') return null;
       const org = await getOrg(orgId);
@@ -679,7 +705,8 @@ const links = new DurableCollection<ShareLink>(
   // correct, but by a different mechanism than this comment claimed. Stated so
   // nobody "simplifies" the frameview registration away on the strength of a
   // cascade that never runs there.
-  (tokenHash) => purgeFrameViewsForToken(tokenHash),
+  // ADR 1141 D4 — and a deleted link's pending code and verified sessions.
+  async (tokenHash) => { await purgeFrameViewsForToken(tokenHash); await clearVerification(tokenHash); },
 );
 /** ADR 0328 P7 — per-FRAME view analytics for shared decks (and any framed
  *  canvas type later): one row per (link token, frame index), CAS-incremented
@@ -847,13 +874,13 @@ export async function _frameViewCountForToken(token: string): Promise<number> {
 /** ADR 0328 P7 — record one frame view from the PUBLIC viewer. Same
  *  fail-closed posture as resolve (revoked/expired/unknown → uniform 404);
  *  best-effort on CAS contention (analytics never block a reader). */
-export async function recordSharedFrameView(token: string, frame: unknown): Promise<void> {
+export async function recordSharedFrameView(token: string, frame: unknown, viewer?: ShareViewer): Promise<void> {
   // Frame indexes are bounded by the largest deck any canvas type allows
   // (slides MAX_SLIDES=100) — a public token must not mint rows past it.
   if (!Number.isInteger(frame) || (frame as number) < 0 || (frame as number) > 99) {
     throw new OpenwopError('validation_error', '`frame` must be an integer frame index.', 400, { field: 'frame' });
   }
-  const link = await resolveActiveLink(token);
+  const link = await resolveActiveLink(token, viewer ? { viewer } : {});
   const tokenHash = hashToken(token); // public path — unconditional (grade fix #1)
   const key = `${tokenHash}:${frame}`;
   for (let attempt = 0; attempt < 6; attempt++) {
@@ -995,11 +1022,65 @@ function publisherRecheckEnforced(): boolean {
 
 // ─── authed management (authorizeOrgScope-gated in routes) ───────────────────
 
+/** ADR 1141 D1 — validate the optional recipient and verification of a new link.
+ *  Off unless asked: no `recipient` and no `verify` ⇒ nothing is added. */
+async function recipientFields(tenantId: string, rawRecipient: unknown, rawVerify: unknown): Promise<Pick<ShareLink, 'recipient' | 'recipientEmailHash' | 'verify' | 'verification'>> {
+  if (rawRecipient === undefined && rawVerify === undefined) return {};
+  const fail = (field: string, message: string): never => { throw new OpenwopError('validation_error', message, 400, { field }); };
+  let recipient: ShareRecipient | undefined;
+  let email: string | undefined;
+  if (rawRecipient !== undefined) {
+    const r = (rawRecipient ?? {}) as { contactId?: unknown; email?: unknown };
+    if (typeof r.contactId === 'string' && r.email === undefined) {
+      const contactId = cleanOpaqueToken(r.contactId, 256);
+      const contact = contactId ? await resolveContactSurvivor(tenantId, contactId) : null;
+      if (!contact) fail('recipient', '`recipient.contactId` is not a contact in this workspace.');
+      if (!contact!.email) fail('recipient', 'That contact has no email address on record.');
+      recipient = { kind: 'contact', contactId: contact!.contactId };
+      email = normalizeEmail(contact!.email);
+    } else if (r.email !== undefined && r.contactId === undefined) {
+      email = normalizeEmail(r.email);
+      recipient = { kind: 'email', email };
+    } else {
+      fail('recipient', '`recipient` MUST be exactly one of `{ contactId }` or `{ email }`.');
+    }
+  }
+  let verify: ShareLink['verify'];
+  if (rawVerify !== undefined && rawVerify !== null && rawVerify !== false) {
+    if (!recipient) fail('verify', '`verify` needs a `recipient` to send the code to.');
+    const hours = (rawVerify as { sessionHours?: unknown }).sessionHours;
+    const sessionHours = hours === undefined ? SESSION_HOURS_DEFAULT : hours;
+    if (typeof sessionHours !== 'number' || !Number.isInteger(sessionHours) || sessionHours < 1 || sessionHours > SESSION_HOURS_MAX) {
+      fail('verify', `\`verify.sessionHours\` MUST be an integer 1–${SESSION_HOURS_MAX}.`);
+    }
+    // The owner learns now, not the visitor later: a code that cannot be sent locks
+    // the recipient out of their own link.
+    if (!(await shareCodeMailReady(tenantId))) {
+      throw new OpenwopError('share_verification_unavailable', 'No email transport is configured, so a verification code could not be sent.', 422, { field: 'verify' });
+    }
+    verify = { sessionHours: sessionHours as number };
+  }
+  return {
+    ...(recipient ? { recipient, recipientEmailHash: createHash('sha256').update(email!).digest('hex') } : {}),
+    ...(verify ? { verify, verification: { sentCount: 0, verifiedCount: 0, failedAttempts: 0 } } : {}),
+  };
+}
+
+/** ADR 1141 D3 — the address a code goes to, resolved NOW (a contact's email can
+ *  change or be erased). `undefined` when there is none to send to. */
+export async function recipientEmailOf(link: Pick<ShareLink, 'tenantId' | 'recipient'>): Promise<string | undefined> {
+  const r = link.recipient;
+  if (!r) return undefined;
+  if (r.kind === 'email') return r.email;
+  const contact = await resolveContactSurvivor(link.tenantId, r.contactId);
+  return contact?.email ? contact.email : undefined;
+}
+
 export async function createLink(
   tenantId: string,
   orgId: string,
   actor: string,
-  input: { resourceType?: unknown; resourceId?: unknown; label?: unknown; expiresInDays?: unknown; maxViews?: unknown },
+  input: { resourceType?: unknown; resourceId?: unknown; label?: unknown; expiresInDays?: unknown; maxViews?: unknown; recipient?: unknown; verify?: unknown },
   access: ShareMintAccess = { lane: 'member' },
 ): Promise<ShareLink & { token: string }> {
   const resourceType = input.resourceType;
@@ -1027,6 +1108,9 @@ export async function createLink(
     }
     maxViews = n;
   }
+
+  // ADR 1141 D1 — an optional recipient, and verification that needs one.
+  const bound = await recipientFields(tenantId, input.recipient, input.verify);
 
   // SHARE-1 — the owning-feature gate at MINT (this replaces the two
   // per-resolver `validate` checks booking/sign used to carry). A tenant with
@@ -1056,6 +1140,7 @@ export async function createLink(
     ...(maxViews !== undefined ? { maxViews } : {}),
     viewCount: 0,
     revoked: false,
+    ...bound,
     // WF-SHARE-1 — a link with an expiry is born knowing when it dies, so the
     // age-out lane can read it without a second pass.
     ...(expiry.expiresAt ? { deadAt: expiry.expiresAt } : {}),
@@ -1198,6 +1283,14 @@ export async function hasActiveLinkForResource(tenantId: string, resourceType: R
   return false;
 }
 
+/** ADR 1141 — the management list is read by every workspace reader, so a recipient's
+ *  address is masked there and its hash is never listed. */
+function listedRecipient(l: ShareLink): ShareLink {
+  const { recipientEmailHash: _hash, ...rest } = l;
+  if (rest.recipient?.kind === 'email') return { ...rest, recipient: { kind: 'email', email: maskEmail(rest.recipient.email) } };
+  return rest;
+}
+
 export type ListedShareLink = ShareLink & { cardTitle?: string; resourceMissing?: boolean; featureDisabled?: boolean; publisherInactive?: boolean; cardRedacted?: boolean; canAdopt?: boolean };
 
 /** `caller` (ADR 0887 D2) is the reader of the list: a row whose resource the
@@ -1292,7 +1385,7 @@ export async function listLinks(tenantId: string, orgId: string, caller: string)
     // exactly the lie the rest of this change closes. The boolean is the server's
     // to know and the client's to say, so it goes on the wire.
     out.push({
-      ...l,
+      ...listedRecipient(l),
       ...(card ? { cardTitle: card.title } : {}),
       ...(resourceMissing ? { resourceMissing: true } : {}),
       ...(gated ? {} : { featureDisabled: true }),
@@ -1311,6 +1404,7 @@ export async function revokeLink(tenantId: string, orgId: string, token: string)
   }
   const revokedAt = nowIsoSharing();
   await links.put({ ...link, revoked: true, revokedAt, deadAt: revokedAt });
+  await clearVerification(link.tokenHash); // ADR 1141 D4 — a revoked link ends its sessions and any pending code
   schedulePublicAssetResync('share-link', link.tenantId, link.tokenHash); // ADR 1122 P1b — a revoked link exposes nothing
 }
 
@@ -1410,7 +1504,10 @@ export async function shareLinkPage(after: string | undefined, limit: number): P
   return { items, ...(rows.length >= limit && last ? { next: last } : {}) };
 }
 
-async function resolveActiveLink(token: string, opts: { enforceViewCap?: boolean } = {}): Promise<ShareLink> {
+/** The public read's view of the caller: the browser session a verification is bound to. */
+export interface ShareViewer { sid?: string }
+
+async function resolveActiveLink(token: string, opts: { enforceViewCap?: boolean; viewer?: ShareViewer; skipVerification?: true } = {}): Promise<ShareLink> {
   // SHCD-3 — the WIRE stays a uniform, reason-less 404 (that is the whole
   // non-oracle posture, and it is deliberate). But the justification for
   // collapsing nine distinct refusals on the wire is that the SERVER still knows
@@ -1486,7 +1583,58 @@ async function resolveActiveLink(token: string, opts: { enforceViewCap?: boolean
   // uniform 404 hides (a deleted org, a disabled feature, a spent cap, a
   // removed publisher) stays that 404.
   if (exp !== undefined && exp <= Date.now()) throw new OpenwopError('not_found', 'This shared link has expired.', 410, { reason: 'expired' });
+  // ADR 1141 D2 — a recipient-bound link opens only for a browser session that
+  // verified it. Decided after every other gate, so a link that is dead for any
+  // other reason keeps its uniform 404 (or 410) and never reveals that it is
+  // bound. The refusal carries only the firm's name and the masked address, and
+  // nothing from the resource. A lane with no browser session (the capability-
+  // proof callers in other features) has no `viewer`, so it fails closed here.
+  if (link!.verify && !opts.skipVerification) {
+    const tokenHash = link!.tokenHash;
+    if (link!.verify.lockedAt) throw await verificationRefusal(link!, 'share_verification_locked', 423, 'This link is locked. Ask the sender for a new one.');
+    if (!(await isVerified(tokenHash, opts.viewer?.sid))) throw await verificationRefusal(link!, 'share_verification_required', 401, 'Enter the code sent to the email on file to open this link.');
+  }
   return link!;
+}
+
+/** ADR 1141 D3 — the live, recipient-bound link behind a token, for the code lane;
+ *  `null` for any token that is unknown, dead, or not bound (never a distinct error:
+ *  the code routes must answer every one of those the same way). */
+export async function verificationTargetFor(token: string): Promise<(ShareLink & { verify: NonNullable<ShareLink['verify']> }) | null> {
+  try {
+    const link = await resolveActiveLink(token, { enforceViewCap: false, skipVerification: true });
+    return link.verify && link.recipient ? (link as ShareLink & { verify: NonNullable<ShareLink['verify']> }) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** ADR 1141 — a compare-and-swap edit of a link's verification state (counters, lock). */
+export async function updateLinkVerification(tokenHash: string, edit: (link: ShareLink) => ShareLink): Promise<ShareLink | null> {
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const cur = await links.get(tokenHash);
+    if (!cur) return null;
+    const next = edit(cur);
+    if (await links.compareAndSwap(cur, next)) return next;
+  }
+  return null;
+}
+
+/** ADR 1141 D3 — the owner's unlock, on the management lane (org-scoped in the route). */
+export async function unlockLinkVerification(tenantId: string, orgId: string, token: string): Promise<void> {
+  const link = await links.get(keyOf(token));
+  if (!link || link.tenantId !== tenantId || link.orgId !== orgId || !link.verify) {
+    throw new OpenwopError('not_found', 'Share link not found.', 404, {});
+  }
+  await updateLinkVerification(link.tokenHash, (l) => ({ ...l, verify: { sessionHours: l.verify!.sessionHours }, verification: { ...(l.verification ?? { sentCount: 0, verifiedCount: 0 }), failedAttempts: 0 } }));
+}
+
+async function verificationRefusal(link: ShareLink, code: 'share_verification_required' | 'share_verification_locked', status: number, message: string): Promise<OpenwopError> {
+  const [org, email] = await Promise.all([getOrg(link.orgId), recipientEmailOf(link).catch(() => undefined)]);
+  return new OpenwopError(code, message, status, {
+    orgDisplayName: org?.name ?? '',
+    maskedEmail: email ? maskEmail(email) : '•••',
+  });
 }
 
 /** C3 (commerce) — capability proof for an ACTION on a shared resource: the LIVE
@@ -1517,7 +1665,7 @@ export async function resolveActiveResource(token: string, resourceType: Resourc
   return { tenantId: link.tenantId, orgId: link.orgId, resourceId: link.resourceId };
 }
 
-export async function resolveShared(token: string): Promise<{
+export async function resolveShared(token: string, viewer?: ShareViewer): Promise<{
   resourceType: ResourceType;
   label?: string;
   resource: Record<string, unknown>;
@@ -1549,7 +1697,7 @@ export async function resolveShared(token: string): Promise<{
   // enforcement (a racing concurrent view is still caught there); it removes the
   // amplification without giving the orphan case its slot-burn back, since a
   // link that is not at its cap still loads first.
-  const link = await resolveActiveLink(token);
+  const link = await resolveActiveLink(token, viewer ? { viewer } : {});
   // SHCD-16 / ADR 0644 D8 — the cap pre-check that used to sit here (and its twin
   // in `resolveSharedCard`) moved INTO `resolveActiveLink`, the one chokepoint.
   const resource = await RESOLVERS[link.resourceType].load(link.tenantId, link.orgId, link.resourceId, { snapshotAt: link.createdAt });
@@ -1571,8 +1719,8 @@ export async function resolveShared(token: string): Promise<{
   };
 }
 
-export async function resolveSharedCard(token: string, baseUrl: string): Promise<{ title: string; description: string; imageUrl?: string }> {
-  const link = await resolveActiveLink(token);
+export async function resolveSharedCard(token: string, baseUrl: string, viewer?: ShareViewer): Promise<{ title: string; description: string; imageUrl?: string }> {
+  const link = await resolveActiveLink(token, viewer ? { viewer } : {});
   const card = await RESOLVERS[link.resourceType].card(link.tenantId, link.orgId, link.resourceId, { snapshotAt: link.createdAt });
   if (!card) throw new OpenwopError('not_found', 'Shared resource not found.', 404, {});
   return {
@@ -1838,8 +1986,49 @@ export async function eraseSubjectSharing(tenantId: string, subjectKey: string):
   return { revoked, anonymized };
 }
 
-declarePiiFields('sharing.link', ['createdBy']);
+/**
+ * ADR 1141 D4 — erase a link's RECIPIENT. A subject (an email address, or a candidate
+ * contactId) is matched by the address hash taken at mint, the recipient's contactId,
+ * or a contact recipient's current address. In
+ * this order, so a failure part-way fails closed: the link is REVOKED first, then its
+ * pending code and verified sessions go, and only then is the stored address
+ * scrubbed. A revoked link still holding an address opens for nobody.
+ */
+export async function eraseSharingRecipient(tenantId: string, subjectKey: string): Promise<{ revoked: number; scrubbed: number }> {
+  if (!tenantId || !subjectKey) return { revoked: 0, scrubbed: 0 }; // fail-closed — never a tenant-wide sweep
+  // The key is an email address OR a candidate contactId (the CRM eraser's posture).
+  const folded = subjectKey.trim().toLowerCase();
+  const hash = createHash('sha256').update(folded).digest('hex');
+  let revoked = 0;
+  let scrubbed = 0;
+  // The complete scan, for the same reason as `eraseSubjectSharing` above.
+  for (const l of await links.list()) {
+    if (l.tenantId !== tenantId || !l.recipient) continue;
+    let match = l.recipientEmailHash === hash || (l.recipient.kind === 'contact' && l.recipient.contactId === subjectKey);
+    if (!match && l.recipient.kind === 'contact' && folded.includes('@')) {
+      const current = await resolveContactSurvivor(tenantId, l.recipient.contactId).catch(() => null);
+      match = Boolean(current?.email && current.email.trim().toLowerCase() === folded);
+    }
+    if (!match) continue;
+    const now = nowIsoSharing();
+    let row = l;
+    if (!l.revoked) {
+      row = { ...l, revoked: true, revokedAt: now, deadAt: now };
+      await links.put(row);
+      revoked += 1;
+    }
+    await clearVerification(l.tokenHash);
+    const { recipient: _r, recipientEmailHash: _h, ...rest } = row;
+    await links.put(rest);
+    scrubbed += 1;
+  }
+  if (revoked > 0 || scrubbed > 0) log.info('sharing_recipient_erased', { tenantId, revoked, scrubbed });
+  return { revoked, scrubbed };
+}
+
+declarePiiFields('sharing.link', ['createdBy', 'recipient', 'recipientEmailHash']);
 registerSubjectEraser(async function eraseSharingSubject(tenantId, subjectKey) { await eraseSubjectSharing(tenantId, subjectKey); });
+registerSubjectEraser(async function eraseSharingRecipientSubject(tenantId, subjectKey) { await eraseSharingRecipient(tenantId, subjectKey); });
 
 // ─── WF-SHARE-3 — the delete cascade, on the OWNER's seam ────────────────────
 //

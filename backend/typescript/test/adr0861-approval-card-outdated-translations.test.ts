@@ -59,7 +59,7 @@ describe('ADR 0861 D6 addendum — outdated translations on the approval card', 
     expect(org.status, JSON.stringify(org.body)).toBe(201);
     const orgId = org.body.orgId;
     const admin = client(); const adminId = await signup(admin, tenantId);
-    expect((await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'A', subject: adminId, roles: ['admin'] })).status).toBeLessThan(300);
+    expect((await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'A', subject: adminId, roles: ['admin'] })).status).toBeLessThan(300);
     expect((await owner.put(u(orgId, '/language-settings'), { supportedLocales: ['es', 'fr', 'de'] })).status).toBe(200);
 
     const created = await typed<PageBody>(owner.post(u(orgId, '/pages'), {

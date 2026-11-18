@@ -309,7 +309,7 @@ describe('D7 — a send needs workspace:write at the seam', () => {
     const [, editorId, viewerId] = ids as [string, string, string];
     const orgId = ((await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body as { orgId: string }).orgId;
     for (const [subject, role] of [[editorId, 'editor'], [viewerId, 'viewer']] as const) {
-      expect((await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: role, subject, roles: [role] })).status).toBe(201);
+      expect((await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: role, subject, roles: [role] })).status).toBe(201);
     }
     const asViewer = buildFeatureSurfaces({ tenantId, runId: 'r-v', actingUserId: viewerId }).whatsapp!;
     const asEditor = buildFeatureSurfaces({ tenantId, runId: 'r-e', actingUserId: editorId }).whatsapp!;
@@ -493,10 +493,10 @@ describe('D10 — the settings page reads, judged at the workspace root (grade-c
     expect((await owner.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.workspaceId)}/switch`)).status).toBe(200);
     const tenantId = ws.workspaceId;
     // The second person: a VIEWER at the root, an ADMIN of one sub-org.
-    expect((await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(tenantId)}/members`, { displayName: 'Sub Admin', subject: ids[1], roles: ['viewer'] })).status).toBe(201);
+    expect((await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(tenantId)}/members`, { displayName: 'Sub Admin', subject: ids[1], roles: ['viewer'] })).status).toBe(201);
     const subOrg = ((await owner.post('/host/openwop-app/orgs', { name: 'Team A' })).body as { orgId?: string; org?: { orgId: string } });
     const subOrgId = subOrg.org?.orgId ?? subOrg.orgId!;
-    expect((await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(subOrgId)}/members`, { displayName: 'Sub Admin', subject: ids[1], roles: ['admin'] })).status).toBe(201);
+    expect((await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(subOrgId)}/members`, { displayName: 'Sub Admin', subject: ids[1], roles: ['admin'] })).status).toBe(201);
     expect((await subAdmin.post(`/host/openwop-app/workspaces/${encodeURIComponent(tenantId)}/switch`)).status).toBe(200);
 
     const conn = (await createSecretConnection({ tenantId, provider: 'whatsapp-cloud', kind: 'bearer', secret: 'waba-token', scope: 'workspace' })).connectionId;

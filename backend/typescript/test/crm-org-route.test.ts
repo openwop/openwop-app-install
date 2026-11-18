@@ -115,7 +115,7 @@ async function ownerWithMember(role: string): Promise<{ owner: Client; member: C
   const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId;
-  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
+  const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, member, memberId: memberUser.userId, orgId };
 }
@@ -251,7 +251,7 @@ describe('crm org surface — RBAC', () => {
     const bobUser = await signup(bob, { tenantId });
     const orgA = (await ownerC.post('/host/openwop-app/orgs', { name: 'A' })).body.orgId;
     const orgB = (await ownerC.post('/host/openwop-app/orgs', { name: 'B' })).body.orgId;
-    await ownerC.post(`/host/openwop-app/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'Bob', subject: bobUser.userId, roles: ['editor'] });
+    await ownerC.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'Bob', subject: bobUser.userId, roles: ['editor'] });
     expect((await bob.post(c(orgA, '/companies'), { name: 'OK' })).status).toBe(201);
     const crossOrg = await bob.get(c(orgB, '/companies'));
     expect(crossOrg.status).toBe(403);

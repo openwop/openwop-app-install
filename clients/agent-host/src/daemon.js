@@ -7,6 +7,15 @@
 //   host → companion   open | input | resize | stop | attach | hello
 //   companion → host   opened | output | replay | exit | error
 //
+// ADR 1136 P2b — a device paired as a BROWSER runs this daemon in browser mode:
+//   host → companion   browser-op {reqId, executorId, bindingId, kind, op}
+//   companion → host   browser-attach {executorId, protocolVersion}
+//                      | browser-result {reqId, executorId, bindingId, result}
+//                      | browser-detach {executorId}
+// The mode is the device's own capability check (ADR 1136 P2 condition 3): a
+// browser daemon ignores every terminal message, and a terminal daemon ignores
+// every browser operation, whatever the host sends.
+//
 // Reconnects with capped exponential backoff: Cloud Run ends every request,
 // WebSockets included, at its request timeout, so a disconnect is routine, not
 // an error. Running PTY sessions survive a reconnect (they belong to this
@@ -33,6 +42,11 @@ export function claudeLaunchArgs({ prompt, settingsPath, mcpConfigPath } = {}) {
   return args;
 }
 
+/** The browser executor protocol version this companion speaks (ADR 1136). */
+export const BROWSER_PROTOCOL_VERSION = 1;
+/** How long one browser operation may take here before it reports `timeout`. */
+export const BROWSER_OP_TIMEOUT_MS = 15_000;
+
 export function deviceSocketUrl(apiRoot) {
   return `${apiRoot.replace(/^http/, 'ws')}/host/openwop-app/claude-code/device`;
 }
@@ -52,6 +66,8 @@ export class AgentHostDaemon {
    */
   constructor(opts) {
     this.opts = opts;
+    /** @type {'terminal' | 'browser'} */
+    this.mode = opts.mode ?? 'terminal';
     this.command = opts.command ?? 'claude';
     this.log = opts.log ?? (() => {});
     this.setTimer = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
@@ -66,7 +82,7 @@ export class AgentHostDaemon {
     /** @type {Map<string, {parts: Buffer[], bytes: number, timer: unknown}>} */
     this.pending = new Map();
     this.sessions = new PtySessions({
-      ptyFactory: opts.ptyFactory,
+      ptyFactory: opts.ptyFactory ?? (() => { throw new Error('this device was paired as a browser; it hosts no terminal'); }),
       onOutput: (sessionId, _g, chunk) => this.queueOutput(sessionId, chunk),
       onExit: (sessionId, _g, code, requested) => { this.flushOutput(sessionId); this.send({ type: 'exit', sessionId, code, requested }); },
     });
@@ -76,6 +92,7 @@ export class AgentHostDaemon {
 
   stop() {
     this.stopped = true;
+    if (this.mode === 'browser' && this.opts.browser) this.send({ type: 'browser-detach', executorId: this.opts.browser.executorId });
     this.sessions.stopAll();
     try { this.ws?.close(1000, 'companion stopping'); } catch { /* closed */ }
   }
@@ -108,7 +125,11 @@ export class AgentHostDaemon {
     const url = deviceSocketUrl(this.opts.apiRoot);
     const ws = new this.WebSocketImpl(url, { headers: { authorization: `Bearer ${this.opts.token}` } });
     this.ws = ws;
-    ws.onopen = () => { this.backoff = MIN_BACKOFF_MS; this.everOpened = true; this.log(`connected to ${this.opts.apiRoot}`); };
+    ws.onopen = () => {
+      this.backoff = MIN_BACKOFF_MS; this.everOpened = true; this.log(`connected to ${this.opts.apiRoot}`);
+      // Ids only: the host takes the device and the person from this socket's key.
+      if (this.mode === 'browser' && this.opts.browser) this.send({ type: 'browser-attach', executorId: this.opts.browser.executorId, protocolVersion: BROWSER_PROTOCOL_VERSION });
+    };
     ws.onmessage = (ev) => {
       if (typeof ev.data !== 'string') return;
       let msg; try { msg = JSON.parse(ev.data); } catch { return; }
@@ -155,9 +176,26 @@ export class AgentHostDaemon {
     }
   }
 
+  /** ADR 1136 P2b — one browser operation, answered on the same socket. */
+  async browserOp(msg) {
+    const b = this.opts.browser;
+    if (!b || msg.executorId !== b.executorId) return; // not addressed to this browser
+    if (typeof msg.reqId !== 'string' || typeof msg.bindingId !== 'string' || !msg.op || msg.kind !== msg.op.op) return;
+    let result;
+    try { result = await b.executor.perform(msg.op, { timeoutMs: BROWSER_OP_TIMEOUT_MS }); } catch { result = { ok: false, error: 'detached' }; }
+    this.send({ type: 'browser-result', reqId: msg.reqId, executorId: b.executorId, bindingId: msg.bindingId, result });
+  }
+
   handle(msg) {
+    if (msg.type === 'hello') return;
+    // The device's own capability check: each mode answers only its own messages.
+    if (this.mode === 'browser') {
+      if (msg.type === 'browser-op') void this.browserOp(msg);
+      else this.log(`ignored a ${String(msg.type)} message: this device was paired as a browser`);
+      return;
+    }
+    if (typeof msg.type === 'string' && msg.type.startsWith('browser-')) { this.log('ignored a browser operation: this device was paired for Claude Code'); return; }
     switch (msg.type) {
-      case 'hello': return;
       case 'task':
         // ADR 0785 P5 — one app-dispatched task, run headless; the result goes back over HTTP.
         if (this.opts.taskRunner) void this.opts.taskRunner.run(msg);

@@ -247,6 +247,12 @@ export const messages = {
   discardHeldBody: 'Elle est supprimée définitivement et le formulaire récupère d’autant sa capacité de quarantaine. Les vrais prospects ne sont pas affectés.',
   discardHeldDone: 'Soumission en attente supprimée.',
   discardHeldFailed: 'Impossible de supprimer cette soumission — réessayez.',
+  deleteSubmission: 'Supprimer la soumission',
+  deleteSubmissionConfirm: 'Supprimer cette soumission ?',
+  deleteSubmissionBody: 'Elle est supprimée définitivement et ne peut pas être restaurée. Ce qu’elle a déjà créé est conservé : un contact CRM, un ticket ou une exécution de workflow.',
+  deleteSubmissionDone: 'Soumission supprimée.',
+  deleteSubmissionFailed: 'Impossible de supprimer cette soumission — réessayez.',
+  deleteSubmissionLegalHold: 'Cet espace de travail fait l’objet d’une conservation légale : ses soumissions ne peuvent pas être supprimées.',
   // ADR 0850 — held-lead release (D3), the burst hold reason (D5), the
   // consent-is-optional rule (D2) and the conditional-visibility editor (D7).
   submissionHeldBurst: "En attente — rafale d’envois",

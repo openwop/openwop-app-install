@@ -79,6 +79,8 @@ const ERASED = new Map<string, string>([
   ['chat:conversation', 'ownerUserId/ownerSubject/participants redacted (conversationStore eraser)'],
   ['chat:message-feedback', 'subjectRef + reason rows deleted (messageFeedbackStore eraser)'],
   ['chat:read-state', 'subjectRef read markers deleted (conversationReadState eraser)'],
+  ['chat:tool-summary', 'per-call tool display summaries DELETED where actingUserId is a form of the subject (chatToolSummaries eraser, ADR 1040 D7 F3)'],
+  ['chat:tool-summary-conv', 'the summaries\' conversation index; each row DELETED with the summary it points at (chatToolSummaries eraser, ADR 1040 D7 F3)'],
   ['chat:message-reactions', 'subjectRef reaction rows deleted (messageReactionsStore eraser)'],
   // ADR 0592 §8 — CLASSIFICATION MOVE (disclosed): this row lived in
   // REVIEWED_EXEMPT as "no-subject: locale config; updatedBy is operator

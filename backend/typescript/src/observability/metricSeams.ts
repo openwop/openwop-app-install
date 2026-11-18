@@ -212,6 +212,14 @@ export function recordHostEventAppendFailed(outcome: HostEventAppendFailedOutcom
   addCount('openwop.host_event.log.append_failed', 1, { outcome });
 }
 
+/**
+ * ADR 1147 — the exit guard stamped `no-store` on an error the route wrote directly.
+ * `route` is the template (or `(no route)`), never the raw path.
+ */
+export function recordErrorCacheStamped(route: string, status: number, prior: 'none' | 'weaker'): void {
+  addCount('openwop.http.error_cache_stamped', 1, { route, status_class: status >= 500 ? '5xx' : '4xx', prior });
+}
+
 /** What the ADR 0341 fast path found in the source run for a side-effecting node. */
 export type ReplayServedOutcome = 'recorded-success' | 'recorded-failure' | 'source-missing';
 

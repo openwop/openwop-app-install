@@ -107,7 +107,7 @@ async function ownerWithViewer(): Promise<{ owner: Client; viewer: Client; viewe
   const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId;
-  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Viewer', subject: viewerUser.userId, roles: ['viewer'] });
+  const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Viewer', subject: viewerUser.userId, roles: ['viewer'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, viewer, viewerId: viewerUser.userId, orgId };
 }
@@ -233,7 +233,7 @@ describe('media library — followup hardening', () => {
     const bobUser = await signup(bob, { tenantId });
     const orgA = (await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'A' })).body.orgId;
     const orgB = (await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'B' })).body.orgId;
-    const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'Bob', subject: bobUser.userId, roles: ['editor'] });
+    const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'Bob', subject: bobUser.userId, roles: ['editor'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
 
     // Editor of A (not owner) holds workspace:write → can create in A.

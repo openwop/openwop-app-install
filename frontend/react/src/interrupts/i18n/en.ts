@@ -6,7 +6,8 @@ export const messages = {
   // ADR 0755 D3 — the resume token is projected only to an approvals:respond holder.
   noRespondPermission: 'You can see this step, but you don\'t have permission to respond to it.',
   // RenderInterrupt fallback — neutral copy; never instructs users to edit source (DEMO-14)
-  unknownKindBody: 'This request can\'t be answered here. Ask whoever runs this workspace to update the app.',
+  unknownKindBody: 'This request can\'t be answered here.',
+  unknownKindLog: 'View the activity log',
   credentialTitle: 'Connect {{provider}}',
   credentialAnAccount: 'an account',
   credentialBody: 'This needs access to {{provider}} before it can continue.',

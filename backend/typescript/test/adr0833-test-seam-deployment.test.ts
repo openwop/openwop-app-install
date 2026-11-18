@@ -29,22 +29,33 @@ afterEach(() => {
   }
 });
 
-async function seamStatus(): Promise<number> {
+async function withSeam<T>(probe: (base: string) => Promise<T>): Promise<T> {
   const app = express();
   app.use(express.json());
   app.use(protocolVersionMiddleware());
   registerAuthTestSeamRoutes(app);
   const server = await new Promise<http.Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   try {
-    const port = (server.address() as { port: number }).port;
-    const res = await fetch(`http://127.0.0.1:${port}/host/openwop-app/test/login`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ subject: 'oidc:victim' }),
-    });
-    return res.status;
+    return await probe(`http://127.0.0.1:${(server.address() as { port: number }).port}`);
   } finally {
     await new Promise<void>((r) => server.close(() => r()));
   }
 }
+
+const seamStatus = (): Promise<number> => withSeam(async (base) => (await fetch(`${base}/host/openwop-app/test/login`, {
+  method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ subject: 'oidc:victim' }),
+})).status);
+
+/** #5945 — whether the seam's member routes are MOUNTED. Express's own
+ *  "Cannot POST" page means no route; any other answer (the handler's own
+ *  refusal, with no auth middleware here) means the route exists. */
+const memberSeamMounted = (): Promise<boolean[]> => withSeam(async (base) => Promise.all([
+  ['POST', '/host/openwop-app/test/orgs/org-x/members'],
+  ['PATCH', '/host/openwop-app/test/orgs/org-x/members/m-x'],
+].map(async ([method, path]) => {
+  const res = await fetch(`${base}${path}`, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ displayName: 'P', subject: 'user:victim' }) });
+  return !(await res.text()).includes(`Cannot ${method} ${path}`);
+})));
 
 describe('S9 / D8 — test-login seam vs a deployment', () => {
   it.each([
@@ -56,6 +67,7 @@ describe('S9 / D8 — test-login seam vs a deployment', () => {
     Object.assign(process.env, env);
     expect(testAuthSeamStartupError()).toMatch(/ADR 0833/);
     expect(await seamStatus()).toBe(404);
+    expect(await memberSeamMounted(), 'the #5945 member seam is not mounted either').toEqual([false, false]);
   });
 
   it('a local / harness boot (memory://, no platform marker) is untouched — the route serves 201', async () => {
@@ -68,11 +80,13 @@ describe('S9 / D8 — test-login seam vs a deployment', () => {
     __resetHostExtPersistence();
     initHostExtPersistence(openSqliteStorage(':memory:'));
     expect(await seamStatus()).toBe(201);
+    expect(await memberSeamMounted(), 'the #5945 member seam is mounted beside /test/login').toEqual([true, true]);
   });
 
-  it('a deployment WITHOUT the flag is untouched', () => {
+  it('a deployment WITHOUT the flag is untouched, and serves neither seam', async () => {
     delete process.env.OPENWOP_TEST_AUTH_ENABLED;
     process.env.K_SERVICE = 'openwop-app-backend';
     expect(testAuthSeamStartupError()).toBeNull();
+    expect(await memberSeamMounted()).toEqual([false, false]);
   });
 });

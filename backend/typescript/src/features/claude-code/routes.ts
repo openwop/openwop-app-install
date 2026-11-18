@@ -30,12 +30,14 @@ import {
   CONSENT_TEXT,
   claudeCodeOperatorEnabled,
   consentHash,
+  consentTextFor,
 } from './constants.js';
 import {
   decidePairing,
   getPendingPairing,
   listDevices,
   ownedDevice,
+  deviceCapabilityOf,
   pollPairing,
   revokeDevice,
   setWorkflowTasks,
@@ -102,8 +104,8 @@ export function registerClaudeCodeRoutes({ app }: RouteDeps): void {
       res.setHeader('Retry-After', String(Math.ceil(START_WINDOW_MS / 1000)));
       throw new OpenwopError('rate_limited', 'Too many pairing attempts from this address. Try again later.', 429, {});
     }
-    const b = (req.body ?? {}) as { label?: unknown; platform?: unknown };
-    const started = await startPairing({ label: b.label, platform: b.platform, requesterIp: ip });
+    const b = (req.body ?? {}) as { label?: unknown; platform?: unknown; capability?: unknown };
+    const started = await startPairing({ label: b.label, platform: b.platform, requesterIp: ip, capability: b.capability });
     res.status(201).json({
       ...started,
       // Relative on purpose: the companion joins it to the origin it was pointed at.
@@ -134,7 +136,9 @@ export function registerClaudeCodeRoutes({ app }: RouteDeps): void {
     if (!pending) throw new OpenwopError('not_found', 'That pairing code is unknown or has expired.', 404, {});
     // `workspaceId`: the approval mints the key in the caller's ACTIVE workspace,
     // so the page names it before anyone clicks.
-    res.json({ request: pending, workspaceId: tenantOf(req), consent: CONSENT_TEXT, consentHash: consentHash() });
+    // ADR 1136 P2a — the consent for THIS pairing's capability (terminal or browser).
+    const consent = consentTextFor(pending.capability);
+    res.json({ request: pending, workspaceId: tenantOf(req), consent, consentHash: consentHash(consent) });
   }));
 
   app.post(`${CLAUDE_CODE_BASE}/pair/requests/:userCode/approve`, wrap(async (req, res) => {
@@ -201,6 +205,10 @@ export function registerClaudeCodeRoutes({ app }: RouteDeps): void {
     const b = (req.body ?? {}) as { deviceId?: unknown; cols?: unknown; rows?: unknown; prompt?: unknown; title?: unknown; approveFromAnywhere?: unknown };
     const device = typeof b.deviceId === 'string' ? await ownedDevice(tenantOf(req), b.deviceId, subject) : null;
     if (!device) throw new OpenwopError('not_found', 'Device not found.', 404, {});
+    // ADR 1136 P2a — a device paired as a browser cannot host a terminal.
+    if (deviceCapabilityOf(device) !== 'terminal') {
+      throw new OpenwopError('conflict', 'That device was paired as a browser. Pair a Claude Code device to open a terminal.', 409, { reason: 'device_capability' });
+    }
     if (!(await isDeviceOnline(device.deviceId))) {
       throw new OpenwopError('conflict', 'That device is offline. Start the companion on it (openwop-agent-host run), then try again.', 409, { reason: 'device_offline' });
     }

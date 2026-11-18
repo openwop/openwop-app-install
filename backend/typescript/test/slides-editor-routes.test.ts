@@ -405,7 +405,7 @@ describe('present remote (ADR 0328 P4)', () => {
     expect(vLogin.status).toBe(201);
     const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
     const orgId = org.body.orgId;
-    const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, {
+    const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, {
       displayName: 'RO', subject: vLogin.body.user.userId, roles: ['viewer'],
     });
     expect(add.status, JSON.stringify(add.body)).toBe(201);

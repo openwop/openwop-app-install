@@ -114,7 +114,7 @@ async function boundFixture(): Promise<{ tenantId: string; orgId: string; collec
   // never grants write" — and `workspace:write` in the org READS every project in it,
   // private ones included). Only READ has the membership dimension the gate enforces,
   // so the principal KBC-1 refuses is an org reader who is not a project member.
-  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Intruder', subject: intruder, roles: ['viewer'] });
+  const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Intruder', subject: intruder, roles: ['viewer'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
 
   const project = await createProject(tenantId, orgId, { name: 'Private project' });
@@ -347,7 +347,7 @@ describe('ADR 0643 R4 review — the SEVENTH bind door and the two missed reads'
     // the leg was ~50% 403 before, deterministically 200 now.
     const orgA = await ownerClient.post('/host/openwop-app/orgs', { name: 'Other Org' });
     expect(orgA.status, JSON.stringify(orgA.body)).toBe(201);
-    const addA = await ownerClient.post(`/host/openwop-app/orgs/${encodeURIComponent(orgA.body?.orgId as string)}/members`, { displayName: 'Intruder', subject: intruder, roles: ['editor'] });
+    const addA = await ownerClient.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgA.body?.orgId as string)}/members`, { displayName: 'Intruder', subject: intruder, roles: ['editor'] });
     expect(addA.status, JSON.stringify(addA.body)).toBe(201);
     const roster = await createRosterEntry({ tenantId, persona: 'Read probe', agentRef: { agentId: 'agent:read-probe' }, roleKey: 'kb-agent' });
     const agentId = roster.rosterId;

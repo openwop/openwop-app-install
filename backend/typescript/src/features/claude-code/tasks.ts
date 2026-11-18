@@ -132,7 +132,8 @@ async function chooseDevice(ctx: NodeContext, wanted: string | undefined): Promi
   const { listDeviceRecordsForSubject, listDeviceRecordsForOwnerUser } = await import('./pairingService.js');
   const byId = new Map<string, DeviceRecord>();
   for (const d of [...await listDeviceRecordsForSubject(ctx.tenantId, acting), ...await listDeviceRecordsForOwnerUser(ctx.tenantId, acting)]) byId.set(d.deviceId, d);
-  const mine = [...byId.values()].filter((d) => !d.revokedAt && (!wanted || d.deviceId === wanted));
+  // ADR 1136 P2a — a browser device never runs Claude Code tasks.
+  const mine = [...byId.values()].filter((d) => !d.revokedAt && (d.capability ?? 'terminal') === 'terminal' && (!wanted || d.deviceId === wanted));
   const allowed = mine.filter((d) => d.workflowTasks);
   if (mine.length > 0 && allowed.length === 0) return 'consent_required';
   for (const d of allowed) if (await isDeviceOnline(d.deviceId)) return d;

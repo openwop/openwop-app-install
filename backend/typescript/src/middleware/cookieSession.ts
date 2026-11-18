@@ -263,6 +263,17 @@ export function mintAnonSession(): SessionPayload {
   return buildSessionPayload({ sid, tenantId: `anon:${sid}`, tier: 'anon' });
 }
 
+/** ADR 1141 — set the cookie for an anonymous session minted by
+ *  {@link mintAnonSession}, so a caller that needs the `sid` BEFORE it decides to
+ *  hand the cookie out (the share-link verify sets it only on success) still mints
+ *  through the ONE builder (ADR 0833 D2): `buildSessionPayload`'s anon lifetime
+ *  (24 h, sliding) and shape, never a hand-built payload. Refuses anything but an
+ *  anon payload. */
+export function setAnonSessionCookie(res: Response, session: SessionPayload): void {
+  if (session.tier !== 'anon' || session.tenantId !== `anon:${session.sid}`) throw new Error('setAnonSessionCookie takes an anonymous session from mintAnonSession');
+  setSessionCookie(res, signSession(session));
+}
+
 /**
  * Bind the response's session cookie to a durable user (ADR 0003, Phase 2). The
  * password login/signup routes call this on success so every subsequent request

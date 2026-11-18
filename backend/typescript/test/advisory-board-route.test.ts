@@ -160,7 +160,7 @@ describe('advisory-board — visibility + IDOR', () => {
     const a = await makeAdvisor(owner, 'Ada');
     const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
     const orgId = org.body.orgId!;
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
 
     const priv = await owner.post(B, { orgId, name: 'Private', advisors: [a], visibility: 'private' });
     const shared = await owner.post(B, { orgId, name: 'Shared', advisors: [a], visibility: 'shared' });
@@ -200,7 +200,7 @@ describe('advisory-board — visibility + IDOR', () => {
     const memberUser = await signup(member, { tenantId });
     const a = await makeAdvisor(owner, 'Ada');
     const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(org.body.orgId!)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(org.body.orgId!)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
     const board = await owner.post(B, { orgId: org.body.orgId, name: 'Shared', advisors: [a], visibility: 'shared' });
     const path = `${B}/${encodeURIComponent(board.body.boardId!)}`;
     // Member can read (shared) but not mutate — and the refusals changed nothing.
@@ -221,7 +221,7 @@ describe('advisory-board — visibility + IDOR', () => {
     const memberUser = await signup(member, { tenantId });
     const a = await makeAdvisor(adopter, 'Ada');
     const org = await adopter.post('/host/openwop-app/orgs', { name: 'Acme' });
-    await adopter.post(`/host/openwop-app/orgs/${encodeURIComponent(org.body.orgId!)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    await adopter.post(`/host/openwop-app/test/orgs/${encodeURIComponent(org.body.orgId!)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
     // Seeded the way the demo provisioners stamp boards: a synthetic `demo:*`
     // actor no caller identity ever matches — pre-fix, permanently uneditable.
     const seeded = await createBoardService(tenantId, org.body.orgId!, 'demo:advisory-seed', { name: 'Seeded Council', advisors: [a], visibility: 'shared' });
@@ -249,7 +249,7 @@ describe('advisory-board — @@<handle> resolution (for the AI chat)', () => {
     const b = await makeAdvisor(owner, 'Boaz');
     const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
     const orgId = org.body.orgId!;
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
 
     const shared = await owner.post(B, { orgId, name: 'Council', advisors: [a, b], visibility: 'shared' });
     const priv = await owner.post(B, { orgId, name: 'Private', advisors: [a], visibility: 'private' });
@@ -328,7 +328,7 @@ describe('advisory-board — strategy context (ADR 0079 Phase 5)', () => {
     const member = client(); const memberUser = await signup(member, { tenantId });
     const orgA = (await owner.post('/host/openwop-app/orgs', { name: 'Alpha' })).body.orgId!;
     const orgB = (await owner.post('/host/openwop-app/orgs', { name: 'Bravo' })).body.orgId!;
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
     const adv = await makeAdvisor(member, 'Cleo');
     // an org-scoped strategy in org B (the member can't read it)
     const sB = (await owner.post(S, { orgId: orgB, title: 'Secret plan', scope: 'org' })).body;

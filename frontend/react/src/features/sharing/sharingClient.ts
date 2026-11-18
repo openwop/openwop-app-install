@@ -258,16 +258,36 @@ export interface SharedResource {
  *  told, in the app's voice, that the owner had probably revoked it. The owner
  *  did nothing of the kind. The distinction now rides `details.reason` rather
  *  than a message string, so it survives rewording and translation. */
-export type SharedResolveFailure = 'expired' | 'gone' | 'resourceGone' | 'unavailable';
+export type SharedResolveFailure = 'expired' | 'gone' | 'resourceGone' | 'unavailable' | 'verify' | 'locked';
+
+/** ADR 1141 — what a recipient-bound link shows before its code: the firm's name
+ *  and the masked address, never anything from the shared resource. */
+export interface ShareVerifyPrompt { orgDisplayName: string; maskedEmail: string }
 
 /** Resolve a share token on the PUBLIC, unauthenticated surface (no auth headers —
  *  the unguessable token is the credential). Used by the public viewer page.
  *  Throws an Error carrying `kind: SharedResolveFailure`. */
 export async function resolveSharedPublic(token: string): Promise<SharedResource> {
   let res: Response;
-  try { res = await fetch(sharedUrl(token)); }
+  // ADR 1141 — credentials ride, so a browser that verified a recipient-bound link
+  // presents its session (`__session`); an unbound link ignores it.
+  try { res = await fetch(sharedUrl(token), fetchOpts()); }
   catch { throw Object.assign(new Error('resolveShared network failure'), { kind: 'unavailable' as SharedResolveFailure }); }
   if (res.status === 410) throw Object.assign(new Error('expired'), { kind: 'expired' as SharedResolveFailure });
+  if (res.status === 401 || res.status === 423) {
+    let details: { orgDisplayName?: unknown; maskedEmail?: unknown } | undefined;
+    let code: unknown;
+    try { const b = (await res.json()) as { error?: unknown; details?: typeof details }; code = b.error; details = b.details; } catch { /* non-JSON */ }
+    if (code === 'share_verification_required' || code === 'share_verification_locked') {
+      const prompt: ShareVerifyPrompt = {
+        orgDisplayName: typeof details?.orgDisplayName === 'string' ? details.orgDisplayName : '',
+        maskedEmail: typeof details?.maskedEmail === 'string' ? details.maskedEmail : '',
+      };
+      const kind: SharedResolveFailure = code === 'share_verification_locked' ? 'locked' : 'verify';
+      throw Object.assign(new Error(kind), { kind, prompt });
+    }
+    throw Object.assign(new Error(`resolveShared returned ${res.status}`), { kind: 'unavailable' as SharedResolveFailure });
+  }
   if (res.status === 404) {
     // A 404 whose body says WHY. Absent/unparseable ⇒ `gone`, the conservative
     // reading: never invent "the content was deleted" from a body we could not
@@ -279,6 +299,42 @@ export async function resolveSharedPublic(token: string): Promise<SharedResource
   }
   if (!res.ok) throw Object.assign(new Error(`resolveShared returned ${res.status}`), { kind: 'unavailable' as SharedResolveFailure });
   return (await res.json()) as SharedResource;
+}
+
+/** ADR 1141 — why a code request or check did not go through. `wrong` covers every
+ *  refused code (the server answers them alike); `rateLimited` carries the wait. */
+export class ShareCodeError extends Error {
+  constructor(readonly kind: 'wrong' | 'rateLimited' | 'unavailable', readonly retryAfterS?: number) { super(kind); }
+}
+
+async function codeCall(path: string, body?: unknown): Promise<Response> {
+  try {
+    return await fetch(path, fetchOpts({ method: 'POST', headers: { 'content-type': 'application/json' }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) }));
+  } catch {
+    throw new ShareCodeError('unavailable');
+  }
+}
+
+async function retryAfterOf(res: Response): Promise<number | undefined> {
+  try { const n = ((await res.json()) as { details?: { retryAfterS?: unknown } }).details?.retryAfterS; return typeof n === 'number' ? n : undefined; } catch { return undefined; }
+}
+
+/** ADR 1141 — ask for a code to the address on record. The server answers 202 for
+ *  any token; only a live, bound link actually sends one. */
+export async function requestShareCode(token: string): Promise<void> {
+  const res = await codeCall(`${sharedUrl(token)}/verification`);
+  if (res.status === 202) return;
+  if (res.status === 429) throw new ShareCodeError('rateLimited', await retryAfterOf(res));
+  throw new ShareCodeError('unavailable');
+}
+
+/** ADR 1141 — check a code; on success this browser can open the link. */
+export async function verifyShareCode(token: string, code: string): Promise<void> {
+  const res = await codeCall(`${sharedUrl(token)}/verification/verify`, { code });
+  if (res.status === 204) return;
+  if (res.status === 400) throw new ShareCodeError('wrong');
+  if (res.status === 429) throw new ShareCodeError('rateLimited', await retryAfterOf(res));
+  throw new ShareCodeError('unavailable');
 }
 
 /** ADR 0328 P7 — per-frame view tallies for one link (owner surface). */

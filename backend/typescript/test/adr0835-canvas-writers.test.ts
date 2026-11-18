@@ -70,7 +70,7 @@ async function fixture() {
   const viewer = client();
   const viewerId = (await viewer.post<LoginBody>(`${H}/test/login`, { email: `w835-v-${n++}@acme.test`, tenantId })).body.user.userId;
   const orgId = (await owner.post<OrgBody>(`${H}/orgs`, { name: 'Acme' })).body.orgId;
-  const add = await owner.post(`${H}/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] });
+  const add = await owner.post(`${H}/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { tenantId, owner, ownerId, viewerId, orgId };
 }

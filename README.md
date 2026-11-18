@@ -1,4 +1,4 @@
-> **Published white-label install bundle.** Auto-synced from `openwop/openwop-app` (source `b39a557d11`). Clone or download the release zip, then follow **[WHITE-LABEL.md](./frontend/react/WHITE-LABEL.md)** to deploy your own. Generated — PRs here are not merged; development happens upstream.
+> **Published white-label install bundle.** Auto-synced from `openwop/openwop-app` (source `0ca7f76944`). Clone or download the release zip, then follow **[WHITE-LABEL.md](./frontend/react/WHITE-LABEL.md)** to deploy your own. Generated — PRs here are not merged; development happens upstream.
 
 # openwop-app — OpenWOP Application
 
@@ -291,7 +291,8 @@ governance) until the **first admin is seated**. Seat them once, with the
 wildcard operator key — `OPENWOP_API_KEYS=<key>:*` (the `:*` suffix must be
 written explicitly; a bare key is scoped to `default`) — against
 `POST /host/openwop-app/orgs/:orgId/members` with `roles: ["admin"]` (or
-`owner`) and `subject` = the SAML user's `user:<userId>`; that admin then seats
+`owner`) and `subject` = the SAML user's `user:<userId>`. (The wildcard key is
+exempt from ADR 1123's refusal of a typed `user:` subject; nobody else is.) That admin then seats
 everyone else from **Access → Members**, or through an ADR 0006 host group.
 `requireMfa` on the SAML tenant is now enforced on SAML sessions too (the
 `/users/me/security` enrollment read and the workspace switch stay exempt so

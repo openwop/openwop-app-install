@@ -15,7 +15,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { scrubSecretShaped } from '../src/host/redactSecrets.js';
-import { safeUrl } from '../src/host/boundedStrings.js';
+import { cleanContent, safeUrl } from '../src/host/boundedStrings.js';
 
 const MARK = '[REDACTED:secret-shaped]';
 
@@ -26,6 +26,13 @@ describe('word slugs survive the secret scrub', () => {
     expect(scrubSecretShaped(slug)).toBe(slug);
     const url = `https://acme.example/blog/${slug}`;
     expect(safeUrl(url, 2048)).toBe(url);
+  });
+
+  it('keeps the #5044 article slug, in the log lane and in CMS content', () => {
+    const slug = 'b2b-content-marketing-in-2026-ai-adoption-is-near-universal-but-performance-gains-are-not';
+    const lede = `As https://news.example/${slug} reports, adoption is near universal.`;
+    expect(scrubSecretShaped(lede)).toBe(lede);
+    expect(cleanContent(lede, 4000, 'lede')).toBe(lede);
   });
 
   it('still redacts opaque blobs: mixed case, underscores, one long run', () => {

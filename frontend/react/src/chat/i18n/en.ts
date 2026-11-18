@@ -37,7 +37,7 @@ export const messages = {
   onSuffix: 'on',
   permissionSafeLabel: 'Ask first',
   permissionBypassLabel: 'Act directly',
-  permissionSafeTitle: 'Ask first — the agent asks before running code or other consequential actions (click to let it act directly)',
+  permissionSafeTitle: 'Ask first — the agent asks before running code, running a workflow it wrote, or sending anything outside the app. Notes to you and to-dos on its own board need no ask (click to let it act directly)',
   permissionBypassTitle: 'Act directly — the agent acts without asking you first (workspace approval rules, sandbox, permissions & limits still apply; click to ask first)',
   togglePermissionMode: 'Toggle permission mode (safe / bypass)',
   permissionOwnerOnlyTitle: 'Ask first — only the conversation owner can let the agent act directly',
@@ -230,6 +230,19 @@ export const messages = {
   slashCommandsAria: 'Slash commands and workflows',
   commandsSection: 'Commands',
   workflowsSection: 'Workflows',
+  // — SlashAutocomplete Templates group (the picker-templates ADR) —
+  templatesSection: "Templates",
+  templateBrowseAll: "Browse all templates…",
+  templateAskAdmin: "Ask an admin to add this template",
+  workflowFromTemplateChip: "From template",
+  templateGalleryTitle: "Add a workflow from a template",
+  templateYouHaveACopy: "You have a copy",
+  templateAddAnotherCopy: "Add another copy",
+  templateGalleryEmptyTitle: "No workflow templates yet",
+  templateGalleryEmptyBody: "Nothing is installed on this workspace yet. An admin can add template packs.",
+  templateAddedToComposer: "Added “{{name}}” to your workflows. Fill in its inputs, then press Enter to run it.",
+  templateAddedNotListed: "Added “{{name}}” to your workflows, but the / list hasn’t picked it up yet. Type / to look again.",
+  templateNotFound: "That template isn’t available any more.",
 
   // — BackendStatusCard —
   backendLoading: 'Loading',
@@ -498,6 +511,7 @@ export const messages = {
   cardLabelExternalEvent: 'Waiting for an outside event',
   externalEventWaitingBody: 'This step is waiting for linked runs or an outside event, and continues on its own. There is nothing to do here.',
   waitingResumesOnItsOwn: 'Waiting — continues on its own',
+  decisionNotRecorded: "Couldn’t record your decision: {{reason}}",
 
   // — defaultCommands —
   cmdNewDescription: 'Start a new chat session (wipes the current thread)',

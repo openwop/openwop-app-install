@@ -137,7 +137,7 @@ describe('ADVB-1 — the board planning-context block is re-resolved per CALLER'
     // `viewer` = read-only org membership — NOT `workspace:write`, so this
     // caller is exactly the one the GRADE-8 snapshot gate excluded from
     // curating and (before the fix) silently included in reading.
-    const added = await curator.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberId, roles: ['viewer'] });
+    const added = await curator.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberId, roles: ['viewer'] });
     expect([200, 201]).toContain(added.status);
     const joined = await member.post<{ sessionId: string }>(`${A}/boards/${encodeURIComponent(boardId)}/chat`);
     expect(joined.status, JSON.stringify(joined.body)).toBe(200);

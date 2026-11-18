@@ -70,9 +70,8 @@ describe('territories A5 — governed surface writes enforce the run owner scope
     const viewerId = (await viewer.post<LoginBody>('/host/openwop-app/test/login', { email: `v-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
 
     const orgId = (await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-    const om = (p: string) => `/host/openwop-app/orgs/${encodeURIComponent(orgId)}${p}`;
-    await owner.post(om('/members'), { displayName: 'E', subject: editorId, roles: ['editor'] });
-    await owner.post(om('/members'), { displayName: 'V', subject: viewerId, roles: ['viewer'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: editorId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] });
 
     const t = (p: string) => `/host/openwop-app/territories/orgs/${encodeURIComponent(orgId)}${p}`;
     const modelId = (await owner.post<{ modelId: string }>(t('/models'), { name: 'M' })).body.modelId;

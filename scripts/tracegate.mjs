@@ -362,7 +362,7 @@ export function ingest(o) {
   const rawDir = path.join(run, 'raw');
   const raws = fs.existsSync(rawDir) ? fs.readdirSync(rawDir).filter((f) => f.endsWith('.json')) : [];
   const lock = lockHash(ln);
-  let recorded = 0, dropped = 0, noVerdict = 0, unmapped = 0, mapped = 0, overBudget = 0;
+  let recorded = 0, dropped = 0, noVerdict = 0, unmapped = 0, mapped = 0, overBudget = 0, noFootprint = 0;
   // A hard time budget: ingest runs at the END of a gate (joined before the
   // final H101 check), so it must never hold that end for long. Footprints
   // written before the budget runs out are complete and valid; the rest are
@@ -376,6 +376,9 @@ export function ingest(o) {
     let raw; try { raw = JSON.parse(fs.readFileSync(path.join(rawDir, f), 'utf8')); } catch { continue; }
     const verdict = results.get(raw.testFile);
     if (!verdict) { noVerdict++; continue; }
+    // #6063 — the recorder could not take this file's coverage in time. No footprint
+    // is evidence of nothing: drop any older one, so the file runs next time.
+    if (raw.noFootprint) { dropFps(ln.name, raw.testFile); noFootprint++; continue; }
     // ADR 0968 P2 shadow: judged against the footprints that existed BEFORE this
     // run, and BEFORE a red drops them, because a would-skip that failed is the
     // soundness signal. Never throws into ingest.
@@ -466,6 +469,7 @@ export function ingest(o) {
   const share = mapped + unmapped ? (100 * unmapped / (mapped + unmapped)).toFixed(1) : '0.0';
   console.log(`tracegate ingest (${ln.name}): ${recorded} footprint(s) at ${H.slice(0, 9)} in ${Math.round((Date.now() - t0) / 1000)} s; ${dropped} dropped (not green); ${noVerdict} without a verdict; unmapped modules ${share}%.`);
   if (shadow.booted) writeBootShadow(ln, H, shadow);
+  if (noFootprint) console.log(`tracegate ingest (${ln.name}): ${noFootprint} file(s) had no footprint (the recorder's coverage takes did not settle in time, #6063); they will run next time.`);
   if (overBudget) console.log(`tracegate ingest (${ln.name}): time budget (${budgetMs / 1000} s) reached — ${overBudget} file(s) not recorded this run; they will simply run next time.`);
   if (Number(share) > 5) console.log(`\x1b[33mtracegate: ${share}% of loaded modules could not be mapped — the recorder's vitest seam may have moved (see scripts/lib/tracegate-recorder.mjs). Predictions stay safe (unmapped ⇒ run) but get coarse.\x1b[0m`);
 }

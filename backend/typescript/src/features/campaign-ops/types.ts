@@ -30,6 +30,10 @@ export interface ClientAccount {
   approvalPolicy: ApprovalPolicyMode;
   /** ADR 0927 D2 — demo rows. */
   synthetic?: true;
+  /** The house-client ADR — the firm's own business, a real non-root org created
+   *  by "Set up your own business". Display only (it sorts first in the
+   *  switcher); it grants nothing. At most one per workspace. */
+  house?: true;
   /** ADR 0962 D7 — what outside agents (MCP) may do for this client. Absent ⇒ `off`. */
   externalAgents?: ExternalAgentsAccess;
   createdAt: string;

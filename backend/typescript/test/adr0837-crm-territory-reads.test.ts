@@ -62,7 +62,7 @@ async function scenario() {
   const rep = client();
   const repId = bodyAs<{ user: { userId: string } }>(await rep.post('/host/openwop-app/test/login', { email: `r-${Date.now()}-${n++}@acme.test`, tenantId })).user.userId;
   const orgId = bodyAs<{ orgId: string }>(await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).orgId;
-  await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Rep', subject: repId, roles: ['editor'] });
+  await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Rep', subject: repId, roles: ['editor'] });
   type Pipeline = { pipelineId: string; stages: Array<{ stageId: string; probability: number }> };
   const pipe = bodyAs<{ pipelines: Pipeline[] }>(await owner.get(`${crm(orgId)}/pipelines`)).pipelines[0]!;
   const stageId = pipe.stages.find((s) => s.probability === 30)!.stageId;

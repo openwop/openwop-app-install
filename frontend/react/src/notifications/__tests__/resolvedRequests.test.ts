@@ -32,10 +32,12 @@ describe('ADR 1114 — resolved requests', () => {
   });
 
   it('every locale names each ending and the archive action', () => {
-    const keys = ['archiveResolved', 'endApproved', 'endRejected', 'endChanges', 'endTimedOut', 'endAnswered', 'endRunEnded', 'cardRunLink'] as const;
+    const keys = ['archiveResolved', 'endApproved', 'endRejected', 'endChanges', 'endTimedOut', 'endAnswered', 'endRunEnded'] as const;
     for (const m of [en, es, fr, ptBR] as Array<Record<string, string>>) {
       for (const k of keys) expect(m[k], k).toBeTruthy();
-      expect(m.cardRunLink).not.toContain('{{id}}');
+      // ADR 1125 D3 — the run link moved into the card menu as View activity log.
+      expect(m.cardRunLink, 'the retired run link is gone').toBeUndefined();
+      expect(m.cardActivityLog).toBeTruthy();
     }
   });
 });

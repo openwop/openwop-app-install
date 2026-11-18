@@ -23,7 +23,7 @@ import { OpenwopError } from '../../../types.js';
 import type { RouteDeps } from '../../../routes/registerAllRoutes.js';
 import { requireFeatureEnabled } from '../../featureRoute.js';
 import { resolveCallerUser } from '../../users/usersGuards.js';
-import { checkGrantUse, getCollaborator, grantResourceKind, type GrantUse } from '../../../host/externalCollaborators.js';
+import { checkGrantUse, getCollaborator, projectForGrant, type GrantUse } from '../../../host/externalCollaborators.js';
 import { assetServeHeaders } from '../../../host/assetServeHeaders.js';
 import { authorizeClient } from '../routes.js';
 import { viewAsset } from '../../media/mediaService.js';
@@ -68,8 +68,7 @@ export function registerIntakeRoutes(deps: RouteDeps, collabEnabledFor: (tenantI
     if (use.grant.resource.kind !== 'campaign' || !(await collabEnabledFor(use.tenantId))) throw notFound();
     // The same "presentable now" rule the grant page uses: a campaign the vendor
     // can no longer see (archived) takes no files either.
-    const kind = grantResourceKind('campaign');
-    if (!kind || !(await kind.project(use.tenantId, use.orgId, use.grant.resource.id))) throw notFound();
+    if (!(await projectForGrant(use))) throw notFound();
     return use;
   }
 

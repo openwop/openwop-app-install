@@ -1717,6 +1717,15 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       return rows[0]?.result ?? null;
     },
 
+    async getInvocationLlmCacheKey({ runId, nodeId, attempt, invocationId }) {
+      const { rows } = await pool.query<{ k: string | null }>(
+        `SELECT llm_cache_key AS k FROM invocation_log
+         WHERE run_id = $1 AND node_id = $2 AND attempt = $3 AND invocation_id = $4`,
+        [runId, nodeId, attempt, invocationId],
+      );
+      return rows[0]?.k ?? null;
+    },
+
     // ADR 0549 P3 — the retry-stable read (RFC 0150 §B). Newest outcome for the
     // logical effect identity, whatever attempt produced it.
     async getLatestInvocation({ runId, nodeId, invocationId }) {
@@ -1733,13 +1742,14 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       // `presented_key` keeps the stored value when an update carries none —
       // the same property the sqlite twin gets from its COALESCE.
       await pool.query(
-        `INSERT INTO invocation_log (run_id, node_id, attempt, invocation_id, result, created_at, presented_key)
-         VALUES ($1,$2,$3,$4,$5,NOW(),$6)
+        `INSERT INTO invocation_log (run_id, node_id, attempt, invocation_id, result, created_at, presented_key, llm_cache_key)
+         VALUES ($1,$2,$3,$4,$5,NOW(),$6,$7)
          ON CONFLICT (run_id, node_id, attempt, invocation_id) DO UPDATE SET
            result = EXCLUDED.result,
            created_at = EXCLUDED.created_at,
-           presented_key = COALESCE(EXCLUDED.presented_key, invocation_log.presented_key)`,
-        [runId, nodeId, attempt, invocationId, jsonbParam(result), opts?.presentedKey ?? null],
+           presented_key = COALESCE(EXCLUDED.presented_key, invocation_log.presented_key),
+           llm_cache_key = COALESCE(EXCLUDED.llm_cache_key, invocation_log.llm_cache_key)`,
+        [runId, nodeId, attempt, invocationId, jsonbParam(result), opts?.presentedKey ?? null, opts?.llmCacheKey ?? null],
       );
     },
     async claimInvocation({ runId, nodeId, invocationId }, { nowMs, staleAfterMs }) {
@@ -1781,18 +1791,19 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       // projected as a completed effect.
       const res = await pool.query(
         `SELECT node_id AS "nodeId", attempt, invocation_id AS "invocationId",
-                presented_key AS "presentedKey",
+                presented_key AS "presentedKey", llm_cache_key AS "llmCacheKey",
                 (result IS NOT NULL) AS completed, created_at AS at
            FROM invocation_log
           WHERE run_id = $1
           ORDER BY created_at, node_id, attempt`,
         [runId],
       );
-      return res.rows.map((r: { nodeId: string; attempt: number; invocationId: string; presentedKey: string | null; completed: boolean; at: unknown }) => ({
+      return res.rows.map((r: { nodeId: string; attempt: number; invocationId: string; presentedKey: string | null; llmCacheKey: string | null; completed: boolean; at: unknown }) => ({
         nodeId: r.nodeId,
         attempt: Number(r.attempt),
         invocationId: r.invocationId,
         ...(r.presentedKey ? { presentedKey: r.presentedKey } : {}),
+        ...(r.llmCacheKey ? { llmCacheKey: r.llmCacheKey } : {}),
         completed: Boolean(r.completed),
         at: r.at instanceof Date ? r.at.toISOString() : String(r.at),
       }));

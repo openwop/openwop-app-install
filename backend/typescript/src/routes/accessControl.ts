@@ -42,7 +42,7 @@
  * @see RFCS/0049 (RBAC scopes), RFCS/0087 §B (org position confers no authority)
  */
 
-import type { Express, Request } from 'express';
+import type { Express, Request, RequestHandler } from 'express';
 import { OpenwopError } from '../types.js';
 import {
   type Organization,
@@ -372,6 +372,141 @@ export async function readOrgCounts(req: Request): Promise<{ orgs: number; membe
  *  (mounted next in `registerAllRoutes`) so the role and owner rules have one copy. */
 export const ACCESS_CONTROL_MEMBER_GUARDS: AddExistingGuards = { loadOrgOwned, requireScope, requireOwner, namesOwner, validRoleIds, parseRoleIds, listCallerOrgs };
 
+/**
+ * ADR 1123 follow-up (#5945) — the member POST and PATCH handlers, as factories so
+ * the auth test seam (`authTestSeam.ts`) can mount the SAME code at
+ * `/host/openwop-app/test/orgs/:orgId/members`. `allowLegacySubject` is that
+ * seam's only difference; the scope check, role validation, owner rule, events
+ * and audit run identically on both.
+ */
+export interface MemberRouteOptions { allowLegacySubject?: boolean }
+
+/**
+ * ADR 1123 follow-up (#5945, PR-2) — a person (`user:`) is added through
+ * add-existing (D3) or linked through link (D4), never by typing their userId.
+ * A raw `user:` subject is refused even when that person is in the caller's D1
+ * pool: one add lane, through opaque candidates. Service and IdP subjects
+ * (`oidc:`, `saml:`, `scim:`, …) are not people and keep this lane, per ADR
+ * 0833's `requireIdpPrincipal`. Exempt: a superadmin or the wildcard bearer
+ * (`isSuperadmin` covers both), whose binds are still audited
+ * (`recordLegacySubjectBind`), and the auth test seam (`allowLegacySubject`).
+ */
+function refuseLegacyPersonSubject(req: Request, subject: string | null | undefined, opts: MemberRouteOptions, via: 'add-existing' | 'link', field: Record<string, unknown> = {}): void {
+  if (!subject?.startsWith('user:') || opts.allowLegacySubject || isSuperadmin(req)) return;
+  const use = via === 'add-existing' ? 'POST …/members/add-existing' : 'POST …/members/:memberId/link';
+  throw new OpenwopError('conflict', `Add a person through ${via === 'add-existing' ? 'Add existing person' : 'Link'}, not by their user id.`, 409, { field: 'subject', ...field, reason: via === 'add-existing' ? 'use_add_existing' : 'use_link', use });
+}
+
+export function memberCreateHandler(opts: MemberRouteOptions = {}): RequestHandler {
+  return async (req, res, next) => {
+  try {
+    const org = await loadOrgOwned(req, req.params.orgId);
+    const access = await requireScope(req, 'host:members:manage');
+    const body = (req.body ?? {}) as {
+      displayName?: unknown;
+      subject?: unknown;
+      email?: unknown;
+      roles?: unknown;
+      teamIds?: unknown;
+    };
+    const roles = parseRoleIds(body.roles, await validRoleIds(tenantOf(req), req.params.orgId));
+    if (namesOwner(roles)) requireOwner(req, access, 'add an owner');
+    const subject = optionalString(body.subject, 'subject');
+    refuseLegacyPersonSubject(req, subject, opts, 'add-existing');
+    // ADR 0815 D3 — a sub-org row has a random id, so adding an identity that
+    // already holds a row there mints the twin ADR 0697 D1 forbids. (A root row
+    // converges on its derived id instead.)
+    if (subject && req.params.orgId !== tenantOf(req)
+        && (await listMembers(tenantOf(req), req.params.orgId)).some((m) => m.subject === subject)) {
+      throw new OpenwopError('conflict', 'That identity is already a member of this organization.', 409, { field: 'subject', reason: 'identity_taken' });
+    }
+    const startedAt = new Date().toISOString();
+    const member = await createMember({
+      orgId: req.params.orgId,
+      tenantId: tenantOf(req),
+      displayName: requireString(body.displayName, 'displayName'),
+      subject,
+      email: optionalString(body.email, 'email'),
+      roles,
+      teamIds: parseTeamIds(body.teamIds),
+    });
+    // ADR 0815 D5 — only a NEW row is a transition (`createMember` converges on
+    // an existing root row, ADR 0697 D1).
+    if (member.createdAt >= startedAt) {
+      memberAdded(member, callerSubject(req));
+      await recordLegacySubjectBind(req, org, member); // ADR 1123 interim (#5945)
+    }
+    res.status(201).json(member);
+  } catch (err) {
+    next(err);
+  }
+  };
+}
+
+export function memberPatchHandler(opts: MemberRouteOptions = {}): RequestHandler {
+  return async (req, res, next) => {
+  try {
+    const org = await loadOrgOwned(req, req.params.orgId);
+    const access = await requireScope(req, 'host:members:manage');
+    const member = await getMember(req.params.memberId);
+    if (!member || member.tenantId !== tenantOf(req) || member.orgId !== req.params.orgId) {
+      throw new OpenwopError('not_found', 'Member not found.', 404, { memberId: req.params.memberId });
+    }
+    const body = (req.body ?? {}) as {
+      displayName?: unknown;
+      email?: unknown;
+      subject?: unknown;
+      roles?: unknown;
+      teamIds?: unknown;
+    };
+    // ≥1-owner invariant is enforced inside `updateMember` (the single mutator
+    // chokepoint): a role change that strips `owner` from the last owner is
+    // rejected atomically with `conflict` (409). ADR 0015.
+    const roles = parseRoleIds(body.roles, await validRoleIds(tenantOf(req), req.params.orgId));
+    // Changing an owner (any field: re-pointing its `subject` hands the role
+    // to someone else) or making someone one. ADR 0815 D2 — "an owner" is the
+    // PERSON: a group-derived owner, or an owner reached through a non-owner
+    // twin row, counts.
+    if (namesOwner(roles) || (await isEffectiveOwner(member.memberId))) requireOwner(req, access, 'change an owner or grant ownership');
+    const subject = patchString(body.subject, 'subject');
+    if (subject !== undefined && subject !== (member.subject ?? null)) {
+      // ADR 0815 D3 — an identity is not edited in place. Re-pointing a row
+      // moves a membership to another person without removing it from the
+      // first: none of the removal cascade runs for them, and a ROOT row's id
+      // and point-read index stay keyed on the old subject, so the old person
+      // kept reading the workspace (MEASURED). Only a subject-LESS placeholder
+      // in a sub-org may be bound, and only to an identity not already there.
+      if (member.subject || isWorkspaceRootMembership(member)) {
+        throw new OpenwopError('conflict', "A member's identity cannot be changed. Remove them and add or invite the new person.", 409, { field: 'subject', memberId: member.memberId, reason: 'identity_locked' });
+      }
+      refuseLegacyPersonSubject(req, subject, opts, 'link', { memberId: member.memberId });
+      if (subject && (await listMembers(tenantOf(req), req.params.orgId)).some((m) => m.subject === subject)) {
+        throw new OpenwopError('conflict', 'That identity is already a member of this organization.', 409, { field: 'subject', memberId: member.memberId, reason: 'identity_taken' });
+      }
+    }
+    const managersBefore = roles !== undefined ? await managersAmong(tenantOf(req), req.params.orgId, [member.memberId]) : new Set<string>();
+    const updated = await updateMember(req.params.memberId, {
+      displayName: optionalString(body.displayName, 'displayName'),
+      email: patchString(body.email, 'email'),
+      subject,
+      roles,
+      teamIds: parseTeamIds(body.teamIds),
+    });
+    if (updated) {
+      memberRolesChanged(updated, member.roles, updated.roles, callerSubject(req)); // ADR 0815 D5
+      // ADR 1123 interim (#5945) — a placeholder bound to a person through the old lane.
+      if (!member.subject && updated.subject) await recordLegacySubjectBind(req, org, updated, { placeholderMemberId: member.memberId });
+      // ADR 0815 D4 — an invite is a delegation of `host:members:manage`; a
+      // demotion that takes it away takes down what it delegated, as removal does.
+      await cascadeLostManagement(req, req.params.orgId, managersBefore);
+    }
+    res.json(updated);
+  } catch (err) {
+    next(err);
+  }
+  };
+}
+
 export function registerAccessControlRoutes(app: Express): void {
   registerMemberLifecycleEvents(); // ADR 0815 D5
   // ── Role catalog (read-only) ──
@@ -592,109 +727,9 @@ export function registerAccessControlRoutes(app: Express): void {
     }
   });
 
-  app.post('/host/openwop-app/orgs/:orgId/members', async (req, res, next) => {
-    try {
-      const org = await loadOrgOwned(req, req.params.orgId);
-      const access = await requireScope(req, 'host:members:manage');
-      const body = (req.body ?? {}) as {
-        displayName?: unknown;
-        subject?: unknown;
-        email?: unknown;
-        roles?: unknown;
-        teamIds?: unknown;
-      };
-      const roles = parseRoleIds(body.roles, await validRoleIds(tenantOf(req), req.params.orgId));
-      if (namesOwner(roles)) requireOwner(req, access, 'add an owner');
-      const subject = optionalString(body.subject, 'subject');
-      // ADR 0815 D3 — a sub-org row has a random id, so adding an identity that
-      // already holds a row there mints the twin ADR 0697 D1 forbids. (A root row
-      // converges on its derived id instead.)
-      if (subject && req.params.orgId !== tenantOf(req)
-          && (await listMembers(tenantOf(req), req.params.orgId)).some((m) => m.subject === subject)) {
-        throw new OpenwopError('conflict', 'That identity is already a member of this organization.', 409, { field: 'subject', reason: 'identity_taken' });
-      }
-      const startedAt = new Date().toISOString();
-      const member = await createMember({
-        orgId: req.params.orgId,
-        tenantId: tenantOf(req),
-        displayName: requireString(body.displayName, 'displayName'),
-        subject,
-        email: optionalString(body.email, 'email'),
-        roles,
-        teamIds: parseTeamIds(body.teamIds),
-      });
-      // ADR 0815 D5 — only a NEW row is a transition (`createMember` converges on
-      // an existing root row, ADR 0697 D1).
-      if (member.createdAt >= startedAt) {
-        memberAdded(member, callerSubject(req));
-        await recordLegacySubjectBind(req, org, member); // ADR 1123 interim (#5945)
-      }
-      res.status(201).json(member);
-    } catch (err) {
-      next(err);
-    }
-  });
+  app.post('/host/openwop-app/orgs/:orgId/members', memberCreateHandler());
 
-  app.patch('/host/openwop-app/orgs/:orgId/members/:memberId', async (req, res, next) => {
-    try {
-      const org = await loadOrgOwned(req, req.params.orgId);
-      const access = await requireScope(req, 'host:members:manage');
-      const member = await getMember(req.params.memberId);
-      if (!member || member.tenantId !== tenantOf(req) || member.orgId !== req.params.orgId) {
-        throw new OpenwopError('not_found', 'Member not found.', 404, { memberId: req.params.memberId });
-      }
-      const body = (req.body ?? {}) as {
-        displayName?: unknown;
-        email?: unknown;
-        subject?: unknown;
-        roles?: unknown;
-        teamIds?: unknown;
-      };
-      // ≥1-owner invariant is enforced inside `updateMember` (the single mutator
-      // chokepoint): a role change that strips `owner` from the last owner is
-      // rejected atomically with `conflict` (409). ADR 0015.
-      const roles = parseRoleIds(body.roles, await validRoleIds(tenantOf(req), req.params.orgId));
-      // Changing an owner (any field: re-pointing its `subject` hands the role
-      // to someone else) or making someone one. ADR 0815 D2 — "an owner" is the
-      // PERSON: a group-derived owner, or an owner reached through a non-owner
-      // twin row, counts.
-      if (namesOwner(roles) || (await isEffectiveOwner(member.memberId))) requireOwner(req, access, 'change an owner or grant ownership');
-      const subject = patchString(body.subject, 'subject');
-      if (subject !== undefined && subject !== (member.subject ?? null)) {
-        // ADR 0815 D3 — an identity is not edited in place. Re-pointing a row
-        // moves a membership to another person without removing it from the
-        // first: none of the removal cascade runs for them, and a ROOT row's id
-        // and point-read index stay keyed on the old subject, so the old person
-        // kept reading the workspace (MEASURED). Only a subject-LESS placeholder
-        // in a sub-org may be bound, and only to an identity not already there.
-        if (member.subject || isWorkspaceRootMembership(member)) {
-          throw new OpenwopError('conflict', "A member's identity cannot be changed. Remove them and add or invite the new person.", 409, { field: 'subject', memberId: member.memberId, reason: 'identity_locked' });
-        }
-        if (subject && (await listMembers(tenantOf(req), req.params.orgId)).some((m) => m.subject === subject)) {
-          throw new OpenwopError('conflict', 'That identity is already a member of this organization.', 409, { field: 'subject', memberId: member.memberId, reason: 'identity_taken' });
-        }
-      }
-      const managersBefore = roles !== undefined ? await managersAmong(tenantOf(req), req.params.orgId, [member.memberId]) : new Set<string>();
-      const updated = await updateMember(req.params.memberId, {
-        displayName: optionalString(body.displayName, 'displayName'),
-        email: patchString(body.email, 'email'),
-        subject,
-        roles,
-        teamIds: parseTeamIds(body.teamIds),
-      });
-      if (updated) {
-        memberRolesChanged(updated, member.roles, updated.roles, callerSubject(req)); // ADR 0815 D5
-        // ADR 1123 interim (#5945) — a placeholder bound to a person through the old lane.
-        if (!member.subject && updated.subject) await recordLegacySubjectBind(req, org, updated, { placeholderMemberId: member.memberId });
-        // ADR 0815 D4 — an invite is a delegation of `host:members:manage`; a
-        // demotion that takes it away takes down what it delegated, as removal does.
-        await cascadeLostManagement(req, req.params.orgId, managersBefore);
-      }
-      res.json(updated);
-    } catch (err) {
-      next(err);
-    }
-  });
+  app.patch('/host/openwop-app/orgs/:orgId/members/:memberId', memberPatchHandler());
 
   app.delete('/host/openwop-app/orgs/:orgId/members/:memberId', async (req, res, next) => {
     try {

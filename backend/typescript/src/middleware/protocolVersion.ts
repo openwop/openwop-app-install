@@ -28,6 +28,7 @@
  * and a blanket rewrite would silently shadow it.
  */
 
+import { sendErrorBody } from './errorEnvelope.js';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -827,7 +828,7 @@ export function protocolVersionMiddleware(opts: ProtocolVersionOptions = {}): Re
         res.end();
         return;
       }
-      res.status(410).json({
+      sendErrorBody(res, 410, {
         error: 'protocol_version_unsupported',
         message:
           'The /v1 path space was withdrawn when this host retired major 1. '

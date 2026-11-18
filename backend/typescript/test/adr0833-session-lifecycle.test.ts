@@ -235,7 +235,7 @@ describe('S2 / D2 — break-glass cannot widen itself or mint a durable credenti
   });
 
   it('issueApiKey refuses a break-glass issuer (covers the CLI-login and pairing POLL lanes)', async () => {
-    const err = await issueApiKey({ tenantId: TENANT, name: 'bg', createdBy: 'breakglass:abc' }).then(() => undefined, (e: unknown) => e);
+    const err = await issueApiKey({ scopes: ['*'], tenantId: TENANT, name: 'bg', createdBy: 'breakglass:abc' }).then(() => undefined, (e: unknown) => e);
     expect(err).toBeInstanceOf(OpenwopError);
     expect(err).toMatchObject({ httpStatus: 403, details: { code: 'break_glass_cannot_mint' } });
   });
@@ -293,7 +293,7 @@ describe('S7 / D6 — only an owner may act on an owner', () => {
 
   it('S10 / D9 — an admin’s OWN API key cannot disable the admin (409 self_lockout)', async () => {
     const admin = await login(ADMIN, WS, true);
-    const { token } = await issueApiKey({ tenantId: WS, name: 'admin-own', createdBy: admin.userId });
+    const { token } = await issueApiKey({ scopes: ['*'], tenantId: WS, name: 'admin-own', createdBy: admin.userId });
     const res = await hit(`${USERS}/${encodeURIComponent(admin.userId)}/disable`, { method: 'POST', bearer: token });
     expect(res.status, JSON.stringify(res.body)).toBe(409);
     expect(res.body?.error).toBe('self_lockout');
@@ -319,7 +319,7 @@ describe('grade-code USERS2-CD-1 — deleting a row never revokes ANOTHER human�
     await createMember({ orgId: t1.tenantId, tenantId: t1.tenantId, displayName: 'O', subject: userIdFor(t1.tenantId, OWNER), roles: ['owner'] });
     // Someone else's key in t2, issued under the SAME bare principal string.
     await createMember({ orgId: t2.tenantId, tenantId: t2.tenantId, displayName: 'J', subject: 'scim:jsmith', roles: ['editor'] });
-    const { token } = await issueApiKey({ tenantId: t2.tenantId, name: 'jsmith-in-t2', createdBy: 'scim:jsmith' });
+    const { token } = await issueApiKey({ scopes: ['*'], tenantId: t2.tenantId, name: 'jsmith-in-t2', createdBy: 'scim:jsmith' });
     resetIssuerLiveCacheForTests();
     const before = (await hit(RUNS, { bearer: token })).status;
     expect(before).not.toBe(401);
@@ -347,7 +347,7 @@ describe('S8 / D7 — deleting a user revokes their keys in EVERY workspace', ()
     const y = await createWorkspace({ name: 'ADR 0833 other', ownerSubject: 'user:placeholder-y' });
     const Y = y.tenantId;
     await createMember({ orgId: Y, tenantId: Y, displayName: 'Leaver', subject: u.userId, roles: ['editor'] });
-    const { token } = await issueApiKey({ tenantId: Y, name: 'leaver-key', createdBy: u.userId });
+    const { token } = await issueApiKey({ scopes: ['*'], tenantId: Y, name: 'leaver-key', createdBy: u.userId });
     resetIssuerLiveCacheForTests();
     expect((await hit(RUNS, { bearer: token })).status, 'precondition: the key works in Y').not.toBe(401);
 

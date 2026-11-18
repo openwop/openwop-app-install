@@ -28,7 +28,24 @@ import {
   adoptLink,
   recordSharedFrameView,
   listFrameViews,
+  unlockLinkVerification,
+  type ShareViewer,
 } from './sharingService.js';
+import { requestShareCode, verifyShareCode } from './recipientVerification.js';
+import { clientIp } from '../../host/clientIp.js';
+import { mintAnonSession, setAnonSessionCookie } from '../../middleware/cookieSession.js';
+import { liveSessionSidOf } from '../../middleware/auth.js';
+
+/** ADR 1141 D2 — the browser session a link's verification is bound to: the `sid`
+ *  of the request's `__session` (signed-in or anonymous). The only cookie Firebase
+ *  Hosting forwards on the `/api` rewrite, so a per-link cookie would never arrive.
+ *  A bearer or API-key caller has none, and fails closed at the gate. */
+async function viewerOf(req: Parameters<RequestHandler>[0]): Promise<ShareViewer> {
+  // `/host/openwop-app/shared` is a public prefix the auth middleware does not
+  // session; the live cookie session is resolved in middleware (ADR 0833 D1).
+  const sid = await liveSessionSidOf(req);
+  return sid ? { sid } : {};
+}
 
 /** ADR 0887 D4 — a capability-token response whose freshness IS the revocation
  *  mechanism must never be kept by a browser or an intermediary. Set before the
@@ -76,6 +93,15 @@ export function registerSharingRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
+  // ADR 1141 D3 — the owner clears a link locked by five wrong codes.
+  app.post(`${BASE}/:token/verification/unlock`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId } = await requireOrgScope(req, 'workspace:write');
+      await unlockLinkVerification(tenantId, orgId, req.params.token);
+      res.status(204).end();
+    } catch (err) { next(err); }
+  });
+
   app.delete(`${BASE}/:token`, async (req, res, next) => {
     try {
       const { orgId, tenantId } = await requireOrgScope(req, 'workspace:write');
@@ -87,7 +113,7 @@ export function registerSharingRoutes(deps: RouteDeps): void {
   // ── public: resolve a share link (NO auth; token is the credential) ──
   app.get('/host/openwop-app/shared/:token', noStore, async (req, res, next) => {
     try {
-      res.json(await resolveShared(req.params.token));
+      res.json(await resolveShared(req.params.token, await viewerOf(req)));
     } catch (err) { next(err); }
   });
 
@@ -96,14 +122,40 @@ export function registerSharingRoutes(deps: RouteDeps): void {
   app.post('/host/openwop-app/shared/:token/frame-view', noStore, async (req, res, next) => {
     try {
       const body = (req.body ?? {}) as { frame?: unknown };
-      await recordSharedFrameView(req.params.token, body.frame);
+      await recordSharedFrameView(req.params.token, body.frame, await viewerOf(req));
       res.status(204).end();
     } catch (err) { next(err); }
   });
 
   app.get('/host/openwop-app/shared/:token/card', noStore, async (req, res, next) => {
     try {
-      res.json(await resolveSharedCard(req.params.token, publicBaseUrl(req)));
+      res.json(await resolveSharedCard(req.params.token, publicBaseUrl(req), await viewerOf(req)));
+    } catch (err) { next(err); }
+  });
+
+  // ── public: ADR 1141 — a recipient-bound link's one-time code ──
+  // Both answer every token alike unless it is a live, bound link with a right code.
+  app.post('/host/openwop-app/shared/:token/verification', noStore, async (req, res, next) => {
+    try {
+      await requestShareCode({ token: req.params.token, ip: clientIp(req) });
+      res.status(202).json({});
+    } catch (err) { next(err); }
+  });
+
+  app.post('/host/openwop-app/shared/:token/verification/verify', noStore, async (req, res, next) => {
+    try {
+      const body = (req.body ?? {}) as { code?: unknown };
+      // A visitor with no session gets an anonymous one, which the verification
+      // then binds to. An existing session (signed in or not) is kept as it is.
+      // A minted session is stateless (a signed cookie, no row), and its cookie is
+      // set only AFTER a successful verify, so a refused attempt (wrong code, a
+      // limiter refusal, any token) leaves the caller nothing. The send and verify
+      // limits per IP bound the work either way.
+      const existing = (await viewerOf(req)).sid;
+      const fresh = existing ? undefined : mintAnonSession();
+      await verifyShareCode({ token: req.params.token, code: body.code, sid: existing ?? fresh!.sid, ip: clientIp(req) });
+      if (fresh) setAnonSessionCookie(res, fresh); // ADR 0833 D2: signed by the session module, minted by its builder
+      res.status(204).end();
     } catch (err) { next(err); }
   });
 }

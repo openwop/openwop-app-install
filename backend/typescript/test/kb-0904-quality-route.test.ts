@@ -69,7 +69,7 @@ describe('ADR 0904 P0 — GET …/kb/orgs/:orgId/quality', () => {
     const viewer = client();
     const login2 = await viewer.post('/host/openwop-app/test/login', { email: `viewer-${n++}@acme.test`, tenantId });
     const intruder = login2.body!.user!.userId;
-    expect((await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Viewer', subject: intruder, roles: ['viewer'] })).status).toBe(201);
+    expect((await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Viewer', subject: intruder, roles: ['viewer'] })).status).toBe(201);
 
     const open = await createCollection(tenantId, orgId, member, { name: 'handbook' });
     await ingestDocument(tenantId, orgId, member, open.collectionId, { title: 'Leave', text: 'Parental leave is sixteen weeks at full pay.' }, {}, PREAUTHORIZED_CALLER);

@@ -109,7 +109,7 @@ async function sharedWorkspace(roles: string[]): Promise<{ ws: string; owner: Cl
     const c = client();
     const u = await signup(c, role);
     memberUserIds.push(u.userId);
-    const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`, { displayName: role, subject: u.userId, roles: [role] });
+    const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(ws)}/members`, { displayName: role, subject: u.userId, roles: [role] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
     expect((await c.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
     members.push(c);
@@ -405,7 +405,7 @@ describe('row 52 S8 (ADR 0930 A5/A6) — which runs count as "yours"', () => {
     const orgId = await personalOrg(owner);
     const member = client();
     const m = await signup(member, 'solo-member');
-    const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: m.userId, roles: ['editor'] });
+    const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: m.userId, roles: ['editor'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
     expect((await member.post(`/host/openwop-app/workspaces/${encodeURIComponent(u.tenantId)}/switch`)).status).toBe(200);
     await seedPattern(u.tenantId, { ...(await realStamp(member)), goal: 'MEMBER-SECRET-GOAL' }, ['member.tool']);

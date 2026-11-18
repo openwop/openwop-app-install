@@ -26,8 +26,12 @@ interface FakeRes {
   writableEnded: boolean;
   statusCode?: number;
   body?: unknown;
+  headers: Record<string, string>;
+  req: { header(name: string): string | undefined };
   status(code: number): FakeRes;
   json(payload: unknown): FakeRes;
+  getHeader(name: string): string | undefined;
+  setHeader(name: string, value: string): FakeRes;
   on(event: string, cb: () => void): FakeRes;
   emit(event: string): void;
 }
@@ -37,8 +41,13 @@ function makeRes(init: Partial<FakeRes> = {}): FakeRes {
   const res: FakeRes = {
     headersSent: false,
     writableEnded: false,
+    headers: {},
+    req: { header: () => undefined },
     ...init,
     status(code) { this.statusCode = code; return this; },
+    // The error envelope reads and sets Cache-Control and negotiates the locale off `req`.
+    getHeader(name) { return this.headers[name.toLowerCase()]; },
+    setHeader(name, value) { this.headers[name.toLowerCase()] = value; return this; },
     json(payload) { this.body = payload; return this; },
     on(event, cb) { (handlers[event] ??= []).push(cb); return this; },
     emit(event) { (handlers[event] ?? []).forEach((cb) => cb()); },
@@ -66,6 +75,7 @@ describe('requestTimeoutMiddleware (API-4)', () => {
     vi.advanceTimersByTime(1000);
     expect(res.statusCode).toBe(503);
     expect(res.body).toEqual({ error: 'request_timeout', message: expect.stringContaining('1000ms') });
+    expect(res.headers['cache-control'], 'a timeout is an error: never cached').toBe('no-store');
   });
 
   it('never interrupts a streaming response (headers already sent)', () => {

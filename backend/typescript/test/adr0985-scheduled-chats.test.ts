@@ -91,7 +91,7 @@ async function member(own: Client, tenant: string, role: 'editor' | 'viewer'): P
   const r = await c('POST', '/host/openwop-app/test/login', { email: `${role}-${n++}@s985.test`, tenantId: tenant });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   const userId = r.body.user!.userId;
-  const add = await own('POST', `/host/openwop-app/orgs/${encodeURIComponent(tenant)}/members`, { displayName: role, subject: userId, roles: [role] });
+  const add = await own('POST', `/host/openwop-app/test/orgs/${encodeURIComponent(tenant)}/members`, { displayName: role, subject: userId, roles: [role] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { c, userId };
 }

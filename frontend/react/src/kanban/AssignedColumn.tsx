@@ -4,10 +4,12 @@
  * standalone `/my-work` page (correction 2026-06-16).
  *
  * The cards here live on OTHER boards (any board where `assigneeId == me`, or a
- * role I hold). This is a derived view over the same records — no copies. They
- * are therefore READ-ONLY in this column: no drag, no lane actions. Each card
- * links to its origin board to progress it (assignment grants the card-scoped
- * access, D4); a role-addressed (unclaimed) card shows a Claim action.
+ * role I hold). This is a derived view over the same records — no copies. No
+ * drag here; each card links to its origin board (assignment grants the
+ * card-scoped access, D4), and a role-addressed (unclaimed) card shows a Claim
+ * action. ADR 1138: a card I hold also offers Done (moves it to its board's
+ * completion lane through the same card move a drag makes), an Open link to
+ * where its work happens (`sourceRef`), and its due state.
  *
  * Rendered by `KanbanPage` ONLY when the active board is the caller's personal
  * board, and ONLY when it holds open cards — otherwise the column collapses
@@ -20,7 +22,8 @@ import { useEffect, useRef } from 'react';
 import { scrollBehavior } from '../ui/motion.js';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
-import { CheckSquareIcon, InboxIcon } from '../ui/icons/index.js';
+import { CheckIcon, CheckSquareIcon, ExternalLinkIcon, InboxIcon } from '../ui/icons/index.js';
+import { CardDue } from './CardDue.js';
 import type { AssignedCard } from './kanbanClient.js';
 
 export function AssignedColumn({
@@ -28,11 +31,14 @@ export function AssignedColumn({
   busyId,
   highlightId,
   onClaim,
+  onDone,
 }: {
   cards: readonly AssignedCard[];
   busyId: string | null;
   highlightId: string | null;
   onClaim: (cardId: string) => void;
+  /** ADR 1138 D2 — finish a card I hold (absent ⇒ no Done button). */
+  onDone?: (card: AssignedCard) => void;
 }): JSX.Element {
   const { t } = useTranslation('kanban');
   const highlightRef = useRef<HTMLLIElement | null>(null);
@@ -61,6 +67,7 @@ export function AssignedColumn({
         {cards.map((card) => {
           const highlighted = card.id === highlightId;
           const unclaimed = Boolean(card.assigneeRole) && !card.assigneeId;
+          const canFinish = Boolean(onDone) && !unclaimed && !card.terminal && Boolean(card.doneColumnId);
           return (
             <li
               key={card.id}
@@ -74,6 +81,7 @@ export function AssignedColumn({
                   <span className="chip chip--warning">{t('unclaimedWithRole', { role: card.assigneeRole })}</span>
                 ) : null}
                 {card.priority === 'high' ? <span className="chip chip--danger kb-prio">{t('priorityHigh')}</span> : null}
+                {card.dueAt ? <CardDue dueAt={card.dueAt} finished={card.terminal} /> : null}
               </div>
               {card.assignmentReason ? (
                 <div className="muted u-fs-12 u-mt-1">{card.assignmentReason}</div>
@@ -88,6 +96,21 @@ export function AssignedColumn({
                   >
                     <CheckSquareIcon size={12} aria-hidden /> {busyId === card.id ? t('claiming') : t('claim')}
                   </Button>
+                ) : null}
+                {canFinish ? (
+                  <Button
+                    variant="secondary" size="sm" className="u-iflex u-items-center u-gap-1"
+                    disabled={busyId === card.id}
+                    aria-label={t('markDoneNamed', { title: card.title })}
+                    onClick={() => onDone?.(card)}
+                  >
+                    <CheckIcon size={12} aria-hidden /> {busyId === card.id ? t('markingDone') : t('markDone')}
+                  </Button>
+                ) : null}
+                {card.sourceRef ? (
+                  <Link to={card.sourceRef.path} className="kb-run-link u-iflex u-items-center u-gap-1">
+                    <ExternalLinkIcon size={12} aria-hidden /> {t('openSource', { label: card.sourceRef.label })}
+                  </Link>
                 ) : null}
                 <span className="kb-card-foot-spacer" />
                 <Link to={`/boards/${encodeURIComponent(card.boardId)}?card=${encodeURIComponent(card.id)}`} className="kb-run-link" title={t('openOnBoard', { board: card.boardName })}>

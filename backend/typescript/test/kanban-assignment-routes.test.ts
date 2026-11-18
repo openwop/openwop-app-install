@@ -88,7 +88,7 @@ describe('ADR 0049 routes — shared workspace assignment', () => {
 
     const bob = client();
     const b = await signup(bob);
-    const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'Bob', subject: b.userId, roles: ['editor'] });
+    const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'Bob', subject: b.userId, roles: ['editor'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
 
     const board = (await owner.post<{ id: string }>(`${K}/boards`, { name: 'Launch' })).body;
@@ -128,7 +128,7 @@ describe('ADR 0049 routes — shared workspace assignment', () => {
     await owner.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
     const bob = client();
     const b = await signup(bob);
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'Bob', subject: b.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'Bob', subject: b.userId, roles: ['editor'] });
 
     // Custom columns with NO `terminal` flag — the last/"shipped" lane is a
     // legacy fallback terminal (review fix #2).
@@ -156,7 +156,7 @@ describe('ADR 0049 routes — shared workspace assignment', () => {
     await owner.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
     const bob = client();
     const b = await signup(bob);
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'Bob', subject: b.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'Bob', subject: b.userId, roles: ['editor'] });
 
     const board = (await owner.post<{ id: string }>(`${K}/boards`, { name: 'Roleboard' })).body;
     const card = (await owner.post<CardBody>(`${K}/boards/${board.id}/cards`, { title: 'Anyone editor', columnId: 'todo' })).body;

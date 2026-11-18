@@ -310,7 +310,8 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
   // ISS-061), while `/p/pricing` rendered them all. Never a 301 to `/p/pricing`: sign-in
   // returns to `/pricing` to continue checkout (`auth/signInReturn.ts`). A bound
   // custom domain already prerenders `/pricing` (`middleware/customDomain.ts`).
-  app.get('/pricing', platformDocumentDoor(() => 'pricing', { admit: admitPublicPage }));
+  // An unpublished `pricing` page is the shell, not a 404 (`admitPricingPage`).
+  app.get('/pricing', platformDocumentDoor(() => 'pricing', { admit: admitPricingPage }));
 
   // ── ADR 0824 D4 — the ROOT robots.txt + sitemap.xml doors ──
   // Crawlers only ever ask the origin root. Hosting used to fall these through
@@ -429,13 +430,18 @@ function shellTtlMs(): number {
   return (Number.isFinite(raw) && raw > 0 ? raw : 60) * 1000;
 }
 
-async function fetchShellFromUrl(url: string): Promise<void> {
+async function fetchShellFromUrl(url: string, opts: { bust?: boolean } = {}): Promise<void> {
   try {
     // Conditional when we already hold a shell: Hosting answers 304 with no
     // body for the common "nothing changed" case, so refreshing often is cheap.
-    const res = await fetch(url, {
+    // #5840 — a refresh forced because the cached bundle is gone also busts any
+    // cache between here and Hosting, so it cannot be handed the same stale shell.
+    const target = opts.bust ? withCacheBust(url) : url;
+    const res = await fetch(target, {
       signal: AbortSignal.timeout(5000),
-      ...(shellEtag && shellCache ? { headers: { 'if-none-match': shellEtag } } : {}),
+      ...(opts.bust
+        ? { headers: { 'cache-control': 'no-cache' } }
+        : shellEtag && shellCache ? { headers: { 'if-none-match': shellEtag } } : {}),
     });
     if (res.status === 304 && shellCache) {
       shellFetchedAt = Date.now(); // unchanged upstream — keep the body, restart the clock
@@ -486,6 +492,47 @@ const SHELL_REFRESH_WEDGE_MS = 15_000;
  */
 const SHELL_REFRESH_AWAIT_MS = 1_000;
 
+/**
+ * #5840 — how often a cached shell's own bundle is checked between TTL refreshes.
+ *
+ * MEASURED on a white-label (casavoga-prod): after a hosting release the cached
+ * shell named a bundle the release had pruned, so the browser got `text/html` for
+ * it and the page stayed blank. That lasted ~1 min (one TTL) on 2026-11-13 and
+ * 2026-11-15, and 6+ min on one instance on 2026-11-12 with no
+ * `spa_shell_fetch_failed` logged. The TTL alone bounds the window at a full TTL,
+ * and only if each refresh returns the new shell. So between refreshes the
+ * shell's `assets/index-*.js` is asked for with a HEAD at most this often; if it
+ * no longer answers as JavaScript, the shell refreshes at once (cache-busted) and
+ * `spa_shell_bundle_gone` is logged, which is the measurement the issue asked for.
+ * About 6 HEADs a minute per instance; a HEAD that errors changes nothing.
+ */
+const SHELL_BUNDLE_CHECK_MS = 10_000;
+let bundleCheckedAt = 0;
+
+/** The shell's main bundle (`assets/index-<hash>.js`), resolved against the shell URL. */
+function shellBundleUrl(shell: string, shellUrl: string): string | undefined {
+  const m = /["'(]([^"'()\s]*assets\/index-[A-Za-z0-9_-]+\.js)["')]/.exec(shell);
+  if (!m) return undefined;
+  try { return new URL(m[1]!, shellUrl).toString(); } catch { return undefined; }
+}
+
+function withCacheBust(url: string): string {
+  const u = new URL(url);
+  u.searchParams.set('cb', String(Date.now()));
+  return u.toString();
+}
+
+/** True only when the bundle positively answers as something other than JavaScript. */
+async function bundleGone(bundleUrl: string): Promise<boolean> {
+  try {
+    const res = await fetch(bundleUrl, { method: 'HEAD', signal: AbortSignal.timeout(2000), headers: { 'cache-control': 'no-cache' } });
+    const type = res.headers.get('content-type') ?? '';
+    return !res.ok || !/javascript/i.test(type);
+  } catch {
+    return false; // an unreachable origin is the TTL's problem, not proof of a release
+  }
+}
+
 /** Resolve when `p` settles or `ms` elapses, whichever comes first. */
 function withDeadline(p: Promise<void>, ms: number): Promise<void> {
   return new Promise<void>((resolve) => {
@@ -501,13 +548,28 @@ async function spaShellHtml(): Promise<string | null> {
   const url = process.env.OPENWOP_SPA_SHELL_URL?.trim();
   if (url) {
     const now = Date.now();
-    const expired = now - shellFetchedAt >= shellTtlMs();
+    let expired = now - shellFetchedAt >= shellTtlMs();
+    // #5840 — between TTL refreshes, a shell whose bundle is gone is stale now.
+    let bust = false;
+    if (!expired && shellCache && shellRefreshing === null && now - bundleCheckedAt >= SHELL_BUNDLE_CHECK_MS) {
+      bundleCheckedAt = now;
+      const bundle = shellBundleUrl(shellCache, url);
+      if (bundle) {
+        let gone = false;
+        await withDeadline(bundleGone(bundle).then((g) => { gone = g; }), SHELL_REFRESH_AWAIT_MS);
+        if (gone) {
+          log.warn('spa_shell_bundle_gone', { bundle, shellAgeMs: now - shellFetchedAt });
+          expired = true;
+          bust = true;
+        }
+      }
+    }
     // A refresh that has been "in flight" past the wedge bound is treated as
     // dead. Without this one starved continuation is permanent.
     const wedged = shellRefreshing !== null && now - shellRefreshStartedAt >= SHELL_REFRESH_WEDGE_MS;
     if (shellCache === undefined || (expired && (shellRefreshing === null || wedged))) {
       shellRefreshStartedAt = now;
-      const refresh = fetchShellFromUrl(url).finally(() => { shellRefreshing = null; });
+      const refresh = fetchShellFromUrl(url, { bust }).finally(() => { shellRefreshing = null; });
       shellRefreshing = refresh;
       // First load blocks (nothing to serve yet). Later refreshes are awaited
       // too, but only up to SHELL_REFRESH_AWAIT_MS — long enough to finish
@@ -551,6 +613,7 @@ export function __resetShellCacheForTests(): void {
   shellEtag = null; // the validator must reset with the body it belongs to
   shellFetchedAt = 0;
   shellRefreshing = null;
+  bundleCheckedAt = 0;
 }
 
 /** ADR 1057 D1 — what a crawler request on a platform-origin document door gets,
@@ -559,7 +622,9 @@ export type DocumentAdmission =
   | { kind: 'render'; slug: string }
   | { kind: 'redirect'; location: string }
   | { kind: 'notFound' }
-  | { kind: 'html'; html: string; locale?: string };
+  | { kind: 'html'; html: string; locale?: string }
+  /** Serve the SPA shell to the crawler too (a route the SPA renders without a page). */
+  | { kind: 'shell' };
 
 export interface DocumentDoorOptions {
   /** Bot branch only. Absent ⇒ render the request's slug (the `/` + `/p/:slug`
@@ -606,6 +671,18 @@ export function platformDocumentDoor(slugOf: (req: Request) => string, opts: Doc
         if (admission.kind === 'redirect') {
           logDocServe('bot_redirect');
           res.redirect(301, admission.location);
+          return;
+        }
+        if (admission.kind === 'shell') {
+          const shell = await spaShellHtml();
+          if (shell !== null) {
+            logDocServe('bot_shell_admitted');
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+            res.type('html').send(shell);
+            return;
+          }
+          logDocServe('no_shell_404');
+          sendError(res, 404, 'not_found', 'No SPA shell is configured on this host.');
           return;
         }
         if (admission.kind === 'html') {
@@ -672,6 +749,26 @@ async function admitPublicPage(siteOrg: string, slug: string): Promise<DocumentA
   return open
     ? { kind: 'redirect', location: `/docs/${encodeURIComponent(hit.page.slug)}` }
     : { kind: 'notFound' };
+}
+
+/** ADR 0391 (b) — `/pricing` for a crawler. Unlike `/p/<slug>`, the route exists
+ *  whether or not a `pricing` CMS page is published: the SPA's `PricingPage` renders
+ *  a built-in tier grid + FAQ when none is authored. So an UNPUBLISHED page is the
+ *  shell (200, what crawlers got before this door), never a 404. MEASURED on
+ *  app.openwop.dev after #6026 deployed (13a73a2057): no published `pricing` page ⇒
+ *  a crawler got `404 application/json` while a browser got the 200 pricing page.
+ *  A failed read keeps `admitPublicPage`'s posture (render; the prerender re-reads). */
+async function admitPricingPage(siteOrg: string, slug: string): Promise<DocumentAdmission> {
+  try {
+    const org = await getOrg(siteOrg);
+    const hit = org ? await getPublishedBySlug(org.tenantId, siteOrg, slug) : null;
+    if (!hit) return { kind: 'shell' };
+  } catch (err) {
+    const t = throttleLog('publishing_pricing_admission_failed');
+    if (t.emit) log.warn('publishing_pricing_admission_failed', { slug, error: err instanceof Error ? err.message : String(err), suppressed: t.suppressed });
+    return { kind: 'render', slug };
+  }
+  return admitPublicPage(siteOrg, slug);
 }
 
 /**

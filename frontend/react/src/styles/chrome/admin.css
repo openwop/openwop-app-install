@@ -9,6 +9,9 @@
   padding: var(--space-4) var(--space-5);
   width: 100%;
 }
+/* Issue 5890 — the loading and refused states render no rail, so their content would
+   fall into the 232px rail column. They take the one full-width column instead. */
+.admin-shell--bare { grid-template-columns: minmax(0, 1fr); }
 .admin-rail {
   position: sticky;
   top: var(--space-4);

@@ -27,6 +27,7 @@ import { fireConversationDeleted } from './conversationLifecycle.js';
 import { deleteFeedbackForConversation } from './messageFeedbackStore.js';
 import { deleteReactionsForConversation } from './messageReactionsStore.js';
 import { deleteReadStateForConversation } from './conversationReadState.js';
+import { deleteToolSummariesForConversation } from './chatToolSummaries.js';
 import { deleteExchangeClaimsForConversation } from './conversationExchangeIdem.js';
 
 /**
@@ -55,6 +56,7 @@ export async function deleteConversationCompletely(
   await deleteFeedbackForConversation(tenantId, conversationId);
   await deleteReactionsForConversation(tenantId, conversationId);
   await deleteReadStateForConversation(tenantId, conversationId);
+  await deleteToolSummariesForConversation(tenantId, conversationId); // ADR 1040 D7 F3
   await deleteExchangeClaimsForConversation(tenantId, conversationId);
   await fireConversationDeleted({ tenantId, conversationId, messageIds });
   return existed;

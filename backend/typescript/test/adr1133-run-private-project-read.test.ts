@@ -75,7 +75,7 @@ async function workspace() {
   const viewer = async (): Promise<{ c: Client; userId: string }> => {
     const c = client();
     const userId = await signup(c);
-    expect((await owner.post(`/host/openwop-app/orgs/${enc(ws)}/members`, { displayName: 'V', subject: userId, roles: ['viewer'] })).status).toBe(201);
+    expect((await owner.post(`/host/openwop-app/test/orgs/${enc(ws)}/members`, { displayName: 'V', subject: userId, roles: ['viewer'] })).status).toBe(201);
     expect((await c.post(`/host/openwop-app/workspaces/${enc(ws)}/switch`)).status).toBe(200);
     return { c, userId };
   };

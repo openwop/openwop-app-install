@@ -143,6 +143,52 @@ describe('ADR 0850 D3/D5 — held rows', () => {
   });
 });
 
+describe('issue 5960 — a clean row has its own Delete', () => {
+  it('confirms that it cannot be undone, deletes, and removes the row', async () => {
+    client.listSubmissionsPage.mockResolvedValue({ submissions: [sub({ values: { name: 'Test Entry' } })], nextCursor: null, flaggedCount: 0, droppedCount: 0 });
+    client.deleteSubmission.mockResolvedValue(undefined);
+    renderDetail();
+    const del = await screen.findByRole('button', { name: /^delete submission$/i });
+    // A clean row is not in the quarantine: no Release, no Discard.
+    expect(screen.queryByRole('button', { name: /^release$/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^discard$/i })).toBeNull();
+    fireEvent.click(del);
+    await waitFor(() => expect(client.deleteSubmission).toHaveBeenCalledWith('o1', 'f1', 's1'));
+    const asked = ui.confirm.mock.calls[0]![0];
+    expect(asked.danger).toBe(true);
+    expect(asked.body).toMatch(/can’t be undone/);
+    expect(asked.body).toMatch(/CRM contact/);
+    await waitFor(() => expect(screen.queryByText('Test Entry')).toBeNull());
+    expect(toasts.success).toHaveBeenCalledWith(expect.stringMatching(/submission deleted/i));
+  });
+
+  it('a declined confirm deletes nothing', async () => {
+    client.listSubmissionsPage.mockResolvedValue({ submissions: [sub()], nextCursor: null, flaggedCount: 0, droppedCount: 0 });
+    ui.confirm.mockResolvedValue(false);
+    renderDetail();
+    fireEvent.click(await screen.findByRole('button', { name: /^delete submission$/i }));
+    await waitFor(() => expect(ui.confirm).toHaveBeenCalled());
+    expect(client.deleteSubmission).not.toHaveBeenCalled();
+  });
+
+  it('a legal hold is named, and the row stays', async () => {
+    client.listSubmissionsPage.mockResolvedValue({ submissions: [sub({ values: { name: 'Real Lead' } })], nextCursor: null, flaggedCount: 0, droppedCount: 0 });
+    client.deleteSubmission.mockRejectedValueOnce(new FormsRequestError('deleteSubmission', 409, 'legal hold', 'legal_hold'));
+    renderDetail();
+    fireEvent.click(await screen.findByRole('button', { name: /^delete submission$/i }));
+    // The page's own copy, not the server detail echoed by the generic failure toast.
+    await waitFor(() => expect(toasts.error).toHaveBeenCalledWith(expect.stringMatching(/so its submissions can’t be deleted/)));
+    expect(screen.getAllByText('Real Lead').length).toBeGreaterThan(0);
+  });
+
+  it('a held row keeps Release and Discard, and gets no second Delete', async () => {
+    client.listSubmissionsPage.mockResolvedValue({ submissions: [sub({ flagged: 'honeypot' })], nextCursor: null, flaggedCount: 1, droppedCount: 0 });
+    renderDetail();
+    await screen.findByRole('button', { name: /^discard$/i });
+    expect(screen.queryByRole('button', { name: /^delete submission$/i })).toBeNull();
+  });
+});
+
 describe('ADR 0850 D1 — the support-ticket opt-in (user decision: per form, default off)', () => {
   it('starts unticked on a form without the flag, and saves `createTicket: true` once ticked', async () => {
     client.updateForm.mockResolvedValue(form({ createTicket: true }));

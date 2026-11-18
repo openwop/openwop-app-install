@@ -759,6 +759,11 @@ export type OpenwopErrorCode =
   // metadata does not verify against its manifest (or its pin); no authorization
   // URL is issued. `422`, not retriable.
   | 'connection_auth_metadata_mismatch'
+  // ADR 1141 — a recipient-bound share link's one-time-code lane (host-ext, never on the wire).
+  | 'share_verification_required'
+  | 'share_verification_locked'
+  | 'share_verification_failed'
+  | 'share_verification_unavailable'
   // ADR 0549 P4 — the in-flight code, paired with `details.retryAfter`.
   // `idempotency.md` §"Concurrent duplicates": when a second request arrives on
   // a live claim, the server MAY block and return the same response, or MAY

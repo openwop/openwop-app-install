@@ -13,6 +13,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { registerRetentionPurger, purgeRowsByAge } from '../../host/retentionPurger.js';
+import { getRetentionHold } from '../../host/retentionHold.js';
 import { declarePiiFields } from '../../host/dataClassification.js';
 import { onCrmRecordDeleted } from '../../host/crmRecordLifecycle.js';
 import { fireFormDeleted } from '../../host/formLifecycle.js';
@@ -947,9 +948,20 @@ export async function isSubmissionHeld(tenantId: string, submissionId: string): 
  * miss rather than a probe.
  */
 export async function deleteSubmission(tenantId: string, orgId: string, formId: string, submissionId: string): Promise<boolean> {
+  // Issue 5960 — the Submissions list now offers Delete on every row, not only on
+  // held (quarantined) ones, so a real lead is one click from gone. Under a tenant
+  // legal hold that click would be spoliation: a clean row is refused (409
+  // `legal_hold`). A held row is the abuse quarantine, and discarding it is how the
+  // budget is given back (FORM-BUDGET-1), so it stays deletable.
+  const legalHold = (await getRetentionHold(tenantId)) !== null;
   // ADR 0850 D4 — a removal CLAIM, crediting the bucket of the row it claimed.
-  const removed = await removeSubmission(submissionId, (s) => s.tenantId === tenantId && s.orgId === orgId && s.formId === formId);
-  if (!removed) return false;
+  const removed = await removeSubmission(submissionId, (s) => s.tenantId === tenantId && s.orgId === orgId && s.formId === formId && (!legalHold || Boolean(s.flagged)));
+  if (!removed) {
+    if (legalHold && (await getSubmission(tenantId, orgId, formId, submissionId))) {
+      throw new OpenwopError('conflict', 'This workspace is under a legal hold, so its form submissions cannot be deleted.', 409, { reason: 'legal_hold' });
+    }
+    return false;
+  }
   log.info('submission_deleted', { tenantId, formId, ...(removed.flagged ? { reason: removed.flagged } : {}) });
   return true;
 }

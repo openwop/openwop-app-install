@@ -15,7 +15,8 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { checkAgent, deleteRosterEntry, updateRosterEntry, getAgentProfile } from './rosterClient.js';
 import { heartbeatReasonText } from './heartbeatReason.js';
 import { loadAgentView, statusMeta, relativeTime, type AgentView } from './agentViewModel.js';
-import { workflowName, roleThemeForAgent } from './roleTemplates.js';
+import { roleThemeForAgent } from './roleTemplates.js';
+import { useWorkflowNames } from './useWorkflowNames.js';
 import { PlayIcon, ColumnsIcon, AlertIcon, PinIcon, CheckIcon, ChevronDownIcon, ArrowLeftIcon, PencilIcon } from '../ui/icons/index.js';
 import type { KanbanCard, KanbanColumn } from '../kanban/kanbanClient.js';
 import { AgentBoardPanel } from './AgentBoardPanel.js';
@@ -607,6 +608,7 @@ function PriorityPanel({
   busy: boolean;
 }): JSX.Element {
   const { t } = useTranslation('agents');
+  const workflowName = useWorkflowNames(); // issue 5911 — the tenant's own names, not raw ids
   const { entry, board, cards, nextSchedule } = view;
   const todoCol = board?.columns.find((c) => colMatches(c, 'todo'));
   const workingCol = board?.columns.find((c) => colMatches(c, 'working'));
@@ -669,6 +671,7 @@ function PriorityPanel({
 
 function OverviewTab({ view, onGoto, onCheckNow, busy }: { view: AgentView; onGoto: (t: TabKey) => void; onCheckNow: (() => void) | undefined; busy: boolean }): JSX.Element {
   const { t } = useTranslation('agents');
+  const workflowName = useWorkflowNames(); // issue 5911 — the tenant's own names, not raw ids
   const { entry, laneCounts, nextSchedule } = view;
   return (
     <>

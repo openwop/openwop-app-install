@@ -5,6 +5,8 @@
  * resolved admin → the normal admin shell (rail + outlet). Presentation-only;
  * the backend 403s remain the authority.
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
@@ -74,5 +76,22 @@ describe('AdminLayout gate (ADR 0203 / ADM-8)', () => {
     expect(screen.getByRole('status', { name: 'Loading…' })).toBeTruthy();
     expect(screen.queryByText('Administrator access required')).toBeNull();
     expect(screen.queryByText('ORG PAGE BODY')).toBeNull();
+  });
+
+  // Issue 5890 — a state with no rail must not sit in the rail's 232px column.
+  it('the deny and loading states take the full-width column; the normal shell keeps its rail column', () => {
+    const css = readFileSync(join(process.cwd(), 'src/styles/chrome/admin.css'), 'utf8');
+    expect(css).toMatch(/\.admin-shell--bare\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\);\s*\}/);
+    const { container, unmount } = mount();
+    expect(container.querySelector('.admin-shell')?.classList.contains('admin-shell--bare'), 'deny').toBe(true);
+    unmount();
+    state.resolved = false;
+    const loading = mount();
+    expect(loading.container.querySelector('.admin-shell')?.classList.contains('admin-shell--bare'), 'loading').toBe(true);
+    loading.unmount();
+    state.resolved = true;
+    state.access = { roles: ['admin'], scopes: [], basis: 'member' };
+    const admin = mount();
+    expect(admin.container.querySelector('.admin-shell')?.classList.contains('admin-shell--bare'), 'the rail layout').toBe(false);
   });
 });

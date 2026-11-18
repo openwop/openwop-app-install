@@ -194,10 +194,61 @@ export function assertMayIssueDurableKey(issuer: string): void {
   }
 }
 
+/**
+ * #6053 — `scopes` is REQUIRED. An empty declaration means "undeclared", which
+ * ADR 0795 D3 keeps for keys minted before it and which permits every route
+ * (`keyDeclarationPermits`), so a mint path that forgot `scopes` used to produce a
+ * key with its issuer's full authority, silently. Every caller now names its
+ * scopes, `['*']` included as an explicit choice; `undefined` and `[]` are a 400.
+ */
 export async function issueApiKey(input: {
-  tenantId: string; name: string; createdBy: string; scopes?: unknown; expiresAt?: string;
+  tenantId: string; name: string; createdBy: string; scopes: unknown; expiresAt?: string;
   rotatedFrom?: string;
 }): Promise<{ token: string; key: ApiKeyPublic }> {
+  return issueKeyRecord(input, requiredScopes(input.scopes));
+}
+
+/**
+ * #6053 step 1 — make the legacy meaning explicit: every stored undeclared (`[]`) key
+ * is rewritten to `['*']`, the same authority (`keyDeclarationPermits` and
+ * `isNarrowingDeclaration` treat the two alike), now declared. A production data
+ * write, so it is OFF unless `OPENWOP_API_KEY_UNDECLARED_REWRITE` is `report` (counts
+ * per tenant, writes nothing) or `apply` (rewrites). Run report, read the counts, then
+ * apply, and only then set step 2's `OPENWOP_API_KEY_EMPTY_SCOPES=deny`. Idempotent:
+ * a rewritten row no longer matches. Revoked and expired rows are rewritten too, so
+ * no `[]` row is left to mean anything.
+ */
+export function undeclaredRewriteMode(): 'report' | 'apply' | null {
+  const v = process.env.OPENWOP_API_KEY_UNDECLARED_REWRITE?.trim().toLowerCase();
+  return v === 'report' || v === 'apply' ? v : null;
+}
+
+export async function rewriteUndeclaredKeys(mode: 'report' | 'apply'): Promise<{ mode: 'report' | 'apply'; scanned: number; undeclared: number; rewritten: number; byTenant: Record<string, number> }> {
+  let scanned = 0;
+  let undeclared = 0;
+  let rewritten = 0;
+  const byTenant: Record<string, number> = {};
+  for (const rec of await keys.list()) {
+    scanned += 1;
+    if (rec.scopes.length !== 0) continue;
+    undeclared += 1;
+    byTenant[rec.tenantId] = (byTenant[rec.tenantId] ?? 0) + 1;
+    if (mode === 'apply' && (await keys.compareAndSwap(rec, { ...rec, scopes: ['*'] }))) rewritten += 1;
+  }
+  return { mode, scanned, undeclared, rewritten, byTenant };
+}
+
+/** Test seam: a key with the LEGACY undeclared (`[]`) declaration, the shape ADR 0795
+ *  D3 keeps for keys minted before it, so its semantics stay pinned until #6053
+ *  step 2. Never reachable from a production path. */
+export async function __issueUndeclaredLegacyKeyForTest(input: { tenantId: string; name: string; createdBy: string; expiresAt?: string }): Promise<{ token: string; key: ApiKeyPublic }> {
+  return issueKeyRecord(input, []);
+}
+
+async function issueKeyRecord(input: {
+  tenantId: string; name: string; createdBy: string; expiresAt?: string;
+  rotatedFrom?: string;
+}, scopes: string[]): Promise<{ token: string; key: ApiKeyPublic }> {
   assertMayIssueDurableKey(input.createdBy);
   // ADR 0823 — an `owk_` key resolves to `tenants: [key.tenantId]`, and `'*'` is the
   // operator WILDCARD (cross-tenant launch, read and run access). Only an operator
@@ -207,7 +258,6 @@ export async function issueApiKey(input: {
   if ((await keys.listForTenantIndexed(input.tenantId)).filter((k) => !k.revokedAt).length >= MAX.perTenant) {
     throw new OpenwopError('validation_error', `at most ${MAX.perTenant} active keys per tenant.`, 400, {});
   }
-  const scopes = normalizeScopes(input.scopes);
   // ADR 0448 OQ3 — the host mint (owk_ format is byte-identical to the prior
   // local mint: base64url of 32 CSPRNG bytes, sha256-hex hash → zero change).
   const { raw: token, hash } = mintApiKeyToken();
@@ -227,6 +277,15 @@ export async function issueApiKey(input: {
   await keys.put(rec);
   await hashIndex.put({ key: rec.tokenHash, keyId: rec.keyId, tenantId: rec.tenantId });
   return { token, key: project(rec) };
+}
+
+/** #6053 — a mint names its scopes. `['*']` is the explicit "everything". */
+function requiredScopes(raw: unknown): string[] {
+  const scopes = normalizeScopes(raw);
+  if (scopes.length === 0) {
+    throw new OpenwopError('validation_error', "a key must declare its scopes (use ['*'] for unrestricted); an empty declaration would permit every route.", 400, { field: 'scopes' });
+  }
+  return scopes;
 }
 
 function normalizeScopes(raw: unknown): string[] {
@@ -454,7 +513,9 @@ export async function rotateApiKey(
     // The replacement belongs to whoever owned the original, not to an admin
     // who rotated it on their behalf.
     createdBy: rec.createdBy,
-    scopes: rec.scopes,
+    // #6053 — a legacy undeclared (`[]`) key rotates into an EXPLICIT `['*']`: the
+    // same authority, now declared, so a rotation never mints a new undeclared key.
+    scopes: rec.scopes.length === 0 ? ['*'] : rec.scopes,
     ...(opts.expiresAt ? { expiresAt: opts.expiresAt } : {}),
     rotatedFrom: rec.keyId,
   });

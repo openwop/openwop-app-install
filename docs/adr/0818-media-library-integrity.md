@@ -105,6 +105,11 @@ single signature and are inert when served (§1).
 - `assertOrgCapacity` also caps the workspace total. The cap is
   `OPENWOP_MEDIA_TENANT_MAX_BYTES`, default **2 GiB**, read per call. The 409 carries
   `scope: 'workspace'`.
+- The per-org caps are operator-tunable the same way (#5928), read per call:
+  `OPENWOP_MEDIA_ORG_MAX_ASSETS` (default 1,000), `OPENWOP_MEDIA_ORG_MAX_BYTES`
+  (default 256 MiB) and `OPENWOP_MEDIA_ORG_MAX_COLLECTIONS` (default 200). A missing,
+  non-numeric or non-positive value keeps the default. The workspace cap still applies
+  on top, so an org cap above it needs the workspace cap raised too.
 - `withOrgCapacity(tenant, org, bytes, write)` runs check then write as one step per tenant
   within an instance. The upload, bulk, surface and image-gen lanes use it.
 - Each writer waits for the one ahead to START, then for it to finish or for 30 s,

@@ -24,3 +24,7 @@
 .film-editor__fields { display: grid; gap: var(--space-3); padding-block: var(--space-4); }
 .film-editor__fields label { display: grid; gap: var(--space-1); }
 @media (max-width: 860px) { .film-presenter__main { grid-template-columns: minmax(0, 1fr); } }
+
+.film-rehearsal__panel { border: 1px solid var(--rule); border-radius: var(--radius); padding: var(--space-3); margin-block: var(--space-3); }
+.film-rehearsal__panel label { display: grid; gap: var(--space-1); max-width: 28rem; }
+.film-rehearsal__panel input[type=range] { min-width: 12rem; max-width: 100%; }

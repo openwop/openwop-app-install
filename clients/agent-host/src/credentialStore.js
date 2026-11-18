@@ -21,14 +21,23 @@ export function defaultHome() {
 
 const credPath = (home) => join(home, 'credentials.json');
 
+/** ADR 1136 P2b — a browser pairing lives in its own folder under the companion's
+ *  home, so a machine can hold a Claude Code pairing and a browser pairing at once
+ *  and neither overwrites the other. */
+export function browserHome(home = defaultHome()) {
+  return join(home, 'browser');
+}
+
 /** Keychain use is opt-out (`useKeychain:false`) and only ever on darwin. */
 function keychainAvailable(useKeychain) {
   return useKeychain !== false && platform() === 'darwin';
 }
 
-function keychainAccount(host) { return host; }
+/** The keychain account: the host for a terminal pairing (unchanged), and
+ *  `<host>#browser` for a browser one, so the two keys never collide. */
+function keychainAccount(host, kind = 'terminal') { return kind === 'browser' ? `${host}#browser` : host; }
 
-export function saveCredential({ home = defaultHome(), host, apiBase = '', streamBase, token, deviceId, tenantId, expiresAt, useKeychain } = {}) {
+export function saveCredential({ home = defaultHome(), host, apiBase = '', streamBase, token, deviceId, tenantId, expiresAt, useKeychain, kind = 'terminal' } = {}) {
   if (!host || !token) throw new Error('saveCredential needs host and token');
   mkdirSync(home, { recursive: true, mode: 0o700 });
   chmodSync(home, 0o700);
@@ -41,11 +50,11 @@ export function saveCredential({ home = defaultHome(), host, apiBase = '', strea
     // it with `ps`. `security` has no stdin form for a non-interactive write. The
     // file fallback (`useKeychain:false`) avoids argv entirely; a native keychain
     // binding would too, at the cost of a compiled dependency — tracked in ADR 0785.
-    execFileSync('security', ['add-generic-password', '-U', '-s', SERVICE, '-a', keychainAccount(host), '-w', token], { stdio: 'ignore' });
+    execFileSync('security', ['add-generic-password', '-U', '-s', SERVICE, '-a', keychainAccount(host, kind), '-w', token], { stdio: 'ignore' });
     storedToken = '';
     tokenIn = 'keychain';
   }
-  const record = { host, apiBase, ...(streamBase ? { streamBase } : {}), deviceId, tenantId, expiresAt, tokenIn, token: storedToken, savedAt: new Date().toISOString() };
+  const record = { host, apiBase, ...(streamBase ? { streamBase } : {}), deviceId, tenantId, expiresAt, kind, tokenIn, token: storedToken, savedAt: new Date().toISOString() };
   const tmp = `${credPath(home)}.${process.pid}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
   renameSync(tmp, credPath(home));
@@ -73,7 +82,7 @@ export function loadCredential({ home = defaultHome() } = {}) {
   const record = JSON.parse(readFileSync(credPath(home), 'utf8'));
   if (record.tokenIn === 'keychain') {
     try {
-      record.token = execFileSync('security', ['find-generic-password', '-s', SERVICE, '-a', keychainAccount(record.host), '-w'], { encoding: 'utf8' }).trim();
+      record.token = execFileSync('security', ['find-generic-password', '-s', SERVICE, '-a', keychainAccount(record.host, record.kind), '-w'], { encoding: 'utf8' }).trim();
     } catch {
       record.token = '';
     }
@@ -85,7 +94,7 @@ export function loadCredential({ home = defaultHome() } = {}) {
 export function clearCredential({ home = defaultHome() } = {}) {
   const record = existsSync(credPath(home)) ? JSON.parse(readFileSync(credPath(home), 'utf8')) : null;
   if (record?.tokenIn === 'keychain') {
-    try { execFileSync('security', ['delete-generic-password', '-s', SERVICE, '-a', keychainAccount(record.host)], { stdio: 'ignore' }); } catch { /* already gone */ }
+    try { execFileSync('security', ['delete-generic-password', '-s', SERVICE, '-a', keychainAccount(record.host, record.kind)], { stdio: 'ignore' }); } catch { /* already gone */ }
   }
   rmSync(credPath(home), { force: true });
   return record;

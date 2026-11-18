@@ -142,7 +142,8 @@ function visibleProfileTabs(twinVisible: boolean): readonly ProfileTab[] {
 }
 
 export function ProfilePage(): JSX.Element {
-  const { t } = useTranslation('profiles');
+  // issue 5775 — the twin tab borrows `twin:` copy, so this page loads that namespace too.
+  const { t } = useTranslation(['profiles', 'twin']);
   const f = useFormat();
   // Profiles graduated to always-on (§ Correction 2026-06-12) — no feature gate;
   // the page serves to any signed-in caller. The Connections tab is likewise a

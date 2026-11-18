@@ -37,7 +37,7 @@ export const messages = {
   onSuffix: 'activé',
   permissionSafeLabel: 'Demander d’abord',
   permissionBypassLabel: 'Agir directement',
-  permissionSafeTitle: 'Demander d’abord — l’agent demande confirmation avant d’exécuter du code ou d’autres actions importantes (cliquez pour le laisser agir directement)',
+  permissionSafeTitle: 'Demander d’abord — l’agent demande confirmation avant d’exécuter du code, d’exécuter un workflow qu’il a écrit ou d’envoyer quoi que ce soit hors de l’application. Les notes qui vous sont adressées et les tâches sur son propre tableau n’ont pas besoin de confirmation (cliquez pour le laisser agir directement)',
   permissionBypassTitle: 'Agir directement — l’agent agit sans vous demander d’abord (les règles d’approbation de l’espace de travail, le bac à sable, les permissions et les limites s’appliquent toujours ; cliquez pour demander d’abord)',
   togglePermissionMode: 'Basculer le mode d’autorisation (sûr / direct)',
   permissionOwnerOnlyTitle: 'Demander d’abord — seul le propriétaire de la conversation peut laisser l’agent agir directement',
@@ -227,6 +227,19 @@ export const messages = {
   slashCommandsAria: 'Commandes slash et workflows',
   commandsSection: 'Commandes',
   workflowsSection: 'Workflows',
+  // — SlashAutocomplete Templates group (the picker-templates ADR) —
+  templatesSection: "Modèles",
+  templateBrowseAll: "Parcourir tous les modèles…",
+  templateAskAdmin: "Demandez à un administrateur d’ajouter ce modèle",
+  workflowFromTemplateChip: "Issu d’un modèle",
+  templateGalleryTitle: "Ajouter un workflow à partir d’un modèle",
+  templateYouHaveACopy: "Vous en avez déjà une copie",
+  templateAddAnotherCopy: "Ajouter une autre copie",
+  templateGalleryEmptyTitle: "Aucun modèle de workflow pour l’instant",
+  templateGalleryEmptyBody: "Rien n’est encore installé dans cet espace de travail. Un administrateur peut ajouter des packs de modèles.",
+  templateAddedToComposer: "« {{name}} » a été ajouté à vos workflows. Renseignez ses entrées, puis appuyez sur Entrée pour l’exécuter.",
+  templateAddedNotListed: "« {{name}} » a été ajouté à vos workflows, mais la liste / ne l’affiche pas encore. Tapez / pour réessayer.",
+  templateNotFound: "Ce modèle n’est plus disponible.",
 
   // — BackendStatusCard —
   backendLoading: 'Chargement',
@@ -494,6 +507,7 @@ export const messages = {
   cardLabelExternalEvent: 'En attente d’un événement externe',
   externalEventWaitingBody: 'Cette étape attend des exécutions liées ou un événement externe, et continue d’elle-même. Rien à faire ici.',
   waitingResumesOnItsOwn: 'En attente — continue d’elle-même',
+  decisionNotRecorded: "Impossible d’enregistrer votre décision : {{reason}}",
 
   // — defaultCommands —
   cmdNewDescription: 'Démarrer une nouvelle session de conversation (efface le fil actuel)',

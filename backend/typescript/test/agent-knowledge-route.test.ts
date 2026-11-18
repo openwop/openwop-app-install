@@ -109,7 +109,7 @@ async function ownerMemberAgent(role: string): Promise<{ owner: Client; member: 
   const r = await owner.post<{ rosterId: string }>('/host/openwop-app/roster', { persona: 'R', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
   const org = await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' });
   const orgId = org.body.orgId;
-  const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
+  const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, member, rosterId: r.body.rosterId, orgId };
 }

@@ -23,7 +23,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
-import { issueApiKey, listApiKeys } from '../src/features/developer-keys/apiKeyService.js';
+import { __issueUndeclaredLegacyKeyForTest, issueApiKey, listApiKeys } from '../src/features/developer-keys/apiKeyService.js';
 
 const TENANT = 'adr0800-key-mint';
 // Single-principal: the tenant shape the demo-mode owner fallback applies to.
@@ -59,7 +59,9 @@ const call = (token: string, method: string, path: string, body?: unknown): Prom
   });
 
 async function key(scopes?: string[], tenantId: string = TENANT): Promise<{ token: string; keyId: string }> {
-  const out = await issueApiKey({ tenantId, name: 'adr0800', createdBy: 'user:adr0800', ...(scopes ? { scopes } : {}) });
+  // #6053 — no scopes means a LEGACY undeclared key, which `issueApiKey` no longer mints.
+  const base = { tenantId, name: 'adr0800', createdBy: 'user:adr0800' };
+  const out = scopes ? await issueApiKey({ ...base, scopes }) : await __issueUndeclaredLegacyKeyForTest(base);
   return { token: out.token, keyId: out.key.keyId };
 }
 

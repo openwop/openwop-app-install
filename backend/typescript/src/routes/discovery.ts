@@ -7,6 +7,8 @@
  * for a real implementation.
  */
 
+import { llmCacheKeyRecipe2Enabled, RECIPE_2 } from '../providers/llmCacheKey2.js';
+import { v2TelemetryFamily } from '../observability/telemetryFamily.js';
 import { oauthAdvertisementSnapshot, refreshOAuthAdvertisement } from '../features/connections/oauthAdvertisement.js';
 import { maxStreamAgeSec } from '../host/streamAgeCapability.js';
 import { defaultMaxAgeMs } from '../host/sseChannel.js';
@@ -1442,6 +1444,8 @@ export function buildV2Advertisement(config: AppConfig, req?: Request): Record<s
     ...(v2MemoryFamily() ?? {}),
     // ADR 1058 / RFC 0258 §E — only while the host runs declared loopbacks.
     ...(v2LoopbackFamily(SINCE, EXPERIMENTAL_UNTIL) ?? {}),
+    // ADR 1146 / RFC 0262 — only behind OPENWOP_TELEMETRY_FAMILY with an exporter wired.
+    ...(v2TelemetryFamily(SINCE, EXPERIMENTAL_UNTIL) ?? {}),
     ...v2AgentsFamily(),
     ...v2MultiAgentFamily(SINCE, EXPERIMENTAL_UNTIL),
     ...v2HostServiceFamilies(SINCE, EXPERIMENTAL_UNTIL),
@@ -1548,6 +1552,10 @@ export function buildV2Advertisement(config: AppConfig, req?: Request): Record<s
       witness: 'witnessable-unaided',
       modes: [...FORK_MODES],
       effectSeamsManifest: V2_EFFECT_SEAMS_PATH as '/host/effect-seams',
+      // RFC 0260 (ADR 1142 D2) — recipe 2 for every LLM-calling node, behind
+      // OPENWOP_LLM_CACHE_KEY_RECIPE_2. `idempotency` is advertised
+      // unconditionally above, which the facet requires (§A.3).
+      ...(llmCacheKeyRecipe2Enabled() ? { llmCacheKeyRecipe: RECIPE_2 } : {}),
     },
     // `interrupt` — RFC 0176 token scheme. `tokenAlgs` is the module's own
     // exported array, so this states what the minter can actually produce.

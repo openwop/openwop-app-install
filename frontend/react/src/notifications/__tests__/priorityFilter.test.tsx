@@ -141,7 +141,7 @@ describe('R2 IB-SP-9 — a failed FIRST read is not "all clear" under a 0/0/0 ba
     await screen.findByText('Still here');
     expect(screen.getByText(/didn.t go through/i)).toBeTruthy();
     // The band stays: a mutation failure must not hide the key figures.
-    expect(screen.getByRole('button', { name: /action needed/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /needs you/i })).toBeTruthy();
   });
 });
 
@@ -181,7 +181,7 @@ describe('inbox — keyboard queue nav (IB-R2-1, first tests: review F13)', () =
     const newsRow = (id: string, title: string): Notification => ({ ...note(id, 'normal', title), type: 'workflow.completed' });
     withNotifications([newsRow('n1', 'First'), newsRow('n2', 'Second')]);
     renderInbox();
-    fireEvent.click(screen.getByRole('button', { name: /^All/ }));
+    fireEvent.click(screen.getByRole('button', { name: /^Updates/ }));
     await screen.findByText('First');
     // Cursor on the SECOND row, so "the cursor row" differs from "the first row".
     kd('j');

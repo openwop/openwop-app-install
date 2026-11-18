@@ -3,7 +3,8 @@
  * outside event (a parent waiting on its child runs, a webhook) or a timer.
  * They resume on their own, so no surface may say "awaiting your input" for them,
  * render a developer placeholder, or offer buttons. One list, read by the chat
- * card registry, the run bubble, the progress panel and the interrupt renderer.
+ * card registry, the run bubble, the progress panel, the interrupt renderer and the
+ * "needs you" tray (CC-CHAT-6).
  */
 export const SELF_RESUMING_INTERRUPT_KINDS: ReadonlySet<string> = new Set(['external-event', 'timer']);
 

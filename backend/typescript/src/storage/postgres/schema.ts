@@ -1073,6 +1073,14 @@ export const MIGRATIONS: Record<number, (client: Queryable) => Promise<void>> = 
     // Mirrors sqlite mig 53.
     await client.query(`CREATE INDEX IF NOT EXISTS idx_notifications_tenant_run_request ON notifications (tenant_id, run_id) WHERE interrupt_id IS NOT NULL;`);
   },
+  52: async (client) => {
+    // ADR 1142 D7 (RFC 0260 §C) — the recipe-2 key of an LLM provider call.
+    // Mirrors sqlite mig 54; see it. NULLABLE WITH NO BACKFILL; `ADD COLUMN`
+    // with no DEFAULT takes no table rewrite.
+    await client.query(`
+      ALTER TABLE invocation_log ADD COLUMN IF NOT EXISTS llm_cache_key TEXT;
+    `);
+  },
 };
 
 /** Highest defined migration — DERIVED from MIGRATIONS, never a hand-bumped cap.

@@ -54,7 +54,7 @@ async function team() {
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId as string;
   const editor = client(); const editorId = await signup(editor, tenantId);
-  const added = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Editor', subject: editorId, roles: ['editor'] });
+  const added = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Editor', subject: editorId, roles: ['editor'] });
   expect(added.status, JSON.stringify(added.body)).toBeLessThan(300);
   const page = await createPage({ tenantId, orgId, title: `Landing ${n}`, createdBy: 'seed' });
   const funnel = await createFunnel({ tenantId, orgId, createdBy: 'seed', name: `Funnel ${n}`, steps: [{ kind: 'landing', pageId: page.pageId }] });

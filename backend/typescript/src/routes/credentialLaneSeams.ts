@@ -52,7 +52,9 @@ export function registerCredentialLaneSeams(app: Express, seamAuth: RequestHandl
         sendError(res, 400, 'validation_error', `lane '${String(lane)}' is not mintable by this seam (api-key, or session while cookies are enabled).`, { lane });
         return;
       }
-      const { token, key } = await issueApiKey({ tenantId: tenantOf(req), name: 'conformance mint seam', createdBy: subject });
+      // #6053 — the seam names what it mints: the corpus's credential-lane scenarios
+      // exercise an unrestricted key, so it declares `*` rather than leaving it undeclared.
+      const { token, key } = await issueApiKey({ tenantId: tenantOf(req), name: 'conformance mint seam', createdBy: subject, scopes: ['*'] });
       res.status(201).json({ lane: 'api-key', credential: token, subjectId: `apikey:${key.keyId}` });
     } catch (err) {
       next(err);

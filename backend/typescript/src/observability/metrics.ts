@@ -203,6 +203,12 @@ export const METRIC_CATALOG: readonly MetricSpec[] = [
     labels: ['outcome'],
   },
   {
+    name: 'openwop.http.error_cache_stamped',
+    description: 'Error responses (status >= 400) the ADR 1147 exit guard had to stamp no-store on, by route template, status class and what the route had set (none, or a weaker value). Envelope errors are already no-store and never count, so this measures the direct writes the envelope does not cover; it falls as routes move onto sendError.',
+    kind: 'counter',
+    labels: ['route', 'status_class', 'prior'],
+  },
+  {
     name: 'openwop.replay.node.served',
     description: 'Side-effecting nodes served from the source run instead of re-executing (ADR 0341 fast path).',
     kind: 'counter',

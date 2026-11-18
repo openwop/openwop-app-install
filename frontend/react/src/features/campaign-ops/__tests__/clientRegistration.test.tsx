@@ -47,7 +47,9 @@ const transport = vi.fn<typeof fetch>();
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 function deferred<T>() { let resolve!: (value: T) => void; let reject!: (error: Error) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 function mount(strict = false) { const page = <MemoryRouter><OperationsPage /></MemoryRouter>; return render(strict ? <StrictMode>{page}</StrictMode> : page); }
-async function open() { fireEvent.click(await screen.findByRole('button', { name: 'Add a client' })); await screen.findByRole('combobox', { name: 'Organization' }); }
+// The dialog opens in "New client" mode (the house-client ADR D3); these cases drive the existing-org chooser.
+function existingMode() { fireEvent.click(within(screen.getByRole('group', { name: 'How to add the client' })).getByRole('button', { name: 'Existing organization' })); }
+async function open() { fireEvent.click(await screen.findByRole('button', { name: 'Add a client' })); existingMode(); await screen.findByRole('combobox', { name: 'Organization' }); }
 function choose() { fireEvent.change(screen.getByRole('combobox', { name: 'Organization' }), { target: { value: ORG.orgId } }); }
 function asButton(element: HTMLElement): HTMLButtonElement { if (!(element instanceof HTMLButtonElement)) throw new Error('Expected a button'); return element; }
 function asSelect(element: HTMLElement): HTMLSelectElement { if (!(element instanceof HTMLSelectElement)) throw new Error('Expected a select'); return element; }
@@ -98,7 +100,7 @@ it('excludes root and registered organizations and requires an explicit choice a
 });
 it('shows no eligible orgs honestly when all are registered, and distinguishes failed org reads with Retry', async () => {
   h.orgs.mockRejectedValueOnce(new Error('offline')); mount();
-  fireEvent.click(await screen.findByRole('button', { name: 'Add a client' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Add a client' })); existingMode();
   await screen.findByText('Organizations could not be loaded. Try again.');
   expect(screen.queryByText('No organizations available')).toBeNull();
   h.orgs.mockResolvedValue([]); fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Try again' }));
@@ -173,7 +175,7 @@ it.each(['success', 'error'])('ignores late organization list%s after identity c
   let current = true; const isCurrent = () => current;
   const onSubmit = vi.fn(); const onClose = vi.fn();
   const page = render(<ClientRegistrationDialog clients={[]} isCurrent={isCurrent} onClose={onClose} onSubmit={onSubmit} />);
-  await screen.findByText('Loading…');
+  existingMode(); await screen.findByText('Loading…');
   current = false;
   page.rerender(<ClientRegistrationDialog clients={[]} isCurrent={isCurrent} onClose={onClose} onSubmit={onSubmit} />);
   await act(async () => { if (outcome === 'success') orgs.resolve([ORG]); else orgs.reject(new Error('old org error')); });
@@ -272,7 +274,7 @@ it('derives newly registered exclusions from current clients without refetching 
   const isCurrent = () => true;
   const onClose = vi.fn();
   const page = render(<ClientRegistrationDialog clients={[]} isCurrent={isCurrent} onClose={onClose} onSubmit={onSubmit} />);
-  await screen.findByRole('option', { name: ORG.name });
+  existingMode(); await screen.findByRole('option', { name: ORG.name });
   choose();
   expect(h.orgs).toHaveBeenCalledTimes(1);
   page.rerender(<ClientRegistrationDialog clients={[CLIENT]} isCurrent={isCurrent} onClose={onClose} onSubmit={onSubmit} />);
@@ -287,7 +289,7 @@ it('hides completed organization data when the existing identity guard invalidat
   const isCurrent = () => current;
   const onSubmit = vi.fn(); const onClose = vi.fn();
   const page = render(<ClientRegistrationDialog clients={[]} isCurrent={isCurrent} onClose={onClose} onSubmit={onSubmit} />);
-  await screen.findByRole('option', { name: ORG.name }); choose();
+  existingMode(); await screen.findByRole('option', { name: ORG.name }); choose();
   current = false;
   page.rerender(<ClientRegistrationDialog clients={[]} isCurrent={isCurrent} onClose={onClose} onSubmit={onSubmit} />);
   expect(screen.queryByRole('option', { name: ORG.name })).toBeNull();

@@ -247,6 +247,12 @@ export const messages = {
   discardHeldBody: 'Ele é excluído permanentemente e o formulário recupera essa parte da sua capacidade de quarentena. Os leads reais não são afetados.',
   discardHeldDone: 'Envio em revisão descartado.',
   discardHeldFailed: 'Não foi possível descartar esse envio — tente novamente.',
+  deleteSubmission: 'Excluir envio',
+  deleteSubmissionConfirm: 'Excluir este envio?',
+  deleteSubmissionBody: 'Ele é excluído permanentemente e não pode ser desfeito. O que ele já criou continua: um contato do CRM, um ticket ou uma execução de fluxo de trabalho.',
+  deleteSubmissionDone: 'Envio excluído.',
+  deleteSubmissionFailed: 'Não foi possível excluir esse envio — tente novamente.',
+  deleteSubmissionLegalHold: 'Este espaço de trabalho está sob retenção legal, então os envios não podem ser excluídos.',
   // ADR 0850 — held-lead release (D3), the burst hold reason (D5), the
   // consent-is-optional rule (D2) and the conditional-visibility editor (D7).
   submissionHeldBurst: "Em revisão — rajada de envios",

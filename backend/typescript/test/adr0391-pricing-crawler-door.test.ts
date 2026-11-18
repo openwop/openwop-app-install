@@ -33,7 +33,7 @@ import { isPublicPath } from '../src/middleware/auth.js';
 let PORT = 0; let server: http.Server;
 type Layer = { regexp?: RegExp & { fast_slash?: boolean }; route?: { path?: unknown; methods?: Record<string, boolean> }; name?: string; handle?: { stack?: Layer[] } };
 let routerStack: Layer[] = [];
-let TENANT = ''; let ORG = '';
+let TENANT = ''; let ORG = ''; let ORG_BARE = '';
 const PREVIEW_BOT = 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)';
 const HUMAN = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36';
 const SHELL = '<!doctype html><html><head><title>shell</title></head><body><div id="root"></div></body></html>';
@@ -71,8 +71,12 @@ beforeAll(async () => {
   const login = await call('/host/openwop-app/test/login', { email: `pricing0391-${Date.now()}@acme.test` });
   TENANT = login.user?.tenantId ?? login.tenantId ?? '';
   ORG = (await call('/host/openwop-app/orgs', { name: 'Pricing Door Co' })).orgId ?? '';
+  // A second site with NO `pricing` page published (the app.openwop.dev case).
+  ORG_BARE = (await call('/host/openwop-app/orgs', { name: 'No Pricing Page Co' })).orgId ?? '';
   expect(TENANT).not.toBe('');
   expect(ORG).not.toBe('');
+  expect(ORG_BARE).not.toBe('');
+  expect(ORG_BARE).not.toBe(ORG);
   const page = await createPage({
     tenantId: TENANT, orgId: ORG, title: 'Plans and Pricing', slug: 'pricing',
     sections: [{ type: 'richText', data: { heading: 'Plans and Pricing', text: 'Pick the plan that fits.' } }],
@@ -162,5 +166,22 @@ describe('the /pricing document door', () => {
     expect(r.headers.location).toBeUndefined();
     expect(r.headers['cache-control']).toBe('no-cache, no-store, must-revalidate');
     expect(String(r.headers.vary)).toMatch(/User-Agent/i);
+  });
+
+  // MEASURED on app.openwop.dev after #6026 deployed (13a73a2057, 2026-11-16): with no
+  // `pricing` page published, a crawler got `404 application/json` while a browser got
+  // the SPA's built-in pricing page. `/pricing` exists without a CMS page, so a crawler
+  // gets the shell there, as it did before the door. `/p/<missing>` stays a 404: that
+  // route has nothing to render.
+  it('with no `pricing` page published, a crawler gets the shell (200 html), not a 404', async () => {
+    process.env.OPENWOP_PUBLIC_SITE_ORG_ID = ORG_BARE; process.env.OPENWOP_SPA_SHELL_FILE = shellFile;
+    const r = await rawGet('/pricing', PREVIEW_BOT);
+    expect(r.status).toBe(200);
+    expect(r.headers['content-type']).toContain('text/html');
+    expect(r.body).toBe(SHELL);
+    expect(r.headers['cache-control']).toBe('no-cache, no-store, must-revalidate');
+    expect(String(r.headers.vary)).toMatch(/User-Agent/i);
+    const missing = await rawGet('/p/pricing', PREVIEW_BOT);
+    expect(missing.status).toBe(404);
   });
 });

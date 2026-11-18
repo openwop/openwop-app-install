@@ -326,6 +326,21 @@ export function KanbanPage(): JSX.Element {
     }
   }, [refreshAssigned]);
 
+  // ADR 1138 D2 — finish a card from the rail: the same card move a drag makes
+  // (the assignee carve-out authorizes it), into the board's completion lane.
+  const onDoneAssigned = useCallback(async (card: AssignedCard) => {
+    if (!card.doneColumnId) return;
+    setClaimBusyId(card.id);
+    try {
+      await patchCard(card.id, { columnId: card.doneColumnId });
+      await refreshAssigned();
+    } catch (err) {
+      setError((() => { const c = classifyHttpError(err); return `${c.title} — ${c.detail}`; })());
+    } finally {
+      setClaimBusyId(null);
+    }
+  }, [refreshAssigned]);
+
   const onCreateBoard = async (input: { name: string; triggerWorkflowId?: string; rosterId?: string }) => {
     try {
       const board = await createBoard(input);
@@ -705,6 +720,7 @@ export function KanbanPage(): JSX.Element {
                 busyId={claimBusyId}
                 highlightId={highlightCardId}
                 onClaim={(cardId) => void onClaim(cardId)}
+                onDone={(card) => void onDoneAssigned(card)}
               />
             ) : undefined}
           />

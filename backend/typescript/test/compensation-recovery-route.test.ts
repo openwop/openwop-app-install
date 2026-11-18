@@ -159,7 +159,7 @@ async function orgWith(roles: readonly string[]): Promise<{
     const email = `cmp-${role}-${Date.now()}-${n++}@acme.test`;
     const uid = await signup(c, tenantId, true, email);
     const add = await founder.post(
-      `/host/openwop-app/orgs/${encodeURIComponent(wsOrgId!)}/members`,
+      `/host/openwop-app/test/orgs/${encodeURIComponent(wsOrgId!)}/members`,
       { displayName: role, subject: uid, roles: [role] },
     );
     expect(add.status, JSON.stringify(add.body)).toBe(201);

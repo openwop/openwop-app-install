@@ -59,6 +59,8 @@ export const messages = {
   wordmarkEmphasisLabel: 'emphasis',
   wordmarkSubLabel: 'sub',
   documentTitleLabel: 'Document title',
+  footerTextLabel: 'Footer text',
+  footerTextHelp: 'Shown before the links in the app footer. Leave it empty to show none.',
   logoHeading: 'Logo',
   logoUrlLabel: 'Logo / mark URL',
   logoUrlHelp: 'An https URL, a /relative path, or a data:image URI. Upload arrives with Media.',

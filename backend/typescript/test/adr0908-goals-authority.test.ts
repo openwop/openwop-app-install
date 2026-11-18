@@ -114,7 +114,7 @@ async function member(own: Client, role: 'editor' | 'viewer'): Promise<{ c: Clie
   const r = await c('POST', '/host/openwop-app/test/login', { email: `${role}-${n++}@g908.test`, tenantId: T });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   const userId = r.body.user!.userId;
-  const add = await own('POST', `/host/openwop-app/orgs/${encodeURIComponent(T)}/members`, { displayName: role, subject: userId, roles: [role] });
+  const add = await own('POST', `/host/openwop-app/test/orgs/${encodeURIComponent(T)}/members`, { displayName: role, subject: userId, roles: [role] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { c, userId };
 }
@@ -339,7 +339,7 @@ describe('D2b — the scheduler route cannot write a goal\'s continuation job', 
   it('a key arms as the PERSON who minted it, and its goal is theirs (A7); a key reads goals (A3)', async () => {
     const o = await owner();
     const editor = await member(o.c, 'editor');
-    const token = (await issueApiKey({ tenantId: o.tenant, name: `k-${n++}`, createdBy: editor.userId })).token;
+    const token = (await issueApiKey({ scopes: ['*'], tenantId: o.tenant, name: `k-${n++}`, createdBy: editor.userId })).token;
     const key = client(token);
     expect((await key('GET', G())).status).toBe(200);
     // A key that declared itself narrower than workspace:read is refused the read.

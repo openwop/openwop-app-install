@@ -306,7 +306,7 @@ describe('attestation routes — RBAC (host:whatsapp:manage)', () => {
     expect((await owner.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.workspaceId)}/switch`)).status).toBe(200);
     const editor = client();
     const editorUser = ((await editor.post('/host/openwop-app/test/login', { email: `waed-${Date.now()}@acme.test` })).body as { user: { userId: string } }).user;
-    expect((await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws.workspaceId)}/members`, { displayName: 'Ed', subject: editorUser.userId, roles: ['editor'] })).status).toBe(201);
+    expect((await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(ws.workspaceId)}/members`, { displayName: 'Ed', subject: editorUser.userId, roles: ['editor'] })).status).toBe(201);
     expect((await editor.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.workspaceId)}/switch`)).status).toBe(200);
 
     const path = `/host/openwop-app/whatsapp/orgs/${encodeURIComponent(ws.workspaceId)}/attestation`;

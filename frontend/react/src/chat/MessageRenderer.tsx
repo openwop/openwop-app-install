@@ -32,6 +32,8 @@ const MermaidDiagram = lazy(() => import('./MermaidDiagram.js').then((m) => ({ d
 import 'katex/dist/katex.min.css';
 import type { ContentPart } from './hooks/useChatSession.js';
 import { mediaSrc } from './mediaSrc.js';
+import { chatUrlTransform, parseFeatureLink } from './lib/chatLinkResolvers.js';
+import { ChatFeatureLink } from './ChatFeatureLink.js';
 import { formatDurationSeconds } from '../i18n/format.js';
 import { MicIcon } from '../ui/icons/MicIcon.js';
 import { PaperclipIcon } from '../ui/icons/index.js';
@@ -50,11 +52,17 @@ import { PaperclipIcon } from '../ui/icons/index.js';
  *    toggle visually then snap back on re-render. Force `disabled`
  *    so the checkbox reads as read-only state. */
 const CHAT_MD_COMPONENTS: Components = {
-  a: ({ href, children, ...rest }) => (
-    <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>
-      {children}
-    </a>
-  ),
+  a: ({ href, children, ...rest }) => {
+    // ADR 1040 D7 F4 — a registered feature scheme is resolved per viewer to an
+    // in-app route (or stays text); it is never used as an href as written.
+    const feature = parseFeatureLink(href);
+    if (feature) return <ChatFeatureLink id={feature.id} resolve={feature.resolve}>{children}</ChatFeatureLink>;
+    return (
+      <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>
+        {children}
+      </a>
+    );
+  },
   input: (props) => (
     props.type === 'checkbox'
       ? <input {...props} disabled className="u-cursor-default" />
@@ -195,6 +203,9 @@ function MarkdownText({ content }: { content: string }): JSX.Element {
         // future KaTeX default does.
         rehypePlugins={[[rehypeKatex, { trust: false, throwOnError: false, output: 'htmlAndMathml' }]]}
         components={CHAT_MD_COMPONENTS}
+        // ADR 1040 D7 F4 — the default sanitizer, except that a REGISTERED
+        // feature scheme survives to be resolved (an unregistered one is blanked).
+        urlTransform={chatUrlTransform}
       >
         {content}
       </ReactMarkdown>

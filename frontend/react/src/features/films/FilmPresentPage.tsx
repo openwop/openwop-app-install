@@ -2,27 +2,32 @@ import { useEffect, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { validateFilm, type FilmSpec } from '../../../../../contracts/films.js';
-import { authedHeaders, config, fetchOpts } from '../../client/config.js';
+import { authedHeaders, config, fetchOpts, onAuthChange } from '../../client/config.js';
 import { listOrgs, asJson } from '../../canvas/canvasClient.js';
 import { resolveCanvasOrg } from '../../canvas/resolveCanvasOrg.js';
 import { CanvasOrgGate } from '../../canvas/CanvasOrgGate.js';
 import { Button } from '../../ui/Button.js';
 import { useOrgSelection } from '../../ui/useOrgSelection.js';
 import { OrgSelectionState } from '../../ui/OrgSelectionState.js';
+import { useUnsavedRouteGuard } from '../../ui/useUnsavedChangesWarning.js';
 import { FilmPresenter } from './FilmPresenter.js';
 interface LoadedFilm { canvasId: string; version: number; film: FilmSpec; assetUrls: Record<string, string> }
 export function FilmPresentPage(): JSX.Element {
   const { t } = useTranslation('films');
+  const [authEpoch, setAuthEpoch] = useState(0);
+  const [dirty, setDirty] = useState(false);
+  useUnsavedRouteGuard(dirty);
   const { canvasId } = useParams();
   const [params, setParams] = useSearchParams();
   const org = params.get('org');
-  const { orgs, orgsFailed, retry: retryOrgs } = useOrgSelection(listOrgs, true, org ?? '', { scopeKey: org ?? '' });
+  const { orgs, orgsFailed, retry: retryOrgs } = useOrgSelection(listOrgs, true, org ?? '', { scopeKey: `${authEpoch}:${org ?? ''}` });
   const resolved = orgs === null ? null : resolveCanvasOrg([...orgs], org);
   const orgId = resolved?.kind === 'ok' ? resolved.orgId : '';
-  const sourceKey = orgId && canvasId ? `${orgId}:${canvasId}` : '';
+  const sourceKey = orgId && canvasId ? `${authEpoch}:${orgId}:${canvasId}` : '';
   const [loaded, setLoaded] = useState<{ sourceKey: string; data: LoadedFilm } | null>(null);
   const [error, setError] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  useEffect(() => onAuthChange(() => { setLoaded(null); setAuthEpoch(n => n + 1); }), []);
   useEffect(() => {
     let live = true; setLoaded(null); setError(false);
     if (!orgId || !canvasId) return;
@@ -42,6 +47,6 @@ export function FilmPresentPage(): JSX.Element {
     {resolved && resolved.kind !== 'ok' ? <CanvasOrgGate resolution={resolved} onPick={id => setParams(previous => { const next = new URLSearchParams(previous); next.set('org', id); return next; })} />
       : error ? <div><p role="alert">{t('loadError')}</p><Button onClick={() => setAttempt(v => v + 1)}>{t('retry')}</Button></div>
       : !current ? <p role="status">{t('loading')}</p>
-      : <FilmPresenter key={`${current.canvasId}:${current.version}`} film={current.film} source={`canvas:${current.canvasId}:${current.version}`} assetUrls={current.assetUrls} />}
+      : <FilmPresenter onUnsavedChange={setDirty} key={`${current.canvasId}:${current.version}`} film={current.film} source={`canvas:${current.canvasId}:${current.version}`} assetUrls={current.assetUrls} performanceEndpoint={`${config.baseUrl}/host/openwop-app/films/orgs/${encodeURIComponent(orgId)}/canvases/${encodeURIComponent(current.canvasId)}/performances?revision=${current.version}`} />}
   </OrgSelectionState>;
 }

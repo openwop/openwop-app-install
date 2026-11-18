@@ -68,7 +68,7 @@ async function scenario(memberRole: string): Promise<{ owner: Client; member: Cl
   const member = client();
   const memberId = (await member.post('/host/openwop-app/test/login', { email: `m-${Date.now()}-${n++}@acme.test`, tenantId })).body.user!.userId;
   const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId!;
-  await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberId, roles: [memberRole] });
+  await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberId, roles: [memberRole] });
   const companyId = (await owner.post(`/host/openwop-app/crm/orgs/${encodeURIComponent(orgId)}/companies`, { name: 'Dealer Co' })).body.companyId!;
   return { owner, member, orgId, companyId };
 }

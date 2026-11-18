@@ -86,7 +86,7 @@ describe('CDP-H developer API keys', () => {
     const past = await c.post('/host/openwop-app/developer-keys', { name: 'exp', scopes: ['runs:read'], expiresAt: '2000-01-01T00:00:00.000Z' });
     expect(past.status).toBe(400);
     expect(past.body.details?.code).toBe('expiry_in_past');
-    const exp = await issueApiKey({ tenantId: 'cdp-keys-expired', name: 'exp', createdBy: 'user:x', expiresAt: '2000-01-01T00:00:00.000Z' });
+    const exp = await issueApiKey({ scopes: ['*'], tenantId: 'cdp-keys-expired', name: 'exp', createdBy: 'user:x', expiresAt: '2000-01-01T00:00:00.000Z' });
     expect(await verifyApiKey(exp.token)).toBeNull();
 
     // revoked

@@ -30,7 +30,7 @@ import {
   ApprovalApiError,
   type PendingApproval,
 } from '../agents/approvalsClient.js';
-import { workflowName } from '../agents/roleTemplates.js';
+import { useWorkflowNames } from '../agents/useWorkflowNames.js';
 import { relativeTime } from '../agents/agentViewModel.js';
 import { Avatar } from '../ui/Avatar.js';
 import { loadOrgMembers } from '../orgs/orgMembers.js';
@@ -235,6 +235,7 @@ function DecidedRow({ a, memberName, t }: {
 
 export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX.Element {
   const { t } = useTranslation('notifications');
+  const workflowName = useWorkflowNames(); // issue 5911 — the tenant's own names, not raw ids
   // ADR 0862 — load the lazy `assistantAction` namespace (its decide-failure copy) WITHOUT
   // suspending: listing it in the main hook blanked the whole page on a first visit.
   useTranslation('assistantAction', { useSuspense: false });

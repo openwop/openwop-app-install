@@ -161,6 +161,13 @@ lists them.
 >   bearer and superadmins are exempt. This is its own gated unit with its own
 >   train, because a sweep of that size trips the src-walking ratchets.
 
+> **CORRECTED 2026-11-16 — (ii) and (iii) shipped (#5945), with two decisions the plan above left open.**
+> Fixtures do not call `createMember` directly. They use the auth test seam's copy of the member routes,
+> which runs the same handler with `allowLegacySubject`, so role validation, the owner rule, events and
+> audit still run in every fixture. And a raw `user:` subject is refused even when it is in the caller's
+> D1 pool, so there is one add lane, through opaque candidates. The refusal covers `user:` only. The
+> other host-identity prefixes the first paragraph lists (`apikey:`, `session:`, …) are still accepted.
+
 ## Implementation record
 
 | Piece | Where | Test |
@@ -169,3 +176,5 @@ lists them.
 | Routes | `routes/accessControl.ts` | same |
 | Interim: old-lane visibility | `routes/accessControl.ts` → `recordLegacySubjectBind` | same (the interim case) |
 | Picker and link UI | `frontend/react/src/orgs/` | component test |
+| #5945 PR-1: fixtures seed through the auth test seam | `routes/accessControl.ts` (`memberCreateHandler`/`memberPatchHandler`, `allowLegacySubject`), `routes/authTestSeam.ts`; 138 backend fixtures, 3 e2e specs | `test/adr0833-test-seam-deployment.test.ts` (absent when deployed or unflagged) |
+| #5945 PR-2: the refusal | `routes/accessControl.ts` `refuseLegacyPersonSubject` | `test/adr1123-legacy-subject-refusal.test.ts` (four sabotages) |

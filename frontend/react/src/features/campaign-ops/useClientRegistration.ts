@@ -1,9 +1,12 @@
-/** Parent-owned registration lifecycle survives dismissal; identity remains the inbox's. */
+/** Parent-owned registration lifecycle survives dismissal; identity remains the inbox's.
+ *  A target with an `org` registers that existing organization; one without creates a
+ *  new organization for the client (the house-client ADR D3, "New client"). */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { Organization } from '../../client/accessClient.js';
 import { CampaignOpsError, createClient, listClients, type ClientAccount } from './campaignOpsClient.js';
-type Target = { org: Organization; name: string };
+export type RegistrationTarget = { org?: Organization; name: string };
+type Target = RegistrationTarget;
 type Operation = Target & { phase: 'pending' | 'uncertain'; checking: boolean; error: string };
 export function useClientRegistration({ isCurrent, onStart, onRegistered, onAuthorityLost }: {
   isCurrent: () => boolean; onStart: () => void;
@@ -14,20 +17,24 @@ export function useClientRegistration({ isCurrent, onStart, onRegistered, onAuth
   const checking = useRef(false);
   const [operation, setOperation] = useState<Operation | null>(null);
   const [error, setError] = useState('');
-  const reset = useCallback(() => { owner.current = null; checking.current = false; setOperation(null); setError(''); }, []);
+  /** The server's `details.reason` for the last refusal (e.g. `root_org_not_client`). */
+  const [errorReason, setErrorReason] = useState('');
+  const reset = useCallback(() => { owner.current = null; checking.current = false; setOperation(null); setError(''); setErrorReason(''); }, []);
   useEffect(() => { const ownership = owner; return () => { ownership.current = null; }; }, []);
   const submit = (target: Target): void => {
-    if (!isCurrent() || owner.current || !target.org.orgId || !target.name.trim()) return;
+    if (!isCurrent() || owner.current || (target.org && !target.org.orgId) || !target.name.trim()) return;
     owner.current = target; setError(''); setOperation({ ...target, phase: 'pending', checking: false, error: '' }); onStart();
     const current = (): boolean => owner.current === target && isCurrent();
-    void createClient({ orgId: target.org.orgId, name: target.name.trim() }).then(client => {
+    const org = target.org;
+    void createClient(org ? { orgId: org.orgId, name: target.name.trim() } : { name: target.name.trim() }).then(client => {
       if (!current()) return;
-      if (client.orgId !== target.org.orgId || client.tenantId !== target.org.tenantId) throw new Error(t('registrationUncertain'));
+      if (org && (client.orgId !== org.orgId || client.tenantId !== org.tenantId)) throw new Error(t('registrationUncertain'));
+      if (!org && client.displayName !== target.name.trim()) throw new Error(t('registrationUncertain'));
       reset(); onRegistered(client, true);
     }).catch((e: unknown) => {
       if (!current()) return;
       if (e instanceof CampaignOpsError && (e.status === 400 || e.status === 403)) {
-        reset(); setError(e.message || t('registrationDenied'));
+        reset(); setError(e.message || t('registrationDenied')); setErrorReason(e.reason ?? '');
         if (e.status === 403) onAuthorityLost();
       } else setOperation({ ...target, phase: 'uncertain', checking: false, error: t('registrationUncertain') });
     });
@@ -40,7 +47,11 @@ export function useClientRegistration({ isCurrent, onStart, onRegistered, onAuth
     void listClients().then(out => {
       if (!current()) return;
       if (!out.agencyAdmin) { reset(); setError(t('registrationDenied')); onAuthorityLost(); return; }
-      const client = out.clients.find(c => c.orgId === target.org.orgId && c.tenantId === target.org.tenantId);
+      const org = target.org;
+      // A new client has no org id until it exists; it is found by its name.
+      const client = org
+        ? out.clients.find(c => c.orgId === org.orgId && c.tenantId === org.tenantId)
+        : out.clients.find(c => c.displayName === target.name.trim());
       reset();
       if (client) onRegistered(client, false);
       else setError(t('registrationNotFound'));
@@ -50,5 +61,5 @@ export function useClientRegistration({ isCurrent, onStart, onRegistered, onAuth
       if (current()) { checking.current = false; setOperation(cur => cur ? { ...cur, checking: false } : cur); }
     });
   };
-  return { operation, error, reset, submit, recheck, isOwned: () => owner.current !== null };
+  return { operation, error, errorReason, reset, submit, recheck, isOwned: () => owner.current !== null };
 }

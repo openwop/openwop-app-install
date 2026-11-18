@@ -138,7 +138,7 @@ describe('priority-matrix — config authority', () => {
     const memberUser = await signup(member, { tenantId });
     const org = await owner.post('/host/openwop-app/orgs', { name: 'Acme' });
     const orgId = org.body.orgId;
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
     const list = (await owner.post(L, { orgId, name: 'Guarded', presetId: 'weighted' })).body;
 
     const newSet = { aggregation: 'weighted-sum', criteria: [{ name: 'Only one', weight: 9, direction: 'benefit' }] };
@@ -166,7 +166,7 @@ describe('priority-matrix — cross-org isolation (project-scoped lists)', () =>
     const orgA = (await owner.post('/host/openwop-app/orgs', { name: 'Alpha' })).body.orgId;
     const orgB = (await owner.post('/host/openwop-app/orgs', { name: 'Bravo' })).body.orgId;
     // The member is an editor in A only.
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
     // A list scoped to org B.
     const listB = (await owner.post(L, { orgId: orgB, name: 'B-only', presetId: 'weighted' })).body;
     const base = `${L}/${encodeURIComponent(listB.id)}`;
@@ -332,7 +332,7 @@ describe('priority-matrix — schedule status (ADR 0103)', () => {
     const viewerUser = await signup(viewer, { tenantId });
     const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
     // Viewer role = workspace:read but NOT workspace:write (accessControl built-in).
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: viewerUser.userId, roles: ['viewer'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: viewerUser.userId, roles: ['viewer'] });
     const list = (await owner.post(L, { orgId, name: 'Gated', presetId: 'weighted' })).body;
     const base = `${L}/${encodeURIComponent(list.id)}`;
     const idea = (await owner.post(`${base}/ideas`, { title: 'Item' })).body;

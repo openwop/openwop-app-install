@@ -43,6 +43,8 @@ export interface KanbanCard {
   lastRunStatus?: 'running' | 'completed' | 'failed' | 'cancelled';
   source?: KanbanCardSource;
   sourceLabel?: string;
+  /** ADR 1138 D1 — where the card's work happens (an app path) and its link label. */
+  sourceRef?: { label: string; path: string };
   priority?: 'low' | 'normal' | 'high';
   dueAt?: string;
   /** Who created the task (the source chip says HOW it arrived; this says WHO). */
@@ -99,7 +101,13 @@ export interface KanbanWorkItem {
 
 /** ADR 0049 — a card on the "assigned to me" mirror, carrying its origin-board
  *  provenance (the card stays in its board; this is a derived view). */
-export type AssignedCard = KanbanCard & { boardName: string; columnName: string; terminal: boolean };
+export type AssignedCard = KanbanCard & {
+  boardName: string;
+  columnName: string;
+  terminal: boolean;
+  /** ADR 1138 D2 — the board's completion lane, the mirror's Done target. */
+  doneColumnId?: string;
+};
 
 export interface KanbanBoard {
   id: string;
@@ -107,6 +115,9 @@ export interface KanbanBoard {
   name: string;
   columns: KanbanColumn[];
   rosterId?: string;
+  /** ADR 0045 — the canonical owner. A board an agent files onto (`kanban.add-todo`,
+   *  `ensureSubjectBoard`) carries ONLY this, not the legacy `rosterId`. */
+  ownerSubject?: { kind: string; id: string };
   createdAt: string;
   updatedAt: string;
 }
@@ -372,4 +383,13 @@ export interface HandoffNoteDraft {
   tried?: { approach: string }[];
   /** A person's own judgement, picked as low / medium / high (see `HANDOFF_CONFIDENCE`). */
   confidence?: { value: number; basis?: string };
+}
+
+/** issue 5965 — is this the agent's own board? The backend's `boardSubject` rule: the
+ *  canonical `ownerSubject` wins, the legacy `rosterId` is read as `{kind:'agent'}`.
+ *  Matching `rosterId` alone missed every board `kanban.add-todo` created, so the
+ *  agent's cards never showed. */
+export function isAgentBoard(board: Pick<KanbanBoard, 'rosterId' | 'ownerSubject'>, rosterId: string): boolean {
+  if (board.ownerSubject) return board.ownerSubject.kind === 'agent' && board.ownerSubject.id === rosterId;
+  return board.rosterId === rosterId;
 }

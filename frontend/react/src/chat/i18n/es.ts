@@ -37,7 +37,7 @@ export const messages = {
   onSuffix: 'activado',
   permissionSafeLabel: 'Preguntar antes',
   permissionBypassLabel: 'Actuar directo',
-  permissionSafeTitle: 'Preguntar antes — el agente pide confirmación antes de ejecutar código u otras acciones importantes (clic para que actúe directo)',
+  permissionSafeTitle: 'Preguntar antes — el agente pide confirmación antes de ejecutar código, ejecutar un flujo de trabajo que escribió o enviar algo fuera de la app. Las notas para ti y las tareas en su propio tablero no necesitan confirmación (clic para que actúe directo)',
   permissionBypassTitle: 'Actuar directo — el agente actúa sin preguntarte antes (las reglas de aprobación del espacio de trabajo, el sandbox, los permisos y los límites siguen aplicándose; clic para preguntar antes)',
   togglePermissionMode: 'Cambiar modo de permisos (seguro / directo)',
   permissionOwnerOnlyTitle: 'Preguntar antes — solo la persona propietaria de la conversación puede dejar que el agente actúe directo',
@@ -227,6 +227,19 @@ export const messages = {
   slashCommandsAria: 'Comandos de barra y workflows',
   commandsSection: 'Comandos',
   workflowsSection: 'Workflows',
+  // — SlashAutocomplete Templates group (the picker-templates ADR) —
+  templatesSection: "Plantillas",
+  templateBrowseAll: "Ver todas las plantillas…",
+  templateAskAdmin: "Pide a un administrador que añada esta plantilla",
+  workflowFromTemplateChip: "De plantilla",
+  templateGalleryTitle: "Añadir un flujo de trabajo desde una plantilla",
+  templateYouHaveACopy: "Ya tienes una copia",
+  templateAddAnotherCopy: "Añadir otra copia",
+  templateGalleryEmptyTitle: "Aún no hay plantillas de flujos de trabajo",
+  templateGalleryEmptyBody: "Todavía no hay nada instalado en este espacio de trabajo. Un administrador puede añadir paquetes de plantillas.",
+  templateAddedToComposer: "Se añadió «{{name}}» a tus flujos de trabajo. Completa sus entradas y pulsa Intro para ejecutarlo.",
+  templateAddedNotListed: "Se añadió «{{name}}» a tus flujos de trabajo, pero la lista de / aún no lo muestra. Escribe / para volver a buscar.",
+  templateNotFound: "Esa plantilla ya no está disponible.",
 
   // — BackendStatusCard —
   backendLoading: 'Cargando',
@@ -494,6 +507,7 @@ export const messages = {
   cardLabelExternalEvent: 'Esperando un evento externo',
   externalEventWaitingBody: 'Este paso espera ejecuciones vinculadas o un evento externo, y continúa solo. No hay nada que hacer aquí.',
   waitingResumesOnItsOwn: 'En espera: continúa sola',
+  decisionNotRecorded: "No se pudo registrar tu decisión: {{reason}}",
 
   // — defaultCommands —
   cmdNewDescription: 'Iniciar una nueva sesión de chat (borra el hilo actual)',

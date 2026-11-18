@@ -34,6 +34,7 @@ import { PauseIcon, WorkflowIcon } from '../../ui/icons/index.js';
 import { LeftRailPanelHeader } from '../leftRail/LeftRailPanelHeader.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { needsPersonInput } from '../interruptKinds.js';
+import { ReadableJsonContent } from '../reviews/ReadableJson.js';
 
 /** Render-time humanization for the pointer-chip copy. Maps the raw
  *  lowercase `kind` enum to its `chat` i18n key — translated at the
@@ -288,7 +289,8 @@ function FocusedRunView({
           so users who are watching the panel know where to look. */}
       {(() => {
         const all = message.activeInterrupts ?? [];
-        if (all.length === 0) return null;
+        // CC-CHAT-6: a finished run points at nothing.
+        if (all.length === 0 || isTerminal) return null;
         // CC-ORCH-3 — only steps a person must answer point at a card.
         const open = all.filter((i) => needsPersonInput(i.kind));
         if (open.length === 0) {
@@ -314,9 +316,11 @@ function FocusedRunView({
 
       {/* Outputs (completed) */}
       {run.status === 'completed' && run.outputs && Object.keys(run.outputs).length > 0 && (
-        <pre className="wfprog-outputs">
-          {JSON.stringify(run.outputs, null, 2)}
-        </pre>
+        // Issue 5849 — a finished run's outputs read as fields, never as printed JSON: the
+        // shared read-only view the approval card uses (inert, every field kept).
+        <div className="wfprog-outputs">
+          <ReadableJsonContent content={JSON.stringify(run.outputs)} />
+        </div>
       )}
 
       {/* Error */}

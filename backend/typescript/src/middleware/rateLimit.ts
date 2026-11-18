@@ -71,6 +71,7 @@
  * spec/v1/capabilities.md §3 + a `Retry-After` header.
  */
 
+import { sendErrorBody } from './errorEnvelope.js';
 import { createHash } from 'node:crypto';
 import type { Request, RequestHandler } from 'express';
 import { apiKeysConfigured } from './apiKeyTenants.js';
@@ -316,7 +317,7 @@ function rejectRateLimited(
   // only the status, so a 2026-09-29 major-1 429 had to be attributed by
   // elimination. Route and reason only: no principal, no token.
   log.info('rate_limited', { reason, scope: RATE_LIMIT_SCOPE[reason], method: res.req?.method, path: res.req?.path });
-  res.status(429).json({
+  sendErrorBody(res, 429, {
     error: 'rate_limited',
     message: 'Request denied by rate limit. Try again later.',
     details: {

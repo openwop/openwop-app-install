@@ -31,6 +31,7 @@
 import type { FirebaseApp } from '@firebase/app';
 import type { AuthCredential, User, Auth, TotpSecret, MultiFactorResolver } from '@firebase/auth';
 import { setCurrentIdToken, registerIdTokenRefresher } from '../client/config.js';
+import { noteOwnSignOut } from './shellIdentity.js';
 import i18n from '../i18n/index.js';
 import { brand } from '../brand/brand.js';
 import { purgeOfflineCaches } from '../sw/offlineCaches.js';
@@ -670,6 +671,9 @@ export function clearPendingMfaChallenge(): void {
 }
 
 export async function signOut(): Promise<void> {
+  // Issue 6043 — mark this tab's own sign-out first, so the cross-tab rule in
+  // `useAuth` never reloads under it.
+  noteOwnSignOut();
   // ADR 0873 D8 — every sign-out path (SignInButton, invite switch, hardSignOut)
   // runs through here, so this is the one place the offline caches are purged.
   // Before the Firebase early return: a cookie-only session signs out too.

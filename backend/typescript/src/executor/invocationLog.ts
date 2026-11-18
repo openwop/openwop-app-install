@@ -65,8 +65,12 @@ export function getInvocationLog() {
     async latest(key: InvocationIdentityKey): Promise<unknown> {
       return await b.getLatestInvocation(key);
     },
-    async put(key: InvocationRecordKey, result: unknown, opts?: { presentedKey?: string }): Promise<void> {
+    async put(key: InvocationRecordKey, result: unknown, opts?: { presentedKey?: string; llmCacheKey?: string }): Promise<void> {
       await b.putInvocation(key, result, opts);
+    },
+    /** RFC 0260 §C.3 (ADR 1142 D8) — the record's stored recipe-2 key, or null. */
+    async llmCacheKey(key: InvocationRecordKey): Promise<string | null> {
+      return await b.getInvocationLlmCacheKey(key);
     },
   };
 }

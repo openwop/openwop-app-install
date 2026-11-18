@@ -31,7 +31,7 @@ import { useHub } from '../../chrome/hubContext.js';
 import {
   listClients, updateClient, listAssets, listRequests, submitRequest, answerQuestions, reviseRequest,
   listChangeSets, getChangeSetDiff, requestApproval, listJobs, approveChangeSet, rejectChangeSet,
-  CampaignOpsError,
+  CampaignOpsError, setUpHouseClient, orderClients,
   type ClientAccount, type CampaignAsset, type ChangeRequest, type ChangeSet, type DiffEntry, type Job, type JobStep, type ExternalAgentsAccess,
 } from './campaignOpsClient.js';
 import { useClientRegistration } from './useClientRegistration.js';
@@ -109,6 +109,12 @@ function OperationsInbox(): JSX.Element {
   const [clientsFailed, setClientsFailed] = useState(false);
   const [registrationOpen, setRegistrationOpen] = useState(false);
   const [registeredName, setRegisteredName] = useState('');
+  // The house-client ADR — "Set up your own business", then the brand-kit offer.
+  const [houseBusy, setHouseBusy] = useState(false);
+  const [houseError, setHouseError] = useState('');
+  const [houseOffer, setHouseOffer] = useState<ClientAccount | null>(null);
+  const [brandKitBusy, setBrandKitBusy] = useState(false);
+  const [brandKitNote, setBrandKitNote] = useState<{ variant: 'info' | 'error'; text: string } | null>(null);
   const [disabled, setDisabled] = useState(false);
   const [orgId, setOrgId] = useState('');
   const [reloadClients, setReloadClients] = useState(0);
@@ -148,6 +154,7 @@ function OperationsInbox(): JSX.Element {
       orgRef.current = '';
       setClients(null); setAgencyAdmin(false); setClientsFailed(false); setDisabled(false);
       resetRegistration(); setRegistrationOpen(false); setRegisteredName('');
+      setHouseBusy(false); setHouseError(''); setHouseOffer(null); setBrandKitBusy(false); setBrandKitNote(null);
       setOrgId(''); setData(EMPTY_DATA); setStatus('');
       setReloadClients(n => n + 1);
     });
@@ -164,7 +171,7 @@ function OperationsInbox(): JSX.Element {
         if (cancelled || generation !== identityGeneration.current) return;
         setClients(out.clients); setRegisteredName('');
         setAgencyAdmin(out.agencyAdmin);
-        setOrgId((cur) => (cur && out.clients.some((c) => c.orgId === cur) ? cur : (out.clients[0]?.orgId ?? '')));
+        setOrgId((cur) => (cur && out.clients.some((c) => c.orgId === cur) ? cur : (orderClients(out.clients)[0]?.orgId ?? '')));
       })
       .catch((e: unknown) => {
         if (cancelled || generation !== identityGeneration.current) return;
@@ -208,6 +215,56 @@ function OperationsInbox(): JSX.Element {
   }, [orgId, load]);
 
   const openRegistration = (): void => { if (registrationCurrent() && !registrationLifecycle.isOwned()) setRegistrationOpen(true); };
+
+  // The house-client ADR D1 — one step: the server creates (or returns) the house
+  // client; it is then selected and the brand-kit copy is offered.
+  const setUpHouse = (): void => {
+    if (!registrationCurrent() || houseBusy) return;
+    const generation = identityGeneration.current;
+    setHouseBusy(true); setHouseError(''); setBrandKitNote(null);
+    resetRegistration();
+    void setUpHouseClient().then(({ client: house }) => {
+      if (generation !== identityGeneration.current) return;
+      setClients(cur => [...(cur ?? []).filter(c => c.orgId !== house.orgId), house]);
+      clientSelectionEpoch.current += 1; setOrgId(house.orgId);
+      setHouseOffer(house);
+      setReloadClients(n => n + 1);
+    }).catch((e: unknown) => {
+      if (generation !== identityGeneration.current) return;
+      setHouseError(e instanceof CampaignOpsError && e.message ? e.message : t('houseSetupFailed'));
+      if (e instanceof CampaignOpsError && e.status === 403) { setAgencyAdmin(false); setReloadClients(n => n + 1); }
+    }).finally(() => { if (generation === identityGeneration.current) setHouseBusy(false); });
+  };
+  // The house-client ADR D2 — a one-time copy of the workspace brand kit; never a link.
+  const copyBrandKit = (): void => {
+    const house = houseOffer;
+    if (!house || brandKitBusy || !registrationCurrent()) return;
+    const generation = identityGeneration.current;
+    setBrandKitBusy(true); setBrandKitNote(null);
+    void setUpHouseClient({ copyBrandKit: true }).then(({ brandKit }) => {
+      if (generation !== identityGeneration.current) return;
+      if (brandKit?.copied) { setHouseOffer(null); toast.success(t('houseBrandKitCopied', { name: house.displayName })); return; }
+      const reason = brandKit?.reason;
+      setBrandKitNote(reason === 'no_workspace_brand' ? { variant: 'info', text: t('houseBrandKitNone') }
+        : reason === 'house_has_brand' || reason === 'already_copied' ? { variant: 'info', text: t('houseBrandKitExists', { name: house.displayName }) }
+        : { variant: 'error', text: t('houseBrandKitFailed') });
+    }).catch((e: unknown) => {
+      if (generation === identityGeneration.current) setBrandKitNote({ variant: 'error', text: e instanceof CampaignOpsError && e.message ? e.message : t('houseBrandKitFailed') });
+    }).finally(() => { if (generation === identityGeneration.current) setBrandKitBusy(false); });
+  };
+  const houseStatus = <>
+    {houseBusy ? <Notice variant="info" announce={t('houseSetupPending')}>{t('houseSetupPending')}</Notice> : null}
+    {houseError ? <Notice variant="error" announce={houseError}>{houseError}</Notice> : null}
+    {houseOffer && agencyAdmin ? <Notice variant="success" announce={t('houseReady', { name: houseOffer.displayName })} onDismiss={() => { setHouseOffer(null); setBrandKitNote(null); }} dismissLabel={t('houseBrandKitDismiss')}>
+      <span className="u-grid u-gap-2">
+        <span>{t('houseReady', { name: houseOffer.displayName })} {t('houseBrandKitHelp')}</span>
+        <span className="action-bar">
+          <Button variant="primary" size="sm" disabled={brandKitBusy} onClick={copyBrandKit}>{t('houseBrandKitOffer')}</Button>
+        </span>
+      </span>
+    </Notice> : null}
+    {brandKitNote ? <Notice variant={brandKitNote.variant} announce={brandKitNote.text}>{brandKitNote.text}</Notice> : null}
+  </>;
   const registration = registrationOpen && agencyAdmin && clients ? <ClientRegistrationDialog
     clients={clients} isCurrent={registrationCurrent} onClose={() => setRegistrationOpen(false)}
     onSubmit={registrationLifecycle.submit} /> : null;
@@ -218,7 +275,13 @@ function OperationsInbox(): JSX.Element {
         {registrationLifecycle.operation.error || t('registrationUncertain')}{' '}
         <Button disabled={registrationLifecycle.operation.checking} onClick={registrationLifecycle.recheck}>{t('registrationCheck')}</Button>
       </Notice> : null}
-    {registrationLifecycle.error ? <Notice variant="error" announce={registrationLifecycle.error}>{registrationLifecycle.error}</Notice> : null}
+    {registrationLifecycle.error ? <Notice variant="error" announce={registrationLifecycle.error}>
+      <span>{registrationLifecycle.error}</span>
+      {/* The house-client ADR D4 — the root refusal offers the house client instead. */}
+      {registrationLifecycle.errorReason === 'root_org_not_client' && agencyAdmin
+        ? <>{' '}<Button size="sm" disabled={houseBusy} onClick={setUpHouse}>{t('setUpHouse')}</Button></> : null}
+    </Notice> : null}
+    {houseStatus}
   </>;
 
   if (disabled) return <StateCard title={t('notEnabledTitle')} body={t('notEnabledBody')} action={<Button onClick={() => setReloadClients(n => n + 1)}>{t('retry')}</Button>} />;
@@ -226,20 +289,29 @@ function OperationsInbox(): JSX.Element {
     return <>{registrationStatus}<StateCard announce title={t('loadFailedTitle')} body={registeredName ? t('registrationRefreshFailed', { name: registeredName }) : t('loadFailedBody')} action={<Button onClick={() => setReloadClients((n) => n + 1)}>{t('retry')}</Button>} /></>;
   }
   if (clients === null) return <StateCard loading title={t('loading')} />;
-  if (clients.length === 0) return <>{registrationStatus}<StateCard title={t('noClientsTitle')} body={t('noClientsBody')}
-    {...(agencyAdmin ? { action: <Button disabled={Boolean(registrationLifecycle.operation)} onClick={openRegistration}>{t('addClient')}</Button> } : {})} />{registration}</>;
+  // The house-client ADR D1/D4 — role-aware: an admin is offered both next steps,
+  // with setting up their own business first; everyone else is told who adds clients.
+  if (clients.length === 0) return <>{registrationStatus}<StateCard title={t('noClientsTitle')} body={agencyAdmin ? t('noClientsBodyAdmin') : t('noClientsBody')}
+    {...(agencyAdmin ? { action: <span className="action-bar">
+      <Button variant="primary" disabled={houseBusy || Boolean(registrationLifecycle.operation)} onClick={setUpHouse}>{t('setUpHouse')}</Button>
+      <Button disabled={houseBusy || Boolean(registrationLifecycle.operation)} onClick={openRegistration}>{t('addClient')}</Button>
+    </span> } : {})} />{registration}</>;
 
   return (
     <section className="u-grid u-gap-4" aria-labelledby="campaign-ops-title" data-walkthrough="campaign-ops.page">
       <h2 id="campaign-ops-title" className="sr-only">{t('title')}</h2>
       <p role="status" aria-live="polite" aria-atomic="true" className="sr-only">{status}</p>
 
-      {agencyAdmin ? <div className="action-bar"><Button disabled={Boolean(registrationLifecycle.operation)} onClick={openRegistration}>{t('addClient')}</Button></div> : null}
+      {/* CC-OPS-3 — a workspace that already has clients can still set up its own
+          business: the empty state and the root refusal were the only doors, and the
+          organization picker never lists the root org, so neither opened. */}
+      {agencyAdmin ? <div className="action-bar"><Button disabled={Boolean(registrationLifecycle.operation)} onClick={openRegistration}>{t('addClient')}</Button>
+        {clients.some((c) => c.house === true) ? null : <Button disabled={houseBusy || Boolean(registrationLifecycle.operation)} onClick={setUpHouse}>{t('setUpHouse')}</Button>}</div> : null}
       {registrationStatus}
       {registration}
       <ClientBar
         key={orgId}
-        clients={clients}
+        clients={orderClients(clients)}
         client={client}
         orgId={orgId}
         onSelect={(nextOrg) => { clientSelectionEpoch.current += 1; setOrgId(nextOrg); }}
@@ -328,6 +400,7 @@ function ClientBar({ clients, client, orgId, onSelect, agencyAdmin, onModeChange
       <SelectField label={t('clientLabel')} value={orgId} onChange={(e) => onSelect(e.target.value)} className="u-minw-240">
         {clients.map((c) => <option key={c.orgId} value={c.orgId}>{nameOf(c)}</option>)}
       </SelectField>
+      {client?.house ? <span className="chip chip--muted">{t('houseChip')}</span> : null}
       {client ? (
         <span className={`chip ${client.mode === 'live' ? 'chip--success' : 'chip--muted'}`}>
           {client.mode === 'live' ? t('liveBadge') : t('previewBadge')}

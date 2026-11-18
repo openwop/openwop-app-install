@@ -326,7 +326,7 @@ describe('SHARE-1 — the structural guards', () => {
     expect(unregistered, 'a resolver names a toggle no feature declares — the public lane for that type would fail closed forever').toEqual([]);
   });
 
-  it('exactly FOUR types are deliberately ungated, and they are named', () => {
+  it('exactly FOUR types are deliberately ungated, plus the surface-gated collab_invite, and they are named', () => {
     // The honest half of SHARE-1: `cms`, `kb` and `prompts` graduated to
     // always-on and conversations are the core chat store, so no toggle exists
     // to consult for these four. Pinned by NAME so a fifth ungated type is a
@@ -335,7 +335,10 @@ describe('SHARE-1 — the structural guards', () => {
       .filter(([, id]) => id === null)
       .map(([type]) => type)
       .sort();
-    expect(ungated).toEqual(['cms_page', 'conversation', 'kb_collection', 'prompt']);
+    // `collab_invite` is the fifth `null`, and it is NOT ungated: ADR 1099 P0b moved
+    // it from the campaign-ops toggle to the collaboration surfaces, checked in its
+    // resolver (`anySurfaceAdmits`), because no single feature owns an invite.
+    expect(ungated).toEqual(['cms_page', 'collab_invite', 'conversation', 'kb_collection', 'prompt']);
   });
 
   it('DRIFT GUARD, the OTHER direction: the ungated types still declare NO toggle', () => {

@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { audienceFilm, evaluateFilm, filmSteps, validateFilm, type FilmSpec } from '../../../../../contracts/films.js';
 import { Button } from '../../ui/Button.js';
 import { ModalPortal } from '../../ui/ModalPortal.js';
 import { FilmStage } from './FilmStage.js';
-import { firstFilmPosition, moveFilm, validPosition, type FilmPosition } from './playback.js';
+import { validPosition, type FilmPosition } from './playback.js';
+
+import { useFilmTransport } from './useFilmTransport.js';
+import { FilmRehearsalControls } from './FilmRehearsalControls.js';
 
 interface Snapshot { type: 'snapshot'; source: string; film: FilmSpec; position: FilmPosition; assetUrls: Record<string, string> }
 const channelName = (id: string) => `owp-film:${id}`;
@@ -16,19 +19,24 @@ function targetIsInput(target: EventTarget | null): boolean {
 /** Reusable manual presenter, pinned by source (e.g. canvas/version or project/revision).
  * No media capture, speech synthesis, auto narration or provider connection is used.
  */
-interface PresenterProps { film: FilmSpec; source: string; assetUrls?: Record<string, string> }
+interface PresenterProps { film: FilmSpec; source: string; assetUrls?: Record<string, string>; performanceEndpoint?: string; onUnsavedChange?: (dirty: boolean) => void }
 export function FilmPresenter(props: PresenterProps): JSX.Element {
   const { t } = useTranslation('films');
   if (validateFilm(props.film).length) return <p role="alert">{t('invalid')}</p>;
   return <ManualFilmPresenter key={props.source} {...props} />;
 }
-function ManualFilmPresenter({ film, source, assetUrls = {} }: PresenterProps): JSX.Element {
+function ManualFilmPresenter({ film, source, assetUrls = {}, performanceEndpoint, onUnsavedChange }: PresenterProps): JSX.Element {
   const { t } = useTranslation('films');
-  const [position, setPosition] = useState(firstFilmPosition);
   const [elapsed, setElapsed] = useState(0);
   const [audience, setAudience] = useState<'closed' | 'waiting' | 'connected' | 'blocked' | 'unsupported'>('closed');
   const [fullscreenError, setFullscreenError] = useState(false);
   const [reducedMotion, setReducedMotion] = useState(() => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false);
+  const transport = useFilmTransport(film, reducedMotion);
+  const { position, move, blank: toggleBlank, restart, replayTake } = transport;
+  useEffect(() => {
+    onUnsavedChange?.(transport.capturing || !!transport.draft);
+    return () => onUnsavedChange?.(false);
+  }, [onUnsavedChange, transport.capturing, transport.draft]);
   const root = useRef<HTMLDivElement>(null);
   const channel = useRef<BroadcastChannel | null>(null);
   const audienceWindow = useRef<Window | null>(null);
@@ -37,7 +45,6 @@ function ManualFilmPresenter({ film, source, assetUrls = {} }: PresenterProps): 
   const steps = useMemo(() => filmSteps(film), [film]);
   const current = evaluateFilm(film, position.step, position.progress).scene;
   latest.current = { type: 'snapshot', source, film: safeFilm, position, assetUrls };
-  const move = useCallback((direction: 'next' | 'back') => setPosition(p => moveFilm(film, p, direction, reducedMotion)), [film, reducedMotion]);
 
   useEffect(() => {
     const query = window.matchMedia?.('(prefers-reduced-motion: reduce)');
@@ -46,23 +53,6 @@ function ManualFilmPresenter({ film, source, assetUrls = {} }: PresenterProps): 
     query.addEventListener('change', update);
     return () => query.removeEventListener('change', update);
   }, []);
-  useEffect(() => { if (reducedMotion) setPosition(p => ({ ...p, progress: 1 })); }, [reducedMotion]);
-  // The only running clock is the active transition. Completion holds indefinitely.
-  useEffect(() => {
-    if (position.progress >= 1) return;
-    const duration = steps[position.step]!.durationMs;
-    const started = performance.now();
-    let frame = 0;
-    const tick = (now: number) => {
-      const progress = duration ? Math.min(1, (now - started) / duration) : 1;
-      setPosition(p => p.step === position.step && p.progress < 1 ? { ...p, progress } : p);
-      if (progress < 1) frame = requestAnimationFrame(tick);
-    };
-    frame = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frame);
-    // Progress is deliberately excluded: one animation clock per selected cue.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [position.step, position.progress < 1]);
   useEffect(() => {
     const started = Date.now();
     const timer = window.setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 1000);
@@ -70,18 +60,18 @@ function ManualFilmPresenter({ film, source, assetUrls = {} }: PresenterProps): 
   }, [source]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.repeat || event.altKey || event.ctrlKey || event.metaKey || targetIsInput(event.target)) return;
+      if (replayTake || event.repeat || event.altKey || event.ctrlKey || event.metaKey || targetIsInput(event.target)) return;
       // Space activates a focused button/link natively; arrows remain film
       // controls after a mouse click has focused one of the presenter buttons.
       if (event.key === ' ' && event.target instanceof Element && event.target.closest('button,a')) return;
       if (['ArrowRight', 'ArrowDown', ' ', 'PageDown'].includes(event.key)) { event.preventDefault(); move('next'); }
       else if (['ArrowLeft', 'ArrowUp', 'PageUp'].includes(event.key)) { event.preventDefault(); move('back'); }
-      else if (event.key.toLowerCase() === 'b') setPosition(p => ({ ...p, blank: !p.blank }));
-      else if (event.key === 'Home') { event.preventDefault(); setPosition(firstFilmPosition()); }
+      else if (event.key.toLowerCase() === 'b') toggleBlank();
+      else if (event.key === 'Home') { event.preventDefault(); restart(); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [move]);
+  }, [move, toggleBlank, restart, replayTake]);
   useEffect(() => { channel.current?.postMessage(latest.current); }, [position, safeFilm, source, assetUrls]);
   useEffect(() => () => { channel.current?.close(); }, []);
   useEffect(() => {
@@ -106,20 +96,21 @@ function ManualFilmPresenter({ film, source, assetUrls = {} }: PresenterProps): 
     else { next.close(); channel.current = null; setAudience('blocked'); }
   };
   return <div className="film-presenter" ref={root}>
-    <header className="film-toolbar"><h1>{film.title}</h1><span>{t('live')}</span><span role="timer" aria-live="off" aria-label={t('elapsed')}>{Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, '0')}</span>
+    <header className="film-toolbar"><h1>{film.title}</h1><span>{t(transport.replayTake ? 'silentReplay' : 'live')}</span><span role="timer" aria-live="off" aria-label={t('elapsed')}>{Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, '0')}</span>
       <Button onClick={openAudience}>{t('openAudience')}</Button>
       <Button onClick={() => { setFullscreenError(false); if (!root.current?.requestFullscreen) setFullscreenError(true); else void root.current.requestFullscreen().catch(() => setFullscreenError(true)); }}>{t('fullscreen')}</Button>
     </header>
     <p className="muted">{t('instructions')}</p>
     <p role="status">{t(`audience_${audience}`)} {fullscreenError ? t('fullscreenError') : ''}</p>
+    {performanceEndpoint && <FilmRehearsalControls film={film} endpoint={performanceEndpoint} transport={transport} />}
     <main className="film-presenter__main">
       <section aria-label={t('current')}><FilmStage film={safeFilm} position={position} assetUrls={assetUrls} />
         <div className="film-toolbar">
-          <Button disabled={position.step === 0} onClick={() => move('back')}>{t('back')}</Button>
-          <Button variant="primary" disabled={position.step === steps.length - 1 && position.progress === 1} onClick={() => move('next')}>{position.progress < 1 ? t('complete') : t('next')}</Button>
-          <Button aria-pressed={position.blank} onClick={() => setPosition(p => ({ ...p, blank: !p.blank }))}>{position.blank ? t('show') : t('blank')}</Button>
-          <Button onClick={() => setPosition(firstFilmPosition())}>{t('restart')}</Button>
-          <span role="status">{t('position', { current: position.step + 1, total: steps.length })} · {position.progress < 1 ? t('animating') : t('holding')}</span>
+          <Button disabled={!!transport.replayTake || position.step === 0} onClick={() => move('back')}>{t('back')}</Button>
+          <Button variant="primary" disabled={!!transport.replayTake || (position.step === steps.length - 1 && position.progress === 1)} onClick={() => move('next')}>{position.progress < 1 ? t('complete') : t('next')}</Button>
+          <Button disabled={!!transport.replayTake} aria-pressed={position.blank} onClick={() => transport.blank()}>{position.blank ? t('show') : t('blank')}</Button>
+          <Button disabled={!!transport.replayTake} onClick={() => transport.restart()}>{t('restart')}</Button>
+          <span role="status">{t('position', { current: position.step + 1, total: steps.length })} · {transport.replayTake ? t(transport.playing ? 'replayRunning' : 'replayPaused') : position.progress < 1 ? t('animating') : t('holding')}</span>
         </div>
       </section>
       <aside><h2>{t('notes')}</h2><p className="film-notes">{current.notes || t('noNotes')}</p>
@@ -127,7 +118,7 @@ function ManualFilmPresenter({ film, source, assetUrls = {} }: PresenterProps): 
       </aside>
     </main>
     <nav className="film-timeline" aria-label={t('timeline')}>{steps.map((step, i) => <Button key={`${step.sceneId}:${step.cueId ?? 'start'}`} size="sm" aria-current={i === position.step ? 'step' : undefined}
-      onClick={() => setPosition(p => ({ ...p, step: i, progress: 1 }))}>{i + 1}. {step.label}</Button>)}</nav>
+      disabled={!!transport.replayTake} onClick={() => transport.jump(i)}>{i + 1}. {step.label}</Button>)}</nav>
   </div>;
 }
 

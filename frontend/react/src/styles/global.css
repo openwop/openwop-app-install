@@ -7414,7 +7414,7 @@ a.btn-accent-solid:hover { color: var(--color-on-scrim); }
 .wfprog-bar { height: 4px; background: var(--paper-2); border-radius: 2px; overflow: hidden; }
 .wfprog-bar-fill { height: 100%; transition: width 200ms ease; }
 .wfprog-interrupt { padding: 8px var(--space-2-5); background: var(--clay-wash); color: var(--clay-text); border: 1px solid var(--clay-rule); border-radius: var(--radius); font-size: var(--text-sm); display: flex; align-items: center; gap: var(--space-1-5); }
-.wfprog-outputs { padding: 8px; background: var(--paper-2); border-radius: var(--radius); font-size: var(--text-eyebrow); max-height: 200px; overflow: auto; border: 1px solid var(--rule); white-space: pre-wrap; word-break: break-word; margin: 0; }
+.wfprog-outputs { padding: 8px; background: var(--paper-2); border-radius: var(--radius); font-size: var(--text-sm); max-height: 240px; overflow: auto; border: 1px solid var(--rule); overflow-wrap: anywhere; margin: 0; }
 .wfprog-error { padding: var(--space-2); background: var(--paper-2); border: 1px solid var(--color-danger); border-radius: var(--radius); font-size: var(--text-sm); }
 .wfprog-footer { margin-top: auto; font-size: var(--text-eyebrow); opacity: 0.75; display: flex; flex-wrap: wrap; gap: var(--space-1-5); align-items: baseline; padding-top: 8px; border-top: 1px solid var(--rule); }
 
@@ -7782,6 +7782,8 @@ a.btn-accent-solid:hover { color: var(--color-on-scrim); }
 .turn-receipt-tool { position: relative; }
 .turn-receipt-effect { display: inline-block; margin-bottom: var(--space-1); padding: 0 var(--space-1-5); border-radius: var(--radius-pill); font-family: var(--mono); font-size: var(--text-eyebrow); border: 1px solid var(--rule); color: var(--ink-3); }
 .turn-receipt-effect.is-write { border-color: var(--rule-2); color: var(--ink); }
+/* ADR 1040 D7 F3 — a tool's one-line display summary, under its card (scales with the user's font size). */
+.turn-receipt-summary { margin: var(--space-1) 0 0; padding-inline-start: var(--space-2-5); font-size: var(--text-eyebrow); color: var(--ink-3); overflow-wrap: anywhere; }
 .turn-receipt-meta { margin-top: var(--space-1-5); font-size: var(--text-eyebrow); color: var(--ink-3); }
 /* SlashInputsPanel.tsx — ADR 0768 follow-up B2 */
 .slash-inputs { margin-bottom: var(--space-1-5); padding: var(--space-2-5); border: 1px solid var(--rule); border-radius: var(--radius); background: var(--paper-2); max-height: 40vh; overflow-y: auto; }
@@ -10497,7 +10499,13 @@ a.fp-post__share { text-decoration: none; }
   .public-shell:not(.site-shell) .public-menu__signin { display: flex; }
   .public-shell:not(.site-shell) .public-shell-brand { flex: 0 0 auto; }
   .public-shell:not(.site-shell) .public-shell-brand .app-gate-product { overflow: visible; text-overflow: clip; }
-  .public-shell:not(.site-shell) a.btn.public-shell-cta { min-width: 0; white-space: normal; text-align: center; line-height: 1.15; }
+  .public-shell:not(.site-shell) a.btn.public-shell-cta { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: center; line-height: 1.15; }
+  /* A CMS nav CTA (nav.cta) made the header wider than a 360px phone: the actions
+     were sized to their content (flex: 0 0 auto above), so the CTA never got the
+     narrower box its `white-space: normal` needs to wrap. The actions may shrink
+     now, and only the CTA gives way: the menu keeps its 44px target. */
+  .public-shell:not(.site-shell) .public-shell-actions { flex: 0 1 auto; }
+  .public-shell:not(.site-shell) .public-shell-actions > .public-menu { flex: none; }
 }
 
 @media (min-width: 621px) and (max-width: 860px) {
@@ -10558,6 +10566,9 @@ a.fp-post__share { text-decoration: none; }
 .readable-json__list { margin: 0; padding-left: var(--space-4); display: flex; flex-direction: column; gap: var(--space-1); }
 .readable-json__deep { font-size: var(--text-sm); overflow-wrap: anywhere; }
 .readable-json__status { padding: var(--space-2) var(--space-3); border: 1px solid var(--rule); border-radius: var(--radius); background: var(--paper-2); }
+/* Issue 5844 — a markdown field under review reads as a document, full width. */
+.readable-json__prose { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; overflow-wrap: anywhere; }
+.readable-json__link { overflow-wrap: anywhere; }
 @media (max-width: 599px) { .readable-json__row { grid-template-columns: minmax(0, 1fr); gap: 0; } }
 
 .review-card { display: flex; flex-direction: column; gap: var(--space-2-5); padding: var(--space-4); }

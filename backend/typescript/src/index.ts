@@ -11,6 +11,7 @@
  * Each substitute is pluggable — see src/host/index.ts and src/storage/.
  */
 
+import { errorCacheGuard } from './middleware/errorCacheControl.js';
 import { startAssetGrantReconciler } from './host/assetGrants.js';
 import { startAgentRegistryEvictionListener } from './host/agentRegistryEviction.js';
 import express, { type Express } from 'express';
@@ -664,6 +665,13 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // MEASURED on production 2026-10-01: credential-less `POST /v1/runs` → 401,
   // `POST /V1/runs` → the handler. One spelling routes; the rest are 404.
   app.set('case sensitive routing', true);
+
+  // ADR 1147 — the first app.use, so it wraps every later layer: any 4xx/5xx leaves
+  // with `no-store` (or the route's stricter value), whatever wrote it. 1xx–3xx are
+  // untouched. It MUST come after every app.set above: Express 4 builds the app's
+  // router on the first app.use and reads `case sensitive routing` then, so mounting
+  // earlier made /RUNS reach the /runs handler (path-case-routing, train 288).
+  app.use(errorCacheGuard());
 
   // Firebase Hosting → Cloud Run rewrite preserves the `/api` source
   // prefix when proxying (e.g. browser hits `/api/v1/runs`, backend

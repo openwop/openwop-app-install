@@ -71,6 +71,7 @@ export function TemplatePreflightModal({
   error,
   onConfirm,
   onClose,
+  confirmLabel,
 }: {
   chain: ChainTemplate;
   busy: boolean;
@@ -79,6 +80,9 @@ export function TemplatePreflightModal({
    *  client the copy is for (ADR 1132), when the person chose one. */
   onConfirm: (params: Record<string, unknown>, clientOrgId?: string) => void;
   onClose: () => void;
+  /** The primary action's label when the caller has a better word than
+   *  "Create" (the chat says "Add another copy" when one already exists). */
+  confirmLabel?: string;
 }): JSX.Element {
   const { t } = useTranslation('builder');
   const nav = useNavigate();
@@ -287,7 +291,7 @@ export function TemplatePreflightModal({
             {t('common:cancel')}
           </Button>
           <Button variant="primary" type="submit" disabled={busy}>
-            {busy ? t('preflightCreating') : t('preflightConfirm')}
+            {busy ? t('preflightCreating') : (confirmLabel ?? t('preflightConfirm'))}
           </Button>
         </div>
       </form>

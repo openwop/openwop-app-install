@@ -84,7 +84,7 @@ describe('vote breakdown (ADR 0059) — config-authority gated', () => {
     const member = client();
     const memberUser = await signup(member, { tenantId });
     const orgId = (await owner.post('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
     const list = (await owner.post(L, { orgId, name: 'Council', presetId: 'weighted', votingMode: 'multi-voter' })).body;
     const idea = (await owner.post(`${L}/${encodeURIComponent(list.id)}/ideas`, { title: 'shared' })).body;
     await owner.put(`${L}/${encodeURIComponent(list.id)}/ideas/${encodeURIComponent(idea.id)}/scores`, { scores: HIGH });

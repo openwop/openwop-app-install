@@ -87,7 +87,7 @@ async function members(): Promise<{ owner: Client; rep: Client; repId: string; o
   const rep = client();
   const repId = (await rep.post<Login>('/host/openwop-app/test/login', { email: `r-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
   const orgId = (await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-  expect((await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Rep', subject: repId, roles: ['editor'] })).status).toBeLessThan(300);
+  expect((await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Rep', subject: repId, roles: ['editor'] })).status).toBeLessThan(300);
   return { owner, rep, repId, ownerId, tenantId, orgId };
 }
 

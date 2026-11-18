@@ -166,7 +166,7 @@ describe('ADR 0815 D1 — a sub-org is not a door to workspace authority', () =>
     const { owner, ws, other, otherMember } = await fixture('viewer');
     const sub = await owner.post(`${H}/orgs`, { name: 'Team B' });
     expect(sub.status).toBe(201);
-    const add = await owner.post(`${H}/orgs/${encodeURIComponent(sub.body.orgId!)}/members`, { displayName: 'v', subject: otherMember.subject, roles: ['owner'] });
+    const add = await owner.post(`${H}/test/orgs/${encodeURIComponent(sub.body.orgId!)}/members`, { displayName: 'v', subject: otherMember.subject, roles: ['owner'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
     expect((await other.post(`${H}/environments`, { name: 'y' })).status).toBe(403);
     // Key oversight is workspace management: a sub-org owner sees only its own keys.
@@ -203,7 +203,7 @@ describe('ADR 0815 D1 — regressions: what must keep working', () => {
     expect((await owner.post(`${membersPath(ws)}/${encodeURIComponent(secondM.memberId)}/transfer-ownership`, {})).status).toBe(200);
     const sub = await owner.post(`${H}/orgs`, { name: 'Owner-made' });
     expect(sub.status).toBe(201);
-    const subMembers = `${H}/orgs/${encodeURIComponent(sub.body.orgId!)}/members`;
+    const subMembers = `${H}/test/orgs/${encodeURIComponent(sub.body.orgId!)}/members`; // #5945: the auth test seam, same handler
     expect((await owner.post(subMembers, { displayName: 's', subject: secondM.subject, roles: ['owner'] })).status).toBe(201);
     for (const c of [owner, second]) {
       expect((await c.post(`${H}/orgs/${encodeURIComponent(sub.body.orgId!)}/teams`, { name: `t-${n++}` })).status).toBe(201);
@@ -226,7 +226,7 @@ describe('ADR 0815 D1b — every tenant-level reader sees the root row', () => {
   it('/access/effective (no orgId) and the distinct-approver check read the ROOT membership, not a sub-org owner row', async () => {
     const { owner, ws, other, otherMember, ownerMember } = await fixture('viewer');
     const sub = await owner.post(`${H}/orgs`, { name: 'Sub' });
-    expect((await owner.post(`${H}/orgs/${encodeURIComponent(sub.body.orgId!)}/members`, { displayName: 'v', subject: otherMember.subject, roles: ['owner'] })).status).toBe(201);
+    expect((await owner.post(`${H}/test/orgs/${encodeURIComponent(sub.body.orgId!)}/members`, { displayName: 'v', subject: otherMember.subject, roles: ['owner'] })).status).toBe(201);
     const eff = await other.call('GET', `${H}/access/effective`);
     expect(eff.status).toBe(200);
     expect(eff.body.roles).toEqual(['viewer']);
@@ -298,7 +298,7 @@ describe('ADR 0815 D3 — identity is not edited in place; updates neither resur
   it('a sub-org cannot hold the same identity twice', async () => {
     const { owner, otherMember } = await fixture('editor');
     const sub = await owner.post(`${H}/orgs`, { name: 'Twins' });
-    const path = `${H}/orgs/${encodeURIComponent(sub.body.orgId!)}/members`;
+    const path = `${H}/test/orgs/${encodeURIComponent(sub.body.orgId!)}/members`; // #5945: the auth test seam, same handler and rules
     expect((await owner.post(path, { displayName: 'a', subject: otherMember.subject, roles: ['viewer'] })).status).toBe(201);
     const dup = await owner.post(path, { displayName: 'b', subject: otherMember.subject, roles: ['viewer'] });
     expect(dup.status, JSON.stringify(dup.body)).toBe(409);
@@ -318,7 +318,7 @@ describe('ADR 0815 D3 — identity is not edited in place; updates neither resur
   it('a subject-less sub-org placeholder can be bound, but not onto an identity already there', async () => {
     const { owner, otherMember } = await fixture('editor');
     const sub = await owner.post(`${H}/orgs`, { name: 'Bind' });
-    const path = `${H}/orgs/${encodeURIComponent(sub.body.orgId!)}/members`;
+    const path = `${H}/test/orgs/${encodeURIComponent(sub.body.orgId!)}/members`; // #5945: the auth test seam, same handler and rules
     expect((await owner.post(path, { displayName: 'real', subject: otherMember.subject, roles: ['viewer'] })).status).toBe(201);
     const ph = await owner.post(path, { displayName: 'placeholder', roles: ['viewer'] });
     expect(ph.status).toBe(201);
@@ -431,7 +431,7 @@ describe('ADR 0815 D4 — removal takes down what the member delegated', () => {
   it('losing the ROOT row is leaving, even with a sub-org row left behind', async () => {
     const { owner, ws, other, otherMember } = await fixture('editor');
     const sub = await owner.post(`${H}/orgs`, { name: 'Kept' });
-    expect((await owner.post(`${H}/orgs/${encodeURIComponent(sub.body.orgId!)}/members`, { displayName: 'k', subject: otherMember.subject, roles: ['viewer'] })).status).toBe(201);
+    expect((await owner.post(`${H}/test/orgs/${encodeURIComponent(sub.body.orgId!)}/members`, { displayName: 'k', subject: otherMember.subject, roles: ['viewer'] })).status).toBe(201);
     const job = await other.post(`${H}/scheduler/jobs`, { cronExpr: '0 9 * * *', enabled: true });
     expect(job.status).toBe(201);
     expect((await owner.del(`${membersPath(ws)}/${encodeURIComponent(otherMember.memberId)}`)).status).toBe(204);

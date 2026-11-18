@@ -4,6 +4,7 @@
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 import type { TextDiff } from '../../chat/artifacts/artifactClient.js';
+import { EmailApiError } from './emailErrors.js';
 
 export interface Org { orgId: string; name: string }
 export type ContactStage = 'lead' | 'qualified' | 'customer' | 'churned';
@@ -61,9 +62,10 @@ const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type'
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
   if (!res.ok) {
-    let detail = '';
-    try { detail = ((await res.json()) as { message?: string })?.message ?? ''; } catch { /* non-JSON */ }
-    throw new Error(detail || `${ctx} returned ${res.status}`);
+    let env: { error?: unknown; message?: unknown } = {};
+    try { env = (await res.json()) as typeof env; } catch { /* non-JSON */ }
+    const detail = typeof env.message === 'string' ? env.message : '';
+    throw new EmailApiError(detail || `${ctx} returned ${res.status}`, res.status, typeof env.error === 'string' ? env.error : undefined);
   }
   return (await res.json()) as T;
 }

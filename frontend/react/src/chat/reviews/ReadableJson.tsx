@@ -17,6 +17,8 @@
 
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
+import ReactMarkdown, { type Components } from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { getReviewArtifactMatch } from './reviewArtifactRenderers.js';
 
 /** Nesting deeper than this renders as compact JSON text. */
@@ -120,12 +122,66 @@ function ApprovalStatus({ value }: { value: { [k: string]: Json } }): JSX.Elemen
   );
 }
 
+/** Issue 5844 — markdown in a reviewed value renders as formatted text, and stays inert:
+ *  no raw HTML (react-markdown renders none without rehype-raw), a link is shown as its
+ *  text and URL rather than as a link, and an image as its alt text, so nothing in a
+ *  value can load a URL in front of an approver. */
+const INERT_MD: Components = {
+  a: ({ children, href }) => <span className="readable-json__link">{children}{href ? ` (${href})` : null}</span>,
+  img: ({ alt }) => <span className="u-text-muted">{alt ? `[${alt}]` : null}</span>,
+};
+
+/** A string the card renders as markdown: a field named `markdown`, or multi-line text
+ *  that uses markdown structure (a heading, a list, emphasis). Plain multi-line text
+ *  keeps the text path, so its line breaks are not reflowed. */
+function isMarkdownField(key: string, v: Json | undefined): v is string {
+  if (typeof v !== 'string' || !v.trim()) return false;
+  if (/^(markdown|md)$/i.test(key)) return true;
+  return v.includes('\n') && /^(#{1,6} |\s*[-*] |\s*\d+\. )|\*\*[^*]+\*\*/m.test(v);
+}
+
+/** Issue 5844 — checksums and record keys say nothing to a person deciding. They leave
+ *  the face of the card and stay under "All saved fields", so nothing is hidden. */
+function isMachineField(key: string, v: Json | undefined): boolean {
+  if (/(hash|checksum|digest|recordkey)$/i.test(key)) return true;
+  return typeof v === 'string' && (/^[0-9a-f]{32,}$/i.test(v) || /^sha(1|256|512):[0-9a-f]+$/i.test(v));
+}
+
 /** The plain read-only view of a JSON value. */
 export function ReadableJson({ value }: { value: Json[] | { [k: string]: Json } }): JSX.Element {
+  const { t } = useTranslation('chat');
+  // Issue 5844 — a single wrapper key (`{ artifact: { … } }`, the shape an approval gate
+  // bundles) is not a row of its own: the card shows what it wraps.
+  const inner = isRecord(value) && Object.keys(value).length === 1 && isRecord(Object.values(value)[0]) ? Object.values(value)[0] as { [k: string]: Json } : value;
+  if (!isRecord(inner)) {
+    return (
+      <div className="readable-json-root u-flex u-flex-col u-gap-2">
+        <Value value={inner} depth={0} />
+      </div>
+    );
+  }
+  const entries = Object.entries(inner);
+  const prose = entries.filter(([k, v]) => isMarkdownField(k, v)) as Array<[string, string]>;
+  const machine = entries.filter(([k, v]) => !isMarkdownField(k, v) && isMachineField(k, v));
+  const rest = Object.fromEntries(entries.filter(([k, v]) => !isMarkdownField(k, v) && !isMachineField(k, v)));
+  // Only when something moved off the face does the card also offer every saved field.
+  const tidied = prose.length > 0 || machine.length > 0;
   return (
     <div className="readable-json-root u-flex u-flex-col u-gap-2">
-      {isRecord(value) ? <ApprovalStatus value={value} /> : null}
-      <Value value={value} depth={0} />
+      <ApprovalStatus value={inner} />
+      {prose.map(([k, text]) => (
+        <div key={k} className="readable-json__prose">
+          {prose.length > 1 || !/^(markdown|md)$/i.test(k) ? <p className="u-fs-12 u-text-muted u-m-0" title={k}>{humanizeKey(k)}</p> : null}
+          <div className="chat-md mdview-root"><ReactMarkdown remarkPlugins={[remarkGfm]} components={INERT_MD}>{text}</ReactMarkdown></div>
+        </div>
+      ))}
+      {Object.keys(rest).length > 0 || !tidied ? <Value value={tidied ? rest : inner} depth={0} /> : null}
+      {tidied ? (
+        <details className="u-fs-12">
+          <summary className="u-text-muted">{t('readableJsonAllFields')}</summary>
+          <Value value={value} depth={0} />
+        </details>
+      ) : null}
     </div>
   );
 }

@@ -461,3 +461,44 @@ tenants) + `rfc0116-prompt-prefix-cache.test.ts` (cross-tenant namespacing units
 - **outcome-invariance** — identical `inputTokens`/`outputTokens` hit vs miss;
 - a negative control proves the leak WITHOUT the namespacing (load-bearing);
 - the advert is `["anthropic"]` and dark without a key/seam.
+
+## RFC 0260 — LLM cache key recipe 2 (`openwop-llm-key-2`)
+
+**Status:** implemented behind `OPENWOP_LLM_CACHE_KEY_RECIPE_2` (ADR 1142). With
+the flag off, nothing is advertised and nothing is recorded.
+
+**Advertisement:** `capabilities.replay.llmCacheKeyRecipe: "openwop-llm-key-2"`.
+`idempotency` is always advertised, as §A.3 requires. The fixture
+`conformance-llm-cache-key` is listed only while the flag is on and its node
+(`conformance.callai.cache-key`) is registered.
+
+**Record:** every LLM provider call writes its key to `invocation_log.llm_cache_key`.
+That covers BYOK and managed plain calls and both tools rounds, on success,
+failure and the replay copy. `GET /runs/{runId}/effects` projects it as
+`cacheKey: {recipe, digest}` with no preimage. A replay fork copies the source
+record's key verbatim. A recipe-2 source record is served only to an invocation
+with an equal key (§C.3).
+
+**Parameter mapping (§B.1, the claims-check row).** The key hashes what the host
+sends to the provider, from `sentSampling()` in `providers/llmCacheKey2.ts`. The
+dispatch request is built from the same function.
+- The real providers (`anthropic`, `openai`, `google`, `minimax`, `compat`,
+  managed) receive `maxTokens` only. Their keys therefore carry
+  `temperature: null` and `stop: null`, even when a node asked for them.
+- The conformance mock (`mock`, `conformance-mock`) also receives `temperature`
+  and `stop`.
+- No adapter sends an unnamed sampling parameter, so `params.extra` is always
+  absent.
+- The tool definitions are hashed after the tool-surface diet, as sent.
+
+**Witness:** `v2-replay-llm-cache-key` (suite 2.49.6+). Host tests:
+`test/adr1142-llm-cache-key-recipe-2.test.ts`, which pins RFC 0260's two
+known-answer digests, and `test/adr1142-llm-cache-key-fixture.test.ts`, which
+runs end to end, including a replay fork.
+
+**Sabotage (RFC 0263 §C):** under `OPENWOP_TEST_SEAM_ENABLED`,
+`OPENWOP_SABOTAGE_LLM_KEY` breaks one leg per value:
+- `omit` → `key-recorded`;
+- `drop-max-tokens` → `params-in-key`;
+- `nonce` → `key-stable`;
+- `model` → `key-portable`.

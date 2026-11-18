@@ -102,4 +102,6 @@ export const messages = {
   comboboxResults_other: '{{count}} matches',
   comboboxResultsMore_one: "{{count}}+ match; type to narrow",
   comboboxResultsMore_other: "{{count}}+ matches; type to narrow",
+  // Issue 5911 — a workflow the caller's own list does not name (shared by several areas).
+  workflowUnnamed: 'Unnamed workflow',
 } as const;

@@ -115,6 +115,10 @@ export interface KanbanCard {
   source?: KanbanCardSource;
   /** Free-text source detail, e.g. the Discord command or the agent name. */
   sourceLabel?: string;
+  /** ADR 1138 D1 — where this card's work actually happens: an APP-RELATIVE path
+   *  (`/projects/p1?tab=selections`) and the label for its Open link. Set by the
+   *  feature that made the card; never an external URL (no scheme, no `//`). */
+  sourceRef?: KanbanCardSourceRef;
   priority?: 'low' | 'normal' | 'high';
   /** ISO-8601 due date. */
   dueAt?: string;
@@ -166,6 +170,23 @@ export interface KanbanCard {
   order: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface KanbanCardSourceRef { label: string; path: string }
+
+const SOURCE_REF_LABEL_MAX = 80;
+const SOURCE_REF_PATH_MAX = 512;
+
+/** ADR 1138 D1 — an Open link stays inside the app: a single leading `/`, no
+ *  scheme, no protocol-relative `//`, no backslash or whitespace. */
+export function assertSourceRef(ref: unknown): asserts ref is KanbanCardSourceRef {
+  const r = ref as Partial<KanbanCardSourceRef> | null;
+  const ok = !!r && typeof r === 'object'
+    && typeof r.label === 'string' && r.label.trim().length > 0 && r.label.length <= SOURCE_REF_LABEL_MAX
+    && typeof r.path === 'string' && r.path.length <= SOURCE_REF_PATH_MAX && /^\/(?![\/\\])[^\s\\]*$/.test(r.path);
+  if (!ok) {
+    throw boardCommandError('kanban_card_invalid', 'A card source link needs a label and an app path that starts with a single "/".');
+  }
 }
 
 export type KanbanCardRunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
@@ -541,6 +562,8 @@ export interface KanbanCardPatch {
   lastRunStatus?: KanbanCardRunStatus | null;
   source?: KanbanCardSource;
   sourceLabel?: string;
+  /** ADR 1138 D1 — `null` clears it. */
+  sourceRef?: KanbanCardSourceRef | null;
   priority?: 'low' | 'normal' | 'high';
   dueAt?: string;
   createdBy?: string;
@@ -641,6 +664,11 @@ export function columnLaneKind(col: { id: string; name: string }): KanbanLaneKin
 }
 
 /** The lane the work loop picks FROM (and restores to). */
+/** ADR 1138 D2 — the board's first completion lane (terminal, not cancellation). */
+export function doneColumnOf(board: KanbanBoard): KanbanColumn | undefined {
+  return board.columns.find((c) => isTerminalColumn(board, c.id) && c.terminalKind !== 'cancellation');
+}
+
 export function todoColumnOf(board: KanbanBoard): KanbanColumn | undefined {
   return board.columns.find((c) => columnLaneKind(c) === 'todo');
 }
@@ -943,6 +971,28 @@ export async function listCards(boardId: string): Promise<KanbanCard[]> {
   return rows.sort(byColumnThenOrder);
 }
 
+/**
+ * ADR 1138 D4 — one tenant's open cards that have a due date and a person, with
+ * their boards, for the due-reminder sweep. Reads ONLY the verified tenant card
+ * index and point-reads each board; returns `null` (sweep skips the tenant this
+ * tick) rather than falling back to a whole-table scan when the index is not yet
+ * verified. Cards in a terminal lane are left out.
+ */
+export async function listOpenDueCards(tenantId: string): Promise<Array<{ card: KanbanCard; board: KanbanBoard }> | null> {
+  let rows: KanbanCard[];
+  try { rows = await cards.listForTenantIndexed(tenantId); } catch { return null; }
+  const boardById = new Map<string, KanbanBoard | null>();
+  const out: Array<{ card: KanbanCard; board: KanbanBoard }> = [];
+  for (const card of rows) {
+    if (!card.dueAt || !card.assigneeId) continue;
+    if (!boardById.has(card.boardId)) boardById.set(card.boardId, await boards.get(card.boardId));
+    const board = boardById.get(card.boardId);
+    if (!board || board.tenantId !== tenantId || isTerminalColumn(board, card.columnId)) continue;
+    out.push({ card, board });
+  }
+  return out.sort((x, y) => x.card.id.localeCompare(y.card.id));
+}
+
 /** A board's cards from the full scan: never misses one (ADR 0872 D4). */
 export async function listCardsExact(boardId: string): Promise<KanbanCard[]> {
   return (await cards.list()).filter((c) => c.boardId === boardId).sort(byColumnThenOrder);
@@ -984,6 +1034,8 @@ export async function createCard(input: {
   workflowId?: string;
   source?: KanbanCardSource;
   sourceLabel?: string;
+  /** ADR 1138 D1. */
+  sourceRef?: KanbanCardSourceRef;
   priority?: 'low' | 'normal' | 'high';
   dueAt?: string;
   createdBy?: string;
@@ -1016,6 +1068,7 @@ export async function createCard(input: {
   const board = await boards.get(input.boardId);
   if (!board) throw new Error(`kanban_board_not_found: ${input.boardId}`);
   if (input.assigneeRole !== undefined) assertAssigneeRoleFits(board, input.assigneeRole);
+  if (input.sourceRef !== undefined) assertSourceRef(input.sourceRef);
   // Ordering only (D4): a missed sibling can only repeat an `order`.
   const siblings = (await cardsOnBoards(board.tenantId, new Set([board.id]))).filter((c) => c.columnId === input.columnId);
   const card: KanbanCard = {
@@ -1030,6 +1083,7 @@ export async function createCard(input: {
     source: input.source ?? 'human',
     sourceConversationId: input.sourceConversationId,
     sourceLabel: input.sourceLabel,
+    ...(input.sourceRef !== undefined ? { sourceRef: { label: input.sourceRef.label, path: input.sourceRef.path } } : {}),
     priority: input.priority,
     dueAt: input.dueAt,
     createdBy: input.createdBy,
@@ -1391,19 +1445,24 @@ function assertAssignmentShape(item: KanbanWorkItemProposal): void {
  * asks about the ASSIGNEE, not the caller, and runs before any write so one bad
  * assignee fails the whole materialization atomically.
  */
-async function assertAssigneesCanRead(board: KanbanBoard, items: readonly KanbanWorkItemProposal[]): Promise<void> {
+/** ADR 1137 D1 / ADR 1138 D4 — can `userId` see this board's cards? A member of
+ *  the board's workspace and, on a subject's board, a reader of that subject in
+ *  the subject's own org. The one rule assignment and due reminders share. */
+export async function assigneeCanSeeBoard(board: KanbanBoard, userId: string): Promise<boolean> {
+  // A personal workspace (`user:<id>`) is its owner's alone and seeds no member
+  // row for them — the assign route's self-on-own-workspace rule.
+  const ownPersonal = isPersonalTenantId(board.tenantId) && board.tenantId === userId;
+  if (!ownPersonal && !(await isWorkspaceMember(userId, board.tenantId))) return false;
   const subject = boardSubject(board);
+  return subject ? subjectReadAllowed(board.tenantId, subject, { subject: userId }) : true;
+}
+
+async function assertAssigneesCanRead(board: KanbanBoard, items: readonly KanbanWorkItemProposal[]): Promise<void> {
   const checked = new Map<string, Promise<boolean>>();
   const canRead = (assigneeId: string): Promise<boolean> => {
     let p = checked.get(assigneeId);
     if (!p) {
-      p = (async () => {
-        // A personal workspace (`user:<id>`) is its owner's alone and seeds no
-        // member row for them — the assign route's self-on-own-workspace rule.
-        const ownPersonal = isPersonalTenantId(board.tenantId) && board.tenantId === assigneeId;
-        if (!ownPersonal && !(await isWorkspaceMember(assigneeId, board.tenantId))) return false;
-        return subject ? subjectReadAllowed(board.tenantId, subject, { subject: assigneeId }) : true;
-      })();
+      p = assigneeCanSeeBoard(board, assigneeId);
       checked.set(assigneeId, p);
     }
     return p;
@@ -1416,13 +1475,34 @@ async function assertAssigneesCanRead(board: KanbanBoard, items: readonly Kanban
 }
 
 /** ADR 1137 D3 — the source-owned fields a refresh may change, and only those. */
-function refreshPatchFor(card: KanbanCard, proposal: KanbanWorkItemProposal): KanbanCardPatch {
+/** ADR 1137 D3 — the facts a card's SOURCE owns, and so may refresh. */
+export interface KanbanCardFacts { title: string; description?: string; dueAt?: string; sourceLabel?: string }
+
+function refreshPatchFor(card: KanbanCard, proposal: KanbanCardFacts): KanbanCardPatch {
   const patch: KanbanCardPatch = {};
   if (proposal.title !== card.title) patch.title = proposal.title;
   if ((proposal.description ?? '') !== (card.description ?? '')) patch.description = proposal.description ?? '';
   if (proposal.dueAt !== undefined && proposal.dueAt !== card.dueAt) patch.dueAt = proposal.dueAt;
   if (proposal.sourceLabel !== undefined && proposal.sourceLabel !== card.sourceLabel) patch.sourceLabel = proposal.sourceLabel;
   return patch;
+}
+
+/**
+ * ADR 1137 D3 / ADR 1138 — the ONE "source wins on facts, board wins on who and
+ * status" rule, for any card a feature keeps in step with its own record (a work
+ * item's refresh and an adopter's plain cards both come through here). Updates only
+ * title, description, dueAt and sourceLabel, through the normal `card.patch`; never
+ * the holder, role, column, order or labels; leaves a finished card as it was; and
+ * writes nothing when nothing differs. Returns whether it wrote.
+ */
+export async function refreshCardFacts(board: KanbanBoard, card: KanbanCard, facts: KanbanCardFacts): Promise<{ card: KanbanCard; refreshed: boolean }> {
+  if (card.boardId !== board.id || isTerminalColumn(board, card.columnId)) return { card, refreshed: false };
+  const patch = refreshPatchFor(card, facts);
+  if (Object.keys(patch).length === 0) return { card, refreshed: false };
+  const next = (await applyKanbanCardPatchCommand({
+    type: 'card.patch', tenantId: board.tenantId, boardId: board.id, cardId: card.id, patch,
+  })).card;
+  return { card: next, refreshed: true };
 }
 
 /** ADR 1137 D1 — the assignment fields a proposal puts on the card it creates. */
@@ -1579,16 +1659,10 @@ export async function applyBoardCommand(
         materializedWorkItems.push(item);
         continue;
       }
-      let current = existingCard;
-      const patch = isTerminalColumn(board, existingCard.columnId) ? {} : refreshPatchFor(existingCard, plan.proposal);
-      if (Object.keys(patch).length > 0) {
-        current = (await applyKanbanCardPatchCommand({
-          type: 'card.patch', tenantId: command.tenantId, boardId: command.boardId, cardId: existingCard.id, patch,
-        })).card;
-        refreshedCardIds.push(current.id);
-      }
+      const r = await refreshCardFacts(board, existingCard, plan.proposal);
+      if (r.refreshed) refreshedCardIds.push(r.card.id);
       materializedWorkItems.push(item);
-      materializedCards.push(current);
+      materializedCards.push(r.card);
       continue;
     }
     const card = await createCard({
@@ -1646,6 +1720,8 @@ function applyKanbanCardPatch(card: KanbanCard, patch: KanbanCardPatch): KanbanC
   else if (patch.lastRunStatus !== undefined) next.lastRunStatus = patch.lastRunStatus;
   if (patch.source !== undefined) next.source = patch.source;
   if (patch.sourceLabel !== undefined) next.sourceLabel = patch.sourceLabel;
+  if (patch.sourceRef === null) delete next.sourceRef;
+  else if (patch.sourceRef !== undefined) next.sourceRef = { label: patch.sourceRef.label, path: patch.sourceRef.path };
   if (patch.priority !== undefined) next.priority = patch.priority;
   if (patch.dueAt !== undefined) next.dueAt = patch.dueAt;
   if (patch.createdBy !== undefined) next.createdBy = patch.createdBy;
@@ -1678,6 +1754,7 @@ async function applyKanbanCardPatchCommand(command: PatchKanbanCardCommand): Pro
   if (!command.tenantId || !command.boardId || !command.cardId) {
     throw boardCommandError('kanban_command_invalid', 'Card mutations require a tenant, board, and card.');
   }
+  if (command.patch.sourceRef !== undefined && command.patch.sourceRef !== null) assertSourceRef(command.patch.sourceRef);
   if (command.patch.title !== undefined && command.patch.title.trim().length === 0) {
     throw boardCommandError('kanban_card_invalid', 'Card title must be a non-empty string.');
   }
@@ -2263,7 +2340,7 @@ export async function listCardsAssignedToUser(
   tenantId: string,
   userId: string,
   roleKeys: readonly string[] = [],
-): Promise<Array<KanbanCard & { boardName: string; columnName: string; terminal: boolean }>> {
+): Promise<Array<KanbanCard & { boardName: string; columnName: string; terminal: boolean; doneColumnId?: string }>> {
   const tenantBoards = (await boards.list()).filter((b) => b.tenantId === tenantId);
   const boardById = new Map(tenantBoards.map((b) => [b.id, b]));
   const roles = new Set(roleKeys);
@@ -2285,7 +2362,7 @@ export async function listCardsAssignedToUser(
     if (!parsed) return roles.has(assigneeRole);
     return (await heldOn(board, parsed.kind)) === parsed.role;
   };
-  const out: Array<KanbanCard & { boardName: string; columnName: string; terminal: boolean }> = [];
+  const out: Array<KanbanCard & { boardName: string; columnName: string; terminal: boolean; doneColumnId?: string }> = [];
   for (const card of await cardsOnBoards(tenantId, new Set(boardById.keys()))) {
     const board = boardById.get(card.boardId);
     if (!board) continue; // cross-tenant / orphaned — never leak
@@ -2297,6 +2374,9 @@ export async function listCardsAssignedToUser(
       boardName: board.name,
       columnName: column?.name ?? card.columnId,
       terminal: isTerminalColumn(board, card.columnId),
+      // ADR 1138 D2 — where the mirror's Done sends it: the board's completion
+      // lane (never a cancellation lane).
+      ...(doneColumnOf(board) ? { doneColumnId: doneColumnOf(board)!.id } : {}),
     });
   }
   return out.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));

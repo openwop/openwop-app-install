@@ -65,7 +65,7 @@ async function ownerWithMember(role: string): Promise<{ owner: Client; member: C
   const owner = client(); await owner.post<LoginBody>('/host/openwop-app/test/login', { email: `co-${Date.now()}-${n++}@acme.test`, tenantId });
   const member = client(); const mr = await member.post<LoginBody>('/host/openwop-app/test/login', { email: `co-${Date.now()}-${n++}@acme.test`, tenantId });
   const org = await owner.post<OrgBody>('/host/openwop-app/orgs', { name: 'Shop' }); const orgId = org.body.orgId;
-  await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: mr.body.user.userId, roles: [role] });
+  await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: mr.body.user.userId, roles: [role] });
   return { owner, member, orgId, tenantId };
 }
 /** The public storefront's product projection (commerce/routes.ts) — operational fields are never present. */

@@ -334,7 +334,11 @@ the spend is counted twice (hold without an `orderId` + the order): the safe dir
 
 **Filed (not built here):** `MCH-STORE-1` (D10, storefront merchandising), `MCHCD-10` (the
 merch-rule cap is checked before the write), `MCHUX-5` (server refusals as raw English
-toasts; a shared console gap), `MCHUX-9`, `MCHUX-10`, `MCHUX-14`. See
+toasts; a shared console gap), `MCHUX-9`, `MCHUX-10`, `MCHUX-14`, and `MCHCD-N1-EXT`
+(filed 2026-11-16 from the row-74 lead notes). `notApplying` explains only some of the
+reasons a promotion doesn't fire. It should also say when the currency differs, the
+schedule window is closed, the segment doesn't match, or the minimum spend isn't met.
+The current limit is written at `promotionsService.ts:747-749`. See
 `docs/steward/CODEBASE-ASSESSMENT-merchandising-row74.md` and
 `docs/steward/UX-ASSESSMENT-merchandising-row74.md`.
 

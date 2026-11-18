@@ -104,8 +104,8 @@ describe('ADR 0842 D2 — the score-change trail keeps multi-voter ballots secre
     const voter = client(); const voterUser = await signup(voter, tenantId);
     const reader = client(); const readerUser = await signup(reader, tenantId);
     const orgId = await newOrg(owner);
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: voterUser.userId, roles: ['editor'] });
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'R', subject: readerUser.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: voterUser.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'R', subject: readerUser.userId, roles: ['editor'] });
 
     const list = (await owner.post<PriorityList>(L, { orgId, name: 'Council', presetId: 'weighted', votingMode: 'multi-voter', voteAggregation: 'mean' })).body;
     const base = `${L}/${encodeURIComponent(list.id)}`;
@@ -149,8 +149,8 @@ describe('ADR 0842 D9 — list reads project what the caller may do', () => {
     const editor = client(); const editorUser = await signup(editor, tenantId);
     const viewerC = client(); const viewerUser = await signup(viewerC, tenantId);
     const orgId = await newOrg(owner);
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: editorUser.userId, roles: ['editor'] });
-    await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: viewerUser.userId, roles: ['viewer'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'E', subject: editorUser.userId, roles: ['editor'] });
+    await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'V', subject: viewerUser.userId, roles: ['viewer'] });
     const list = (await owner.post<PriorityList>(L, { orgId, name: 'Perms', presetId: 'weighted' })).body;
     const one = async (c: Client): Promise<Viewer> => (await c.get<{ viewer: Viewer }>(`${L}/${encodeURIComponent(list.id)}`)).body.viewer;
     expect(await one(owner)).toEqual({ canWrite: true, canConfigure: true });

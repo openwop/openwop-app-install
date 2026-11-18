@@ -370,7 +370,7 @@ describe('ADR 0950 P2 — 4. the route', () => {
     expect([foreign.status, foreign.body.error]).toEqual([404, 'not_found']);
     const viewer = client();
     const viewerId: string = (await viewer.call('POST', '/host/openwop-app/test/login', { email: `p2-v-${n++}@acme.test`, tenantId: w.tenantId })).body.user!.userId;
-    expect((await w.owner.call('POST', `/host/openwop-app/orgs/${encodeURIComponent(w.orgId)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] })).status).toBe(201);
+    expect((await w.owner.call('POST', `/host/openwop-app/test/orgs/${encodeURIComponent(w.orgId)}/members`, { displayName: 'V', subject: viewerId, roles: ['viewer'] })).status).toBe(201);
     const refused = await viewer.call('POST', path(w.orgId, e.experimentId), {});
     expect([refused.status, refused.body.error]).toEqual([403, 'forbidden_scope']);
     const ok = await w.owner.call('POST', path(w.orgId, e.experimentId), { holdoutPct: 3 });

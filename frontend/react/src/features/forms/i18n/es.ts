@@ -247,6 +247,12 @@ export const messages = {
   discardHeldBody: 'Se elimina de forma permanente y el formulario recupera esa parte de su capacidad de cuarentena. Los contactos reales no se ven afectados.',
   discardHeldDone: 'Envío en revisión descartado.',
   discardHeldFailed: 'No se pudo descartar ese envío — inténtalo de nuevo.',
+  deleteSubmission: 'Eliminar envío',
+  deleteSubmissionConfirm: '¿Eliminar este envío?',
+  deleteSubmissionBody: 'Se elimina de forma permanente y no se puede deshacer. Lo que ya creó se conserva: un contacto del CRM, un ticket o una ejecución de flujo de trabajo.',
+  deleteSubmissionDone: 'Envío eliminado.',
+  deleteSubmissionFailed: 'No se pudo eliminar ese envío — inténtalo de nuevo.',
+  deleteSubmissionLegalHold: 'Este espacio de trabajo está bajo una retención legal, así que sus envíos no se pueden eliminar.',
   // ADR 0850 — held-lead release (D3), the burst hold reason (D5), the
   // consent-is-optional rule (D2) and the conditional-visibility editor (D7).
   submissionHeldBurst: "En revisión — ráfaga de envíos",

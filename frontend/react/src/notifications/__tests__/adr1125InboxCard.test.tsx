@@ -117,9 +117,11 @@ describe('ADR 1125 D3 — the inbox card', () => {
   });
 
   it('leg 5: identical news collapse and expand in place; requests never collapse', () => {
-    store.notifications = [news('a'), news('b'), news('c'), request({ notificationId: 'r1' }), request({ notificationId: 'r2', interruptId: 'i-2' })];
+    // Two IDENTICAL finished requests: on Updates beside the news, and still never collapsed.
+    const done = { metadata: { resolution: { state: 'approved', at: now } } };
+    store.notifications = [news('a'), news('b'), news('c'), request({ notificationId: 'r1', ...done }), request({ notificationId: 'r2', interruptId: 'i-2', ...done })];
     renderAt('/inbox?notification=r1');
-    fireEvent.click(screen.getByRole('button', { name: /^All/ }));
+    fireEvent.click(screen.getByRole('button', { name: /^Updates/ }));
     expect(card('a')).toBeTruthy();
     expect(card('b')).toBeNull();
     expect(within(card('a')).getByText('· 3 times')).toBeTruthy();

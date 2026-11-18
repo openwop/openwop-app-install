@@ -16,6 +16,7 @@ import { describe, it, expect } from 'vitest';
 import { FEATURES } from '../../../chrome/features.js';
 import type { FeatureHubTab, FeatureRoute } from '../../../chrome/featureTypes.js';
 import { scopesOf, tabIdOf, visibleHubRoutes, type HubRoute } from '../../../chrome/hubProjection.js';
+import { ADOPTER_FRONTEND_FEATURES } from '../../adopterFeatures.js';
 
 const route = (
   path: string,
@@ -100,8 +101,24 @@ describe('visibleHubRoutes — projection logic', () => {
   });
 });
 
+/** Routes an adopter repo ships under `src/adopter/features/` (ADR 1031). Empty in
+ *  openwop-app itself. Upstream's exact-set pins describe the HOST manifest, so an
+ *  adopter hub tab (CasaVoga's `image-keys`, #6094) is left out of them rather than
+ *  forcing the adopter to edit this upstream-owned file on every sync. */
+const ADOPTER_PATHS = new Set(ADOPTER_FRONTEND_FEATURES.flatMap((f) => f.routes.map((r) => r.path)));
+const hostOnly = (routes: readonly FeatureRoute[], adopterPaths: ReadonlySet<string> = ADOPTER_PATHS): FeatureRoute[] =>
+  routes.filter((r) => !adopterPaths.has(r.path));
+
 describe('Access Hub manifest wiring (the real FEATURES)', () => {
-  const adminHub = () => visibleHubRoutes(FEATURES, () => true, true, 'access', ACCESS_GROUPS);
+  const adminHub = () => visibleHubRoutes(hostOnly(FEATURES), () => true, true, 'access', ACCESS_GROUPS);
+
+  it('an adopter hub tab does not change the host set the pins below compare', () => {
+    const adopterTab = route('/access/image-keys', { group: 'credentials', order: 99 });
+    const withAdopter = hostOnly([...FEATURES, adopterTab], new Set([...ADOPTER_PATHS, adopterTab.path]));
+    const ids = (rs: FeatureRoute[]) => visibleHubRoutes(rs, () => true, true, 'access', ACCESS_GROUPS).map(tabIdOf);
+    expect(ids([...FEATURES, adopterTab])).toContain('image-keys'); // the projection does show it
+    expect(ids(withAdopter)).toEqual(ids(hostOnly(FEATURES)));
+  });
 
   it('ADR 0788 MCPUX-1 — a MEMBER (non-admin) reaches the AI clients tab; the admin-only tabs stay hidden', () => {
     const memberIds = visibleHubRoutes(FEATURES, () => true, false, 'access', ACCESS_GROUPS).map(tabIdOf);

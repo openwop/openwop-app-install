@@ -22,6 +22,8 @@ vi.mock('../../agents/approvalsClient.js', async (orig) => ({
 }));
 const { toastSuccess } = vi.hoisted(() => ({ toastSuccess: vi.fn() }));
 vi.mock('../../ui/toast.js', () => ({ toast: { success: toastSuccess, error: vi.fn(), info: vi.fn() } }));
+// Issue 5911 — the inbox names a person's own workflows through GET /workflows.
+vi.mock('../../workflows/workflowsClient.js', async (orig) => ({ ...(await orig<Record<string, unknown>>()), listWorkflowSummaries: vi.fn(async () => []) }));
 // NeedsYouInbox's board read — unmocked, it fetched live from jsdom.
 const { loadAgentViews } = vi.hoisted(() => ({ loadAgentViews: vi.fn() }));
 vi.mock('../../agents/agentViewModel.js', async (orig) => ({

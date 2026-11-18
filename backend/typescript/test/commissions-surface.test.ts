@@ -62,7 +62,7 @@ describe('commissions P4 — governed surface writes + subject-scoped reads', ()
     const rep = client();
     const repId = (await rep.post<LoginBody>('/host/openwop-app/test/login', { email: `r-${Date.now()}-${n++}@acme.test`, tenantId })).body.user.userId;
     const orgId = (await owner.post<{ orgId: string }>('/host/openwop-app/orgs', { name: 'Acme' })).body.orgId;
-    const added = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'R', subject: repId, roles: ['editor'] });
+    const added = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'R', subject: repId, roles: ['editor'] });
     expect(added.status).toBe(201);
 
     const B = `/host/openwop-app/commissions/orgs/${encodeURIComponent(orgId)}`;

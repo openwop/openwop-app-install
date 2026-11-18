@@ -239,7 +239,7 @@ describe('ADR 0952 P7 — the signed public URL', () => {
     expect((await owner.get(FEED(shared))).status).toBe(200);
     const insider = client();
     const login = await insider.post('/host/openwop-app/test/login', { email: `feed-insider-${Date.now()}-${n++}@x.test` });
-    const add = await owner.post(`/host/openwop-app/orgs/${encodeURIComponent(ws.workspaceId)}/members`, { displayName: 'viewer', subject: (login.body as { user: { userId: string } }).user.userId, roles: ['viewer'] });
+    const add = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(ws.workspaceId)}/members`, { displayName: 'viewer', subject: (login.body as { user: { userId: string } }).user.userId, roles: ['viewer'] });
     expect(add.status, add.text).toBe(201);
     expect((await insider.post(`/host/openwop-app/workspaces/${encodeURIComponent(ws.workspaceId)}/switch`)).status).toBe(200);
     const insiderRead = await insider.get(FEED(shared));

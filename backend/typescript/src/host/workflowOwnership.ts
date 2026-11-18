@@ -91,6 +91,12 @@ export interface WorkflowOwnershipRecord {
    *  that this tenant already holds its own copy and skip the shared one, instead
    *  of listing an "X" beside the tenant's edited "X". */
   forkedFrom?: string;
+  /** ADR 0163 (the picker-templates ADR) — the chain template this workflow was
+   *  instantiated from (`metadata.expandedFrom.chainId`, denormalized for the
+   *  same reason as `authoredVia`: the scoped list projects from these rows).
+   *  Lets the chat `/` picker show an owned copy instead of offering the
+   *  template again. STICKY: only the instantiate lane sets it. */
+  fromChainId?: string;
   /** ADR 0789 — on the SHARED id's row: the fork this tenant's first edit claimed
    *  (a compare-and-swap, so two concurrent first saves converge on ONE fork).
    *  Preserved across refreshes; only `claimForkOf` sets it. */
@@ -115,6 +121,8 @@ export interface OwnershipMeta {
   mintedRevision?: string;
   /** ADR 0789 — set by the shared-definition fork lane; omitted meta preserves it. */
   forkedFrom?: string;
+  /** The picker-templates ADR — set by the instantiate lane; omitted meta preserves it. */
+  fromChainId?: string;
   /** ADR 0913 — set by `from-chain` when the caller names a subject; omitted meta preserves it. */
   subject?: string;
   /** ADR 1132 — set by the instantiate lane; omitted meta preserves it, and an
@@ -174,6 +182,9 @@ export async function recordOwnership(
       ...((meta.forkedFrom ?? existing?.forkedFrom) !== undefined
         ? { forkedFrom: meta.forkedFrom ?? existing?.forkedFrom }
         : {}),
+      ...((meta.fromChainId ?? existing?.fromChainId) !== undefined
+        ? { fromChainId: meta.fromChainId ?? existing?.fromChainId }
+        : {}),
       ...((meta.subject ?? existing?.subject) !== undefined
         ? { subject: meta.subject ?? existing?.subject }
         : {}),
@@ -208,6 +219,9 @@ export async function recordOwnership(
       : {}),
     ...((meta.forkedFrom ?? existing?.forkedFrom) !== undefined
       ? { forkedFrom: meta.forkedFrom ?? existing?.forkedFrom }
+      : {}),
+    ...((meta.fromChainId ?? existing?.fromChainId) !== undefined
+      ? { fromChainId: meta.fromChainId ?? existing?.fromChainId }
       : {}),
     ...((meta.subject ?? existing?.subject) !== undefined
       ? { subject: meta.subject ?? existing?.subject }
