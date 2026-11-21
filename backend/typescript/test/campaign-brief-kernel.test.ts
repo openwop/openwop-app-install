@@ -9,6 +9,20 @@
  * pinned to the pack MANIFEST (module ↔ pack.json parity), not a hand list. Two
  * product defects were pinned as `it.fails` (CB-SEEDS-1, CB-KERNEL-1); both are
  * fixed by ADR 1020 and now assert the correct behaviour.
+ *
+ * Wave 118 (grade-tests re-grade, ADR 1020 P2/D8/D11/D12): red if the product
+ * section leaves the context; if a foreign tenant reads the brief (a DOUBLE guard:
+ * the `${tenantId}::${id}` key AND getBrief's row-tenant check, broken together);
+ * if a node is dropped from the pack; if the extract-seeds repair or its typed
+ * `generation_empty` goes; if `cleanKernel` stops refusing; if the protected-field
+ * diff stops sorting keys, stops demoting, or drops `groundingPolicy`/`competitors`;
+ * if setKernel stops checking `expectedVersion` or `expectedPriorKernelAt`, bumps
+ * the content version, or promotes an invalid brief; if the revision snapshot drops
+ * the evidence policy; if generate-kernel saves under `stageKernel` or skips its
+ * repair; if promote-kernel stops requiring `briefVersion` or `priorKernelAt`
+ * (each case passes the other, so each check stands alone) or stops mapping
+ * `brief_changed`; if a stale kernel reaches readers; if `[n]` sources map to the
+ * wrong block; or if a lost brief compare-and-swap blind-writes.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -42,7 +56,7 @@ describe('briefContext.assembleBriefContextText (pure)', () => {
     }];
     const text = assembleBriefContextText(brief, personas);
     expect(text).toContain('# Campaign: Q4');
-    expect(text).toContain('FlashPick');
+    expect(text).toContain('## Product\nName: FlashPick\nGrocery automation\nIndustry: Grocery');
     expect(text).toContain('Ops Director');
     expect(text).toContain('handle objections'); // product_aware guidance
     expect(text).toContain('40% faster');
@@ -69,8 +83,10 @@ describe('campaign-brief surface', () => {
     expect(out.contextText).toContain('Ops');
     expect(out.enabledChannels).toEqual(['landing_page']);
 
+    // Isolation is a double guard (the tenant-prefixed key AND getBrief's row-tenant
+    // check); the probe breaks both in one edit.
     const foreign = buildCampaignBriefSurface({ tenantId: 'other' });
-    expect(as<{ found: boolean }>(await foreign.assembleContext({ briefId: brief.id })).found).toBe(false);
+    expect(as<{ found: boolean }>(await foreign.assembleContext({ briefId: brief.id }))).toEqual({ found: false });
   });
 });
 
@@ -127,11 +143,12 @@ describe('feature.campaign-brief.nodes — node pack', () => {
 // a typed `generation_empty` after ONE error-fed repair.
 describe('CB-SEEDS-1 — extract-seeds never reports an empty model reply as success', () => {
   it('an empty model reply is a typed failure', async () => {
-    const callAI = async () => ({ data: undefined });
+    let calls = 0;
+    const callAI = async () => { calls += 1; return { data: undefined }; };
     const kb = { rag: async () => ({ augmentedPrompt: '[0] FlashPick buyers are ops directors.', citations: [{ documentId: 'd1' }], coverage: 'ok' }) };
     const out = await nodePack['feature.campaign-brief.nodes.extract-seeds']({ features: { kb }, callAI, inputs: { orgId: 'o1', collectionId: 'c1' } });
-    expect(out.status).toBe('failed');
-    expect(out.error?.code).toBeTruthy();
+    expect(out).toMatchObject({ status: 'failed', error: { code: 'generation_empty' } });
+    expect(calls).toBe(2); // ONE error-fed repair before the typed failure
   });
 });
 
@@ -325,8 +342,10 @@ describe('ADR 1020 P2 — the kernel is saved only after its approval', () => {
   it('grade-code M2: promote-kernel refuses a kernel that arrives without its brief revision (never saves unconditioned)', async () => {
     let saved = 0;
     const features = { 'campaign-brief': { setKernel: async () => { saved += 1; return { brief: { id: 'b1', status: 'validated' } }; }, assembleContext: async () => ({ found: true }) } };
-    const out = await nodePack['feature.campaign-brief.nodes.promote-kernel']({ features, inputs: { briefId: 'b1', kernel: GOOD } });
+    // `priorKernelAt` IS passed, so the missing revision is the only refusal left.
+    const out = await nodePack['feature.campaign-brief.nodes.promote-kernel']({ features, inputs: { briefId: 'b1', kernel: GOOD, priorKernelAt: null } });
     expect(out).toMatchObject({ status: 'failed', error: { code: 'validation_error' } });
+    expect(out.error?.message).toContain('brief revision');
     expect(saved).toBe(0);
   });
 
@@ -348,6 +367,7 @@ describe('ADR 1020 P2 — the kernel is saved only after its approval', () => {
     const features = { 'campaign-brief': { setKernel: async () => { saved += 1; return { brief: { id: 'b1', status: 'validated' } }; }, assembleContext: async () => ({ found: true }) } };
     const out = await nodePack['feature.campaign-brief.nodes.promote-kernel']({ features, inputs: { briefId: 'b1', kernel: GOOD, briefVersion: 1 } });
     expect(out).toMatchObject({ status: 'failed', error: { code: 'validation_error' } });
+    expect(out.error?.message).toContain('which kernel the new one replaces');
     expect(saved).toBe(0);
   });
 

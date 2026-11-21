@@ -12,7 +12,7 @@ import type { CuAction, CuTier } from './adapter.js';
 /** `aborted` (ADR 0894 D4/D8) — ended by the host or a person, not by the
  *  provider: the opener lost authority, the toggle went off, the wall-clock
  *  ceiling passed, or someone pressed stop. `error` names which. */
-export type CuSessionStatus = 'starting' | 'running' | 'awaiting_approval' | 'completed' | 'failed' | 'denied' | 'aborted';
+export type CuSessionStatus = 'starting' | 'running' | 'awaiting_approval' | 'awaiting_takeover' | 'completed' | 'failed' | 'denied' | 'aborted';
 
 export interface CuStep {
   action: CuAction;
@@ -44,6 +44,16 @@ export interface CuSession {
   steps: CuStep[];
   /** Set while `awaiting_approval` — the commit-tier action needing a human. */
   pendingAction?: CuAction;
+  /**
+   * ADR 1136 P3a — set while `awaiting_takeover`: the person does a step the
+   * agent must not (a sign-in) in their own browser window. `origin` is the host
+   * of the page the executor reported, never model text; `label` is the
+   * host-composed step label (no typed values). `n` numbers the take-over, so
+   * each one has its own resume key; `expiresAt` ends it unanswered.
+   */
+  takeover?: { n: number; reason: 'credential'; origin: string; label: string; raisedAt: string; expiresAt: string };
+  /** How many take-overs this session has raised (bounded, ADR 1136 P3a). */
+  takeovers?: number;
   /**
    * ADR 0541 D2 — the apply-grant context, set ONLY by a job-search campaign.
    *

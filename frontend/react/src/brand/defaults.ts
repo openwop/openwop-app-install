@@ -232,6 +232,9 @@ export const BRAND_ENV_KEYS = {
   /** Read by `privacyHref.ts`, not by the resolver below; listed so this map is
    *  the complete set of brand build variables (BRAND-01). */
   privacyUrl: 'VITE_BRAND_PRIVACY_URL',
+  /** Read by `consentOptions.ts` (#6150, #6155); listed for BRAND-01 like the one above. */
+  consentClearance: 'VITE_BRAND_CONSENT_CLEARANCE',
+  consentFooter: 'VITE_BRAND_CONSENT_FOOTER',
 } as const;
 
 /** Every `VITE_BRAND_*` build variable this app reads. The Vite config refuses any

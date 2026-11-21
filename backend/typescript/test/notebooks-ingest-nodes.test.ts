@@ -4,16 +4,18 @@
  * (ctx.http.safeFetch caption track), and `ingest-source` (the surface write).
  *
  * Pure node-fn unit test against a MOCK ctx — asserts the pack's own contract
- * (audio part shape, caption parsing + no_transcript, the typed refusals that replaced
- * the no-op short-circuits (ADR 1103 D4), surface write) without the host surface (covered elsewhere). `safeFetch` returns REAL
- * `Response` objects, so `readBodyCapped` runs the same `body.getReader()` stream
- * branch (the MEDIA-4 byte cap) it runs against undici in production.
+ * (audio part shape, caption parsing + no_transcript, surface write, and the two
+ * typed refusals ADR 1103 D4 put in place of the old success no-ops: blank audio
+ * → `validation_error`, blank text → `transcript_empty`) without the host surface
+ * (covered elsewhere). `safeFetch` returns REAL `Response` objects, so
+ * `readBodyCapped` runs the same `body.getReader()` stream branch (the MEDIA-4
+ * byte cap) it runs against undici in production.
  *
- * What reds it (sabotage-witnessed, /grade-tests wave 20): the audio part's
- * `dataBase64` key; the empty-audio refusal; the 32 MiB cap; entity decoding;
- * the no-captions branch; the lowest-bitrate stream pick; the nested
+ * What reds it (sabotage-witnessed, /grade-tests waves 20 and 120): the audio
+ * part's `dataBase64` key; the empty-audio refusal; the 32 MiB cap; entity
+ * decoding; the no-captions branch; the lowest-bitrate stream pick; the nested
  * `playerCaptionsTracklistRenderer` fallback; the `ctx.callAI`-absent guard; the
- * sourceType title weave; the empty-text refusal.
+ * sourceType title weave; the empty-text refusal; the stream byte cap.
  */
 
 import { describe, expect, it } from 'vitest';

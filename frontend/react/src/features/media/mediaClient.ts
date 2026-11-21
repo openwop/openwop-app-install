@@ -48,6 +48,10 @@ export interface MediaAsset {
   /** Current bytes, used to confirm an immutable creative review. */
   contentHash?: string;
   sizeBytes: number;
+  /** Issue 5928 ask 4 — intrinsic (displayed) pixel size of a raster image, from its header.
+   *  Absent on non-images, SVG and assets uploaded before the field. */
+  width?: number;
+  height?: number;
   tags: string[];
   marketing?: MediaMarketing;
   /** ADR 0229 / ADR 0945 — provenance (absent on plain uploads). */

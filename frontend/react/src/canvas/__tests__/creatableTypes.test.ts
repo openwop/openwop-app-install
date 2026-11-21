@@ -4,6 +4,17 @@
  * features/*), so this test is the seam that keeps it honest: every row must
  * match its real definition field-for-field, every first-party type must have
  * a row, and the i18n keys the cards render must exist in the canvas catalog.
+ *
+ * The typed hand list (`DEFINITIONS`) is pinned to the glob-discovered set, so
+ * a new definition cannot escape the field-for-field check by being left off it
+ * (w46; Film joined in ADR 1075, challenge-outline left in ADR 1031 P3). Orphan
+ * rows are checked against the discovered set too. `NOT_CREATABLE` is empty
+ * today, so its loop is inert until an exemption is written.
+ *
+ * Sabotages that turn it red: a wrong toggleId / basePath / editorPath on a row
+ * (case 1), a row with no definition (orphans), a new definition export with no
+ * row (cases 1 and 3), a missing card key (i18n), and `canvasTypeNameKey`
+ * returning the hint key or a fallback for an unknown type.
  */
 import { describe, it, expect } from 'vitest';
 import { CREATABLE_CANVAS_TYPES, canvasTypeNameKey } from '../creatableTypes.js';
@@ -39,6 +50,8 @@ const NOT_CREATABLE: ReadonlyMap<string, string> = new Map<string, string>([]);
 
 describe('creatableTypes registry ↔ feature definitions', () => {
   it('pins every registry row to its real definition (id, toggle, base path, editor path)', () => {
+    // The hand list IS the discovered set — no definition skips this check.
+    expect(DEFINITIONS.map((d) => d.canvasTypeId).sort()).toEqual([...discoveredCanvasTypeIds()].sort());
     for (const def of DEFINITIONS) {
       const row = CREATABLE_CANVAS_TYPES.find((r) => r.canvasTypeId === def.canvasTypeId);
       expect(row, `missing registry row for ${def.canvasTypeId}`).toBeTruthy();
@@ -49,7 +62,7 @@ describe('creatableTypes registry ↔ feature definitions', () => {
   });
 
   it('has no orphan rows (a row whose definition was removed/renamed)', () => {
-    const ids = new Set<string>(DEFINITIONS.map((d) => d.canvasTypeId));
+    const ids = discoveredCanvasTypeIds();
     for (const row of CREATABLE_CANVAS_TYPES) {
       expect(ids.has(row.canvasTypeId), `registry row ${row.canvasTypeId} has no definition`).toBe(true);
     }

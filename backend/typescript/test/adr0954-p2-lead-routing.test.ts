@@ -42,6 +42,7 @@ import { createMember, createOrg, createWorkspace, deleteMember } from '../src/h
 import { upsertFromPrincipal } from '../src/features/users/usersService.js';
 import { hostExtStorage } from '../src/host/hostExtPersistence.js';
 import { tombstoneId } from '../src/features/consent/consentService.js';
+import { eraseSubject } from '../src/host/subjectErasure.js';
 import { createContact } from '../src/features/crm/contactsService.js';
 import { bindLead, getLeadProfile, getLeadBindingId, getPendingLeadRoute, reserveLeadRoute, stampPendingGrade } from '../src/features/crm/leadIntel/leadStore.js';
 import { saveRoutingPolicy } from '../src/features/crm/leadIntel/routingPolicy.js';
@@ -300,5 +301,54 @@ describe('ADR 0954 D5 — routing', () => {
     expect((await call('onlyB', 'GET', `/${orgA}/leads/${contactId}/routing/${started.body.routingEpoch}`)).status).toBe(404);
     expect((await call('onlyB', 'POST', `/${orgA}/leads/${contactId}/route`)).status).toBe(404);
     expect((await call('onlyB', 'GET', `/${orgA}/leads/routing-policy`)).status).toBe(404);
+  });
+});
+
+describe('CHAN-F19 #7 (ADR 0464 §9) — a DSAR on a lead owner', () => {
+  it('deletes the owner\'s capacity pools in every org, and keeps everyone else\'s', async () => {
+    const mkOwner = async (p: string, orgs: string[]): Promise<string> => {
+      const owner = (await upsertFromPrincipal({ tenantId: TENANT, principalId: `oidc:f19-${p}`, source: 'oidc' })).userId;
+      await createMember({ tenantId: TENANT, orgId: TENANT, subject: owner, displayName: p, roles: ['viewer'] });
+      for (const orgId of orgs) await createMember({ tenantId: TENANT, orgId, subject: owner, displayName: p, roles: ['editor'] });
+      return owner;
+    };
+    const alice = await mkOwner('alice', [orgA, orgB]);
+    const bob = await mkOwner('bob', [orgA]);
+    // Real routing rounds, so the pools are the ones `reserveOwner` writes.
+    await setPolicy(orgA, [{ ruleId: 'f19-alice', strategy: 'named', named: alice }]);
+    expect((await routeLead({ tenantId: TENANT, orgId: orgA, contactId: await newLead(orgA, 'F19A'), routingEpoch: 1, runId: 'f19-a' })).decision.chosen).toBe(alice);
+    await setPolicy(orgA, [{ ruleId: 'f19-bob', strategy: 'named', named: bob }]);
+    expect((await routeLead({ tenantId: TENANT, orgId: orgA, contactId: await newLead(orgA, 'F19B'), routingEpoch: 1, runId: 'f19-b' })).decision.chosen).toBe(bob);
+    await setPolicy(orgB, [{ ruleId: 'f19-alice-b', strategy: 'named', named: alice }]);
+    expect((await routeLead({ tenantId: TENANT, orgId: orgB, contactId: await newLead(orgB, 'F19C'), routingEpoch: 1, runId: 'f19-c' })).decision.chosen).toBe(alice);
+
+    const pool = (orgId: string, owner: string): string => `hostext:crm:lead-rr:${TENANT}::${orgId}::capacity:${tombstoneId(TENANT, owner)}`;
+    const keys = async (): Promise<Set<string>> => new Set((await hostExtStorage().kvList(`hostext:crm:lead-rr:${TENANT}::`)).map((r) => r.key));
+    const before = await keys();
+    for (const k of [pool(orgA, alice), pool(orgB, alice), pool(orgA, bob)]) expect(before.has(k), `${k} exists before erasure`).toBe(true);
+
+    await eraseSubject(TENANT, alice);
+
+    const after = await keys();
+    expect(after.has(pool(orgA, alice)), 'Alice\'s pool in client A is gone').toBe(false);
+    expect(after.has(pool(orgB, alice)), 'and in client B').toBe(false);
+    expect(after.has(pool(orgA, bob)), 'Bob\'s pool is kept').toBe(true);
+    const others = [...before].filter((k) => k !== pool(orgA, alice) && k !== pool(orgB, alice));
+    expect(others.filter((k) => !after.has(k)), 'nothing else in the store was deleted').toEqual([]);
+
+    // The pool must not come back. The policy leg already dropped Alice from every
+    // rule; a territory's member list is outside crm, so it can still name her.
+    // The decision commit refuses any round that names an erased subject (409), but
+    // a capacity pool is reserved BEFORE that commit, so the refusal alone would not
+    // stop the pool being written back. Routing must not choose her at all.
+    setLeadTerritoryResolver(async (_t, orgId) => (orgId === orgA ? { territoryId: 't-f19', ruleId: 'r-f19', memberSubjectIds: [alice, bob] } : null));
+    try {
+      await setPolicy(orgA, [{ ruleId: 'f19-terr', strategy: 'territory' }]);
+      await expect(routeLead({ tenantId: TENANT, orgId: orgA, contactId: await newLead(orgA, 'F19D'), routingEpoch: 1, runId: 'f19-d' }))
+        .rejects.toMatchObject({ details: { reason: 'routing_subject_erased' } });
+    } finally {
+      registerLeadTerritoryRouting();
+    }
+    expect((await keys()).has(pool(orgA, alice)), 'and no later round re-creates her pool').toBe(false);
   });
 });

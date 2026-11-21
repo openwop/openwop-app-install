@@ -39,9 +39,10 @@ import { buildPacing } from './pacing.js';
 import { buildAttribution } from './attribution.js';
 import { orgScopeGranted } from './orgScope.js';
 import { listCaps, getCapState } from './spendCaps.js';
-import { proposeReallocation } from './reallocation.js';
+import { proposeReallocation, reallocationApprovers } from './reallocation.js';
 import { makeAdsAdapter } from '../../host/adsAdapter.js';
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
+import { OpenwopError } from '../../types.js';
 
 export const CAMPAIGN_INTEL_BUDGET_OPTIMIZE_TOOL_ID = 'openwop:campaign-intel.budget-optimize';
 export const CAMPAIGN_INTEL_FORECAST_TOOL_ID = 'openwop:campaign-intel.forecast';
@@ -320,7 +321,28 @@ export function registerCampaignIntelAgentTools(): void {
         return toolError('forbidden_scope', 'The user cannot change budgets in that organization, so no plan can be proposed for them.', { requiredScope: 'workspace:write', orgId: gate.orgId });
       }
       const adapter = makeAdsAdapter({ storage: hostExtStorage(), tenantId: scope.tenantId, runId: scope.runId ?? `hostext:intel-propose:${gate.orgId}`, actingUserId: gate.actingUserId, orgId: gate.orgId });
-      const out = await proposeReallocation(adapter, scope.tenantId, gate.orgId, { runId: scope.runId ?? 'chat', actor: gate.actingUserId });
+      // ADR 1022 CP71WF-23 — name the client's approvers (the chat run's ADR 0942
+      // policy, else the org's owner or admin) so the person chatting cannot
+      // approve their own plan. A refusal by policy is a typed tool error.
+      let out: Awaited<ReturnType<typeof proposeReallocation>>;
+      try {
+        out = await proposeReallocation(adapter, scope.tenantId, gate.orgId, {
+          runId: scope.runId ?? 'chat', actor: gate.actingUserId,
+          bindApproval: reallocationApprovers({
+            tenantId: scope.tenantId, orgId: gate.orgId, requester: gate.actingUserId,
+            ...(scope.runId ? { policyRunId: scope.runId } : {}),
+          }),
+        });
+      } catch (err) {
+        if (err instanceof OpenwopError && err.code === 'forbidden_scope') {
+          // TOC2CD-11 — a host sentence per reason, never the thrown message.
+          if (err.details?.reason === 'autonomy_blocked') {
+            return toolError('forbidden_scope', 'This client\'s review policy does not allow this budget change, so no plan was proposed.', { orgId: gate.orgId, reason: 'autonomy_blocked' });
+          }
+          return toolError('forbidden_scope', 'The approval for this budget change could not be bound to the client, so no plan was proposed.', { orgId: gate.orgId, reason: 'approval_binding_invalid' });
+        }
+        throw err;
+      }
       return {
         content: JSON.stringify(out.outcome === 'no_change'
           ? out

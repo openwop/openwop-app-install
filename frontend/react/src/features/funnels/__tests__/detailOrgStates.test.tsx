@@ -23,10 +23,14 @@
  * DOUBLE GUARD on the funnel read: the load effect returns on `!orgId`, AND
  * `reload()` returns on its own `if (!orgId || !funnelId)`. Dropping the effect's
  * check alone still leaves `getFunnel` uncalled, so the effect's guard is witnessed
- * by `cms.listPages` — the one read in that effect with no second guard.
+ * by `cms.listPages` — the one read in that effect with no second guard. Both
+ * guards sit in `FunnelDetailPage.tsx`, so one edit that drops both is what the
+ * `getFunnel` assertions are probed with (wave 120).
  *
- * Sabotage-witnessed (wave 52): dropping the effect's `!orgId` check, the failed-read
- * clause, the zero-org branch, the retry wiring, the 404 → not-found mapping, and the
+ * Sabotage-witnessed (wave 52, re-probed wave 120): dropping the effect's `!orgId`
+ * check, both `!orgId` guards together, the failed-read clause, the zero-org branch,
+ * the retry wiring, the 404 → not-found mapping (ADR 1023: decided on the typed
+ * `FunnelsError` status, which is why the fixtures throw one), and the
  * guessed-workspace name (explicit `?org=` vs none) each turn a case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -126,6 +130,9 @@ describe('funnel detail — the three organization states', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })); });
     expect(api.listOrgs).toHaveBeenCalledTimes(2);
     await waitFor(() => expect(api.getFunnel).toHaveBeenCalledWith('o1', 'f1'));
+    // …and the recovered read replaces the failure card rather than sitting under it.
+    expect(await screen.findByText('Summer launch')).toBeTruthy();
+    expect(screen.queryByText('Could not load your organizations')).toBeNull();
   });
 
   it('read SUCCEEDS with []: the zero-organization state, not an endless skeleton (HG-1)', async () => {
@@ -202,6 +209,9 @@ describe('funnel detail — the three organization states', () => {
     api.getFunnel.mockRejectedValue(new FunnelsError('Funnel not found.', 404));
     view();
     expect((await screen.findAllByText('Funnel not found')).length).toBeGreaterThan(0);
-    expect(screen.getByText(/looked in .*Acme.*/)).toBeTruthy();
+    // The whole sentence, not a `/looked in .*Acme/` regex: the claim is that
+    // THIS copy (the guessed-workspace variant) is the one shown.
+    expect(screen.getByText('The link didn’t name a workspace, so we looked in “Acme”. If the funnel lives in another workspace, switch to it from Funnels.')).toBeTruthy();
+    expect(screen.queryByText('This funnel was deleted, or the link points at another workspace.')).toBeNull();
   });
 });

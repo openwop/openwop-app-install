@@ -11,7 +11,9 @@
  * a window button that always reads 7, "new" → "no change", a swallowed weekly
  * failure, offering the panel to a non-superadmin, and hiding the read failure
  * each turn a case red. The panel is `React.lazy`: the owner case awaits the
- * chunk (`settleLazy`) before asserting it never mounted.
+ * chunk (`settleLazy`) before asserting it never mounted. Wave 117 (detection-only
+ * tightening, no case removed): each window switch is exactly one read, and both
+ * failure notices are asserted as warnings (a neutral `info` tone reds them).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, within, act, waitFor } from '@testing-library/react';
@@ -75,6 +77,15 @@ const settleLazy = async (): Promise<void> => {
   });
 };
 
+/** Let a read that has been SENT settle (its then/catch/finally chain runs in
+ *  microtasks), so a failure branch is asserted on the value, synchronously,
+ *  instead of a lookup that can only red by timing out. */
+const drain = async (): Promise<void> => {
+  await act(async () => {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  });
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   mFunnel.mockReset();
@@ -107,6 +118,10 @@ describe('BillingPage — paywall funnel (superadmin)', () => {
     at();
     await screen.findByRole('heading', { name: 'Paywall funnel' });
     fireEvent.click(screen.getByRole('button', { name: '30 days' }));
+    // Settle, then assert on the value: exactly one read per window (the mount
+    // read, then the switch), so a dead button reds here, not by a timeout.
+    await drain();
+    expect(mFunnel.mock.calls).toEqual([[7], [30]]);
     await waitFor(() => expect(mFunnel).toHaveBeenLastCalledWith(30));
   });
 
@@ -115,6 +130,10 @@ describe('BillingPage — paywall funnel (superadmin)', () => {
     at();
     await screen.findByRole('heading', { name: 'Paywall funnel' });
     fireEvent.click(screen.getByRole('button', { name: '90 days' }));
+    // Settle, then assert on the value: exactly one read per window (the mount
+    // read, then the switch), so a dead button reds here, not by a timeout.
+    await drain();
+    expect(mFunnel.mock.calls).toEqual([[7], [90]]);
     await waitFor(() => expect(mFunnel).toHaveBeenLastCalledWith(90));
   });
 
@@ -139,8 +158,13 @@ describe('BillingPage — paywall funnel (superadmin)', () => {
     mFunnel.mockResolvedValue(FUNNEL);
     mWeekly.mockRejectedValue(new Error('down'));
     at();
-    expect(await screen.findByText(/Could not load the weekly comparison\./)).toBeTruthy();
+    await waitFor(() => expect(mWeekly).toHaveBeenCalledTimes(1));
+    await drain();
+    const weekFail = screen.getByText(/Could not load the weekly comparison\./);
+    // A warning, not a neutral note (the tone is part of "says so").
+    expect(weekFail.closest('.alert')?.classList.contains('warning')).toBe(true);
     expect(await screen.findByRole('rowheader', { name: 'crm' })).toBeTruthy();
+    expect(screen.queryByRole('table', { name: 'This week compared with last week' })).toBeNull();
   });
 
   it('an owner who is not a superadmin is never shown — or sent to — the funnel', async () => {
@@ -156,7 +180,12 @@ describe('BillingPage — paywall funnel (superadmin)', () => {
   it('a failed read says so', async () => {
     mFunnel.mockRejectedValue(new Error('network down'));
     at();
-    expect(await screen.findByText(/Could not load the paywall funnel\./)).toBeTruthy();
+    await waitFor(() => expect(mFunnel).toHaveBeenCalledTimes(1));
+    await drain();
+    const failed = screen.getByText(/Could not load the paywall funnel\./);
+    expect(failed.closest('.alert')?.classList.contains('warning')).toBe(true);
     expect(screen.queryByRole('rowheader', { name: 'crm' })).toBeNull();
+    // Not presented as an empty window either (ADR 0779 D7).
+    expect(screen.queryByText('No paywall activity in this window.')).toBeNull();
   });
 });

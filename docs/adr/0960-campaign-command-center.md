@@ -170,6 +170,9 @@ Buyer agent are here" uses the existing tracker. No second presence system.
 
 ### D7 — Where it lives, and the vocabulary split (closes C-G5)
 
+> **ADDED 2026-11-20 (ADR 1154).** Under `campaigns.guided` the Command view
+> is reached from the campaign workspace's overview. It stays per campaign.
+
 The cockpit is a **campaign detail tab** ("Command") inside the
 `/campaign-studio` hub, per campaign — not a hub-level tab. ADR 0926's
 Operations inbox stays plain-language for operators and links to "Open command

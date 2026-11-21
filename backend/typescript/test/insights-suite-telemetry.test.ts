@@ -8,17 +8,21 @@
  * workflows themselves rides the executor's standard run events — out of scope here.)
  *
  * ADR 0599 §6 (ISC-7): `scheduleArmed` may only be true after `registerJob` reported ok,
- * and the job id appears ONLY when the schedule is armed.
+ * and the job id appears ONLY when the schedule is armed. (A refused `registerJob`
+ * throws before this line is written; that refusal is insights-suite-cron's claim,
+ * not this file's.)
  * ADR 1102 D6: the anniversary trigger is never armed, so `anniversaryArmed` is a
  * definite `false` and no `subscriptionId` is ever logged. D5: one business unit,
- * logged as `hasBusinessUnit`.
- * Sabotage that reds it: `scheduleArmed = false` reds case 1; leaking the `jobId`
- * spread on an unarmed apply reds case 2.
+ * logged as `hasBusinessUnit` (true with one, false without).
+ * Sabotage that reds it (w20, re-probed w119 as w119g3-is-*): `scheduleArmed = false`
+ * or a wrong `cron` reds case 1; leaking the `jobId` spread on an unarmed apply, or
+ * a constant `hasBusinessUnit`, reds case 2; `anniversaryArmed: true` or a logged
+ * `subscriptionId` reds both.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
-import { applyConfig, __resetInsightsSuiteStore } from '../src/features/insights-suite/insightsSuiteService.js';
+import { applyConfig, __resetInsightsSuiteStore, type InsightsSuiteConfig } from '../src/features/insights-suite/insightsSuiteService.js';
 
 function capture(fn: () => Promise<void>): Promise<string> {
   const lines: string[] = [];
@@ -29,7 +33,7 @@ function capture(fn: () => Promise<void>): Promise<string> {
   return fn().finally(() => spy.mockRestore()).then(() => lines.join(''));
 }
 
-const base = (over: Record<string, unknown> = {}) => ({
+const base = (over: Partial<InsightsSuiteConfig> = {}): InsightsSuiteConfig => ({
   tenantId: 'tA', principalUserId: 'u1', businessUnit: 'Sales', updatedAt: '2026-06-20T00:00:00.000Z', ...over,
 });
 
@@ -54,9 +58,12 @@ describe('INS-1 — insights_suite_reconciled telemetry', () => {
     expect(out).not.toContain('"subscriptionId"');
   });
 
-  it('logs both as NOT armed when neither is configured (and omits the ids)', async () => {
-    const out = await capture(async () => { await applyConfig(base()); });
+  it('logs both as NOT armed when neither is configured (omits the ids; no business unit logs false)', async () => {
+    // No cron, no trigger, and no business unit (case 1 carries one).
+    const out = await capture(async () => { await applyConfig({ tenantId: 'tA', principalUserId: 'u1', updatedAt: '2026-06-20T00:00:00.000Z' }); });
+    expect(out).toContain('insights_suite_reconciled');
     expect(out).toMatch(/"scheduleArmed":false/);
+    expect(out).toMatch(/"hasBusinessUnit":false/);
     expect(out).toMatch(/"anniversaryArmed":false/);
     // `"cron"` alone cannot catch a leaked spread (an undefined cron is dropped by
     // JSON.stringify), so the jobId — always defined — is the schedule-side witness.

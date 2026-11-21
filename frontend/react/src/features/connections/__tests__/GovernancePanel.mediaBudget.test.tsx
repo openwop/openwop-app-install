@@ -13,6 +13,13 @@
  * Sabotage that turns it red (wave 52): seeding tts from `budgets` (case 1),
  * renaming `videoJobs` in the PUT body (cases 2, 3), `0 → null` for a kept zero
  * (case 2), or sending 0 for a blank field (case 3).
+ *
+ * ADR 1051 D3 (video: 0 is OFF, uncapped is the explicit 'unlimited'): the
+ * effective-cap row reads "off" for 0, and the "no cap" box disables the number
+ * and PUTs `videoJobs: 'unlimited'` with every other field left as seeded. w117
+ * sabotage: the off branch rendered as "no cap" or as usage, the box not
+ * disabling the input, the box ignored on save, and each seed/clear rule above
+ * re-measured against the full PUT body of the unlimited save.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
@@ -108,7 +115,8 @@ describe('ADR 1051 D3 — video: 0 is off, uncapped is explicit', () => {
   it('an effective video cap of 0 reads as "off", never as "no cap"', async () => {
     render(<GovernancePanel />);
     await waitFor(() => expect(screen.getByText('Media generation budgets')).toBeTruthy());
-    expect(screen.getByText('Paid video is off for this workspace')).toBeTruthy();
+    // The video row's own reading, so the stt row's (genuine) "no cap" cannot satisfy it.
+    expect(screen.getByText('Video').closest('div')?.textContent).toBe('VideoPaid video is off for this workspace');
   });
 
   it('the "no cap" box saves the explicit unlimited, and disables the number', async () => {
@@ -118,6 +126,7 @@ describe('ADR 1051 D3 — video: 0 is off, uncapped is explicit', () => {
     expect(input('Video units per day (this workspace)').disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Save media budgets' }));
     await waitFor(() => expect(puts).toHaveLength(1));
-    expect((puts[0]!.body as { videoJobs: unknown }).videoJobs).toBe('unlimited');
+    // Only video changes: tts and images keep their seeded override, stt stays cleared.
+    expect(puts[0]).toEqual({ url: `${GOV}/media-budget`, method: 'PUT', body: { ttsChars: 1234, sttBytes: null, images: 7, videoJobs: 'unlimited' } });
   });
 });

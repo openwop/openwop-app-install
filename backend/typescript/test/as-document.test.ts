@@ -15,7 +15,13 @@
  * the actor's alone, because a Document is readable by the whole org. The fixture is
  * therefore production-shaped: an owned 1:1 agent chat whose user turn the owner wrote.
  * It used to have NO meta, which is the legacy owner-less, tenant-visible shape. That
- * shape is now pinned as REFUSED, so dropping the owner check turns the last case red.
+ * shape (and a meta that names no owner) is now pinned as REFUSED with the
+ * `shared_conversation` reason and NO Document written.
+ *
+ * Re-probed wave 119 (`w119g2-ad-*`): the owner check dropped, the refusal not thrown, a
+ * Document written before the refusal, and the not_found code changed each red the
+ * matching case; so do a constant title, a wrong kind/format/creator, and a dropped
+ * transcript or producer.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -25,7 +31,7 @@ import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { initHostExtPersistence, hostExtStorage } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 import { exportConversationAsDocument } from '../src/features/chat-export/asDocumentService.js';
-import { getDocument, listVersions } from '../src/features/documents/documentsService.js';
+import { getDocument, listDocumentsForTenant, listVersions } from '../src/features/documents/documentsService.js';
 import { ensureConversationMeta } from '../src/host/conversationStore.js';
 
 const T = 'asdoc-tenant';
@@ -65,12 +71,15 @@ describe('exportConversationAsDocument', () => {
 
   it('refuses an owner-less legacy conversation: it is not the actor\'s alone (ADR 0992 B1)', async () => {
     for (const id of ['conv-legacy', 'conv-unowned']) {
+      const before = (await listDocumentsForTenant(T)).length;
       await expect(exportConversationAsDocument(T, ORG, 'user:alice', id))
         .rejects.toMatchObject({ code: 'forbidden', httpStatus: 403, details: { reason: 'shared_conversation' } });
+      // Refused BEFORE anything is written: no org-readable copy of the transcript.
+      expect((await listDocumentsForTenant(T)).length, id).toBe(before);
     }
   });
 
   it('404s a non-existent conversation', async () => {
-    await expect(exportConversationAsDocument(T, ORG, 'user:alice', 'nope')).rejects.toMatchObject({ code: 'not_found' });
+    await expect(exportConversationAsDocument(T, ORG, 'user:alice', 'nope')).rejects.toMatchObject({ code: 'not_found', httpStatus: 404 });
   });
 });

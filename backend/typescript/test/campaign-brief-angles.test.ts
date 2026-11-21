@@ -6,12 +6,22 @@
  *     never demoting a tested hook)
  *   - generate-angles node: index→id mapping, kernel required, ONE repair,
  *     typed generation_ungrounded
+ *   - ADR 1020 D10 (CS70WF-14): angle ids are content-derived (normalized claim +
+ *     sorted proof refs), so a retry / fork / re-run stores ONE angle
  *   - hook transitions: candidate→tested→retired lattice enforced
- *   - assembleContext projects TESTED hooks only (capped)
+ *   - assembleContext projects TESTED hooks only, minimal shape (the 20-hook cap is
+ *     pinned in campaign-brief-kb-integration.test.ts, not here)
  *   - build-targeting node + surface: platform enum, evidence grounding,
  *     deterministic brief+platform upsert (re-run replaces)
  *   - brief-delete cascade: angles + targeting go, the ORG hook bank survives
  *   - artifact-type pack parity for the three Phase 2-3 schemas
+ *
+ * Sabotage-witnessed (w120): each validateAngleCandidate finding, the angle-id
+ * normalization and proof-ref term, the hook re-emission skip and the lattice, the
+ * tested-only projection, the node's index bound, kernel/evidence guards and ONE
+ * repair, the platform enum, the targeting key and closed-world ref check, both
+ * cascade deletes, and a pack.json limit. The two `it.fails` (CB-UNTRUSTED-1) each go
+ * red under a fix-probe that fences the evidence block.
  *
  * Wave 30 (grade-tests): the surface's closed-world proofRef check is DOUBLE-guarded
  * by the MI-1 post-persist re-check (an unresolvable angle that slipped validation
@@ -159,12 +169,13 @@ describe('hook transitions — the promotion lattice', () => {
     const surface = buildCampaignBriefSurface({ tenantId: TENANT });
     await surface.persistAngles({ briefId, candidates: [{ claim: 'C', positioningLens: 'l', proofRefs: [evidence[0].id], hookVariants: [{ text: 'Hook A', format: 'question' }] }] });
     const id = deterministicHookId(TENANT, ORG, 'Hook A');
-    await expect(promoteHook(TENANT, ORG, id, 'bogus')).rejects.toMatchObject({ httpStatus: 422 });
+    await expect(promoteHook(TENANT, ORG, id, 'bogus')).rejects.toMatchObject({ httpStatus: 422, details: { field: 'status' } });
     const tested = await promoteHook(TENANT, ORG, id, 'tested', 'perf:abc');
     expect(tested).toMatchObject({ status: 'tested', metricRef: 'perf:abc' });
-    await expect(promoteHook(TENANT, ORG, id, 'candidate')).rejects.toMatchObject({ httpStatus: 422 }); // no demotion
+    // The lattice refusal (`from`/`to`), not the unknown-status one.
+    await expect(promoteHook(TENANT, ORG, id, 'candidate')).rejects.toMatchObject({ httpStatus: 422, details: { from: 'tested', to: 'candidate' } }); // no demotion
     expect(await promoteHook(TENANT, ORG, id, 'retired')).toMatchObject({ status: 'retired' });
-    await expect(promoteHook(TENANT, ORG, id, 'tested')).rejects.toMatchObject({ httpStatus: 422 }); // retired is terminal
+    await expect(promoteHook(TENANT, ORG, id, 'tested')).rejects.toMatchObject({ httpStatus: 422, details: { from: 'retired', to: 'tested' } }); // retired is terminal
     expect(await promoteHook(TENANT, ORG, 'missing', 'tested')).toBeNull();
   });
 });
@@ -180,6 +191,8 @@ describe('assembleContext — TESTED-only hooks projection', () => {
     await promoteHook(TENANT, ORG, deterministicHookId(TENANT, ORG, 'Tested hook'), 'tested');
     const asm = as<{ hooks: Array<{ text: string; id: string }> }>(await surface.assembleContext({ briefId }));
     expect(asm.hooks.map((h) => h.text)).toEqual(['Tested hook']);
+    // Minimal shape: no status, metricRef, tenant or audit fields reach the prompt.
+    expect(Object.keys(asm.hooks[0]!).sort()).toEqual(['angleId', 'format', 'id', 'text']);
   });
 });
 
@@ -235,13 +248,24 @@ describe('build-targeting node + surface — platform packs', () => {
   it('persists THE brief+platform pack with mapped evidenceRefs; a re-run replaces it', async () => {
     const { briefId } = await briefWithEvidence();
     const mkAI = (kw: string) => vi.fn(async () => ({ data: { audiences: ['ops directors'], interests: ['warehouse automation'], keywords: [kw], rationale: 'Derived from [0].', evidenceIndexes: [0] } }));
-    const first = as<{ status: string; outputs: { pack: { keywords: string[]; evidenceRefs: string[] } } }>(
-      await nodePack['feature.campaign-brief.nodes.build-targeting'](ctx(mkAI('picking speed'), briefId, 'meta')),
-    );
+    // The two runs are stamped a second apart (only Date is faked): written in the same
+    // millisecond, a key that wrongly included the write time would still collide and
+    // look like a replace (w120 probe cb-target-key).
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 1_000 });
+    let first!: { status: string; outputs: { pack: { keywords: string[]; evidenceRefs: string[] } } };
+    let second!: { status: string };
+    try {
+      first = as<{ status: string; outputs: { pack: { keywords: string[]; evidenceRefs: string[] } } }>(
+        await nodePack['feature.campaign-brief.nodes.build-targeting'](ctx(mkAI('picking speed'), briefId, 'meta')),
+      );
+      vi.setSystemTime(Date.now() + 1_000);
+      second = as<{ status: string }>(await nodePack['feature.campaign-brief.nodes.build-targeting'](ctx(mkAI('recount waste'), briefId, 'meta')));
+    } finally {
+      vi.useRealTimers();
+    }
     expect(first.status).toBe('success');
     const nodeView = await listVocEvidence(TENANT, briefId);
     expect(first.outputs.pack.evidenceRefs).toEqual([nodeView[0].id]);
-    const second = as<{ status: string }>(await nodePack['feature.campaign-brief.nodes.build-targeting'](ctx(mkAI('recount waste'), briefId, 'meta')));
     expect(second.status).toBe('success');
     const packs = await listTargetingPacks(TENANT, briefId);
     expect(packs).toHaveLength(1); // replaced, not duplicated
@@ -251,7 +275,11 @@ describe('build-targeting node + surface — platform packs', () => {
     await expect(buildCampaignBriefSurface({ tenantId: TENANT }).persistTargeting({
       briefId,
       candidate: { platform: 'google', audiences: ['a'], interests: [], keywords: [], rationale: 'r', evidenceRefs: ['fake-ev'] },
-    })).rejects.toMatchObject({ code: 'validation_error', httpStatus: 422 });
+    })).rejects.toMatchObject({
+      code: 'validation_error', httpStatus: 422,
+      details: { finding: { field: 'evidenceRefs' } },
+      message: expect.stringContaining('do not resolve to stored evidence of this brief: fake-ev'),
+    });
     expect((await listTargetingPacks(TENANT, briefId)).map((p) => p.platform)).toEqual(['meta']);
   });
 
@@ -271,7 +299,7 @@ describe('build-targeting node + surface — platform packs', () => {
   });
 });
 
-// CB-UNTRUSTED-1 (BLOCKED-ON-PRODUCT, wave 30 grade-tests) — a stored VOC quote is
+// CB-UNTRUSTED-1 (BLOCKED-ON-PRODUCT, #6142; wave 30 grade-tests) — a stored VOC quote is
 // verbatim customer / uploaded-file text: UNTRUSTED. extract-voc fences its sources
 // (ADR 0830 D3), but generate-angles and build-targeting interpolate the stored
 // quotes into their prompts bare, so a quote reading as an instruction reaches the
@@ -300,6 +328,7 @@ describe('CB-UNTRUSTED-1 — stored quotes reach the angle/targeting prompts fen
     return brief.id;
   }
 
+  // #6142: flips red (drop `.fails`) when generate-angles fences the evidence block.
   it.fails('generate-angles fences the stored quotes', async () => {
     const briefId = await briefWithInjectedQuote();
     const callAI = vi.fn(async (_req: unknown) => ({ data: { angles: [{ claim: 'C', positioningLens: 'l', evidenceIndexes: [0], hookVariants: [] }] } }));
@@ -309,6 +338,7 @@ describe('CB-UNTRUSTED-1 — stored quotes reach the angle/targeting prompts fen
     expect(quoteIsFenced(prompt, INJECTED)).toBe(true);
   });
 
+  // #6142: flips red (drop `.fails`) when build-targeting fences the evidence block.
   it.fails('build-targeting fences the stored quotes', async () => {
     const briefId = await briefWithInjectedQuote();
     const callAI = vi.fn(async (_req: unknown) => ({ data: { audiences: ['a'], interests: [], keywords: [], rationale: 'r', evidenceIndexes: [0] } }));
@@ -335,8 +365,10 @@ describe('brief-delete cascade — org hook bank survives', () => {
 describe('artifact-type pack ↔ TS SSoT parity (Phases 2-3)', () => {
   it('ad-angle / hook / targeting-pack schemas mirror their services', () => {
     const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..');
-    const pack = JSON.parse(readFileSync(join(REPO_ROOT, 'packs', 'feature.campaign-brief.artifact-types', 'pack.json'), 'utf8'));
-    const byId = new Map<string, { schema: Record<string, any> }>(pack.artifactTypes.map((t: { artifactTypeId: string }) => [t.artifactTypeId, t]));
+    // The slice of JSON Schema this parity reads; a missing node throws (red), never passes.
+    interface SchemaNode { properties: Record<string, SchemaNode>; items: SchemaNode; maxLength?: number; minItems?: number; maxItems?: number; enum?: string[] }
+    const pack: { artifactTypes: Array<{ artifactTypeId: string; schema: SchemaNode }> } = JSON.parse(readFileSync(join(REPO_ROOT, 'packs', 'feature.campaign-brief.artifact-types', 'pack.json'), 'utf8'));
+    const byId = new Map(pack.artifactTypes.map((t): [string, { schema: SchemaNode }] => [t.artifactTypeId, t]));
 
     const angle = byId.get('campaign-brief.ad-angle');
     expect(angle, 'campaign-brief.ad-angle must be declared').toBeTruthy();

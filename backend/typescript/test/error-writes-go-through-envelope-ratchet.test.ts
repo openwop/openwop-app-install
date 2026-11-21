@@ -39,7 +39,6 @@ function directCounts(dir: string): Record<string, number> {
 const ROUTES_BASELINE: Record<string, number> = {
   'routes/accessControl.ts': 1,
   'routes/admin.ts': 4,
-  'routes/agents.ts': 30,
   'routes/appBrand.ts': 1,
   'routes/artifactTypeSeam.ts': 1,
   'routes/authBreakGlass.ts': 1,
@@ -64,13 +63,10 @@ const ROUTES_BASELINE: Record<string, number> = {
  * so a new one in a feature would have passed. Shrink-only, like the routes baseline.
  */
 const FEATURES_BASELINE: Record<string, number> = {
+  // A webhook sender's contract body ({ outcome: 'unknown_webhook' }), not an error envelope; the exit guard still makes it no-store.
   'features/app-builder/routes.ts': 1,
+  // The declined-checkout 402 ({ declined, reason }) the checkout client reads, not an error envelope; the exit guard still makes it no-store.
   'features/commerce/routes.ts': 1,
-  'features/job-search/autopilot/routes.ts': 2,
-  'features/job-search/routes.ts': 18,
-  'features/podcasts/publicRoutes.ts': 1,
-  'features/runtime-posture/routes.ts': 2,
-  'features/tutorials/routes.ts': 1,
 };
 
 function noGrowth(dir: string, baseline: Record<string, number>): { grew: string[]; shrank: string[] } {

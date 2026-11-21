@@ -26,9 +26,11 @@ import { declarePiiFields } from '../../host/dataClassification.js';
 import { registerRetentionPurger, registerDefaultWindowSweep, type PurgeOutcome } from '../../host/retentionPurger.js';
 import { getRetentionHold } from '../../host/retentionHold.js';
 import {
-  registerToggleWriteIntent, registerToggleWriteListener, resolveOne, resolveWrittenToggle, type ToggleWrite, type ToggleWriteIntent,
+  registerToggleWriteIntent, registerToggleWriteListener, resolveOne, resolveWrittenToggle, stripToggleSubject, type ToggleWrite, type ToggleWriteIntent,
 } from '../../host/featureToggles/service.js';
 import type { ToggleConfig } from '../../host/featureToggles/types.js';
+import { toggleSubjectIds } from '../../host/featureToggles/erasure.js';
+import { ERASED_USER_REF } from '../../host/subjectErasureRedaction.js';
 import { resolveBackendId, hasAdapter, MEMORY_BACKEND } from '../../host/surfaceBackends.js';
 import { buildHostSurfaceBundle, type BlobSurface } from '../../host/inMemorySurfaces.js';
 import { getStrictGrantGeneration, registerConsentWithdrawalHook, registerVisitorChoiceProvider } from '../consent/consentService.js';
@@ -979,6 +981,47 @@ export async function eraseSubjectReplays(tenantId: string, subjectKey: string):
   return { rowsTouched };
 }
 registerSubjectEraser(eraseSubjectReplays);
+
+/**
+ * CHAN-F19 #12 (ADR 0464 §9, user decision 2026-11-19) — a pending toggle write
+ * (`analytics:replay-toggle-writes`) copies whole toggle rows, so it holds the beta
+ * cohort's principal ids and the saver's `updatedBy` for the settle window and the
+ * next hourly sweep. A DSAR strips the subject from every pending copy with the same
+ * rule as the host store (`stripToggleSubject`: an emptied cohort keeps a sentinel,
+ * so a closed beta stays closed). Narrowing a cohort can only turn a tenant's replay
+ * OFF, never ON, so the fence errs to the safe side. CAS: a row the sweep just
+ * deleted is never written back.
+ */
+async function eraseReplayToggleWriteSubject(tenantId: string, subjectKey: string): Promise<{ rowsTouched: number }> {
+  if (!tenantId || !subjectKey || subjectKey === ERASED_USER_REF) return { rowsTouched: 0 };
+  const ids = await toggleSubjectIds(tenantId, subjectKey);
+  const strip = (w: PendingToggleWrite): PendingToggleWrite | null => {
+    let changed = false;
+    const rows: Record<string, ToggleConfig | null> = {};
+    for (const [id, row] of Object.entries(w.rows)) {
+      const next = row ? stripToggleSubject(row, ids, ERASED_USER_REF) : null;
+      if (next) changed = true;
+      rows[id] = next ?? row;
+    }
+    return changed ? { ...w, rows } : null;
+  };
+  let rowsTouched = 0;
+  for (const first of await toggleWrites.list()) {
+    const key = `${first.scope}:${first.writeId}`;
+    let cur: PendingToggleWrite | null = first;
+    for (let attempt = 0; ; attempt += 1) {
+      const next: PendingToggleWrite | null = cur ? strip(cur) : null;
+      if (!cur || !next) break;
+      if (await toggleWrites.compareAndSwap(cur, next)) { rowsTouched += 1; break; }
+      if (attempt >= 5) throw new OpenwopError('internal_error', `session replay: toggle write ${key} kept changing during erasure.`, 500, {});
+      cur = await toggleWrites.get(key);
+    }
+  }
+  return { rowsTouched };
+}
+registerSubjectEraser(eraseReplayToggleWriteSubject);
+// CHAN-F19 #12 — the copied rows' cohort entries and saver are person ids.
+declarePiiFields('analytics:replay-toggle-writes', ['rows'], { maskGloballyByFieldName: false });
 
 // D4 — withdrawing `analytics.replay` deletes the recordings already made, not
 // only future capture. Same eraser, same subject key the grant was recorded under.

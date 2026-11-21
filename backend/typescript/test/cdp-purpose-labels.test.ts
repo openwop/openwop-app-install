@@ -14,9 +14,9 @@
  * Production reaches this algebra through `reEmitLabel` / `intersectLabels` / `isNoOnwardUse`
  * (`routes/purposePropagationSeam.ts`, `destination-sync/destinationSyncService.ts`).
  * `isNonWidening` has no production caller; it is the invariant checker for the reEmit property
- * loop below. Its "labelled → unlabelled is a narrowing" leg is the product's documented reading,
- * which RFC 0128 §3's "a host that simply drops the label … also fails" does not share — recorded
- * as grade-code row TST-NZZ-2, not changed here.
+ * loop below. Since 2026-11-18 (TST-NZZ-2, owner decision) a labelled → unlabelled onward hop
+ * is a violation, matching RFC 0128's "a host that simply drops the label … also fails", so the
+ * property loop now reds if `reEmitLabel` ever drops a labelled grant.
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -67,8 +67,9 @@ describe('CDP-1d purpose-label algebra (RFC 0128)', () => {
     // narrowing / equal ⇒ ok
     expect(isNonWidening(['analytics', 'marketing'], ['analytics'])).toBe(true);
     expect(isNonWidening(['analytics'], ['analytics'])).toBe(true);
-    // dropping the label is a narrowing ⇒ ok (the product's reading; header, TST-NZZ-2)
-    expect(isNonWidening(['analytics'], undefined)).toBe(true);
+    // dropping a label is silent loss ⇒ violation (RFC 0128 negative example; TST-NZZ-2)
+    expect(isNonWidening(['analytics'], undefined)).toBe(false);
+    expect(isNonWidening([], undefined)).toBe(false);
     // WIDENING ⇒ violation
     expect(isNonWidening(['analytics'], ['analytics', 'advertising'])).toBe(false);
     // [] inbound ⇒ nothing may be forwarded (only []/unlabelled onward)

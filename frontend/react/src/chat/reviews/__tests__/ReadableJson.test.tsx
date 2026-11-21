@@ -25,6 +25,12 @@
  * removing the item cap; dropping the stored-key tooltip; humanizing without
  * kebab keys; parsing malformed JSON as an empty object. Measured by wave 79
  * sabotage probes and re-probed in wave 116 (w116g3-rj-*).
+ *
+ * Issue #5844 (an approval artifact reads as a document): a single wrapper key not
+ * collapsed; checksums left on the face (the key rule and the hex rule are a DOUBLE
+ * guard on the 64-hex `contentHash` fixture, so only breaking both reds); markdown
+ * not rendered, or plain multi-line text rendered as markdown; the inert link or
+ * image override removed; "All saved fields" dropped or missing the checksum.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup, within } from '@testing-library/react';
@@ -138,8 +144,13 @@ describe('issue 5844 — an approval artifact reads as a document, not a data du
     const { container } = show({ artifact: { markdown: '# Who buys it: Kitchen\n\nThe **buyer** is the household.', contentHash: HASH } });
     expect(container.querySelector('h1')?.textContent).toBe('Who buys it: Kitchen');
     expect(container.querySelector('strong')?.textContent).toBe('buyer');
-    const face = container.querySelector('.readable-json-root')!;
-    const details = face.querySelector('details')!;
+    const roots = container.querySelectorAll('.readable-json-root');
+    expect(roots).toHaveLength(1);
+    const face = roots[0]!;
+    // Exactly one "All saved fields" view, so a card that tidied nothing reds on the count.
+    const allDetails = face.querySelectorAll('details');
+    expect(allDetails).toHaveLength(1);
+    const details = allDetails[0]!;
     const faceText = (face.textContent ?? '').replace(details.textContent ?? '', '');
     expect(faceText, 'no unrendered markdown on the face').not.toMatch(/# Who|\*\*/);
     expect(faceText, 'no checksum on the face').not.toContain(HASH);
@@ -149,16 +160,22 @@ describe('issue 5844 — an approval artifact reads as a document, not a data du
 
   it('markdown stays inert: a link shows as text and an image as its alt text', () => {
     const { container } = show({ markdown: '# T\n\nSee [the site](https://example.test/x) ![pixel](https://tracker.test/p.png)' });
-    const face = container.querySelector('.readable-json__prose')!;
-    expect(face.querySelector('a')).toBeNull();
-    expect(face.querySelector('img')).toBeNull();
-    expect(face.textContent).toContain('the site (https://example.test/x)');
-    expect(face.textContent).toContain('[pixel]');
+    const prose = container.querySelectorAll('.readable-json__prose');
+    expect(prose).toHaveLength(1);
+    const face = prose[0]!;
+    expect(face.querySelector('h1')?.textContent).toBe('T');
+    expect(face.querySelectorAll('a')).toHaveLength(0);
+    expect(face.querySelectorAll('img')).toHaveLength(0);
+    // The link reads as its text plus its URL, the image as its bracketed alt text.
+    expect(face.querySelector('p')?.textContent).toBe('See the site (https://example.test/x) [pixel]');
   });
 
   it('plain multi-line text keeps the text path', () => {
     const { container } = show({ note: 'line one\nline two' });
-    expect(container.querySelector('.readable-json__prose')).toBeNull();
-    expect(screen.getByText(/line one/)).toBeTruthy();
+    expect(container.querySelectorAll('.readable-json__prose')).toHaveLength(0);
+    // The field view's text span, with its line break kept rather than reflowed.
+    const texts = container.querySelectorAll('.readable-json__text');
+    expect(texts).toHaveLength(1);
+    expect(texts[0]!.textContent).toBe('line one\nline two');
   });
 });

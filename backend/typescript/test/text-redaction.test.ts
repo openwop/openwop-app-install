@@ -15,6 +15,15 @@
  * a pasted provider key survives into the durable event log. The array branch
  * of the deep walk and the 32-char hex boundary are each fed a value that only
  * that branch/boundary redacts (wave-61 probes rd-deep-array, rd-hex-boundary).
+ *
+ * #5798 record-id allowlist: a `<prefix>:<hex>` id is kept whole ONLY when its
+ * prefix is declared (the host's own list or `registerRecordIdPrefixes`), so a
+ * model can name a record back to a tool and two records never hash alike in
+ * `computeArgsHash`. Every other prefix, credential carriers included, still
+ * masks the hex run, and the prefix must start at a word boundary (`Xinv:` and
+ * `9inv:` are not `inv:`). What breaks if this goes red: either a declared id is
+ * mangled (the tool cannot find the record; the repeat guard treats two records
+ * as one), or a secret behind an undeclared label survives the scrub.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -73,6 +82,10 @@ describe('sanitizeFreeText', () => {
     expect(sanitizeFreeText(`inv: ${hex}`), 'a space breaks the id shape').toBe('inv: ***');
     expect(sanitizeFreeText(`INV:${hex}`)).toBe('INV:***');
     expect(sanitizeFreeText(`::${hex}`)).toBe('::***');
+    // The declared prefix must START the label: a declared name inside a longer
+    // undeclared one does not unlock the hex run.
+    expect(sanitizeFreeText(`Xinv:${hex}`)).toBe('Xinv:***');
+    expect(sanitizeFreeText(`9inv:${hex}`)).toBe('9inv:***');
   });
 
   it('refuses a prefix that is not a lowercase identifier', () => {
@@ -145,8 +158,8 @@ describe('sanitizeFreeTextDeep', () => {
       },
     };
     const scrubbed = sanitizeFreeTextDeep(payload) as typeof payload;
-    expect(scrubbed.outputs.output.comment).not.toContain('sk-ant-api-AAAAAAAAAAAAAAAAAAAA');
-    expect(scrubbed.outputs.output.comment).toContain('sk-***');
+    // Exact: the key is replaced in place and the rest of the comment survives.
+    expect(scrubbed.outputs.output.comment).toBe('Looks good. PS, here is the key sk-*** for your reference.');
     // Non-secret fields untouched.
     expect(scrubbed.outputs.output.action).toBe('approve');
     expect(scrubbed.outputs.output.selectedKey).toBe('Clarity critic');

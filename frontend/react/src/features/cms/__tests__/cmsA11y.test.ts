@@ -4,9 +4,21 @@
  * a media-less image/hero section is ignored; the shared checker then flags the
  * alt-less image and the generic CTA.
  *
- * Sabotage-witnessed (/grade-tests w17): dropping the `str(d.token)` or
- * `str(d.imageToken)` guard reds case 3; dropping the hero CTA push or the hero
- * alt reds cases 1+2; dropping the cta branch reds case 1.
+ * ADR 1100 D3 — pictures are found by field name (`token` / `imageToken`) in
+ * every object of a section's data, list items and nested objects included, with
+ * one ref per picture (`<sectionId>#<n>`) when a section has several; a hero
+ * checks only the picture its `visual` renders (an unknown visual renders the
+ * picture); a rich-text picture counts only under `visual: 'image'`.
+ *
+ * Sabotage (/grade-tests w118, `w118g4-cms-*`): checking a token-less image or
+ * hero reds "ignores … no media token"; dropping the hero CTA push reds cases 1+2;
+ * dropping the cta branch reds case 1; blanking the hero alt reds 1, 2 and the
+ * hero-visual case; dropping the array or the object walk, or numbering refs from
+ * 0, reds the nested case; dropping the hero visual gate reds the stale-token case;
+ * keeping unknown visuals reds the unknown-visual case; dropping the richText gate
+ * reds the prose case; a wrong item number or splitting on `:` reds splitA11yRef.
+ * `headings: []` / no `colorPairs` are constants of the projector (CMS authors
+ * neither), asserted as its contract rather than as a guard.
  */
 import { describe, it, expect } from 'vitest';
 import { cmsPageToA11yModel, splitA11yRef } from '../cmsA11y.js';

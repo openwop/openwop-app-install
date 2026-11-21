@@ -74,6 +74,8 @@ function originOf(url) {
  *    timer between polls (keyed by the session's own idle count, so every wait
  *    is a fresh durable key) — grade-code CU2CD-1: without this the chain ended
  *    while the session was still live and nothing ever drove it again.
+ *  - `awaiting_takeover` (ADR 1136 P3a) → ask the opener to do the step in their
+ *    own browser window, then continue or stop.
  * Re-invoked after each suspend; every pass re-reads the session first, so an
  * approval answered after the session ended (stopped, run cancelled, opener
  * removed, time ceiling) finds it terminal and returns it — no error
@@ -83,6 +85,7 @@ export async function decide(ctx) {
   const cu = ensure(ctx, 'decide');
   ensure(ctx, 'status');
   ensure(ctx, 'resume');
+  ensure(ctx, 'takeover');
   const i = ctx.inputs ?? {};
   const sessionId = str(i.sessionId) || str(i.session && i.session.sessionId);
   if (!sessionId) {
@@ -90,12 +93,30 @@ export async function decide(ctx) {
   }
   let session = (await cu.status({ sessionId })).session;
   for (let n = 0; n < MAX_ROUNDS && session; n += 1) {
-    if (session.status !== 'awaiting_approval' && session.status !== 'running' && session.status !== 'starting') break;
+    if (session.status !== 'awaiting_approval' && session.status !== 'awaiting_takeover' && session.status !== 'running' && session.status !== 'starting') break;
     if (!session.decidable) {
       throw Object.assign(new Error('Only the person who started this browser session can decide its actions.'), { code: 'forbidden' });
     }
     if (typeof ctx.suspend !== 'function') {
       throw Object.assign(new Error('host does not support suspend — a browser session cannot be driven here'), { code: 'host_capability_missing' });
+    }
+    // ADR 1136 P3a — the agent reached a step the person must do themselves (a
+    // sign-in) in their own browser window. Ask ONLY the opener, naming the page's
+    // real origin from the host's projection, in host words. Their "continue" is
+    // verified by the surface from the run record before the agent goes on.
+    if (session.status === 'awaiting_takeover' && session.takeover) {
+      const tk = session.takeover;
+      const answer = await ctx.suspend({
+        reason: 'clarification',
+        resumeKey: `cu-takeover:${sessionId}:${tk.n}`,
+        question: `The browser agent needs you to sign in yourself on ${tk.origin}. Do it in the browser window, then choose Continue. Never type a password here.`,
+        actions: ['continue', 'stop'],
+        approverRefs: [session.approverRef],
+        computerUseTakeover: { sessionId, n: tk.n, origin: tk.origin, reason: tk.reason, expiresAt: tk.expiresAt, label: tk.label },
+      });
+      const verb = answer && typeof answer === 'object' ? answer.action : undefined;
+      session = (await cu.takeover({ sessionId, proceed: verb === 'continue', nodeId: ctx.nodeId })).session;
+      continue;
     }
     if (session.status !== 'awaiting_approval' || !session.pendingAction) {
       const before = session;

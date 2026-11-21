@@ -21,7 +21,7 @@ import { buildReconciliation } from './reconciliation.js';
 import { buildAdMap } from './adMap.js';
 import { buildPacing, runPacingCheck } from './pacing.js';
 import { enforceCaps, listCaps, CAPS_TOGGLE_ID } from './spendCaps.js';
-import { proposeReallocation, applyReallocation } from './reallocation.js';
+import { proposeReallocation, applyReallocation, reallocationApprovers } from './reallocation.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { makeAdsAdapter } from '../../host/adsAdapter.js';
@@ -103,6 +103,12 @@ export function buildCampaignIntelSurface(scope: BundleScope): FeatureSurface {
         ...(args.ops !== undefined ? { ops: args.ops } : {}),
         ...(optStr(args.campaignId) ? { campaignId: str(args.campaignId) } : {}),
         runId: scope.runId ?? 'surface', actor: gate.actingUserId,
+        // ADR 1022 CP71WF-23 — the run's ADR 0942 policy (else the client org's
+        // owner or admin) names the approvers, so the run owner cannot approve it.
+        bindApproval: reallocationApprovers({
+          tenantId, orgId: gate.orgId, requester: gate.actingUserId,
+          ...(scope.runId ? { policyRunId: scope.runId } : {}),
+        }),
       });
       // Which recommendation the plan was built from: the upstream node's (the
       // chain edge) or recomputed here. A run record should say, not imply.

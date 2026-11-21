@@ -92,7 +92,13 @@ const CLASSIFIED: Record<string, { kind: Kind; why: string; decisionSource?: Reg
   'host/liveDispatchLane.ts': {
     kind: 'MUST_SUPPLY',
     why: 'The runless live-dispatch lane (ADR 0889 D3: moved from routes/agents.ts, shared with the eval runner). Resolves via stampRunStartContext({}, {...}) — the blessed reuse.',
-    decisionSource: /const\s+compaction\s*=\s*readCompactionDecision\s*\(\s*compactionMeta\s*\)/,
+    // The decision the loop receives is `effectiveCompaction` (returned at the end of the lane),
+    // so the source must include its fallback to the frozen decision, not only the read above it.
+    // Matching the read alone let `effectiveCompaction = input.compaction` (route lane goes
+    // uncompacted) stay green: grade-tests w114 probe `w114g2-tcc-override`, owner decision
+    // TST-NZV-1 (2026-11-18).
+    decisionSource:
+      /const\s+compaction\s*=\s*readCompactionDecision\s*\(\s*compactionMeta\s*\)\s*;\s*const\s+effectiveCompaction\s*=\s*'compaction'\s+in\s+input\s*\?\s*input\.compaction\s*:\s*compaction\s*;/,
   },
   'host/evals/toolBoundary.ts': {
     kind: 'EXEMPT',

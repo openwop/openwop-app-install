@@ -6,7 +6,16 @@
  *
  * Sabotage-witnessed (grade-tests w14): dropping the deletion-mark strike, the
  * nested-list indent, the GFM separator, the heading level, or the link / math /
- * embed / image serialization each turns its case red.
+ * embed / image serialization each turns its case red. The heading case carries a
+ * level-3 heading (grade-tests w117): with only level 1, emitting a bare `#`
+ * passed.
+ *
+ * ADR 1055 D7 (export hygiene, the same cases as the frontend twin): red when the
+ * serializer stops gating a link on `isDocumentHrefAllowed` (a `javascript:` href
+ * exported as a live link), the helper stops stripping control characters
+ * (`java\tscript:`), an allowed non-http scheme (`mailto:`) is dropped, the href's
+ * parentheses are not escaped, or a chart/embed fence is not longer than the
+ * longest backtick run inside it.
  */
 import { describe, it, expect } from 'vitest';
 import { pmToMarkdown, type PMNode } from '../pmToMarkdown.js';
@@ -18,12 +27,13 @@ describe('pmToMarkdown (backend)', () => {
   it('serializes headings, marks, and blocks', () => {
     const out = pmToMarkdown(doc([
       { type: 'heading', attrs: { level: 1 }, content: [text('Title')] },
+      { type: 'heading', attrs: { level: 3 }, content: [text('Sub')] },
       { type: 'paragraph', content: [text('a'), text('b', [{ type: 'bold' }]), text('c', [{ type: 'italic' }])] },
       { type: 'blockquote', content: [{ type: 'paragraph', content: [text('q')] }] },
       { type: 'codeBlock', attrs: { language: 'ts' }, content: [text('x=1')] },
       { type: 'horizontalRule' },
     ]));
-    expect(out).toBe('# Title\n\na**b***c*\n\n> q\n\n```ts\nx=1\n```\n\n---\n');
+    expect(out).toBe('# Title\n\n### Sub\n\na**b***c*\n\n> q\n\n```ts\nx=1\n```\n\n---\n');
   });
 
   it('serializes nested lists (2 levels)', () => {

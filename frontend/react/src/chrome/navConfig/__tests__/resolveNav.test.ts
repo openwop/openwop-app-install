@@ -2,7 +2,9 @@
  * ADR 0139 — the pure nav resolver: (tenant ← user) MenuConfig overlaid on the
  * declared FEATURES nav. Guards the feature-toggle HARD gate (no override can
  * reveal a disabled feature), the ADR 0144 `hiddenWhenFeature` inverse gate,
- * hide-overrides never touching always-on items, the ADR 0203 authority
+ * the ADR 1106 D1 hide rule (any entry hides, an always-on one included, EXCEPT
+ * the `lockVisible` set, which ignores `hidden` in either layer but can still
+ * move — this replaced the old "hide never touches always-on items"), the ADR 0203 authority
  * projection (admin tier / superadminOnly / requiredScope; a legacy saved
  * `tier` cannot move an item across the boundary), group/order/header
  * overrides with per-field user-over-tenant precedence, and the empty == today
@@ -82,7 +84,7 @@ describe('resolveNav — feature-toggle hard gate', () => {
   it('a hidden:false override can NEVER reveal a disabled feature', () => {
     const user = cfg({ items: { '/a': { hidden: false } } });
     const r = resolveNav({ features, user, access: (id) => id !== 'flagA' });
-    expect(r.workspace.flatMap((g) => g.items.map((i) => i.to))).not.toContain('/a');
+    expect(r.workspace.flatMap((g) => g.items.map((i) => i.to))).toEqual(['/core']);
   });
 });
 
@@ -107,15 +109,13 @@ describe('resolveNav — hiddenWhenFeature inverse gate (ADR 0144)', () => {
   it('access-hub OFF: the subsumed item shows, the hub is hidden (safe default)', () => {
     const r = resolveNav({ features, access: (id) => id !== 'access-hub' });
     const paths = r.admin.flatMap((g) => g.items.map((i) => i.to));
-    expect(paths).toContain('/keys');
-    expect(paths).not.toContain('/access');
+    expect(paths).toEqual(['/keys']);
   });
 
   it('access-hub ON: the subsumed item hides, the hub shows (collapsed)', () => {
     const r = resolveNav({ features, access: allow });
     const paths = r.admin.flatMap((g) => g.items.map((i) => i.to));
-    expect(paths).not.toContain('/keys');
-    expect(paths).toContain('/access');
+    expect(paths).toEqual(['/access']);
   });
 });
 
@@ -141,6 +141,11 @@ describe('resolveNav — visibility overrides', () => {
     const r = resolveNav({ features, tenant, user, access: allow });
     const settings = r.workspace.find((g) => g.items.some((i) => i.to === '/settings'));
     expect(settings?.id).toBe('Platform');
+    expect(settings?.items.map((i) => i.to)).toEqual(['/settings']);
+    expect(r.workspace.flatMap((g) => g.items.map((i) => i.to)).sort()).toEqual(['/b', '/settings']);
+    // The tenant layer ALONE hiding it: still shown, in its declared group.
+    const tenantOnly = resolveNav({ features, tenant, access: allow });
+    expect(tenantOnly.workspace.map((g) => [g.id, g.items.map((i) => i.to)])).toEqual([['Workspace', ['/settings', '/b']]]);
   });
 });
 

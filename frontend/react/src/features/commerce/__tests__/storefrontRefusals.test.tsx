@@ -6,9 +6,19 @@
  *    `Product not found: prod:…` never reaches the page, and the shopper is not left
  *    retrying into the same refusal;
  *  - the one-click capability `oc` is dropped from the address bar on landing.
+ *
+ * ADR 1110 P2: the refused line is found by asking about each cart line by id
+ * (`/public-store/:org/products/:id`, a 404 is the line that went away), so the mock
+ * answers that detail read, not the paged list.
+ *
+ * Sabotage-witnessed (/grade-tests, TST-COM-61; re-probed in wave 121): the detail-read `404` test
+ * inverted (the wrong line is named), the `details.productId` branch skipped (generic
+ * `checkoutFailed`), the line's name dropped from the message, the chip on every line,
+ * Remove not dropping the line, Remove not clearing the refusal, `oc` kept, and the
+ * other query parameters dropped with it each turn one case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (k: string, o?: Record<string, unknown>) => (o?.name ? `${k}:${String(o.name)}` : k) }) }));
 vi.mock('../../../i18n/useFormat.js', () => ({ useFormat: () => ({ date: (d: string) => d, currency: (n: number) => String(n) }) }));
@@ -53,7 +63,11 @@ describe('ADR 0875 — storefront refusals are actionable', () => {
     fireEvent.change(screen.getByLabelText(/fieldEmail/), { target: { value: 'a@b.test' } });
     fireEvent.click(screen.getByRole('button', { name: 'placeOrder' }));
 
-    expect(await screen.findByText('lineUnavailable:Guide')).toBeTruthy();
+    // Settle on the refusal Notice (an error Notice is role=alert), whatever it says,
+    // then read its exact text: a failed identification shows `checkoutFailed` there,
+    // so the break reads as a value mismatch rather than a lookup timeout.
+    const refusal = await screen.findByRole('alert');
+    expect(refusal.textContent).toBe('lineUnavailable:Guide');
     // The generic fallback is what a failed line-identification would show instead.
     // (The server's `Product not found` English has no render path at all, so
     // asserting its absence could never fail.)
@@ -61,10 +75,13 @@ describe('ADR 0875 — storefront refusals are actionable', () => {
     // The chip marks the refused line, and only that one.
     expect(screen.getAllByText('lineUnavailableChip')).toHaveLength(1);
     fireEvent.click(screen.getByRole('button', { name: 'removeLine:Guide' }));
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'removeLine:Guide' })).toBeNull());
+    // Remove is a synchronous state update (fireEvent runs inside act), so the line is
+    // gone by the time the click returns.
+    expect(screen.queryByRole('button', { name: 'removeLine:Guide' })).toBeNull();
     // The checkout is still open on the remaining line, and the refusal is gone.
     expect(screen.getByRole('button', { name: 'removeLine:Pen' })).toBeTruthy();
     expect(screen.queryByText('lineUnavailable:Guide')).toBeNull();
+    expect(screen.queryAllByRole('alert')).toHaveLength(0);
     expect(screen.queryByText('lineUnavailableChip')).toBeNull();
   });
 
@@ -72,8 +89,12 @@ describe('ADR 0875 — storefront refusals are actionable', () => {
     window.history.replaceState(null, '', '/store/org-1?order=ord%3Aabc&paid=1&oc=secret-token');
     mockFetch({ status: 201, body: {} });
     render(<StorefrontPage orgId="org-1" />);
-    await waitFor(() => expect(window.location.search).not.toMatch(/oc=/));
-    // Exact: only `oc` is dropped; the order id and the paid flag survive.
+    // Settle on the loaded store (the mount effect that drops `oc` has run by then),
+    // then read the address bar synchronously, so a kept `oc` is a value mismatch.
+    await screen.findByRole('button', { name: 'addOne:Guide' });
+    expect(window.location.search).not.toMatch(/oc=/);
+    // Exact: only `oc` is dropped; the order id and the paid flag survive, on the same path.
     expect(window.location.search).toBe('?order=ord%3Aabc&paid=1');
+    expect(window.location.pathname).toBe('/store/org-1');
   });
 });

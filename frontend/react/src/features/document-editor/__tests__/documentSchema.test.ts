@@ -1,14 +1,18 @@
 /**
- * documentSchema tests (ADR 0334 2b-3) — the closed extension set builds a valid
- * ProseMirror schema that includes the custom block nodes (math/chart/embed), so
- * the editable surface and the read-only renderer share one schema.
+ * documentSchema tests (ADR 0334 2b-3, ADR 1055) — the closed extension set builds a
+ * valid ProseMirror schema that includes the custom block nodes (math/chart/embed),
+ * so the editable surface and the read-only renderer share one schema; and the
+ * suggestion marks survive an HTML round-trip as suggestions (DE87UX-22).
  *
- * Sabotage (wave 14): drop MathBlock / the comment mark's `inclusive:false` / the
- * insertion+deletion marks from the closed set → the named case goes red.
- * Ceiling: chart/embed atomicity is ALSO implied by their being content-less
- * leaves (ProseMirror `isAtom = isLeaf || spec.atom`), so flipping `atom: true`
- * alone is a behavioral no-op and cannot red the atom case (probe
- * w14g4-schema-atom, vacuous by double guard).
+ * Sabotage (wave 14, re-probed wave 117): drop MathBlock / ChartBlock / the
+ * comment mark's `inclusive:false` / the insertion+deletion marks from the closed
+ * set → the named case goes red. Chart/embed atomicity is held twice: `atom: true`
+ * AND being a content-less leaf (ProseMirror `isAtom = isLeaf || spec.atom`), so
+ * flipping `atom` alone is an equivalent mutant (w14g4-schema-atom, vacuous). One
+ * edit that replaces `atom: true` with `content: 'inline*'` breaks both halves and
+ * reds the atom case. The round-trip case reds when the suggestion parse rules
+ * lose their priority over StarterKit's Strike (`<del>` → strike), when
+ * `<ins>`/`<del>` render as `<span>`, or when the author attr is not parsed back.
  */
 import { describe, it, expect } from 'vitest';
 import { getSchema, generateHTML, generateJSON } from '@tiptap/core';
@@ -56,12 +60,16 @@ describe('documentExtensions', () => {
       { type: 'text', text: 'new', marks: [{ type: 'insertion', attrs: { author: 'ai' } }] },
     ] }] };
     const html = generateHTML(doc, exts);
-    expect(html).toContain('<del');
-    expect(html).toContain('<ins');
+    // Native elements carrying the suggestion text (DE87UX-12), not just a tag
+    // somewhere in the string.
+    const host = document.createElement('div');
+    host.innerHTML = html;
+    expect(host.querySelector('del[data-deletion]')?.textContent).toBe('old');
+    expect(host.querySelector('ins[data-insertion]')?.textContent).toBe('new');
     const back = generateJSON(html, exts) as { content: { content: { text: string; marks: { type: string; attrs?: { author?: string } }[] }[] }[] };
     const runs = back.content[0]!.content;
     expect(runs.map((r) => [r.text, r.marks.map((m) => m.type)])).toEqual([['old', ['deletion']], ['new', ['insertion']]]);
-    expect(runs[0]!.marks[0]!.attrs?.author).toBe('ai');
+    expect(runs.map((r) => r.marks[0]!.attrs?.author)).toEqual(['ai', 'ai']);
   });
 });
 

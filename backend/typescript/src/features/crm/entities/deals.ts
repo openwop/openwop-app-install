@@ -570,6 +570,34 @@ export async function relinkDealsForContact(tenantId: string, sourceContactId: s
   }
 }
 
+/**
+ * CHAN-F19 #9 (ADR 0464 §9, user decision 2026-11-18) — a converted deal's title
+ * defaults to `<company> — <contact name>`. On erasure, in every deal linked to one of
+ * `contactIds`, each exact (case-sensitive) occurrence of a former name is replaced with
+ * `placeholder`. The deal, amount and stage stay. A title that spells the name in a
+ * different case is NOT matched (the stated limit of the exact-name rule). CAS per row;
+ * returns the companies those deals point at, for the company-name leg.
+ */
+export async function redactNamesInDealTitles(
+  tenantId: string, contactIds: ReadonlySet<string>, names: readonly string[], placeholder: string,
+): Promise<{ touched: number; companyIds: Set<string> }> {
+  const companyIds = new Set<string>();
+  let touched = 0;
+  const live = names.filter((n) => n.trim().length > 0 && n !== placeholder);
+  for (const listed of await deals.listForTenant(tenantId)) {
+    if (listed.tenantId !== tenantId || !listed.contactId || !contactIds.has(listed.contactId)) continue;
+    if (listed.companyId) companyIds.add(`${listed.orgId}::${listed.companyId}`);
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const cur = await deals.get(tenantId, listed.dealId);
+      if (!cur || cur.tenantId !== tenantId) break;
+      const title = live.reduce((t, n) => t.split(n).join(placeholder), cur.title);
+      if (title === cur.title) break;
+      if (await deals.cas(cur, { ...cur, title, updatedAt: nowIso() })) { touched++; break; }
+    }
+  }
+  return { touched, companyIds };
+}
+
 /** ADR 0264 — deal ids currently pointing at `contactId` (captured pre-merge for a
  *  reversible unmerge). */
 export async function dealIdsForContact(tenantId: string, contactId: string): Promise<string[]> {

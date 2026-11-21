@@ -25,13 +25,22 @@
  *     `required-packs-pin-parity.test.ts`; the `profiles` surface id in
  *     `pack-surface-arg-parity.test.ts`'s anti-vacuity case).
  *
- * Sabotage that turns it red (grade-tests w3 probes, each witnessed):
- *   - the pack sends `{ profileId }` again                       → the seeded-member case
+ *   - ADR 0888 D3 (`PR2WF-1`): a run with no acting user, or an actor who is not a
+ *     member of the run's tenant, reaches the chain as a node FAILURE carrying
+ *     `forbidden_scope` and the named reason, never as a success;
+ *   - ADR 0888 D2: a recorded node output carries capability, never `bio` or
+ *     `contact` (both seeded on Alice, so their omission can fail; the asset
+ *     tokens ride the same `RUN_OMITTED` set and are not seeded here).
+ *
+ * Sabotage that turns it red (grade-tests w3, re-probed wave 119 `w119g2-pf-*`):
+ *   - the pack sends `{ profileId }` again                       → seeded-member, unknown-id, both forbidden cases
  *   - the surface stops refusing an empty id                     → the three refusal cases
- *   - the node maps a refusal to success-with-null               → NO-userId + 1.0.0-key cases
+ *   - the node stops mapping validation_error / forbidden_scope  → NO-userId + 1.0.0-key / both forbidden cases
  *   - `found` forced true                                        → the unknown-id case
- *   - internal columns not stripped / `endorsedByMe` on the surface → get + list cases
- *   - `getProfile` drops its tenant check                        → the foreign-tenant case
+ *   - `bio` / `contact` dropped from `RUN_OMITTED`               → get + list cases
+ *   - endorsers not projected                                    → get + list cases
+ *   - the run directory serves a foreign tenant as home, or treats a non-member as a member → the foreign-tenant case
+ *   - the no-acting-user refusal removed                         → the no-actor case
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -89,7 +98,7 @@ beforeEach(async () => {
   const mod = (await import(pathToFileURL(join(PACK_DIR, 'index.mjs')).href)) as { nodes: Record<string, NodeFn> };
   nodes = mod.nodes;
   await getOrCreateProfile(T, ALICE);
-  await updateOwnProfile(T, ALICE, { jobTitle: 'Producer', bio: 'Ships things.' });
+  await updateOwnProfile(T, ALICE, { jobTitle: 'Producer', bio: 'Ships things.', contact: { location: 'Lisbon', links: [] } });
   await setOwnSkills(T, ALICE, [{ name: 'TypeScript', proficiency: 4 }]);
   await getOrCreateProfile(T, BOB);
   await setEndorsement(T, ALICE, 'TypeScript', BOB, true);
@@ -115,6 +124,8 @@ describe('feature.profiles.nodes.get through the REAL surface (UPWF-1 / UPWF-3)'
     expect(profile!.skills).toEqual([{ name: 'TypeScript', proficiency: 4, endorsements: { count: 1, endorserUserIds: [BOB] } }]);
     expect(JSON.stringify(profile)).not.toContain('endorsedByMe');
     expect('completenessMissing' in profile!).toBe(false); // D4 — self-lane only, never on the surface
+    // ADR 0888 D2 — the get output is recorded too: no bio, contact or asset tokens.
+    for (const k of ['bio', 'contact', 'avatarAssetToken', 'portfolioAssetTokens']) expect(k in profile!, k).toBe(false);
   });
 
   it('an unknown id is an EXPLICIT empty: { profile: null, found: false } with status success', async () => {
@@ -176,8 +187,9 @@ describe('feature.profiles.nodes.list through the REAL surface', () => {
     const profiles = out.outputs?.profiles as Array<Record<string, unknown>>;
     expect(profiles.map((p) => p.userId).sort()).toEqual([ALICE, BOB].sort()); // the actor never opened a profile
     // ADR 0888 D2 — a recorded node output carries capability, never bio/contact/asset tokens.
-    expect(profiles.every((p) => !('bio' in p) && !('contact' in p) && !('avatarAssetToken' in p))).toBe(true);
-    expect(profiles.every((p) => !('tenantId' in p) && !('updatedBy' in p))).toBe(true);
+    for (const p of profiles) {
+      for (const k of ['bio', 'contact', 'avatarAssetToken', 'portfolioAssetTokens', 'tenantId', 'updatedBy']) expect(k in p, `${String(p.userId)}.${k}`).toBe(false);
+    }
     const alice = profiles.find((p) => p.userId === ALICE)!;
     expect((alice.skills as Array<{ endorsements: unknown }>)[0]!.endorsements).toEqual({ count: 1, endorserUserIds: [BOB] });
   });

@@ -131,6 +131,9 @@ describe('ADR 0601 / NBC-3 — a write tool enforces the scope it advertises', (
       'app-builder-resolve-paused-task',
       // ADR 0962 P2 — writes a change REQUEST for one client and starts the governed
       // chain; the change waits on a person's approval. A deliberate bump.
+      // ADR 0962 P2 — PROPOSES one budget plan for one client and opens one approval
+      // naming its approvers; the key's person cannot decide it, nothing applies.
+      'campaign_propose_budget_change',
       'campaign_request_change',
       // ADR 0785 P3 — files onto the CALLER'S OWN personal board; a deliberate bump.
       'claude-code-add-todo',

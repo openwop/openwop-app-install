@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.campaign-studio-mcp",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "kind": "workflow-chain",
   "description": "ADR 0962 — Campaign Studio's open agent interface: MCP read tools (core.openwop.mcp.expose-tool → a campaign-ops read node). Every tool requires a clientId and binds the run to that client (access, the client's externalAgents switch, the client stamp). Registered chain-backed by campaign-ops with the ADR 0087 MCP gates; no tool publishes, sends, spends or approves.",
   "keywords": [
@@ -522,6 +522,163 @@
               "text": "{{params.text}}",
               "assetIds": "{{params.assetIds}}",
               "campaignId": "{{params.campaignId}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      },
+      "capabilities": [
+        "side-effectful"
+      ]
+    },
+    {
+      "chainId": "campaign-studio.mcp.propose-budget-change",
+      "internal": true,
+      "version": "1.0.0",
+      "label": "campaign_propose_budget_change",
+      "description": "ADR 0962 MCP request tool campaign_propose_budget_change.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "clientId"
+        ],
+        "properties": {
+          "clientId": {
+            "type": "string",
+            "description": "The client (its org id). Every campaign tool acts for exactly one client."
+          },
+          "changes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "platform": {
+                  "type": "string",
+                  "enum": [
+                    "meta",
+                    "google"
+                  ],
+                  "description": "The ad platform."
+                },
+                "platformCampaignId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200,
+                  "description": "The platform's campaign id (one of this client's dispatched ad campaigns)."
+                },
+                "toDailyMinor": {
+                  "type": "integer",
+                  "minimum": 100,
+                  "maximum": 100000000,
+                  "description": "The proposed daily budget, in minor units of the ad account's currency (cents for USD)."
+                }
+              },
+              "required": [
+                "platform",
+                "platformCampaignId",
+                "toDailyMinor"
+              ],
+              "additionalProperties": false
+            },
+            "description": "Optional: the daily budgets to propose. Omit to propose the app's own recommendation."
+          },
+          "campaignId": {
+            "type": "string",
+            "description": "Optional: limit the plan to one campaign of this client."
+          },
+          "note": {
+            "type": "string",
+            "description": "Optional: why the change is proposed. Shown to the approver as outside content."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool@1.0.0",
+            "config": {
+              "name": "campaign_propose_budget_change",
+              "description": "Propose a change to one client's daily ad budgets (Meta, Google). Name the budgets in `changes`, or omit it to propose the app's own recommendation. The app reads each campaign's live budget, puts decreases first and refuses an increase a spend cap would not allow. It opens ONE approval: an approver at the client must approve it in the app and apply it there. You cannot approve it, and no budget changes until a person does. Returns the plan id and the approval id; it never reports the change as done.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "clientId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "The client (its org id). Every campaign tool acts for exactly one client."
+                  },
+                  "changes": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "platform": {
+                          "type": "string",
+                          "enum": [
+                            "meta",
+                            "google"
+                          ],
+                          "description": "The ad platform."
+                        },
+                        "platformCampaignId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200,
+                          "description": "The platform's campaign id (one of this client's dispatched ad campaigns)."
+                        },
+                        "toDailyMinor": {
+                          "type": "integer",
+                          "minimum": 100,
+                          "maximum": 100000000,
+                          "description": "The proposed daily budget, in minor units of the ad account's currency (cents for USD)."
+                        }
+                      },
+                      "required": [
+                        "platform",
+                        "platformCampaignId",
+                        "toDailyMinor"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "description": "Optional: 1 to 20 daily budgets to propose. Omit to propose the app's own recommendation from the client's performance data."
+                  },
+                  "campaignId": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "description": "Optional: limit the plan to one campaign of this client (campaign_list lists them)."
+                  },
+                  "note": {
+                    "type": "string",
+                    "maxLength": 500,
+                    "description": "Optional: why you propose it. The approver sees it marked as outside content."
+                  }
+                },
+                "required": [
+                  "clientId"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "feature.campaign-ops.nodes.mcp-propose-budget-change@1.0.0",
+            "inputs": {
+              "clientId": "{{params.clientId}}",
+              "changes": "{{params.changes}}",
+              "campaignId": "{{params.campaignId}}",
+              "note": "{{params.note}}"
             }
           }
         ],

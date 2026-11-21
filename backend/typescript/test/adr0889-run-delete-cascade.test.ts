@@ -20,6 +20,12 @@
  * a copy another eval run froze from it, all keyed `<tenant>:#x:<runId>:`, and a
  * copy the run itself froze from another source (`<tenant>:#x:<src>:#frozen:<runId>:`).
  * Dropping either pattern from `toolBoundaryKeyPatterns` reds both delete cases.
+ *
+ * Re-probed wave 119 (`w119g2-cas-*`): each of the four `toolBoundaryKeyPatterns`
+ * dropped, the tenant segment of the call pattern widened to any tenant (the
+ * same-id-in-another-tenant leg), and the pattern loop skipped in each adapter's
+ * `deleteRun` and `pruneTerminalRuns`. The deleteRun case also checks that the doomed
+ * run's 9 rows were present before the delete, so an empty seed cannot pass it.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -60,8 +66,8 @@ async function recordCapture(tenantId: string, runId: string): Promise<void> {
   initHostExtPersistence(scratch);
   await setCaptureSetting(tenantId, AGENT, true);
   const exec = await maybeCaptureExecuteTool(async () => ({ content: '{"ok":true}' }), { tenantId, runId, agentId: AGENT });
-  await exec({ name: 'crm:lookup', input: { email: 'pat@example.com' } } as Parameters<typeof exec>[0]);
-  await exec({ name: 'crm:update', input: { id: 'c-1' } } as Parameters<typeof exec>[0]);
+  await exec({ name: 'crm:lookup', input: { email: 'pat@example.com' } });
+  await exec({ name: 'crm:update', input: { id: 'c-1' } });
   const record = (await maybeRecordExactCalls({ tenantId, runId, agentId: AGENT }))!(async () => ({ content: '{"ok":true}' }));
   await record({ name: 'crm:lookup', input: { email: 'pat@example.com' }, callId: 'c1' });
   await record({ name: 'crm:update', input: { id: 'c-1' }, callId: 'c2' });
@@ -138,6 +144,9 @@ describe.each(backends)('EVD-2 — %s: deleting a run deletes its captured tool 
     const keptKeys = await seed(s, tenant, kept);
     // The same run id captured under another tenant: the cascade is tenant-keyed.
     const otherKeys = await seed(s, 't-other', doomed);
+    // Positive control: all 9 production rows (4 capture + 5 D7) are there before the delete.
+    expect(doomedKeys).toHaveLength(9);
+    expect(await present(s, doomedKeys)).toEqual(doomedKeys);
 
     expect(await s.deleteRun(doomed)).toBe(true);
 

@@ -755,6 +755,45 @@ coordinator state directory. This supersedes the UNRUN note above for those
 checks only; the full current-tree gate and merge qualification remain pending.
 
 
+### Accepted correction — new KPI snapshot availability (2026-11-09)
+
+The earlier “copy figures verbatim” decision keeps source arithmetic authoritative,
+but copying its compatible numeric-zero sentinel into a **new** frozen report loses
+whether anyone reported the numerator. The existing KPI section adapter now uses
+its source's explicit availability counts for these existing nullable fields only:
+
+- `revenue` and `roas`: `reportedRevenueRecordCount === 0` stores `null`.
+- `conversions`, `cvr` and `cpa`: `reportedConversionRecordCount === 0` stores `null`.
+- The existing platform table's `revenue`, `roas` and `conversions` cells use that
+  platform's own corresponding count, never a total or another numerator's count.
+
+A positive count retains the exact source number, including measured zero,
+reporting-only subtotals/ratios and zero-spend sentinels. An absent count retains
+legacy numeric behavior. A newly computed empty population with explicit count0
+stores null for these five metrics; spend/impressions/clicks/CTR/CPC and both
+availability count metrics retain their existing source values. Count metadata,
+lineage/window notes, units, currency, columns and other table cells remain intact.
+This projection adds no sums, ratios, FX, inferred availability or source math.
+
+The existing `ReportMetric.value`/`ReportTable` nullable contract and existing
+localized “Not available” UI already represent null. The UI must render the stored
+value, not reinterpret old snapshots from sibling counts. No migration, automatic
+recompute, hash rewrite or history edit occurs: a new manual compute creates a new
+report ID/hash, and historical numeric snapshots remain as originally frozen.
+Routes, authorization, scopes, CAS, review/publication and notifications do not
+change. This is host-local use of an existing contract, not an OpenWOP wire change
+or new RFC. Dashboard/agent/attribution availability limitations remain separate.
+
+The inherited all-totals/platform-copy tests receive an explicit projection-only
+oracle correction for the five metrics/three cells above; all unaffected field,
+source-math, count, authorization, CAS and hash assertions remain. Five separate
+real-HTTP first assertions witness missing Revenue/ROAS/Conversions/CVR/CPA;
+measured zero, partial/one-missing-numerator, zero spend, empty/legacy and immutable
+GET history controls accompany row-scoped mounted UI tests. These source changes
+are authored **NOT RUN**, pending independent source review, guarded focused
+qualification and the canonical composed gate. No report/live acceptance follows
+from the source proposal or from issue72's separate qualification.
+
 ### Correction — KPI revenue availability projection (2026-11-08)
 
 PERF-4 extends the existing KPI source with `reportedRevenueRecordCount` on
@@ -775,3 +814,18 @@ route-backed null/zero/mixed-platform controls and two report-render controls
 extend it; all new checks are NOT RUN at source preparation and require fresh
 focused/composed qualification. The original canonical failure is retained,
 not classified as a flake or resolved by changing its expectation.
+
+
+> **Integration correction (2026-11-08, PERF-REVENUE-AVAILABILITY-1).**
+> The host KPI projection gains optional `reportedConversionRecordCount` on totals
+> and platform rows alongside revenue-reporting counts. Preserve it verbatim as a
+> count metric (never currency) and optional platform column through this source,
+> with localized “Records reporting conversions” labels. Keep the existing
+> every-`kpi.totals`-key parity assertions: dropping an additive count is a real
+> composition regression, not an assertion to relax. Undefined legacy platform
+> counts remain omitted; missing metric values retain the existing null policy.
+> Fresh compute retains existing lineage, snapshot hashing and source values;
+> saved snapshots remain immutable. This is metadata propagation, not a claim
+> that report Revenue/ROAS/Conversions amounts now format missing data honestly.
+> New and strengthened service/HTTP/label controls are authored **NOT RUN**;
+> no canonical, deploy or live report qualification follows from source changes.

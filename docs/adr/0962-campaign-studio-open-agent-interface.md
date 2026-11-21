@@ -1,6 +1,6 @@
 # ADR 0962 — Campaign Studio open agent interface (MCP, A2A later)
 
-Status: Accepted (P0–P1 implemented, P2 partly implemented 2026-10-20; P2 rest, P3–P4 open)
+Status: Accepted (P0–P1 implemented; P2 partly implemented: request-change 2026-10-20, propose-budget-change 2026-11-19; P2 creative + experiment, P3–P4 open)
 
 Date: 2026-10-19
 
@@ -235,6 +235,51 @@ on (0921 D5); an unknown or foreign `clientId` gets the same not-found.
 > - `campaign_propose_budget_change`: needs ADR 0952 P3 (#5078).
 > - `campaign_propose_experiment`: needs ADR 0949's pre-registration chain.
 > - The P2 exit's budget-change end to end follows #5078.
+>
+> > **UPDATED 2026-11-19 (user decision): `campaign_propose_budget_change` is built.**
+> > The "needs ADR 0952 P3 (#5078)" line above is stale: the reallocation store,
+> > its one campaign-spend approval and the apply route all shipped with #5078.
+> > - **Chain:** `campaign-studio.mcp.propose-budget-change` (pack
+> >   `core.openwop.workflows.campaign-studio-mcp` 1.0.1 → 1.1.0), write tier,
+> >   `mcpApproval: 'never'` for the X1 reason above. Backing node
+> >   `feature.campaign-ops.nodes.mcp-propose-budget-change` (pack 1.4.0 → 1.5.0,
+> >   role `side-effect`, D6 class `none`, served on a replay fork).
+> > - **Not the `campaign-intel.reallocate` chain.** D2 said "starts the 0952
+> >   apply-gated reallocation chain". That chain ends in `apply-reallocation`
+> >   (`ads.budget`), so starting it from an MCP run would put an external-effect
+> >   node inside an MCP-origin run. Instead the backing node writes the SAME plan
+> >   record (`proposeReallocation`) and its chain has no apply node at all. A
+> >   person approves in the Inbox and applies through the existing
+> >   `POST …/campaign-intel/reallocations/:planId/apply` route, on their own
+> >   connections. That is the human gate Q1 requires.
+> > - **Who decides is bound at propose time.** The node resolves `ads.budget`
+> >   through the ADR 0942 chokepoint (`enforceCampaignAction`) on the MCP run.
+> >   `blocked` refuses. `approve` uses the policy's approvers. With no frozen
+> >   policy (`unbound`), it uses the default owner/admin approvers. The approval
+> >   names those approvers on the client org, lists the person behind the key as
+> >   a requester and points `autonomySourceRunId` at the MCP run. So
+> >   `spendEligibility` refuses that person, and the MCP-origin floor closes the
+> >   sole-admin escape (D4.2). **Finding for the reviewer:** a reallocation
+> >   approval WITHOUT named approvers (the route and chat lanes) records
+> >   `submitters`, but the decide-time check returns early for it, so the
+> >   CP71WF-23 "the proposer cannot approve" claim is not enforced on those lanes.
+> >   This P2 lane does not have that gap. The other lanes are unchanged here.
+> > - **Typed, all-or-nothing.** Amounts must be whole minor units from 100 to
+> >   100,000,000 (`invalid_budget_amount`). A foreign platform campaign, an
+> >   unreadable budget or a cap-blocked increase refuses the whole request
+> >   (`budget_change_target_not_found`, `budget_unreadable`,
+> >   `budget_change_cap_blocked`) before any plan or approval exists. With no
+> >   `changes`, the plan comes from the app's own optimizer. No person ⇒
+> >   `no_acting_user`, nothing read.
+> > - **D5:** the optional `note` reaches the approval text only inside one
+> >   `fenceUntrustedBlock` fence. The result returns ids and amounts only.
+> > - **Tests:** `test/adr0962-p2-budget-change.test.ts` (through the MCP mount:
+> >   proposed and not applied, MCP-origin approval refused, human approval then
+> >   apply, outsider not-found, amount and cap refusals, no acting person). Its
+> >   red witnesses are designed but were **not run** in the authoring session
+> >   (a merge train was gating). Run them before citing the file.
+> > - **Still OPEN:** `campaign_draft_creative` (ADR 0946's variant-set chain) and
+> >   `campaign_propose_experiment` (ADR 0949's pre-registration chain).
 
 ### D5 — Inbound content is untrusted all the way down
 
@@ -309,7 +354,7 @@ Three narrowing switches, all existing or additive: the deployment switch
 |---|---|---|
 | P0 | D4.1 ACL ratchet + D4.2 self-approval refusal in the 0942 gate; D8 A2A exclusion | MRTR self-approval test red before, green after; A2A 0.3 card lists no team agent — **implemented 2026-10-20** (branch `feat/mcp-0962-p0`, stacked on ADR 0942 P2): D4.1 as corrected above |
 | P1 | Read tools + `campaign-studio.mcp` chain pack + `externalAgents` field | Route test via the MCP mount: client B invisible to an A-only operator; `/v1/tools` lists them only with the toggle on — **implemented 2026-10-20** (`test/adr0962-p1-mcp-read-tools.test.ts`, branch `feat/mcp-0962-p1`) |
-| P2 | Request tools (change, creative draft, budget, experiment) + D4.3 clamp | End-to-end: Claude-style client requests a budget change, gate lands in the inbox, MCP retry refused, human approval proceeds — **`campaign_request_change` implemented 2026-10-20** (branch `feat/mcp-0962-p2`); creative / budget / experiment wait on 0946 / #5078 / 0949 (see P2 note) |
+| P2 | Request tools (change, creative draft, budget, experiment) + D4.3 clamp | End-to-end: Claude-style client requests a budget change, gate lands in the inbox, MCP retry refused, human approval proceeds — **`campaign_request_change` implemented 2026-10-20** (branch `feat/mcp-0962-p2`); **`campaign_propose_budget_change` implemented 2026-11-19** (branch `feat/adr0962-budget-change`, `test/adr0962-p2-budget-change.test.ts`; the end to end is propose → inbox → refused self-approval → human approval → apply route); creative / experiment wait on 0946 / 0949 (see P2 note) |
 | P3 | `campaign_brief_to_launch` (after 0961) + UI card + attribution | Command center shows claimed client + principal |
 | P4 | A2A study: authenticated extended card, tenant-scoped skills | Decision recorded; RFC filed if the card shape changes |
 

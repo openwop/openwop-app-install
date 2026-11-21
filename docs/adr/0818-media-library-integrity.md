@@ -100,6 +100,20 @@ workflow-surface lanes STORE:
 The AI-image lane stores the sniffed type and skips non-images. Text, JSON, audio and video have no
 single signature and are inert when served (§1).
 
+> **Added 2026-11-17 (#5928 ask 4) — width and height on the record.** Beside the
+> sniffing, `host/imageDimensions.ts` reads a raster image's pixel size from its HEADER
+> only (PNG IHDR, the first JPEG SOFn, the GIF logical screen, WebP `VP8 `/`VP8L`/`VP8X`),
+> with no image library. Every read is bounded by the buffer AND by the length the
+> segment or chunk declares; a truncated, hostile or unknown header, or a claim outside
+> 1..65,535 px, gives no dimensions and never throws. A JPEG whose Exif IFD0 orientation
+> is 5–8 reports the swapped (displayed) size; unreadable Exif falls back to the stored
+> size. `createAsset` records `width`/`height` on every lane: the upload, bulk, surface
+> and image-gen lanes pass the bytes they hold, and every other caller (seeds, render,
+> video, intake, documents, run artifacts) gets them from the stored bytes' first
+> 512 KiB (`mediaStorage.readHead`, tenant-checked). SVG and non-images get none. Assets
+> created before this have none; there is no backfill. Pinned by
+> `media-image-dimensions.test.ts` (fixtures + a seeded fuzz) and `media-route.test.ts`.
+
 ### §3 — A workspace quota that holds (MEDWF-4)
 
 - `assertOrgCapacity` also caps the workspace total. The cap is
@@ -131,6 +145,26 @@ single signature and are inert when served (§1).
   request concurrency.
 - Seeds, documents and run artifacts keep calling `assertOrgCapacity` directly, so they get
   the workspace cap without the queue.
+
+  > **Added 2026-11-17 (#5928 ask 2) — the gate and the lists read the org's index, not the
+  > tenant's rows.** At the now-raisable caps the check read every asset of the tenant
+  > per upload. Media now declares two ADR 1110 P5 store indexes over its own rows
+  > (`media.asset`, `media.collection`; the shared `entity:sysidx*` collections, so
+  > nothing moves under `hostext:media:asset:` and the legacy byte-row validator is
+  > untouched; no SQL index or migration). The per-org counter row gained an optional
+  > summed weight (`weightOf`, here `sizeBytes`), kept in step by the same intent lease
+  > as the count. So the gate reads one counter row for the org (count + bytes) and the
+  > tenant's org counter rows for the workspace total: no asset row. A counter is
+  > trusted below a cap and recounted exactly at it (an over-count never refuses an
+  > upload that fits); the hourly drift check in `repairMediaIndex` recounts every
+  > counter, count and bytes (an under-count lasts at most an hour, the same window as
+  > ADR 1110's catalog). The counters move inside the write's own index sync, before
+  > `write()` returns, so the check → write serialization above still holds.
+  > `GET …/assets` and `…/collections` take an optional `?limit=`/`?cursor=` for a
+  > KEYSET page (`nextCursor`, `total` when unfiltered). Without them the response is
+  > the whole list as before, read from the org's (or collection's) slice. A tenant
+  > with more than 500 pre-index rows reads the old tenant slice until the background
+  > build lands (`mediaIndexSweep.ts`). Pinned by `media-org-indexed-reads.test.ts`.
 
 ### §4 — A run acting for a person has that person's authority (MEDWF-2)
 

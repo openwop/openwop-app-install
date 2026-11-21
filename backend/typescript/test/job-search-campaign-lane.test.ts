@@ -7,7 +7,9 @@
  * user can already see in the UI:
  *
  *  - a board with no submit lane is a VISIBLE skip, never a claimed listing;
- *  - the steering `dailyCap` and the grant's `ratePerHour` actually bind;
+ *  - the steering `dailyCap` binds; a submit consumes the grant (`submitsUsed`,
+ *    `paceUsed`) and the day slot, mints a deal under THIS person's tag (ADR 1036),
+ *    and appends one `job-search.campaign.pass` audit row;
  *  - a replayed run cannot spend budget or re-submit (ambient, not caller-told);
  *  - queueing is grant-gated (409) and idempotent while a card is waiting.
  *
@@ -16,11 +18,17 @@
  * the pass stops reading the ambient replay flag (`cl-replay`); queueing stops
  * requiring a live grant (`cl-409`) or stops returning the waiting card
  * (`cl-idem`); `applicantFromBank` manufactures a clearance bar (`cl-bank`);
- * `digestFromListing` reads a clock or randomness (`cl-pure`).
+ * `digestFromListing` reads a clock or randomness (`cl-pure`). Wave 121 adds: the
+ * deal id loses its per-person tag, or the tag stops depending on the person
+ * (`w121g2-cl-dealtag`, `w121g2-cl-dealtag-const`); the pass audit row is not
+ * written (`w121g2-cl-audit`). (This header used to claim the grant's `ratePerHour`
+ * BINDS; no case ever exercised a pace refusal, so the claim is withdrawn, not
+ * backfilled. `paceUsed` is asserted as consumed only.)
  *
- * BLOCKED-ON-PRODUCT (CAMPAIGN-DAYCAP-MISLABEL-1): inside ONE pass the daily cap
- * bites in the submit closure (campaignRun.ts:320), which the pipeline reports as
- * `refused: board-rejected` (pipeline.ts:227) — the board never saw it. The honest
+ * BLOCKED-ON-PRODUCT (CAMPAIGN-DAYCAP-MISLABEL-1, #6148): inside ONE pass the daily cap
+ * bites in the submit closure (`runTenantCampaignPass`'s `consumeDaySlot` call), which
+ * the pipeline reports as `refused: board-rejected` (`pipeline.ts`, the `!sent.ok`
+ * exit) — the board never saw it. (Line numbers dropped: they had drifted.) The honest
  * assertion (a `daily-cap` skip row) would fail today, so the dailyCap case pins
  * only the COUNTS, which are correct.
  */
@@ -28,10 +36,10 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runTenantCampaignPass, campaignDayCounts, digestFromListing, applicantFromBank } from '../src/features/job-search/autopilot/campaignRun.js';
 import { queueCampaignCard, CAREER_CAMPAIGN_CARD_WORKFLOW_ID } from '../src/features/job-search/agent/provision.js';
 import { registerBoardAdapter, getBoardAdapter, type BoardAdapter } from '../src/features/job-search/boards/adapters.js';
-import { upsertListing } from '../src/features/job-search/boards/listing.js';
+import { upsertListing, listListings } from '../src/features/job-search/boards/listing.js';
 import { putSteering } from '../src/features/job-search/agent/steering.js';
 import { createApplyGrant, applyGrants } from '../src/host/applyGrant.js';
-import { subjectDealTag } from '../src/features/job-search/domain/applications.js';
+import { listChain } from '../src/host/auditChainService.js';
 import { runWithEffectContext } from '../src/host/runEffectContext.js';
 import { listCards } from '../src/host/kanbanService.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -78,7 +86,7 @@ const grant = (over: Partial<Parameters<typeof createApplyGrant>[0]> = {}) =>
   createApplyGrant({
     tenantId: T, orgId: ORG, subjectId: ME, grantedBy: ME, campaignId: 'camp-lane',
     maxSubmits: 10, maxPrepared: 5, ratePerHour: 10,
-    origins: ['lane-a.example.com', 'lane-pace.example.com', 'lane-cap.example.com', 'lane-replay.example.com'],
+    origins: ['lane-a.example.com', 'lane-cap.example.com', 'lane-replay.example.com'],
     resumePolicy: 'default', expiresAt: new Date(NOW + 86_400_000).toISOString(),
     ...over,
   });
@@ -135,13 +143,19 @@ describe('WF-JS-1 — the pass is honest about what it cannot do', () => {
     const up = await listing('lane-a', 1);
     const report = await runTenantCampaignPass(T, ME, NOW);
     const d = report.results[0]!.digest;
-    expect(d.applied).toEqual([`deal:${subjectDealTag(ME)}:${up.listingId}`]);
+    // A LITERAL tag (sha256('user:me') → first 16 hex), never `subjectDealTag(ME)`:
+    // an expectation built with the product's own helper moves with it.
+    expect(d.applied).toEqual([`deal:3a12c0aa5bf763ce:${up.listingId}`]);
     expect(submits).toEqual([{ listingId: up.listingId }]);
     const g = (await applyGrants.listByPrefix(`${T}:`))[0]!;
     expect(g.submitsUsed).toBe(1);
     expect(g.paceUsed).toBe(1);
     // …and the day slot was consumed at the moment of submission.
     expect((await campaignDayCounts.get(`${T}:${ME}:${new Date(NOW).toISOString().slice(0, 10)}`))?.used).toBe(1);
+    // …and the pass is audited: exactly one row, naming this grant and person.
+    const passes = (await listChain(T)).filter((e) => e.kind === 'job-search.campaign.pass');
+    expect(passes).toHaveLength(1);
+    expect(passes[0]!.payload).toMatchObject({ grantId: g.grantId, campaignId: 'camp-lane', subjectId: ME, applied: 1, skipped: 0, isReplay: false });
   });
 
   it('the steering dailyCap binds ACROSS listings in a pass', async () => {
@@ -158,6 +172,7 @@ describe('WF-JS-1 — the pass is honest about what it cannot do', () => {
     // or a pre-pipeline daily-cap skip depending on where the cap bit — either
     // way, exactly one application left this pass.
     expect(submits.length).toBe(1);
+    expect((await campaignDayCounts.get(`${T}:${ME}:${new Date(NOW).toISOString().slice(0, 10)}`))?.used).toBe(1);
   });
 
   it('a REPLAYED pass spends nothing and submits nothing — ambient, not caller-told', async () => {
@@ -198,7 +213,6 @@ describe('WF-JS-1 — assembly helpers stay deterministic and neutral', () => {
   it('digestFromListing is pure: same row, byte-identical digest', async () => {
     await steer();
     const up = await listing('greenhouse', 9);
-    const { listListings } = await import('../src/features/job-search/boards/listing.js');
     const row = (await listListings(T)).find((r) => r.entityId === up.listingId)!;
     // Fake ONLY Date between the two assemblies: a clock read inside the digest
     // would diverge across the hour, randomness on any call.

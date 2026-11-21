@@ -441,3 +441,72 @@ notes inline:
   tutorial completes, or leave it? *Assumption: offer, never automatic.*
 - **OQ5** — Content localization coverage: seed English only and let tenants/AI translate via
   ADR 0406 overlays, or ship ×4 seeds? *Assumption: English seed + overlay-on-demand.*
+
+
+### Correction — contextual hint and pocket share bottom clearance (2026-11-08)
+
+D7's quiet offering is not permission to cover another control. The existing
+fixed bottom-end hint (layer40) overlapped the real non-modal Funnel Architect
+composer (layer30) at861×720 in an isolated real-App Chromium diagnostic. This
+is source-bound synthetic browser evidence, distinct from the deployed phone
+navigation overlap. Neither tutorial dismissal nor raising the pocket layer is
+a correction: both controls must remain usable.
+
+The existing TutorialHint now registers its measured border-box height plus
+resolved bottom offset through a small shell-owned body-inherited geometry
+helper. Its initial layout measurement and ResizeObserver/window/visual viewport
+resize updates reflect actual wrapping, localization and visibility, without a
+hardcoded hint height or duplicated JavaScript breakpoints. Each effect owns a
+registration; maximum aggregation, stale-callback invalidation and cleanup preserve
+other owners and a later foreign inline writer. Hidden, dismissed, unrelated and
+unmounted offers release their clearance. Tutorial selection, progress reads,
+persisted dismissal and never-auto-launch semantics remain unchanged.
+
+Hint bottom depends only on mobile navigation clearance; it never consumes its
+own measured property. Pocket/launcher consume the larger occupied-bottom value
+and navigation reserve, not their sum, and cap pocket height by the same available
+space. This avoids double-counting the bar and observer feedback. The shared nav
+default0 is compatible with the separately reviewed source70 mobile-bar fix; a
+later exact composition must retain all14 source70 viewport cases and add the
+independent71 case (15 total absent other changes). Standalone source71 is not a
+claim to have shipped or qualified source70.
+
+Six new unit controls are authored for consumer wiring/dismissal, absence,
+multiple-owner restoration, resize/hidden updates, StrictMode/stale callbacks and
+foreign writer preservation. Controlled unit rectangles prove lifecycle only.
+The independent actual-App861 browser case keeps real guidance present and checks
+its CTA/Dismiss plus actual composer/actions/launcher, short-height/reopen/scroll
+controls without Send, Voice or tutorial activation. All checks are NOT_RUN at
+source preparation; actual Chromium, strict frontend checks, composed full gate
+and deployed retest remain separate. RTL, expanded localization, zoom and
+719/720/860 mobile composition branches remain explicit qualification obligations.
+
+
+### Validation correction — 2026-11-09: custom-property priority in the DOM fixture
+
+The first composed focus run preserved the two priority assertions above as real
+failures: the 17 hint controls had 15 passes and two failures, while later statics
+were not run. An independent CSSOM precondition diagnostic then measured the same
+operations before any React or hook import. Locked jsdom 25.0.1 / cssstyle 4.6.0
+returned an empty priority immediately after custom-property `setProperty` calls
+with `important`; actual Chromium retained `important`. The ordinary CSS property
+control retained priority in both. This distinguishes a missing fixture
+precondition from evidence that the clearance hook discarded a real priority.
+It does not retroactively qualify that failed run or prove the hook lifecycle.
+
+The frontend's existing `patch-package --error-on-fail` postinstall now applies
+one narrow cssstyle 4.6.0 correction: forward the supplied priority to its existing
+`_setProperty` implementation for custom properties, just as its ordinary
+property branch preserves priority. Dependency versions and lockfiles stay
+unchanged. This is a development/test DOM dependency; the production clearance
+hook and browser behavior are unchanged. Normal frontend installation must apply
+the patch; copying dependencies or faking getters/private priority maps is not a
+substitute. No root or backend installation is required to apply this frontend
+postinstall patch.
+
+The two lifecycle tests additionally assert the real priority immediately after
+the prior and foreign inline writes, before mounting or notifying the hook.
+All previous cases and terminal assertions remain intact. Fresh dependency
+installation, the measured CSSOM control, the whole hint controls, frontend
+statics/build and the eventual exact composed gate and deployed retest remain
+qualification obligations; authoring this correction executes none of them.

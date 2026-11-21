@@ -13,12 +13,12 @@ import type { BackendFeature } from '../types.js';
 import type { BundleScope, SurfaceFn } from '../../host/inMemorySurfaces.js';
 import { makeMockAdapter, type ComputerUseAdapter } from './adapter.js';
 import { registerBrowserDeviceHandlers } from './remoteExecutor.js';
-import { startTask, decide, sessionStatus, resumeSession, pollWaitSeconds } from './computerUseService.js';
+import { startTask, decide, sessionStatus, resumeSession, pollWaitSeconds, completeTakeover } from './computerUseService.js';
 import { registerComputerUseRoutes } from './routes.js';
 import { registerComputerUseAgentTools } from './agentTools.js';
 import { assertRunScopeOrg } from '../../host/accessControlService.js';
 import { getSession, type CuSession } from './sessionStore.js';
-import { verifiedApprovalInterrupt } from './approvalBinding.js';
+import { verifiedApprovalInterrupt, verifiedTakeoverAnswer } from './approvalBinding.js';
 import { registerComputerUseRevocation } from './revocation.js';
 import { registerComputerUseErasure } from './erasure.js';
 
@@ -136,6 +136,23 @@ export function buildComputerUseSurface(scope: BundleScope): Record<string, Surf
           tenantId, sessionId: s.sessionId, approve, actor: scope.actingUserId ?? '',
           ...(scope.runId ? { runId: scope.runId } : {}),
           ...(approvalInterruptId ? { approvalInterruptId } : {}),
+        }),
+      };
+    },
+    /** ADR 1136 P3a — the opener's answer to a take-over: continue (verified from
+     *  the run record) or stop. */
+    takeover: async (args) => {
+      const s = await sessionForRun(scope, str(args.sessionId));
+      await assertRunScopeOrg(scope, s.orgId, 'runs:create');
+      const proceed = args.proceed === true;
+      const takeoverInterruptId = proceed && s.createdBy === scope.actingUserId && s.status === 'awaiting_takeover'
+        ? await verifiedTakeoverAnswer({ runId: scope.runId, nodeId: str(args.nodeId), session: s })
+        : undefined;
+      return {
+        session: await completeTakeover(resolveAdapter(), {
+          tenantId, sessionId: s.sessionId, actor: scope.actingUserId ?? '', proceed,
+          ...(scope.runId ? { runId: scope.runId } : {}),
+          ...(takeoverInterruptId ? { takeoverInterruptId } : {}),
         }),
       };
     },

@@ -257,6 +257,7 @@ export const messages = {
   reportsMetric_spend: "Gasto",
   reportsMetric_revenue: "Receita",
   reportsMetric_reportedRevenueRecordCount: "Registros com receita informada",
+  reportsMetric_reportedConversionRecordCount: "Registros com conversões informadas",
   reportsMetric_impressions: "Impressões",
   reportsMetric_clicks: "Cliques",
   reportsMetric_conversions: "Conversões",

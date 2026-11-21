@@ -20,13 +20,19 @@
  * recipient-bearing email reds cases 3+4; loosening `parseEmailList` reds case 5;
  * dropping `requireAfter` reds cases 6+7. Cases 6+7 are DOUBLE-guarded — the
  * resumed recipients pass both `parseEmailList` and `missingEmailSendFields`'s
- * regex — so loosening only the first leaves them green (an honest ceiling).
+ * regex — so loosening only the first leaves them green; `requireAfter` is the
+ * one guard that alone reds both (re-probed at w119 after ADR 1013 moved the
+ * surface under `data.form` and the resume value to `{answers:[{id,answer}]}`:
+ * w119g3-em-*). The test's closed catalog is a copy, so the last case pins it
+ * to the renderer's own `SUPPORTED_COMPONENTS` / `A2UI_CATALOG_VERSION`
+ * (frontend `chat/a2ui/catalog.ts`): a shrunk renderer catalog reds it.
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
@@ -86,10 +92,10 @@ describe('Assistant email.send A2UI clarification (ADR 0051 §3/§5)', () => {
     expect(captured!.resumeKey).toBe('email-send-clarify');
     assertCatalogValid(captured!);
     const components = ((captured!.form as Record<string, unknown>).surface as { components: Array<Record<string, unknown>> }).components;
-    const ids = components.map((c) => c.id).filter((id): id is string => typeof id === 'string');
-    // No recipient and no subject → asks for both.
-    expect(ids).toEqual(expect.arrayContaining(['to', 'subject']));
-    expect(components.some((c) => c.component === 'action.button')).toBe(true);
+    const fieldIds = components.filter((c) => String(c.component).startsWith('field.')).map((c) => c.id);
+    // No recipient and no subject → asks for both, and for nothing else.
+    expect(fieldIds).toEqual(['to', 'subject']);
+    expect(components.filter((c) => c.component === 'action.button')).toHaveLength(1);
   });
 
   it('resumed recipient + subject merge into the payload and enqueue', async () => {
@@ -100,11 +106,14 @@ describe('Assistant email.send A2UI clarification (ADR 0051 §3/§5)', () => {
       suspend: async () => answers(resume),
     };
     const r = await enqueueAction(ctx);
-    const pa = field(r, 'pendingAction') as { status: string; kind: string; payload: { to?: unknown; subject?: unknown } };
+    const pa = field(r, 'pendingAction') as { actionId: string; status: string; kind: string; payload: { to?: unknown; subject?: unknown } };
     expect(pa.status).toBe('pending');
     expect(pa.kind).toBe('email.send');
     expect(pa.payload.to).toEqual(['sam@acme.com', 'lee@acme.com']);
     expect(pa.payload.subject).toBe('Following up');
+    // Positive control for cases 6+7's "nothing enqueued": the store reader sees an
+    // enqueue when one happens.
+    expect((await listPendingActions('t-mail2')).map((a) => a.actionId)).toEqual([pa.actionId]);
   });
 
   it('a recipient already present → no clarification (subject-only gap is not blocking)', async () => {
@@ -158,7 +167,7 @@ describe('Assistant email.send A2UI clarification (ADR 0051 §3/§5)', () => {
       // Only invalid addresses → after re-validation the recipient is still missing.
       suspend: async () => answers({ to: 'nope, also-bad' }),
     };
-    await expect(enqueueAction(ctx)).rejects.toThrow(/recipient/);
+    await expect(enqueueAction(ctx)).rejects.toThrow('enqueue-action: email.send still needs a valid recipient after clarification');
     // The node failed BEFORE the enqueue — the store has no pending action.
     expect((await listPendingActions('t-mail6')).length).toBe(0);
   });
@@ -170,8 +179,19 @@ describe('Assistant email.send A2UI clarification (ADR 0051 §3/§5)', () => {
       // The newline makes the whole token fail the email regex → dropped → still missing → fail fast.
       suspend: async () => answers({ to: 'a@b.com\nBcc: evil@x.com' }),
     };
-    await expect(enqueueAction(ctx)).rejects.toThrow(/recipient/);
+    await expect(enqueueAction(ctx)).rejects.toThrow('enqueue-action: email.send still needs a valid recipient after clarification');
     // Rejected means nothing reached the approval queue.
     expect((await listPendingActions('t-mail7')).length).toBe(0);
+  });
+
+  it('the closed catalog this file checks against IS the renderer\'s (frontend chat/a2ui/catalog.ts)', () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(resolve(here, '../../../frontend/react/src/chat/a2ui/catalog.ts'), 'utf8');
+    const version = /export const A2UI_CATALOG_VERSION = '([^']+)';/.exec(src)?.[1];
+    const list = /export const SUPPORTED_COMPONENTS = \[([^\]]*)\] as const;/.exec(src)?.[1];
+    expect(version).toBe(CATALOG_VERSION);
+    expect(list, 'SUPPORTED_COMPONENTS is still a literal array').toBeTypeOf('string');
+    const renderer = [...list!.matchAll(/'([^']+)'/g)].map((m) => m[1]);
+    expect([...renderer].sort()).toEqual([...CATALOG].sort());
   });
 });

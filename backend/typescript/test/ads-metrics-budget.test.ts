@@ -9,9 +9,16 @@
  * campaignBudgets:mutate) mirror the publishAd broker pattern and are exercised by
  * the env-gated ads-adapter-{meta,google} suites.
  *
+ * A live change also resolves the run's org and asks the ADR 1022 ownership
+ * checker before the adapter call (its own witnesses: adr1022-ad-budget-node-org);
+ * here the run is a stored, unstamped one and the checker always says yes, so
+ * every case reaches the guard it names.
+ *
  * Tracker TST-BKU-5. Red when the budget node applies by default or without an
  * account, a failed read stops being a typed failure, `platform_unsupported` is
- * dropped, or ad-metrics reads without an account — each sabotage-witnessed (w65).
+ * dropped, ad-metrics reads without an account, or either node's success output
+ * changes shape (every success output is asserted exactly). Sabotage-witnessed in
+ * w65 and again at w119 (w119g3-am-* / w119g3-bu-*).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ensureNodesRegistered } from '../src/bootstrap/nodes.js';
@@ -49,7 +56,7 @@ describe('ADR 0186 slice 4a/4b — ad-metrics + ad-budget-update nodes', () => {
     // unstamped, actorless run (its org is its workspace), and a campaign it owns.
     const storage = await openStorage('memory://');
     initHostExtPersistence(storage);
-    const now = new Date().toISOString();
+    const now = '2026-06-15T12:00:00.000Z';
     await storage.insertRun({ runId: 'run_1', workflowId: 'wf.ads-budget', tenantId: 'demo', status: 'running', inputs: {}, metadata: {}, configurable: {}, createdAt: now, updatedAt: now });
     setAdsCampaignOwnershipChecker(async () => true);
   });
@@ -65,13 +72,15 @@ describe('ADR 0186 slice 4a/4b — ad-metrics + ad-budget-update nodes', () => {
     });
     const res = await metricsNode().execute(ctx);
     expect(asked).toEqual({ platform: 'google', adAccountId: '111', campaignId: '222' });
-    expect(outputsOf(res)).toMatchObject({ connected: true, platform: 'google', metrics: { impressions: 10, spend: 3.5 } });
+    expect(outputsOf(res)).toEqual({ connected: true, platform: 'google', metrics: { impressions: 10, clicks: 2, spend: 3.5, ctr: 0.2, cpc: 1.75 } });
   });
 
   it('ad-metrics: degrades to connected:false with no ctx.ads or no account/campaign', async () => {
-    expect(outputsOf(await metricsNode().execute(makeCtx({})))).toMatchObject({ connected: false, metrics: null });
-    const ctx = makeCtx({ config: { platform: 'meta' }, ads: adsDouble(async () => ({ outcome: 'ok', platform: 'meta', metrics: { impressions: 0, clicks: 0, spend: 0, ctr: 0, cpc: 0 } })) });
-    expect(outputsOf(await metricsNode().execute(ctx))).toMatchObject({ connected: false }); // missing adAccountId/campaignId → no read
+    expect(outputsOf(await metricsNode().execute(makeCtx({})))).toEqual({ connected: false, metrics: null });
+    let reads = 0;
+    const ctx = makeCtx({ config: { platform: 'meta' }, ads: adsDouble(async () => { reads++; return { outcome: 'ok', platform: 'meta', metrics: { impressions: 0, clicks: 0, spend: 0, ctr: 0, cpc: 0 } }; }) });
+    expect(outputsOf(await metricsNode().execute(ctx))).toEqual({ connected: false, metrics: null }); // missing adAccountId/campaignId → no read
+    expect(reads).toBe(0);
   });
 
   it('ad-metrics: no_connection / unsupported degrade; failed → failure', async () => {
@@ -79,32 +88,32 @@ describe('ADR 0186 slice 4a/4b — ad-metrics + ad-budget-update nodes', () => {
       config: { platform: 'tiktok', adAccountId: '1', campaignId: '2' },
       ads: adsDouble(async () => (outcome === 'unsupported' ? { outcome, platform: 'tiktok' } : outcome === 'failed' ? { outcome, error: 'boom' } : { outcome })),
     });
-    expect(outputsOf(await metricsNode().execute(mk('no_connection')))).toMatchObject({ connected: false });
-    expect(outputsOf(await metricsNode().execute(mk('unsupported')))).toMatchObject({ connected: false, reason: 'platform_unsupported' });
+    expect(outputsOf(await metricsNode().execute(mk('no_connection')))).toEqual({ connected: false, metrics: null });
+    expect(outputsOf(await metricsNode().execute(mk('unsupported')))).toEqual({ connected: false, metrics: null, reason: 'platform_unsupported', platform: 'tiktok' });
     expect(await metricsNode().execute(mk('failed'))).toMatchObject({ status: 'failure', error: { code: 'ad_metrics_failed' } });
   });
 
   it('ad-budget-update: recommends (applied:false) BY DEFAULT — dryRun on, no platform call', async () => {
     let called = false;
     const ctx = makeCtx({ config: { platform: 'google', adAccountId: 'acct', campaignId: '222', dailyBudgetMinor: 7500 }, ads: adsDouble({ updateBudget: async () => { called = true; return { outcome: 'updated', platform: 'google', dailyBudgetMinor: 7500, target: 't' }; } }) });
-    expect(outputsOf(await budgetNode().execute(ctx))).toMatchObject({ applied: false, planned: { platform: 'google', campaignId: '222', dailyBudgetMinor: 7500 } });
+    expect(outputsOf(await budgetNode().execute(ctx))).toEqual({ applied: false, planned: { platform: 'google', campaignId: '222', dailyBudgetMinor: 7500 } });
     expect(called).toBe(false); // dryRun default ⇒ ctx.ads.updateBudget NOT called
     // No budget/campaign → planned:null, still applied:false.
-    expect(outputsOf(await budgetNode().execute(makeCtx({ config: { platform: 'meta' } })))).toMatchObject({ applied: false, planned: null });
+    expect(outputsOf(await budgetNode().execute(makeCtx({ config: { platform: 'meta' } })))).toEqual({ applied: false, planned: null });
   });
 
   it('ad-budget-update: applies via ctx.ads.updateBudget only on explicit dryRun:false + account', async () => {
     let asked: unknown = null;
     const ctx = makeCtx({ config: { platform: 'google', adAccountId: 'acct', campaignId: '222', dailyBudgetMinor: 7500, dryRun: false }, ads: adsDouble({ updateBudget: async (a) => { asked = a; return { outcome: 'updated', platform: 'google', dailyBudgetMinor: 7500, target: 'customers/1/campaignBudgets/9' }; } }) });
     const res = await budgetNode().execute(ctx);
-    expect(asked).toMatchObject({ platform: 'google', adAccountId: 'acct', campaignId: '222', dailyBudgetMinor: 7500, dryRun: false });
-    expect(outputsOf(res)).toMatchObject({ applied: true, target: 'customers/1/campaignBudgets/9' });
+    expect(asked).toEqual({ platform: 'google', adAccountId: 'acct', campaignId: '222', dailyBudgetMinor: 7500, dryRun: false });
+    expect(outputsOf(res)).toEqual({ applied: true, planned: { platform: 'google', campaignId: '222', dailyBudgetMinor: 7500 }, target: 'customers/1/campaignBudgets/9' });
   });
 
   it('ad-budget-update: dryRun:false without an account cannot apply — stays applied:false', async () => {
     let called = false;
     const ctx = makeCtx({ config: { platform: 'google', campaignId: '222', dailyBudgetMinor: 7500, dryRun: false }, ads: adsDouble({ updateBudget: async () => { called = true; return { outcome: 'updated', platform: 'google', dailyBudgetMinor: 7500, target: 't' }; } }) });
-    expect(outputsOf(await budgetNode().execute(ctx))).toMatchObject({ applied: false });
+    expect(outputsOf(await budgetNode().execute(ctx))).toEqual({ applied: false, planned: { platform: 'google', campaignId: '222', dailyBudgetMinor: 7500 } });
     expect(called).toBe(false);
   });
 
@@ -113,8 +122,9 @@ describe('ADR 0186 slice 4a/4b — ad-metrics + ad-budget-update nodes', () => {
       config: { platform: 'google', adAccountId: 'acct', campaignId: '222', dailyBudgetMinor: 7500, dryRun: false },
       ads: adsDouble({ updateBudget: async () => (outcome === 'unsupported' ? { outcome, platform: 'google' } : outcome === 'failed' ? { outcome, error: 'boom' } : { outcome }) }),
     });
-    expect(outputsOf(await budgetNode().execute(mk('no_connection')))).toMatchObject({ applied: false });
-    expect(outputsOf(await budgetNode().execute(mk('unsupported')))).toMatchObject({ applied: false, reason: 'platform_unsupported' });
+    const planned = { platform: 'google', campaignId: '222', dailyBudgetMinor: 7500 };
+    expect(outputsOf(await budgetNode().execute(mk('no_connection')))).toEqual({ applied: false, planned });
+    expect(outputsOf(await budgetNode().execute(mk('unsupported')))).toEqual({ applied: false, planned, reason: 'platform_unsupported' });
     expect(await budgetNode().execute(mk('failed'))).toMatchObject({ status: 'failure', error: { code: 'ad_budget_update_failed' } });
   });
 });

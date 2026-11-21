@@ -233,8 +233,10 @@ Each phase is one PR, through a train.
 | P0 | #5943 | `conversation` never notifies; the items already sent are retired | (#5943) |
 | P1 | #5958 (train 285) | D1 kinds ratchet, `external-event` never notifies, host-built credential Connect card, fallback without the kind; D2 named asker and composed titles, banned-words ratchet; D5 `asker` and `reason` stamping | `adr1125-request-words-and-kinds`, `adr1109-readable-requests`, `adr0710-run-notice-audience` leg 6, `RenderInterrupt`, `ccUi2TimerWalkthrough` |
 | P2 | #6001 (train 285) | `notifications/inboxCards.ts`; the card (dot plus label for unread, no type chip, priority only for high and urgent, line 2 from `asker`/`reason`, message dropped when it repeats the title, "…" menu with Mark read/unread, Archive, Delete, View activity log); `e` skips open requests; Archive read sends `keep`; identical news collapse | `adr1125InboxCard` legs 1–7 (five guards sabotaged red, then restored); `priorityFilter` `e` cases; `notifications-feature` `keep` cases (own, foreign and unknown ids; 501 ids refused) |
-| D1 fix | #6050 (train 286a, not yet merged) | the fallback links the activity log instead of advising an update (D1 correction); the unused `cardRunLink` copy is retired | `ccUi2TimerWalkthrough` controls (removing the link reds them); `resolvedRequests` locale case |
-| P3 | — | not started: D4 tabs, one count (#5909), empty state, deep links | — |
+| D1 fix | #6050 (merged 2026-11-17, 57865cbf03) | the fallback links the activity log instead of advising an update (D1 correction); the unused `cardRunLink` copy is retired | `ccUi2TimerWalkthrough` controls (removing the link reds them); `resolvedRequests` locale case |
+| P3 | #6062 (merged 2026-11-17, dc43ae45b9) | D4 tabs (Needs you, Updates, Archived), one count (#5909), deep links to the canonical tab (`NeedsYouInbox.tsx`, `NotificationsPage.tsx`, `notificationDeepLink.ts`) | see #6062 |
+
+> **CORRECTED 2026-11-19:** this record said #6050 was not merged and P3 was not started; both merged on 2026-11-17. Corrected from the merge commits; witnesses for P3 are as listed in #6062.
 
 ## Open questions
 

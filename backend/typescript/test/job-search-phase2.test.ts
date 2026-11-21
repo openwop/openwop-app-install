@@ -17,14 +17,17 @@
  * (`p2-release`); `runCampaign`'s discovery memo stops keying per subject
  * (`p2-memo-r2` — the case now drives the REAL `runCampaign`).
  * DOUBLE GUARD (recorded): the stage-rename case is held by both the write-time
- * `toStagePosition` snapshot and the stable-`toStageId` index; no single edit
- * reaches it.
+ * `toStagePosition` snapshot and the stable-`toStageId` index. Either alone keeps
+ * it green; both sit on one line of `funnel.ts`, so the witness is one edit that
+ * replaces both with the old match on the CURRENT stage name
+ * (`w120g2-p2-rename-both`, red on the rename and the beyond-vocabulary cases).
+ * The deal ids in the memo case are literals (ADR 1036 D3), not
+ * `subjectDealTag` output.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { buildFunnelReport } from '../src/features/job-search/lifecycle/funnel.js';
 import { createApplication, advanceApplication, ensureApplicationPipeline, APPLICATION_PIPELINE_NAME } from '../src/features/job-search/domain/applications.js';
 import { listPipelines, updatePipeline } from '../src/features/crm/crmEntitiesService.js';
-import { subjectDealTag } from '../src/features/job-search/domain/applications.js';
 import { createApplyGrant, consultApplyGrant, revokeApplyGrant, claimSubmission, releaseSubmission } from '../src/host/applyGrant.js';
 import { runCampaign, type CampaignItem } from '../src/features/job-search/autopilot/campaign.js';
 import type { JobDigest } from '../src/features/job-search/domain/digest.js';
@@ -82,7 +85,8 @@ describe('JS-LIFE-2 — stage position, not stage name', () => {
     // `silent` and screening dropped to 0.
     expect(after.reachedStage.screening).toBe(1);
     expect(after.responseRate.numerator).toBe(1);
-    expect(after.silent).toBe(before.silent);
+    expect(before.silent).toBe(1); // deal b never moved
+    expect(after.silent).toBe(1);
   });
 
   it('a stage BEYOND the funnel vocabulary is a RESPONSE but never an offer (grade-trio finding 4)', async () => {
@@ -117,7 +121,6 @@ describe('JS-LIFE-2 — stage position, not stage name', () => {
 describe('JS-LANE-1 — the hoisted discovery scan reads rows FRESH', () => {
   const grantInput = (subjectId: string) => ({
     tenantId: T, orgId: ORG, subjectId, grantedBy: subjectId, // DG-SEC-1: self-consent
-   
     campaignId: 'camp-1', maxSubmits: 5, maxPrepared: 5, ratePerHour: 4,
     origins: ['boards.example.com'], resumePolicy: 'default' as const,
     expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
@@ -132,7 +135,7 @@ describe('JS-LANE-1 — the hoisted discovery scan reads rows FRESH', () => {
     const g = await createApplyGrant(grantInput('subj-1'));
     const ids = [g.grantId];
     expect((await consult('subj-1', ids)).allowed).toBe(true);
-    await revokeApplyGrant(T, ORG, g.grantId, Date.now(), 'subj-1');
+    expect(await revokeApplyGrant(T, ORG, g.grantId, Date.now(), 'subj-1')).toBe(true); // the subject revokes their own
     // The ids are stale; the ROWS are not — consult re-reads at decision time.
     const after = await consult('subj-1', ids);
     expect(after.allowed).toBe(false);
@@ -149,7 +152,6 @@ describe('JS-LANE-1 — the hoisted discovery scan reads rows FRESH', () => {
 
 const mkGrant = (subjectId: string) => ({
   tenantId: T, orgId: ORG, subjectId, grantedBy: subjectId, // DG-SEC-1: self-consent
-   
   campaignId: 'camp-1', maxSubmits: 5, maxPrepared: 5, ratePerHour: 4,
   origins: ['boards.example.com'], resumePolicy: 'default' as const,
   expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
@@ -203,7 +205,8 @@ describe('grade-trio finding 2 — the discovery memo is per (tenant, subject, c
     });
     const run = await runCampaign([item('mix-a', 'subj-A'), item('mix-b', 'subj-B')], async () => ({ ok: true }), Date.now());
     expect(run.skipped).toEqual([]);
-    // ADR 1036 D3 — per-person deal ids.
-    expect(run.applied).toEqual([`deal:${subjectDealTag('subj-A')}:mix-a`, `deal:${subjectDealTag('subj-B')}:mix-b`]);
+    // ADR 1036 D3 — per-person deal ids, pinned as literals (sha256(subjectId)
+    // hex, first 16), never computed with the product's `subjectDealTag`.
+    expect(run.applied).toEqual(['deal:a74c6ed1db17cccb:mix-a', 'deal:772b3d8be56251aa:mix-b']);
   });
 });

@@ -171,6 +171,7 @@ export function registerImageGenRoutes(deps: RouteDeps): void {
             lineage,
             ...(grounding ? { grounding } : {}),
             contentHash,
+            bytes: Buffer.from(entry.contentBase64, 'base64'), // #5928 ask 4 — width/height from the header
           });
         });
         assets.push(viewAsset(asset));
@@ -263,6 +264,7 @@ export function registerImageGenRoutes(deps: RouteDeps): void {
           lineage: { ...derived.lineage, derivedFrom: source.assetId, generatedBy: 'ai', provider },
           ...(grounding ? { grounding } : {}),
           contentHash,
+          bytes: Buffer.from(out.contentBase64, 'base64'), // #5928 ask 4 — width/height from the header
         });
       });
       assets.push(viewAsset(asset));

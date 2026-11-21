@@ -11,45 +11,74 @@
  *
  * Demo host: an anonymous visitor resolves `basis:'tenant-owner'` server-side
  * (the demo single-tenant exception), so the demo keeps its full nav.
- * Re-resolves when the signed-in identity changes.
+ * Read failures stay distinct and explicitly retryable. Re-resolves when the signed-in identity/workspace changes.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import { getEffectiveAccess, type EffectiveAccess } from './accessClient.js';
 import { onAuthChange } from './config.js';
 
 const NONE: EffectiveAccess = { roles: [], scopes: [], basis: 'none' };
 
-let cached: EffectiveAccess | null = null;
-let inflight: Promise<EffectiveAccess> | null = null;
+/** Presentation read status; failed is not a successful non-admin answer. */
+export interface EffectiveAccessState {
+  access: EffectiveAccess;
+  resolved: boolean;
+  failed: boolean;
+  retry: () => void;
+}
+type AccessSnapshot = Omit<EffectiveAccessState, 'retry'>;
+const PENDING: AccessSnapshot = { access: NONE, resolved: false, failed: false };
+let snapshot: AccessSnapshot = PENDING;
+let inflight: Promise<void> | null = null;
+let epoch = 0;
 let authSubscribed = false;
-const listeners = new Set<(a: EffectiveAccess) => void>();
+const listeners = new Set<() => void>();
 
-function resolve(): Promise<EffectiveAccess> {
-  if (!inflight) {
-    inflight = getEffectiveAccess()
-      .catch(() => NONE) // fail-closed presentation
-      .then((a) => {
-        cached = a;
-        for (const fn of listeners) fn(a);
-        return a;
-      });
+function publish(next: AccessSnapshot): void {
+  snapshot = next;
+  for (const fn of listeners) fn();
+}
+
+function resolve(): Promise<void> {
+  if (inflight) return inflight;
+  // A settled error is shared too: mounting another consumer is not a retry
+  // loop against an already rate-limited server. Only Retry/auth change retries.
+  if (snapshot.resolved) return Promise.resolve();
+  const owner = epoch;
+  const request: Promise<void> = getEffectiveAccess().then(
+    (access) => { if (owner === epoch) publish({ access, resolved: true, failed: false }); },
+    () => { if (owner === epoch) publish({ access: NONE, resolved: true, failed: true }); },
+  ).finally(() => { if (inflight === request) inflight = null; });
+  inflight = request;
+  return request;
+}
+
+function invalidate(): void {
+  epoch += 1;
+  inflight = null;
+  // Neutralize authority immediately for every subscriber, including newly
+  // mounted consumers. An older request cannot publish into the new epoch.
+  publish(PENDING);
+  void resolve();
+}
+
+function retry(): void {
+  // Coalesce simultaneous Retry controls and never turn a successful cached
+  // non-admin response into a polling loop.
+  if (!snapshot.failed) return;
+  invalidate();
+}
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  if (!authSubscribed) {
+    authSubscribed = true;
+    onAuthChange(invalidate);
   }
-  return inflight;
+  void resolve();
+  return () => { listeners.delete(listener); };
 }
-
-/** Drop the cache (identity changed) and re-resolve for all subscribers.
- *  Subscribed ONCE at module level (lazily) — a per-hook subscription would
- *  fire N invalidations per auth change and null `inflight` N times, kicking
- *  off N redundant fetches. */
-function subscribeAuthOnce(): void {
-  if (authSubscribed) return;
-  authSubscribed = true;
-  onAuthChange(() => {
-    cached = null;
-    inflight = null;
-    void resolve();
-  });
-}
+const readSnapshot = (): AccessSnapshot => snapshot;
 
 /** True when the caller should see admin-tier chrome: the workspace owner, a
  *  member holding the built-in admin/owner role, OR a member whose (custom)
@@ -103,19 +132,9 @@ export function useEffectiveAccess(): EffectiveAccess {
  * gate needs that difference so first paint shows a loading state, never a
  * deny flash.
  */
-export function useEffectiveAccessState(): { access: EffectiveAccess; resolved: boolean } {
-  const [state, setState] = useState<{ access: EffectiveAccess; resolved: boolean }>(
-    () => (cached !== null ? { access: cached, resolved: true } : { access: NONE, resolved: false }),
-  );
-  useEffect(() => {
-    let live = true;
-    const push = (a: EffectiveAccess) => { if (live) setState({ access: a, resolved: true }); };
-    listeners.add(push);
-    subscribeAuthOnce();
-    void resolve().then(push);
-    return () => { live = false; listeners.delete(push); };
-  }, []);
-  return state;
+export function useEffectiveAccessState(): EffectiveAccessState {
+  const current = useSyncExternalStore(subscribe, readSnapshot, readSnapshot);
+  return { ...current, retry };
 }
 
 /**

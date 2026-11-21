@@ -31,7 +31,7 @@ import { resolveOne } from '../../host/featureToggles/service.js';
 import { getToggleDefault } from '../../host/featureToggles/registry.js';
 import { isDeniedWebhookHost } from '../../host/webhookEgressGuard.js';
 import { configuredPublicBaseUrl } from '../featureRoute.js';
-import { tierOf, type ComputerUseAdapter, type CuAction } from './adapter.js';
+import { tierOf, TAKEOVER_UNSUPPORTED, type ComputerUseAdapter, type CuAction } from './adapter.js';
 import { privateOriginOf } from './hostResolution.js';
 import { createHash } from 'node:crypto';
 import {
@@ -223,6 +223,8 @@ export interface SessionView {
   pendingAction?: CuAction;
   /** Addendum 2 — what the approval card shows for the pending action. */
   pendingShown?: ShownAction;
+  /** ADR 1136 P3a — set while `awaiting_takeover`: what the take-over card shows. */
+  takeover?: NonNullable<CuSession['takeover']>;
   /** G-A — the digest of `pendingShown`; the decide node keys its approval on it. */
   pendingDigest?: string;
   resultSummary?: string;
@@ -238,6 +240,7 @@ const view = (s: CuSession): SessionView => ({
   steps: s.steps.length,
   idleRounds: s.idleRounds ?? 0,
   ...(s.pendingAction ? { pendingAction: s.pendingAction, pendingShown: shownAction(s.pendingAction, s.startUrl), pendingDigest: actionDigest(s.pendingAction, s.startUrl) } : {}),
+  ...(s.takeover ? { takeover: { ...s.takeover } } : {}),
   ...(s.resultSummary ? { resultSummary: s.resultSummary } : {}),
   ...(s.error ? { error: s.error } : {}),
 });
@@ -377,13 +380,40 @@ export async function advance(adapter: ComputerUseAdapter, session: CuSession): 
       return finish({ ...s, status: 'failed', error: `origin_denied:${action.url ?? 'unknown'}` });
     }
     if (action.kind === 'credential') {
+      // ADR 1136 P3a — in the person's OWN browser window (an adapter that offers
+      // `handOver`), the step goes to the person: the session waits for them to do
+      // it themselves. Bounded: at most MAX_TAKEOVERS per session, each expiring.
+      const n = (s.takeovers ?? 0) + 1;
+      // No `handOver`, or the adapter declines for this session: not the person's
+      // own window, so the step is refused as before.
+      let declined = !adapter.handOver;
+      if (adapter.handOver && n <= MAX_TAKEOVERS) {
+        const handed = await adapter.handOver(psid, action.actionId);
+        if (handed.ok) {
+          const now = Date.now();
+          return finish({
+            ...s, status: 'awaiting_takeover', takeovers: n,
+            takeover: {
+              n, reason: 'credential',
+              // The host of the page the EXECUTOR reported (the action's URL is the
+              // current page in the host-run loop), never model text.
+              origin: pageOrigin(action.url ?? '') || pageOrigin(s.startUrl),
+              label: action.description,
+              raisedAt: new Date(now).toISOString(),
+              expiresAt: new Date(now + TAKEOVER_TTL_MS).toISOString(),
+            },
+          });
+        }
+        if (handed.error !== TAKEOVER_UNSUPPORTED) return view(s); // transient: a re-invoke retries
+        declined = true;
+      }
       // ADR 0894 D6 — never offered for approval. Credentials enter only through
       // a broker the model never sees (ADR 0418 §2), and no broker exists; a
       // human approving "type the password" would be approving the provider
       // obtaining it some other way.
       await adapter.submitDecision(psid, action.actionId, false);
       await adapter.abortSession(psid);
-      return finish({ ...s, status: 'failed', error: 'credential_entry_unsupported' });
+      return finish({ ...s, status: 'failed', error: declined ? 'credential_entry_unsupported' : 'takeover_limit_reached' });
     }
     const tier = tierOf(action);
     if (tier === 'commit') {
@@ -428,6 +458,56 @@ export async function advance(adapter: ComputerUseAdapter, session: CuSession): 
  */
 export function drivableBy(s: Pick<CuSession, 'runId'>, runId: string | undefined): boolean {
   return !s.runId || s.runId === runId;
+}
+
+/** ADR 1136 P3a — a take-over waits this long for the person, then ends. */
+export const TAKEOVER_TTL_MS = 15 * 60_000;
+/** ADR 1136 P3a — the most take-overs one session may raise. */
+export const MAX_TAKEOVERS = 3;
+
+const pageOrigin = (u: string): string => { try { return new URL(u).origin; } catch { return ''; } };
+
+export interface TakeoverInput {
+  tenantId: string;
+  sessionId: string;
+  /** The person answering (`scope.actingUserId`). Must be the opener. */
+  actor: string;
+  runId?: string;
+  /** True: the person did the step, so continue. False: stop the session. */
+  proceed: boolean;
+  /** The take-over interrupt whose recorded resolution authorises a continue.
+   *  The surface verifies it (`verifiedTakeoverAnswer`). */
+  takeoverInterruptId?: string;
+}
+
+/**
+ * ADR 1136 P3a — the person's answer to a take-over. STOP is allowed from any
+ * run the opener acts in (condition 4 restricts driving, never stopping).
+ * CONTINUE is driving: opener only, the opening run only, a verified answer, and
+ * not past the take-over's expiry. The next step reads the page afresh.
+ */
+export async function completeTakeover(adapter: ComputerUseAdapter, input: TakeoverInput): Promise<SessionView> {
+  const s = await getSession(input.tenantId, input.sessionId);
+  if (!s) throw new OpenwopError('not_found', 'Session not found.', 404, { sessionId: input.sessionId });
+  openerOnly(s, input.actor);
+  if (s.status !== 'awaiting_takeover' || !s.takeover) {
+    throw new OpenwopError('conflict', `Session is ${s.status} — it is not waiting for you.`, 409, { sessionId: s.sessionId, status: s.status });
+  }
+  if (!input.proceed) return view(await endSession(adapter, s, 'stopped_at_takeover'));
+  if (Date.parse(s.takeover.expiresAt) <= Date.now()) return view(await endSession(adapter, s, 'takeover_expired'));
+  if (!drivableBy(s, input.runId)) return view(s);
+  if (!input.takeoverInterruptId) {
+    throw new OpenwopError('approval_required', 'Continue in the run, where the browser agent asked you.', 409, { sessionId: s.sessionId });
+  }
+  if ((s.consumedApprovals ?? []).includes(input.takeoverInterruptId)) {
+    throw new OpenwopError('approval_required', 'That answer was already used.', 409, { sessionId: s.sessionId });
+  }
+  const { takeover: _tk, ...rest } = s;
+  const resumed = await writeSession(s, { ...rest, status: 'running', idleRounds: 0, consumedApprovals: [...(s.consumedApprovals ?? []), input.takeoverInterruptId] });
+  if (!resumed) {
+    throw new OpenwopError('conflict', 'This session changed while your answer was being recorded.', 409, { sessionId: s.sessionId });
+  }
+  return advance(adapter, resumed);
 }
 
 export interface DecideInput {
@@ -512,7 +592,7 @@ export async function resumeSession(adapter: ComputerUseAdapter, input: { tenant
 }
 
 /** The terminal statuses — a session in one of these drives nothing. */
-export const isLive = (s: CuSession): boolean => s.status === 'starting' || s.status === 'running' || s.status === 'awaiting_approval';
+export const isLive = (s: CuSession): boolean => s.status === 'starting' || s.status === 'running' || s.status === 'awaiting_approval' || s.status === 'awaiting_takeover';
 
 /**
  * ADR 0894 D4/D8 — the reason a live session may no longer proceed, or null.
@@ -550,7 +630,7 @@ export async function endSession(adapter: ComputerUseAdapter | null, s: CuSessio
   let current: CuSession | null = s;
   for (let attempt = 0; attempt < 8 && current; attempt += 1) {
     if (!isLive(current)) return current;
-    const { pendingAction: _pa, ...rest } = current;
+    const { pendingAction: _pa, takeover: _tk, ...rest } = current;
     const ended = await writeSession(current, { ...rest, status: 'aborted', error: reason });
     if (ended) {
       if (ended.providerSessionId && adapter) {

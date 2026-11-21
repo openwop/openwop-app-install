@@ -5,12 +5,22 @@
  * SAME artifact is idempotent (one canvas); cross-tenant / non-canvas / absent → null
  * (no existence leak, no spurious canvas). The working copy records the artifact key in
  * `metadata.seededFromArtifactKey` — the delete cascade reads it to drop the reopen row.
+ * A caller-scoped open (`idempotencyScope`, the private editor copy the canvas editor
+ * routes pass for a `defaultOwnerToCaller` door, 21340e8f31) gives each caller their
+ * OWN copy, and re-opening within one scope still returns that copy.
+ *
+ * Red when: the cross-tenant check in `seedCanvasFromArtifact` is dropped; the
+ * `canvas.` prefix check is dropped; `metadata` is not stamped; the idempotency key
+ * ignores `idempotencyScope` (two callers share one copy) or stops being stable
+ * (a re-open mints a second copy); `updateCanvasForTenant` merges instead of
+ * replacing, skips `expectedVersion`, or skips its tenant check.
  */
 import { describe, it, expect, beforeEach, beforeAll } from 'vitest';
 import { createCanvasForTenant, getCanvasForTenant, updateCanvasForTenant } from '../canvasSurface.js';
 import { seedCanvasFromArtifact } from '../canvasFromArtifact.js';
-import { persistRunArtifact, __resetRunArtifactStore } from '../runArtifactStore.js';
+import { persistRunArtifact, getRunArtifact, __resetRunArtifactStore } from '../runArtifactStore.js';
 import { registerAppBuilderArtifactType } from '../../features/app-builder/artifactTypes.js';
+import { registerCodeExecArtifactType } from '../../features/code-exec/artifactTypes.js';
 import { initHostExtPersistence } from '../hostExtPersistence.js';
 import { openStorage } from '../../storage/index.js';
 
@@ -21,6 +31,7 @@ const TENANT = 'tenant-a';
 beforeAll(async () => {
   initHostExtPersistence(await openStorage('memory://'));
   registerAppBuilderArtifactType();
+  registerCodeExecArtifactType(); // a registered NON-canvas type (the non-canvas case)
 });
 
 async function emitCanvasArtifact(runId: string, nodeId: string, tenantId = TENANT) {
@@ -34,14 +45,15 @@ async function emitCanvasArtifact(runId: string, nodeId: string, tenantId = TENA
 describe('host.canvas ownerSubject (additive, R6)', () => {
   it('scopes private artifact copies by caller and preserves repeat opening within that scope', async () => {
     const artifact = await emitCanvasArtifact('film-scope-run', 'deliver');
-    if (!artifact) throw new Error('Artifact was not persisted');
+    expect(artifact?.artifactId).toEqual(expect.any(String));
     const a = { canvasTypeId: 'canvas.app-builder', ownerSubject: { kind: 'user' as const, id: 'user:a' }, idempotencyScope: 'org-1:user:a' };
     const b = { ...a, ownerSubject: { kind: 'user' as const, id: 'user:b' }, idempotencyScope: 'org-1:user:b' };
     const first = await seedCanvasFromArtifact(TENANT, 'film-scope-run:deliver', a);
     expect(first?.ownerSubject).toEqual(a.ownerSubject);
     expect((await seedCanvasFromArtifact(TENANT, 'film-scope-run:deliver', a))?.canvasId).toBe(first?.canvasId);
     const other = await seedCanvasFromArtifact(TENANT, 'film-scope-run:deliver', b);
-    expect(other?.canvasId).not.toBe(first?.canvasId); expect(other?.ownerSubject).toEqual(b.ownerSubject);
+    expect(other?.ownerSubject).toEqual(b.ownerSubject);
+    expect(other?.canvasId).not.toBe(first?.canvasId);
   });
   it('round-trips an owning project Subject; absent ⇒ tenant-scoped as before', async () => {
     const owned = await createCanvasForTenant(TENANT, { canvasTypeId: 'canvas.app-builder', name: 'A', ownerSubject: { kind: 'project', id: 'proj-1' }, initialState: { x: 1 } });
@@ -89,6 +101,14 @@ describe('seedCanvasFromArtifact (R1)', () => {
     const res = await persistRunArtifact({ tenantId: TENANT, runId: 'run-4', nodeId: 'node-1', role: 'deliverable', now: new Date().toISOString(), output: { text: 'plain prose' } });
     expect(res?.artifactId).toBeTruthy();
     expect(await seedCanvasFromArtifact(TENANT, 'run-4:node-1')).toBeNull();
+    // A TYPED non-canvas artifact with a JSON-object body: here the `canvas.` prefix
+    // check is the only guard standing (an untyped row also fails `!artifactTypeId`).
+    await persistRunArtifact({
+      tenantId: TENANT, runId: 'run-4', nodeId: 'node-2', role: 'deliverable', now: new Date().toISOString(),
+      output: { artifact: { artifactTypeId: 'code.execution-result', payload: { exitCode: 0, stdout: 'ok', stderr: '' } } },
+    });
+    expect((await getRunArtifact('run-4:node-2'))?.artifactTypeId).toBe('code.execution-result');
+    expect(await seedCanvasFromArtifact(TENANT, 'run-4:node-2')).toBeNull();
   });
 
   it('returns null for an absent artifact', async () => {

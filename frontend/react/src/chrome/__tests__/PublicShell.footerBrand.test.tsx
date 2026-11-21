@@ -16,6 +16,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+// The configured brand, not the stock name: an adopter's build (VITE_BRAND_PRODUCT_NAME) runs this suite too.
+import { brand } from '../../brand/brand.js';
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -59,7 +61,7 @@ describe('PublicShell grouped footer brand column + bottom bar (ADR 1056)', () =
     expect(cta.classList.contains('btn')).toBe(true);
     const brandCol = footer.querySelector('.app-footer__brand-col')!;
     // The home link carries the brand name as its accessible name (logo art is decorative).
-    expect(within(brandCol as HTMLElement).getByRole('link', { name: 'OpenWOP' }).getAttribute('href')).toBe('/');
+    expect(within(brandCol as HTMLElement).getByRole('link', { name: brand.productName }).getAttribute('href')).toBe('/');
     expect(hrefs(brandCol)).toEqual(['/', '/p/start']);
     // Only one CTA renders, even though three pages set one.
     expect(within(footer).queryByRole('link', { name: 'Book a call' })).toBeNull();
@@ -89,7 +91,7 @@ describe('PublicShell grouped footer brand column + bottom bar (ADR 1056)', () =
       const footer = await renderWith(SITE);
       await within(footer).findByRole('link', { name: 'Start free' });
       const bottom = footer.querySelector('.app-footer__bottom')!;
-      expect(bottom.querySelector('.app-footer__copyright')?.textContent).toBe('© 2031 OpenWOP');
+      expect(bottom.querySelector('.app-footer__copyright')?.textContent).toBe(`© 2031 ${brand.productName}`);
       const extras = within(bottom as HTMLElement).getByRole('navigation', { name: 'Footer extras' });
       // Group order (Company before Legal), then order; each keeps its nav label.
       expect(within(extras).getAllByRole('link').map((a) => [a.textContent, a.getAttribute('href')]))

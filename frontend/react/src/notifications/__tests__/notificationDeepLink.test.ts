@@ -2,10 +2,19 @@
  * ADR 0336 Rec Phase 3 — inbox deep-link derivation (DL-T-1b) + the FE↔BE
  * URL round-trip (DL-C-3). These pin the resolution the `/inbox` page depends
  * on: the emit sites build `/inbox?approval=<encoded>`, and the page must parse
- * that back to the right row AND pick a tab that actually shows it.
+ * that back to the right row AND pick a tab that actually shows it. ADR 1125 D4
+ * (tabs Needs you / Updates / Archived): every row is on exactly one tab, and a
+ * finished request (`metadata.resolution`, ADR 1114) moves to Updates.
+ *
+ * Sabotage-witnessed (wave 119 `w119g4-dl-*`): dropping either `link.x &&` empty
+ * guard, matching ids loosely, the archived short-circuit in either function, the
+ * Needs you / Updates split, the resolution check in `isActionNeeded`, a missing
+ * param's '' default, and an emit site that stops encoding the id each turn a case
+ * red. The `typeof … === 'string'` guard is an equivalent mutant here: `42 === '42'`
+ * is already false under `===`.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -66,10 +75,10 @@ describe('canonicalInboxTabFor', () => {
   it('routes archived rows to the archived tab', () => {
     expect(canonicalInboxTabFor(notif({ status: 'archived' }))).toBe('archived');
   });
-  it('routes an action-needed row to action-needed', () => {
+  it('routes an open request to Needs you (ADR 1125 D4)', () => {
     expect(canonicalInboxTabFor(notif({ type: 'openwop-app.workflow.approval-needed' }))).toBe('needs-you');
   });
-  it('routes any other non-archived row to all', () => {
+  it('routes any other non-archived row to Updates (ADR 1125 D4)', () => {
     expect(canonicalInboxTabFor(notif({ type: 'agent.escalation' }))).toBe('updates');
     expect(canonicalInboxTabFor(notif({ type: 'workflow.completed' }))).toBe('updates');
   });
@@ -105,18 +114,40 @@ describe('FE↔BE round-trip (DL-C-3)', () => {
   // The other side is READ, not copied: every backend emit site must build the
   // deep link with this exact template, so `beActionUrl` below is what they emit.
   const BACKEND = join(dirname(fileURLToPath(import.meta.url)), '../../../../../backend/typescript/src');
-  const EMIT_SITES = [
+  /** The emit sites known when this was written — a floor, not the list: the case
+   *  below FINDS every site, because a hand list missed `features/email/sendApproval.ts`. */
+  const KNOWN_EMIT_SITES = [
     'host/escalationNotify.ts',
     'host/approvalSla.ts',
     'features/assistant/actionApproval.ts',
     'features/claude-code/mcpTools.ts',
+    'features/email/sendApproval.ts',
   ];
   const beActionUrl = (approvalId: string): string => `/inbox?approval=${encodeURIComponent(approvalId)}`;
 
+  /** Every non-test backend source file, relative to BACKEND, `/`-separated. */
+  function backendSources(dir = BACKEND, rel = ''): string[] {
+    const out: string[] = [];
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) { if (e.name !== '__tests__') out.push(...backendSources(join(dir, e.name), r)); }
+      else if (/\.ts$/.test(e.name) && !/\.test\.ts$/.test(e.name)) out.push(r);
+    }
+    return out;
+  }
+
   it('every backend emit site builds `/inbox?approval=<encodeURIComponent(id)>`', () => {
-    for (const site of EMIT_SITES) {
-      const src = readFileSync(join(BACKEND, site), 'utf8');
-      expect(src, site).toMatch(/actionUrl: `\/inbox\?approval=\$\{encodeURIComponent\([\w.]+\)\}`/);
+    const LINK = '/inbox?approval=';
+    // One read of ~2,300 files (~30 MB at 5037babf89; 6 links in 5 files).
+    const sites = backendSources()
+      .map((f) => ({ f, src: readFileSync(join(BACKEND, f), 'utf8') }))
+      .filter(({ src }) => src.includes(LINK));
+    // Two-sided: every known site is still found (a renamed or moved file cannot drop out).
+    for (const site of KNOWN_EMIT_SITES) expect(sites.map(({ f }) => f), site).toContain(site);
+    for (const { f, src } of sites) {
+      // EVERY occurrence in the file, not "some line matches": the id must be encoded.
+      const bad = src.split(LINK).slice(1).filter((rest) => !/^\$\{encodeURIComponent\([\w.]+\)\}`/.test(rest));
+      expect(bad, f).toEqual([]);
     }
   });
 

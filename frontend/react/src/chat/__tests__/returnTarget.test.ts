@@ -1,8 +1,16 @@
 /**
- * returnTarget seam tests (ADR 0334 5b-2) — the chat return-handoff: staging a
- * return-target, the subscribable snapshot, and the one-shot pending-apply.
+ * returnTarget seam tests (ADR 0334 5b-2, ADR 1055 D5) — the chat return-handoff:
+ * staging a return-target, the subscribable snapshot, the one-shot pending-apply,
+ * the non-consuming peek, and the agent binding that decides which replies offer
+ * "Apply" (MessageBubble reads `appliesTo`; DocumentEditorSurface peeks first).
+ *
+ * Sabotage that turns these red (returnTarget.ts): a fresh copy from
+ * getReturnTarget, clear without notify, a no-op unsubscribe, take that does not
+ * clear, peek that consumes, an agent check that ignores the bound agent, or an
+ * unbound target compared by agent id (the last needs a NON-undefined message
+ * agent: with `undefined` on both sides the comparison holds anyway).
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import {
   stageReturnTarget, getReturnTarget, clearReturnTarget, subscribeReturnTarget,
   stagePendingApply, takePendingApply, peekPendingApply, appliesTo, __resetReturnTarget, type ReturnTarget,
@@ -23,14 +31,16 @@ describe('returnTarget', () => {
   });
 
   it('notifies subscribers on stage + clear, stops after unsubscribe', () => {
-    const fn = vi.fn();
-    const off = subscribeReturnTarget(fn);
+    // Record the snapshot each notification sees: a subscriber must read the NEW
+    // state (what useSyncExternalStore re-renders with), not merely be called.
+    const seen: (ReturnTarget | null)[] = [];
+    const off = subscribeReturnTarget(() => { seen.push(getReturnTarget()); });
     stageReturnTarget(T);
     clearReturnTarget();
-    expect(fn).toHaveBeenCalledTimes(2);
+    expect(seen).toEqual([T, null]);
     off();
     stageReturnTarget(T);
-    expect(fn).toHaveBeenCalledTimes(2);
+    expect(seen).toEqual([T, null]);
   });
 
   it('hands the pending-apply back exactly once (one-shot)', () => {
@@ -55,7 +65,11 @@ describe('returnTarget', () => {
     expect(appliesTo(bound, 'agent.writer')).toBe(true);
     expect(appliesTo(bound, 'agent.other')).toBe(false);
     expect(appliesTo(bound, undefined)).toBe(false);
-    expect(appliesTo(T, undefined)).toBe(true); // an unbound target keeps the old behaviour
+    // An unbound target keeps the old behaviour: every assistant reply offers Apply,
+    // including one from a named agent (`undefined` alone cannot tell an id
+    // comparison apart, since undefined === undefined).
+    expect(appliesTo(T, undefined)).toBe(true);
+    expect(appliesTo(T, 'agent.other')).toBe(true);
   });
 });
 

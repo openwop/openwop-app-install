@@ -468,6 +468,14 @@ describe('ADR 0439 — feature dependency graph integrity', () => {
     //    standing reason: `dependsOn` is a disable-LOCK. Off-leg: with notebooks off,
     //    `POST /episodes`, `/retry` and the `produce` tool refuse typed
     //    (`notebooks_disabled`), pinned by podcasts-episode-access.test.ts.
+    // +1 inside the existing slack, bound unchanged (#5928 ask 2):
+    //  - `media → entities`: media registers store indexes on `entities/systemIndex.ts`
+    //    (the counter + keyset index commerce already uses, ADR 1110) for its per-org
+    //    caps and paged lists. It is a library module with no toggle check: it indexes
+    //    media's OWN rows in the shared index tables and never reads an entity record,
+    //    so it works with the entities feature off. UNDECLARED for the standing reason:
+    //    `dependsOn` is a disable-LOCK. Off-leg: media-org-indexed-reads.test.ts runs
+    //    the gate and the paged lists with entities at its default toggle.
     ).toBeLessThanOrEqual(122);
   });
 });

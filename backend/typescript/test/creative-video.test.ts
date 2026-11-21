@@ -12,6 +12,13 @@
  * model, and when the job id stops being derived from the request hash (replay
  * re-submits). A completed job returns early in BOTH `runGeneration` and
  * `finalize` (a recorded double guard), so the replay probe targets `jobIdFor`.
+ *
+ * Re-graded wave 118 (ADR 1051 P1): the budget gate is now a reservation taken
+ * before the submit (`reserveMediaBudget`), and the fixtures carry the D5 likeness
+ * consent and a connection (D7). Also red when the job id drops the tenant, when
+ * content-hash dedup is skipped, when clearJobsForAsset stops deleting, when
+ * resolveVideoJob stops polling, or when heygen/runway stop being adapterOnly. The
+ * consent and connection gates are fixtures here, not claims (adr1051-* tests).
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -154,6 +161,7 @@ describe('creative-video — replay/idempotency + budget', () => {
     const second = await generateVideo(deps('t5', 'o1'), { tenantId: 't5', orgId: 'o1', script: 'Retry me', avatarId: 'av1', createdBy: 'u1', likenessConsent: CONSENT }, adapter);
     expect(second.status).toBe('completed');
     expect(assetOf(second)).toBeTruthy();
+    expect(adapter.submitCalls).toBe(2); // the released hash was re-submitted, once
   });
 
   it('a permanent (host-denied) download is TERMINAL — no eternal pending, no re-charge on retry', async () => {

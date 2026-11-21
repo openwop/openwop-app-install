@@ -32,6 +32,12 @@ vi.mock('../client/runsClient.js', async (importOriginal) => {
   const orig = await importOriginal<Record<string, unknown>>();
   return { ...orig, getCapabilities: caps.getCapabilities };
 });
+// ADR 1153 D6: the page also renders the analytics-choice section, which reads the
+// consent posture. That section is covered by consentPlacementAndChoices.test.tsx;
+// here the lane is unavailable, so it renders nothing and makes no network read.
+vi.mock('../features/site/useVisitorConsent.js', () => ({
+  useVisitorConsent: () => ({ decision: 'unknown', regime: undefined, choice: null }),
+}));
 
 /** Rendered only by the RESOLVED non-demo arm (literal en copy: an expectation
  *  imported from the catalog would move with it). */

@@ -22,7 +22,9 @@
  * Red when: the sweep is not registered at boot, ignores the cutoff or the hold,
  * or the knob; the eraser is not registered, matches by prefix or crosses
  * tenants; the owner leg is dropped from `eraseRelayOwnerSubject`; the table
- * loses its `tenant_id` teardown reach; the revoke route stops deleting.
+ * loses its `tenant_id` teardown reach; the revoke route stops deleting; (g) the
+ * `relay-outbound` sweep is not registered at boot (`hostSubjectErasers.ts`) or
+ * its window is not the device token lifetime (31-day egress kept, 29-day dropped).
  * Sabotage-witnessed 2026-11-04, one edit at a time, each turned exactly its
  * own case red: passing no held tenants to `pruneDeliveryLog` (a); erasing
  * `${key}5` instead of the key (b); dropping the owner leg's delete in

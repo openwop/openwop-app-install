@@ -8,6 +8,12 @@
  * unrelated error cannot satisfy it. Sabotage-witnessed (grade-tests w14): dropping
  * the root-object, root-type, node-type, text/marks/content type, title, node-count,
  * depth or embed-size check each turns its case red.
+ *
+ * Re-graded at grade-tests w117: each cap is pinned at its boundary (one over is
+ * refused, exactly at the cap is accepted), so a cap moved by one is red; and the
+ * node-field case fixtures use `paragraph`, since ADR 1055 D1 refuses a node type
+ * outside the closed schema before the field checks run (`p` would stop there).
+ * The closed-world checks themselves are in `test/adr1055-document-editor.test.ts`.
  */
 import { describe, it, expect } from 'vitest';
 import { validateDocumentDoc, MAX_NODES, MAX_DEPTH, MAX_TITLE, MAX_EMBED_HTML } from '../validateDocumentDoc.js';
@@ -37,7 +43,7 @@ describe('validateDocumentDoc', () => {
 
   it('rejects a non-"doc" root type', () => {
     const v = validateDocumentDoc(doc({ type: 'paragraph' }));
-    expect(v.errors.some((e) => e.path === 'content.type')).toBe(true);
+    expect(v.errors.map((e) => e.path)).toEqual(['content.type']);
   });
 
   it('rejects a node without a string type', () => {
@@ -48,26 +54,36 @@ describe('validateDocumentDoc', () => {
   it('rejects wrong-typed node fields (text/attrs/marks/content)', () => {
     const paths = (node: Record<string, unknown>) => validateDocumentDoc(doc({ type: 'doc', content: [node] })).errors.map((e) => e.path);
     expect(paths({ type: 'paragraph', text: 5 })).toEqual(['content.content[0].text']);
+    expect(paths({ type: 'paragraph', attrs: 'x' })).toEqual(['content.content[0].attrs']);
     expect(paths({ type: 'paragraph', marks: {} })).toEqual(['content.content[0].marks']);
     expect(paths({ type: 'paragraph', content: {} })).toEqual(['content.content[0].content']);
   });
 
   it('rejects an over-long title', () => {
     const v = validateDocumentDoc(doc({ type: 'doc', content: [] }, 'x'.repeat(MAX_TITLE + 1)));
-    expect(v.errors.some((e) => e.path === 'title')).toBe(true);
+    expect(v.errors.map((e) => e.path)).toEqual(['title']);
+    // Boundary: a title of exactly the cap is accepted.
+    expect(validateDocumentDoc(doc({ type: 'doc', content: [] }, 'x'.repeat(MAX_TITLE))).errors).toEqual([]);
   });
 
   it('rejects a document that exceeds the node-count cap (DoS guard)', () => {
-    const many = Array.from({ length: MAX_NODES + 5 }, () => ({ type: 'paragraph' }));
-    const v = validateDocumentDoc(doc({ type: 'doc', content: many }));
-    expect(v.errors.some((e) => e.path === 'content' && e.message.includes(`${MAX_NODES}-node limit`))).toBe(true);
+    // The root `doc` counts, so the root + MAX_NODES paragraphs is ONE node over the cap.
+    const paragraphs = (n: number) => Array.from({ length: n }, () => ({ type: 'paragraph' }));
+    const v = validateDocumentDoc(doc({ type: 'doc', content: paragraphs(MAX_NODES) }));
+    expect(v.errors).toEqual([{ path: 'content', message: `document exceeds the ${MAX_NODES}-node limit` }]);
+    // Boundary: exactly MAX_NODES nodes (the root + MAX_NODES - 1) are accepted.
+    expect(validateDocumentDoc(doc({ type: 'doc', content: paragraphs(MAX_NODES - 1) })).errors).toEqual([]);
   });
 
   it('rejects a document that exceeds the nesting-depth cap (DoS guard)', () => {
-    let node: Record<string, unknown> = { type: 'paragraph' };
-    for (let i = 0; i < MAX_DEPTH + 5; i++) node = { type: 'blockquote', content: [node] };
-    const v = validateDocumentDoc(doc({ type: 'doc', content: [node] }));
-    expect(v.errors.some((e) => e.message.includes(`exceeds ${MAX_DEPTH} levels`))).toBe(true);
+    // `wraps` blockquotes around a paragraph, under the root: the paragraph sits at depth wraps + 1.
+    const nested = (wraps: number) => {
+      let node: Record<string, unknown> = { type: 'paragraph' };
+      for (let i = 0; i < wraps; i++) node = { type: 'blockquote', content: [node] };
+      return validateDocumentDoc(doc({ type: 'doc', content: [node] })).errors.map((e) => e.message);
+    };
+    expect(nested(MAX_DEPTH)).toEqual([`content nesting exceeds ${MAX_DEPTH} levels`]); // depth MAX_DEPTH + 1
+    expect(nested(MAX_DEPTH - 1)).toEqual([]); // depth MAX_DEPTH: at the cap, accepted
   });
 
   it('accepts chart + embed blocks, and caps oversized embed HTML (2b-3)', () => {
@@ -79,6 +95,10 @@ describe('validateDocumentDoc', () => {
     const huge = validateDocumentDoc(doc({ type: 'doc', content: [
       { type: 'embedBlock', attrs: { html: 'x'.repeat(MAX_EMBED_HTML + 1) } },
     ] }));
-    expect(huge.errors.some((e) => e.path.endsWith('.attrs.html'))).toBe(true);
+    expect(huge.errors.map((e) => e.path)).toEqual(['content.content[0].attrs.html']);
+    // Boundary: HTML of exactly the cap is accepted.
+    expect(validateDocumentDoc(doc({ type: 'doc', content: [
+      { type: 'embedBlock', attrs: { html: 'x'.repeat(MAX_EMBED_HTML) } },
+    ] })).errors).toEqual([]);
   });
 });

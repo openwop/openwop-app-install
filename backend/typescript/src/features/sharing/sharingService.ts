@@ -9,7 +9,7 @@
  * @see docs/adr/0013-sharing.md
  */
 
-import { designSectionMarkdown } from '../cms/designSections.js';
+import { designSectionMarkdown, heroQueueMarkdown } from '../cms/designSections.js';
 import { pricingPlans } from '../cms/pricingPlans.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { createLogger } from '../../observability/logger.js';
@@ -1790,6 +1790,9 @@ function cmsSectionsToMarkdown(sections: Section[]): string {
           ...head(),
           ...(str('subheading') ? [str('subheading'), ''] : []),
           str('url') ? `[${str('label')}](${str('url')})` : `**${str('label')}**`,
+          // #6150 — the queue card's rows, and the photo's words (media has no public URL here).
+          ...(heroQueueMarkdown(d.queue) ? ['', heroQueueMarkdown(d.queue)] : []),
+          ...(str('imageToken') && str('alt') ? ['', `*${str('alt')}*`] : []),
         ].join('\n'));
         break;
       case 'columns': {

@@ -86,6 +86,8 @@ default in `src/brand/defaults.ts`.
 | `VITE_BRAND_INSTANCE_NAME` | `OpenWOP` | Workspace / instance name shown in the sidebar chrome |
 | `VITE_BRAND_HOME_URL` | `https://openwop.dev/` | "Learn more" link (privacy footer) |
 | `VITE_BRAND_PRIVACY_URL` | `/privacy` | Where the app's own "Privacy" links go (footers, demo banner, visitor-consent banner). An app path, e.g. `/p/privacy` for a CMS policy page; anything else falls back to `/privacy`. The built-in `/privacy` route still exists, so redirect it at the edge if you replace it |
+| `VITE_BRAND_CONSENT_CLEARANCE` | *(unset: pad)* | `off` = while the visitor-consent banner shows, the page gets no bottom padding, so its height does not change and the banner lies over the page foot until closed (ADR 1153 D5). Unset, the page is padded by the banner's height so its end can scroll clear |
+| `VITE_BRAND_CONSENT_FOOTER` | *(unset: panel)* | `link` = the footer's "Privacy choices" is a link to the built-in `/privacy` page's `#privacy-choices` section instead of reopening the banner (ADR 1153 D7). Applies only while `VITE_BRAND_PRIVACY_URL` is unset (`/privacy`); with another privacy page it stays the button. An adopter policy page can render the same section with `VisitorConsentChoices` |
 | `VITE_BRAND_REPO_URL` | `https://github.com/openwop/openwop` | Source-repo link (privacy footer) |
 | `VITE_BRAND_THEME_COLOR` | `#1a1a17` | PWA manifest + mobile browser chrome color |
 | `VITE_BRAND_DEFAULT_THEME` | `system` | Initial app theme when the visitor has not chosen one (`system`, `light`, or `dark`) |

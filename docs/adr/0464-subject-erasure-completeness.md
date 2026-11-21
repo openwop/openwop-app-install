@@ -580,3 +580,191 @@ another workspace's manager gets 404 on a real id and it is unchanged. Six sabot
 probes, each red: the route unwired, the scope lowered to `workspace:write`, the
 tenant/org check dropped, the code wiped too, the idempotence guard dropped, the PII
 declaration dropped (census red).
+
+**CHAN-F19 #6 (2026-11-18): `portability:import-claims`, baseline 105 → 104 (ceiling 104).**
+Portability import (RFC 0098, ADR 0039) claims each item's dedup key once, and the claims
+are permanent. A PRIVATE prompt's key is `${tenantId}:prompt:${orgId}:${owner}:${name}`
+(grade-code P61CD-5 made it per importer), so it holds the importer's `User.userId` and
+the name of a prompt they imported. No eraser reached it.
+- *The eraser* (`erasePortabilitySubject`, `portability/portabilityService.ts`, registered
+  by the portability feature): deletes the subject's private-prompt claims in the tenant.
+  Deleted, not scrubbed: a claim only blocks a duplicate import, and the find-existing
+  check before each claim still dedupes. Tenant-scoped (a `${tenantId}:prompt:` prefix read).
+- *Kept:* roster claims (a persona slug), schedule claims (a job id) and org-visible prompt
+  claims (`${orgId}:${name}`) name no person.
+- *The census signal:* new private claims record `ownerUserId` (USER_ID_FIELD). Claims
+  written before that match on the `:user:…:` key segment.
+- *Manifest:* a new eraser id, so `erasePortabilitySubject` joins the WF-CONS-2 manifest
+  with its ledger edge.
+Tests: `test/chan-f19-portability-import-claims-erasure.test.ts` (the real app's eraser set
+through `eraseSubject`, imports through `applyImport`): the subject's new and legacy claims
+deleted, another person's private claim and the org-visible claim kept, the same person in
+another workspace kept, `ownerUserId` set only on private claims.
+
+**CHAN-F19 #7 (2026-11-18): `crm:lead-rr`, baseline 104 → 103 (ceiling 103).**
+Lead routing (ADR 0954 D5) keeps one pointer row per pool. A rule's round-robin pool is
+keyed by the rule id; an owner's CAPACITY pool is keyed `capacity:<tombstoneId(tenant,
+owner)>`, a tenant-salted hash of the member subject that re-identifies them, holding the
+pending reservations counted against their lead cap. Reservations have no time expiry, so
+the row was permanent, and no eraser reached it.
+- *The leg* (`eraseLeadRoutingOwnerSubject`, `crm/leadIntel/routing.ts`), run by crm's
+  member eraser `eraseCrmTaskAssignees` beside the routing-policy and SLA legs: deletes the
+  subject's capacity pools in every org of the tenant, matched over the same key forms as
+  `eraseRoutingPolicySubjects`. Deleted, not scrubbed: an erased member owns no new leads,
+  and the policy leg already removes them from every rule pool. Rule pointers are kept.
+- *No re-creation:* routing's `eligible` refuses an erasure-tombstoned subject. A
+  territory's member list is outside crm and can still name the person. The decision
+  commit already refuses a round that names an erased subject (409
+  `routing_subject_erased`), but the capacity pool is reserved before that commit, so
+  without this guard a later round would write the pool back and then fail.
+- *The census signal:* `declarePiiFields('crm:lead-rr', ['poolId'], { maskGloballyByFieldName:
+  false })` (D2). Not masked by name: a rule pool's `poolId` is a rule id.
+- *Manifest:* no new eraser id; the leg runs inside an existing one.
+Tests: a case in `test/adr0954-p2-lead-routing.test.ts` that routes real leads (so the pools
+are the ones `reserveOwner` writes) and erases one owner through `eraseSubject`: their pools
+in two orgs are deleted, another owner's pool and every other row are kept; then a territory
+that still lists the erased owner gets a new lead, the round is refused, and the erased
+owner's pool stays gone.
+
+**CHAN-F19 #8 (2026-11-18): `notebook-source-summary`, baseline 103 → 102 (ceiling 102).**
+A notebook source summary (ADR 1103) is model text derived from one KB source, keyed
+tenant:notebook:source, and it can quote the people in that source.
+- *What already reached it:* kb's eraser deletes the subject's own documents (the
+  subject-keyed ids) through `deleteDocument`, which always fires the KB lifecycle seam,
+  and notebooks' `onNotebookSourceChanged` drops that source's summary and level (ADR 1103
+  D7). But the seam is best-effort: a consumer failure is logged and swallowed, so a failed
+  drop left the summary while the DSAR reported success.
+- *The leg* (`eraseNotebookSourceStateSubject`, `notebooks/notebooksService.ts`, registered
+  by the notebooks feature): strict, runs after kb's eraser (kb registers at module load,
+  notebooks at feature boot; the fan-out is sequential), and deletes every summary and
+  level in the tenant whose source document no longer exists. Not keyed by the subject: it
+  cannot tell whose a vanished source was, and such a summary has no reader.
+- *Scope, stated:* a summary of a document the subject does not own, which only mentions
+  them, is kept, as kb keeps the document. That is kb's documented residual (the "KNOWN
+  RESIDUAL" in the `eraseSubjectKb` docblock, `kb/kbService.ts`); tenant teardown is the
+  backstop. The census "covered" entry says exactly this.
+- *Census:* `declarePiiFields('notebook-source-summary', ['summary'], { maskGloballyByFieldName:
+  false })` (D2), and EXPECTED_COVERED. *Manifest:* a new eraser id, with its ledger edge.
+Tests: `test/chan-f19-notebook-source-summary-erasure.test.ts` (real app, `eraseSubject`):
+the subject's own document's summary and level deleted and an org document's summary that
+mentions them kept; with the seam consumer throwing, the strict leg still deletes it;
+another tenant's row untouched.
+
+**CHAN-F19 #9 (2026-11-18): the contact's name in deals and companies; `crm:dealkeyclaim`
+and `crm:companykeyclaim` reviewed, baseline 102 → 100 (ceiling 100).**
+Reading the two claim stores found a larger leak beside them. Convert titles a deal
+`<company> — <contact name>`, and when no company name was given it named the new company
+after the contact (`companyName ?? contact.company ?? contact.name`). crm's eraser
+anonymizes the contact but keeps deals and companies as the org's records (the header's
+anonymize-don't-destroy rule), so the erased person's name survived in both.
+User decisions (2026-11-18): (a) anonymize a company named after the contact, and stop
+naming new companies after the person; (b) in deals linked to the contact, replace the
+contact's exact former name in the title.
+- *The leg* (5c in `eraseCrmSubject`, before leg 6): for every former name on the contact's
+  chain (the contact and its merge tombstones), `redactNamesInDealTitles` replaces each exact
+  occurrence in the titles of deals linked to the chain, and `redactCompaniesNamedAfter`
+  renames a company those deals point at whose name IS that name. CAS per row. It MUST run
+  before leg 6, which erases the names it reads (the fold-in B2 retry trap).
+- *Stop:* a convert with no company name now names the company after the business email
+  domain, else `UNNAMED_COMPANY`; never the person.
+- *Known limit of (b):* the match is exact and case-sensitive, so a title a user edited to
+  spell the name in another case ("MARIA SILVA") is not matched. A same-named company with no
+  deal of the subject, and another contact's deal naming them, are out of scope.
+- *Census:* `crm:dealkeyclaim` (opaque company and contact ids) and `crm:companykeyclaim`
+  (business domain or given company name; never written for a name-less, free-mail convert)
+  are reviewed. No new eraser id.
+Tests: `test/chan-f19-crm-company-deal-names-erasure.test.ts` (real app, `eraseSubject`):
+company renamed and both title occurrences replaced with amount and links kept; another
+contact's deal and an unlinked same-named company untouched; the different-case title left
+(the limit, pinned); a name-less convert names the company `UNNAMED_COMPANY`.
+
+**CHAN-F19 #10 (2026-11-19): a connection's child rows; `service-desk:legacy-none`
+reviewed, baseline 100 → 97 (ceiling 97).**
+The DSAR revokes the subject's USER-scoped connections (ADR 0780 D4). Their children went
+only through revoke consumers: `connections-children` (`connections:pairing`,
+`connections:inbound-session`) and `channel-ingress` (`purgeLane`, which deletes the lane's
+`channel-ingress:settings`). The lifecycle seam swallows a consumer's failure, and once the
+parent row is gone a retry cannot find the child, so one failed delete orphaned it for good.
+The settings row is not subject-free, as the channel-ingress eraser's header had said: on a
+connection lane `botHandle` is the connected account's handle, and a person may connect
+their own account (a Telegram or WhatsApp number is often a person's own).
+- *Connections:* `eraseSubjectConnections` now purges each connection's child pointers
+  FIRST and strictly (`purgeConnectionChildren`, set from `feature.ts` through
+  `setConnectionChildPurge`, because importing the child stores into the service would
+  close the `connectionsService → inboundWebhooks` cycle). Both deletes are attempted; a
+  failure is reported and the parent is kept, so the retry finds it again.
+- *Channel settings:* `eraseChannelIngressSubject` deletes a connection lane's settings when
+  the lane's connection is the subject's, or is already gone (the consumer's residue; an
+  orphan is housekeeping and not counted). Org/workspace connections keep theirs: that
+  account is the workspace's, the scope ADR 0780 D4 draws. A relay lane's row holds no
+  handle (the route refuses one), only an agent id and a model, so it stays.
+- *Census:* `connections:pairing` and `channel-ingress:settings` are EXPECTED_COVERED;
+  `service-desk:legacy-none` is reviewed (the kernel adapter's legacy seam for tickets,
+  which were born on the kernel: nothing writes it). No new eraser id.
+Tests: `test/chan-f19-connection-children-erasure.test.ts` (real app, `eraseSubject`): the
+subject's connection takes its pairing, inbound session and lane settings while another
+user's and an org connection keep theirs; a failed pairing or inbound-session delete is
+reported and keeps the parent, and the retry removes it (each child witnessed on its own);
+the lane settings go even when the revoke itself fails; orphaned settings are deleted and a
+relay lane's are kept. Eleven sabotage probes, all red.
+
+**CHAN-F19 #11 (2026-11-19): the builder-pair room index; the two chat-widget session
+counters reviewed, baseline 97 → 94 (ceiling 94).**
+- *`builder-pair:room`:* a room index row lists the suggestion keys shared with a
+  workflow's room, and each key is `tenant:<userId>:<conversationId>`, so it carries the
+  requester's id. The eraser unlisted a key only while its suggestion existed. Suggestions
+  age out after a day, but a room other members keep writing to stays fresh, so the erased
+  person's stale key stayed (up to 50 per room). `eraseBuilderPairSubject` now strips, after
+  its suggestion loop, every room key whose suggestion is gone, and deletes a room left
+  empty. It decides by the suggestion row, never by parsing the key, because ids can hold
+  `:`. Another member's dangling key goes too; it lists nothing. The eraser also matched
+  with `===`, so a `user:`-spelled id was missed; it now matches every `subjectKeyForms`
+  spelling. `keys` is declared PII.
+- *`chatwidget:session`, `chatwidget:anonautowrite:session`:* each holds a hash of the
+  visitor's random browser session id (the raw id is never stored, CW68C-2), an integer
+  count, `tenantId` and `updatedAt`, with a 2-day default-on age-out. No person identifier,
+  so no DSAR can match them. Rows from before A5 have no `updatedAt`, so the age-out skips
+  them, and they may hold the raw session id: a pseudonymous online identifier, not a person
+  identifier, that no DSAR can match either. Deleting them would be a data migration, which
+  is left to the user.
+Tests: `test/chan-f19-builder-pair-room-erasure.test.ts` (real app, `eraseSubject`): the
+subject's aged-out room key is stripped while a peer's live one is kept and still lists; a
+`user:`-spelled context, suggestion and room key go when the DSAR names the bare id; an
+emptied room is deleted. Nine sabotage probes, all red.
+
+**CHAN-F19 #12 (2026-11-19): a person in feature-toggle beta cohorts; the last F19 store,
+baseline 94 → 93 (ceiling 93).**
+A toggle row's `betaCohort` admits tenant ids and principal ids (a SAML subject can be an
+email address, which is why `host/featureToggles/audit.ts` records cohorts as a size), and
+`updatedBy` names the saving operator. The host `feature-toggle` store was ledgered
+"no-subject" in `subject-erasure-coverage.test.ts`. That was false: an erased person stayed
+in every closed beta, and `analytics:replay-toggle-writes` held the same ids in its pending
+copies of written rows (for the 10-minute settle window and the next hourly sweep).
+User decisions (2026-11-19): remove the person from every beta cohort (they lose
+closed-beta access), and strip them from the pending copies.
+- *Which ids:* the cohort is compared with the PRINCIPAL id (`toggleSubjectOf` sets
+  `userId = req.principal.principalId`), while a DSAR names the app user id. So
+  `toggleSubjectIds` takes the key's `subjectKeyForms` plus the principal on the User row,
+  HOME TENANT ONLY (the `actingUserIds` rule, ADR 0780 D2 correction).
+- *Host leg:* `eraseFeatureToggleSubject` (host boot list) rewrites every stored row that
+  names the subject through the toggle write path (intents prepared, CAS, listeners
+  notified), so the replay fence sees it. `updatedBy` becomes `user:[erased]`.
+- *The trap:* `resolveConfig` reads an EMPTY cohort as an OPEN beta. An emptied cohort
+  keeps `ERASED_COHORT_MEMBER` (`[erased]`, the host redaction sentinel) instead, so a
+  closed beta never opens. Cohort entries are compared only with a tenant id and a
+  principal id, and no IdP lane issues `[erased]`. No admin screen lists cohort members
+  (the client only types the field; the audit shows a size), so nothing presents the
+  sentinel as a person.
+- *Copies:* `eraseReplayToggleWriteSubject` (analytics) applies the same rule to each
+  pending write by CAS, so a row the sweep just deleted is never written back. Narrowing a
+  cohort can only turn a tenant's replay off, never on, so the fence errs safe.
+- *SCOPE, stated:* the toggle rows are host-global, so the person leaves every cohort, not
+  only the erasing tenant's. A principal id is not issuer-qualified (`scim:jsmith` from two
+  IdPs is one string), so a same-string principal from ANOTHER IdP loses its beta access
+  too. That is the cost of the decision; the alternative left the erased person admitted.
+- *Census:* host `feature-toggle` moves from REVIEWED_EXEMPT to ERASED;
+  `analytics:replay-toggle-writes` declares `rows` PII and is covered. Two new eraser ids.
+Tests: `test/chan-f19-toggle-cohort-erasure.test.ts` (real app, `eraseSubject`): the
+principal leaves the cohort and others stay, with `updatedBy` redacted; an emptied cohort
+keeps the sentinel and the beta stays closed; the alias is home-tenant only; a pending
+replay copy no longer holds the principal.

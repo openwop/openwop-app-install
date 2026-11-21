@@ -69,6 +69,23 @@ package's own modules at the pinned version.
 | P3 | The same for the backend lane, after its own 20 compared gates. | backend selection | proposed |
 | P4 | Retire `scripts/tracegate.mjs`, the recorder, the i18n tracker and the vendored copies. `tracegate-daemon.sh` keeps its open-PR pre-gating (Gaps), calling the package. | none by itself | proposed |
 
+> **CORRECTED 2026-11-18 (P1 exit, again) — 44 more compared gates counted for nothing,
+> and the pin moves to `tracegate-ci@0.10.4`.** MEASURED on `compare-frontend.tsv`: all 44
+> `basis = predict` rows after the 2026-11-11 recording had the package selecting every
+> file (1,307–1,319 of 1,319). So none count toward the 20, because a whole-lane selection
+> is trivially a superset. `reasons-*.tsv` named the cause: every footprint read
+> `lockfile changed`. The frontend `package-lock.json` changed three times in that window
+> (v0.13.0, v0.14.0, v0.15.0). Each was a release bump of the root package's OWN version,
+> which changes no installed package. 0.10.1 treated any lockfile hash change as
+> invalidating, and its dependency rule could not help, because these footprints carried
+> no package lists. **0.10.4** treats a lockfile change that moves no installed package as
+> no dependency change (no package lists or bar needed), and waives a version-only
+> `package.json` edit from the global rule. A test that reads either file itself still
+> runs. 0.10.4 also maps modules under Vitest 5.1.1, which inlines source maps only with
+> an inspector open. So a release no longer resets the count. The 2026-11-17 recording
+> (fe77b6204) stands. The P1 exit still counts only `basis = predict` rows in which the
+> package selected fewer than all files.
+
 > **CORRECTED 2026-11-11 (P1 exit) — the first 24 compared gates compared nothing, and
 > don't count.** P1b's `shadow-compare` read the package's `selected.txt`. In shadow
 > the package writes the WHOLE lane there, because shadow runs everything. What it

@@ -115,9 +115,9 @@ const MAX = {
 } as const;
 
 /** Section layout for `columns` — how the public renderer lays the items out. */
-const COLUMN_LAYOUTS = ['cards', 'steps', 'stats', 'showcase', 'rows', 'prompts', 'dives', 'ruled', 'progress', 'list', 'tiles', 'panels', 'timeline', 'bento', 'marquee', 'features', 'flow', 'incidents', 'board', 'gallery'] as const; // ADR 1063 D3 — incidents; P2d — board; P2e — gallery
+const COLUMN_LAYOUTS = ['cards', 'steps', 'stats', 'showcase', 'rows', 'prompts', 'dives', 'ruled', 'progress', 'list', 'tiles', 'panels', 'timeline', 'bento', 'marquee', 'features', 'flow', 'incidents', 'board', 'gallery', 'split'] as const; // ADR 1063 D3 — incidents; P2d — board; P2e — gallery; ADR 1150 D1 — split
 /** Optional hero art direction. Absent preserves the original workflow motif. */
-const HERO_VISUALS = ['workflow', 'journey', 'run', 'film', 'image', 'none', 'plan', 'activity', 'hub', 'flow', 'receipt', 'apps', 'versus', 'fanout', 'phone', 'wall', 'tally', 'log', 'queue'] as const; // ADR 1080 D7 — queue
+const HERO_VISUALS = ['workflow', 'journey', 'run', 'film', 'image', 'video', 'none', 'plan', 'activity', 'hub', 'flow', 'receipt', 'apps', 'versus', 'fanout', 'phone', 'wall', 'tally', 'log', 'queue'] as const; // ADR 1080 D7 — queue; ADR 1150 D3 — video
 /** ADR 1047 — a feature card pill's state. Presentation of authored text: the
  *  pill's `label` is the words; the state's legend words render beside it. */
 const FEATURE_TAG_STATES = ['now', 'soon'] as const;
@@ -803,6 +803,15 @@ function richTextShot(d: Record<string, unknown>): Record<string, string> {
   return { imageToken, alt, ...(frameUrl ? { frameUrl } : {}), ...(caption ? { caption } : {}) };
 }
 
+/** #6150 — a photo behind a `cta` band. Alt text is required with a token. */
+function ctaPicture(d: Record<string, unknown>): Record<string, string> {
+  const imageToken = cleanOpaqueToken(d.imageToken, MAX.token);
+  if (!imageToken) return {};
+  const alt = optionalCleanContent(d.alt, MAX.alt, 'alt');
+  if (!alt) throw new OpenwopError('validation_error', 'cta.alt is required when it has an imageToken.', 400, {});
+  return { imageToken, alt };
+}
+
 /** ADR 1080 D12 — a photo beside a `card` form. Alt text is required with a token. */
 function formPicture(d: Record<string, unknown>): Record<string, string> {
   if (d.layout !== 'card') return {};
@@ -848,6 +857,29 @@ export const COMPARISON_STYLES: ReadonlySet<string> = new Set(['text']);
 // `VIDEO_LENGTH_RE` (ADR 0843) now lives in designSections.ts, shared with `films`.
 /** ADR 0843 — the hosts a `youtubeUrl` may name (the link reads "Watch on YouTube"). */
 const YOUTUBE_HOSTS = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be']);
+
+/**
+ * ADR 1150 D3 — the `video` hero's film and poster: a path on THIS site's own
+ * origin (`/media/reel.mp4`), never another origin. A background film autoplays
+ * on every visit, so an arbitrary URL from page content would make each visitor
+ * fetch from a host the operator never chose (tracking, hot-linking, mixed
+ * trust), and the SPA's `media-src 'self'` would block it anyway. Media-library
+ * tokens are deferred: `/assets/:token` serves no Range, which iOS Safari needs
+ * to play video (the podcasts precedent, `features/podcasts/publicRoutes.ts`).
+ * Anything else is a 400 on the base layer and dropped on a partial overlay.
+ */
+function heroVideoFields(d: Record<string, unknown>, partial: boolean): { videoSrc?: string; posterSrc?: string } {
+  const sameOrigin = (v: unknown, field: 'videoSrc' | 'posterSrc'): string | undefined => {
+    if (v === undefined || v === null || (typeof v === 'string' && v.trim() === '')) return undefined;
+    const path = typeof v === 'string' ? v.trim() : '';
+    if (path.length <= MAX.url && isInternalHref(path)) return path;
+    if (partial) return undefined;
+    throw new OpenwopError('validation_error', `hero.${field} must be a path on this site, such as /media/reel.mp4 (another origin is refused).`, 400, { field });
+  };
+  const videoSrc = sameOrigin(d.videoSrc, 'videoSrc');
+  const posterSrc = sameOrigin(d.posterSrc, 'posterSrc');
+  return { ...(videoSrc ? { videoSrc } : {}), ...(posterSrc ? { posterSrc } : {}) };
+}
 
 /**
  * ADR 0843 — a media URL a `video` section loads or links: https ONLY (never
@@ -1021,6 +1053,9 @@ function buildTypedSectionData(type: SectionType, d: Record<string, unknown>, pa
         ...(visual ? { visual } : {}),
         // ADR 1064 P3f(d) — up to four short notes pinned to the picture's corners.
         ...heroImageChips(d.chips),
+        // ADR 1150 D3 — a `video` visual's muted, looping background film and its
+        // poster, same-origin paths only. Kept only for that visual.
+        ...(visual === 'video' ? heroVideoFields(d, partial) : {}),
         ...(cta1 ? { ctaLabel: cta1, ctaUrl: safeLink(d.ctaUrl, MAX.url) } : {}),
         ...(cta2 ? { ctaLabel2: cta2, ctaUrl2: safeLink(d.ctaUrl2, MAX.url) } : {}),
         ...(ctaIcon2 ? { ctaIcon2 } : {}),
@@ -1205,6 +1240,10 @@ function buildTypedSectionData(type: SectionType, d: Record<string, unknown>, pa
         ...(align ? { align } : {}),
         // ADR 1062 D4 — a short line under the button ("No card needed").
         ...(optionalCleanContent(d.note, MAX.caption, 'note') ? { note: optionalCleanContent(d.note, MAX.caption, 'note') } : {}),
+        // #6150 — a photo behind the band (alt required), and the hero's queue card
+        // (ADR 1080 D7, same closed shape) beside the copy.
+        ...ctaPicture(d),
+        ...(cleanHeroQueue(d.queue) ? { queue: cleanHeroQueue(d.queue) } : {}),
       };
     }
     case 'columns': {

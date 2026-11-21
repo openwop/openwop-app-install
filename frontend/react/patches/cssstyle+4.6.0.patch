@@ -1,0 +1,12 @@
+diff --git a/node_modules/cssstyle/lib/CSSStyleDeclaration.js b/node_modules/cssstyle/lib/CSSStyleDeclaration.js
+--- a/node_modules/cssstyle/lib/CSSStyleDeclaration.js
++++ b/node_modules/cssstyle/lib/CSSStyleDeclaration.js
+@@ -273,7 +273,7 @@
+     }
+     const isCustomProperty = property.startsWith("--");
+     if (isCustomProperty) {
+-      this._setProperty(property, value);
++      this._setProperty(property, value, priority);
+       return;
+     }
+     property = asciiLowercase(property);

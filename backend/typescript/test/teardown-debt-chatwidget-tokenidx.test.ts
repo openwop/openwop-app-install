@@ -21,7 +21,10 @@
  *  2. WIRING — assert `feature.ts` registers the hook (comment-stripped, so a
  *     commented-out registration still fails — the "ratchet counts comments" class).
  *     BOTH comment forms are stripped: line-only stripping let a `/* … *\/`-commented
- *     registration pass (wave 26 probe). CEILING: no exported reader of the hook
+ *     registration pass (wave 26 probe); the shared scanner `helpers/stripComments`
+ *     (#5422) replaced the regex stripper. Re-probed wave 121 (w121g1-cw-*): the
+ *     trailing-colon prefix, the token-index delete, the purge walk's hook loop, and
+ *     a line- or block-commented registration. CEILING: no exported reader of the hook
  *     registry exists, so a source check is the honest limit short of a createApp boot.
  */
 import { readFileSync } from 'node:fs';

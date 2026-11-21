@@ -1,12 +1,20 @@
 /**
- * ART-2 — ArtifactWorkbench component coverage. Loads an artifact + its revisions by stable
- * id, renders the preview of the latest revision, exposes the five tabs, and surfaces a load
- * error. `artifactClient` is mocked so this is a pure component test.
+ * ART-2 / ADR 0069 — ArtifactWorkbench component coverage. Loads an artifact + its revisions
+ * by stable id, renders the preview of the latest revision (`latestRevisionId`, never the head
+ * of the list), exposes the five tabs, opens the ADR 0128 P5 ephemeral edit canvas, and
+ * surfaces a load error as friendly copy (ART-7). P9: the preview dispatch — untyped JSON and a
+ * typed review artifact with no workbench renderer read through the review layout; plain text
+ * keeps the workbench's own Markdown. `artifactClient` is mocked so this is a pure component test.
+ *
+ * Sabotage (w118g4-aw-*): picking `revs[0]`, rendering docked, dropping a TAB, hiding the
+ * editable bar, seeding the draft empty, a no-op Reset or Done, showing the raw exception,
+ * dropping the `{`/`[` JSON branch, dropping the typed id, or sending plain text through the
+ * review preview each turns its case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // ADR 1031 P2 — a fixture typed renderer (it was a product's outline type).
 import { TEST_OUTLINE_TYPE } from '../../reviews/__tests__/testOutlineRenderer.js';
-import { render, screen, cleanup, fireEvent } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
 
 vi.mock('../artifactClient.js', () => ({
   getArtifact: vi.fn(), listArtifactRevisions: vi.fn(), getArtifactRevision: vi.fn(), diffArtifact: vi.fn(),
@@ -43,6 +51,19 @@ const REV0: ArtifactRevision = { ...REV, revisionId: 'rev0', version: 0, content
 beforeEach(() => { registerDefaultArtifactRenderers(); mockGet.mockReset(); mockRevs.mockReset(); mockRev.mockReset(); });
 afterEach(cleanup);
 
+/** The preview container once its (possibly lazy) content has settled: the same element
+ *  exists on the Markdown and the review-preview branch, so a wrong dispatch reds on a
+ *  VALUE below, not on a lookup that times out. */
+async function settledPreview(): Promise<HTMLElement> {
+  const preview = await waitFor(() => {
+    const el = document.querySelector<HTMLElement>('.artifact-workbench__preview');
+    expect(el).not.toBeNull();
+    return el!;
+  });
+  await waitFor(() => expect(within(preview).queryByText('Loading artifact…')).toBeNull());
+  return preview;
+}
+
 describe('ArtifactWorkbench (ART-2)', () => {
   it('loads the artifact + latest revision and renders the preview inside a dialog with the five tabs', async () => {
     mockGet.mockResolvedValueOnce(ART);
@@ -52,9 +73,9 @@ describe('ArtifactWorkbench (ART-2)', () => {
     render(<ArtifactWorkbench artifactId="run-event:r:n" onClose={() => {}} />);
 
     expect(await screen.findByText('Q3 variance was within plan.')).toBeTruthy(); // preview content
-    expect(screen.getByRole('dialog')).toBeTruthy();
-    expect(screen.getByText('Quarterly Report')).toBeTruthy();                      // title
-    expect(screen.getAllByRole('tab')).toHaveLength(5);                             // preview/raw/revisions/diff/provenance
+    expect(screen.getByRole('dialog', { name: 'Quarterly Report' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Quarterly Report' })).toBeTruthy(); // title
+    expect(screen.getAllByRole('tab').map((tab) => tab.textContent)).toEqual(['Preview', 'Raw', 'Revisions', 'Diff', 'Provenance']);
     expect(mockGet).toHaveBeenCalledWith('run-event:r:n');
     expect(mockRev).toHaveBeenCalledTimes(1);
     expect(mockRev).toHaveBeenCalledWith('run-event:r:n', 'rev1');                  // loaded the latest revision, not revs[0]
@@ -69,13 +90,20 @@ describe('ArtifactWorkbench (ART-2)', () => {
 
     render(<ArtifactWorkbench artifactId="run-event:r:n" onClose={() => {}} />);
 
-    const editBtn = await screen.findByRole('button', { name: 'Edit' });
+    // Settle on the canvas (rendered with or without the editable bar), then read the bar.
+    await waitFor(() => expect(document.querySelector('.artifact-workbench__canvas')).not.toBeNull());
+    const editBtn = screen.getByRole('button', { name: 'Edit' });
     expect(screen.queryByLabelText('Artifact source')).toBeNull(); // no editor until toggled
     fireEvent.click(editBtn);
     const src = await screen.findByLabelText('Artifact source');
     expect((src as HTMLTextAreaElement).value).toBe('graph TD; A-->B'); // seeded from the persisted source
-    expect(screen.getByRole('button', { name: 'Reset' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Done' })).toBeTruthy();
+    // Reset restores the persisted source over a scratch edit; Done closes the editor.
+    fireEvent.change(src, { target: { value: 'graph TD; X-->Y' } });
+    expect((src as HTMLTextAreaElement).value).toBe('graph TD; X-->Y');
+    fireEvent.click(screen.getByRole('button', { name: 'Reset' }));
+    expect((screen.getByLabelText('Artifact source') as HTMLTextAreaElement).value).toBe('graph TD; A-->B');
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(screen.queryByLabelText('Artifact source')).toBeNull();
   });
 
   it('surfaces a load error instead of a blank workbench', async () => {
@@ -85,9 +113,11 @@ describe('ArtifactWorkbench (ART-2)', () => {
     render(<ArtifactWorkbench artifactId="run-event:r:n" onClose={() => {}} />);
     // ART-7 — a load failure now surfaces friendly localized copy (not the raw
     // exception message); the point is an error renders, not a blank workbench.
-    expect(await screen.findByText('Could not load this artifact. Please try again.')).toBeTruthy();
+    // The error Notice (role=alert) renders on either message, so a raw exception reds on its TEXT.
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent?.trim()).toBe('Could not load this artifact. Please try again.');
     expect(screen.queryByText(/artifact_unreachable/)).toBeNull(); // never the raw exception
-    expect(screen.queryByText('Quarterly Report')).toBeNull();
+    expect(screen.getByRole('heading', { level: 2 }).textContent).toBe('Artifact'); // the fallback title, nothing loaded
   });
   // P9 — an untyped JSON run output, and a typed review artifact the workbench
   // has no renderer for, both used to preview as Markdown of the raw JSON.
@@ -97,8 +127,10 @@ describe('ArtifactWorkbench (ART-2)', () => {
     mockRevs.mockResolvedValueOnce([REV]);
     mockRev.mockResolvedValueOnce({ ...REV, content: raw });
     render(<ArtifactWorkbench artifactId="run-event:r:n" onClose={() => {}} />);
-    expect(await screen.findByText('Submitted and awaiting review. Not published yet.')).toBeTruthy();
-    expect(screen.getByText('Approval id')).toBeTruthy();
+    const preview = await settledPreview();
+    expect(preview.querySelector('.readable-json__status')?.textContent).toBe('Submitted and awaiting review. Not published yet.');
+    expect(within(preview).getByText('Approval id').tagName).toBe('DT');
+    expect(preview.textContent).not.toContain('"approvalId"'); // not a Markdown dump of the JSON
     fireEvent.click(screen.getByRole('tab', { name: 'Raw' }));
     expect(document.querySelector('.artifact-workbench__raw')?.textContent).toBe(raw);
   });
@@ -110,7 +142,8 @@ describe('ArtifactWorkbench (ART-2)', () => {
     mockRevs.mockResolvedValueOnce([REV]);
     mockRev.mockResolvedValueOnce({ ...REV, content: JSON.stringify(plan) });
     render(<ArtifactWorkbench artifactId="run-event:r:n" onClose={() => {}} />);
-    expect(await screen.findByText('Day 1: First block')).toBeTruthy();
+    const preview = await settledPreview();
+    expect(within(preview).queryAllByRole('listitem').map((li) => li.textContent)).toEqual(['Day 1: First block']);
   });
 
   it('plain text still previews through Markdown, unchanged', async () => {
@@ -118,7 +151,10 @@ describe('ArtifactWorkbench (ART-2)', () => {
     mockRevs.mockResolvedValueOnce([REV]);
     mockRev.mockResolvedValueOnce(REV);
     render(<ArtifactWorkbench artifactId="run-event:r:n" onClose={() => {}} />);
-    expect(await screen.findByText('Q3 variance was within plan.')).toBeTruthy();
+    const preview = await settledPreview();
+    expect(preview.textContent?.trim()).toBe('Q3 variance was within plan.');
+    // The workbench's OWN Markdown, not the review preview wrapped around it.
+    expect(preview.querySelector('.assetpreview-asset')).toBeNull();
     expect(screen.queryByRole('status')).toBeNull();
   });
 });

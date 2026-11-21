@@ -14,7 +14,7 @@ export const SNAPSHOT_CAP_CHARS = 8_000;
 export interface DriverStep {
   /** What the host recorded for this step. Labels never carry typed text. */
   label: string;
-  outcome: 'done' | 'stale_ref' | 'uncertain' | 'refused' | 'error';
+  outcome: 'done' | 'stale_ref' | 'uncertain' | 'refused' | 'error' | 'handed_over';
 }
 
 export type DriverDecision =

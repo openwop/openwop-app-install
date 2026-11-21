@@ -20,6 +20,8 @@ import {
   runSubjectOf,
   setNotificationWorkflowNameResolver,
 } from '../src/notifications/notify.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { createBoard } from '../src/host/kanbanService.js';
 import type { InterruptRecord, RunRecord } from '../src/types.js';
 
 type GateCtx = Record<string, unknown>;
@@ -70,12 +72,28 @@ describe('D2 — one reader for what a request says', () => {
 });
 
 describe('D4 — what a request is about', () => {
-  it('names a project only from a project schedule\'s host-written owner', () => {
-    expect(runSubjectOf({ metadata: { schedule: { ownerScope: 'project:p-kitchen' } } })).toEqual({ kind: 'project', id: 'p-kitchen' });
-    expect(runSubjectOf({ metadata: { schedule: { ownerScope: 'user:u-1' } } })).toBeUndefined();
-    expect(runSubjectOf({ metadata: { schedule: { ownerScope: 'project:' } } })).toBeUndefined();
-    // A client-shaped hint is not a source: only `schedule.ownerScope` is read.
-    expect(runSubjectOf({ metadata: { manual: { source: 'project' }, projectId: 'p-forged' } })).toBeUndefined();
+  const T = 'tenant-adr1109-d4';
+  it('names a project from a project schedule\'s host-written owner', async () => {
+    expect(await runSubjectOf({ tenantId: T, metadata: { schedule: { ownerScope: 'project:p-kitchen' } } })).toEqual({ kind: 'project', id: 'p-kitchen' });
+    expect(await runSubjectOf({ tenantId: T, metadata: { schedule: { ownerScope: 'user:u-1' } } })).toBeUndefined();
+    expect(await runSubjectOf({ tenantId: T, metadata: { schedule: { ownerScope: 'project:' } } })).toBeUndefined();
+    // A client-shaped hint is not a source.
+    expect(await runSubjectOf({ tenantId: T, metadata: { manual: { source: 'project' }, projectId: 'p-forged' } })).toBeUndefined();
+  });
+
+  // PPR-1 — the ONE resolver (`runProject`, ADR 1133): a card run on a project's
+  // board names that project too. Red when `runSubjectOf` reads only the schedule.
+  it('names the project of a card run on a project board, and only for that tenant\'s board', async () => {
+    initHostExtPersistence(openSqliteStorage(':memory:'));
+    const board = await createBoard({ tenantId: T, name: 'Kitchen board', ownerSubject: { kind: 'project', id: 'p-kitchen' } });
+    expect(await runSubjectOf({ tenantId: T, metadata: { kanban: { boardId: board.id } } })).toEqual({ kind: 'project', id: 'p-kitchen' });
+    // Another tenant's run pointing at this board names nothing.
+    expect(await runSubjectOf({ tenantId: 'tenant-other', metadata: { kanban: { boardId: board.id } } })).toBeUndefined();
+    // A board with no project owner names nothing.
+    const plain = await createBoard({ tenantId: T, name: 'Plain board' });
+    expect(await runSubjectOf({ tenantId: T, metadata: { kanban: { boardId: plain.id } } })).toBeUndefined();
+    // An unknown board is a display miss, never a throw.
+    expect(await runSubjectOf({ tenantId: T, metadata: { kanban: { boardId: 'no-such-board' } } })).toBeUndefined();
   });
 });
 

@@ -299,6 +299,10 @@
 
   /* App-shell sidebar (§5 .app-sidebar). The rail is a fixed-width column;
    * collapsed mode narrows it to an icon-only strip. */
+  /* Shell defaults; visible owners supply body-inherited measured reserves. */
+  --app-mobile-nav-block-size: 64px;
+  --app-mobile-nav-reserve: 0px;
+  --tutorial-hint-occupied-bottom: 0px;
   --sidebar-w: 248px;
   --sidebar-w-collapsed: 64px;
   --leftrail-w: 320px;      /* chat left-rail total width (mode rail + list column) */

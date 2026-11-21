@@ -5,6 +5,15 @@
  * the load-bearing property is HONESTY about that sample: a window the rows do
  * not reach must report `covered: false`, and a previous period they do not
  * reach must produce NO comparison rather than a comparison against zero.
+ *
+ * Needs you (ADR 0844, issues #4511 and #5788): ranked newest first, failures from
+ * the last day only, no run link for a member, and a run row titled with its
+ * workflow's name. Sabotage that turns it red: coverage or the previous period
+ * ignoring truncation, a success rate over all runs, a wrong median, waiting
+ * counted inside the window only, a reversed sparkline, a reversed rank, no
+ * 24 h lookback, a member given the run link, a row titled by its id, names read
+ * for a list with no waiting or failed row (or not read for a failed one), an
+ * unsettled name read, and a wrong filter.
  */
 import { describe, it, expect } from 'vitest';
 import type { RunListItem } from '../../../client/runsClient.js';
@@ -109,19 +118,24 @@ describe('needsYouItems', () => {
   });
 
   it('titles a run row with its workflow name, and with the id only when no name is known (#5788)', () => {
-    const names = new Map([['wf-w', 'Decision reminders']]);
-    const items = needsYouItems([], [run('w', 'paused', 2 * H), run('f', 'failed', 3 * H, 1000)], [], NOW, t, true,
+    // Both a waiting AND a failed row have a known name, so each lane's title is witnessed
+    // on its own; the third (unnamed) row shows the id.
+    const names = new Map([['wf-w', 'Decision reminders'], ['wf-f', 'Weekly digest']]);
+    const items = needsYouItems([], [run('w', 'paused', 2 * H), run('f', 'failed', 3 * H, 1000), run('g', 'failed', 4 * H, 1000)], [], NOW, t, true,
       (id) => names.get(id) ?? id);
-    expect(items.map((i) => i.title)).toEqual(['Decision reminders', 'wf-f']);
+    expect(items.map((i) => i.title)).toEqual(['Decision reminders', 'Weekly digest', 'wf-g']);
   });
 
   it('reads names only when a run row needs one, and a failed read falls back to the id', async () => {
     let reads = 0;
-    const read = async () => { reads++; return [{ workflowId: 'wf-w', name: 'Decision reminders' }]; };
+    const read = async () => { reads++; return [{ workflowId: 'wf-w', name: 'Decision reminders' }, { workflowId: 'wf-f', name: 'Weekly digest' }]; };
     expect((await runNameLookup([run('ok', 'completed', H, 1000)], read))('wf-ok')).toBe('wf-ok');
     expect(reads).toBe(0);
     expect((await runNameLookup([run('w', 'paused', H)], read))('wf-w')).toBe('Decision reminders');
     expect(reads).toBe(1);
+    // A FAILED row needs a name too (it is titled like a waiting one).
+    expect((await runNameLookup([run('f', 'failed', H, 1000)], read))('wf-f')).toBe('Weekly digest');
+    expect(reads).toBe(2);
     const down = async (): Promise<never> => { throw new Error('read failed'); };
     expect((await runNameLookup([run('w', 'paused', H)], down))('wf-w')).toBe('wf-w');
   });

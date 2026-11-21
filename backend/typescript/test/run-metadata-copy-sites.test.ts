@@ -91,8 +91,9 @@ const CLASSIFIED: Record<string, { source: MetadataSource; why: string }> = {
       'the literal `{ seededBy, seam }`. There is no source run: the point of the ' +
       'seam is to create a run that drives ONE declared manifest row into the ' +
       'Layer-2 ledger, so a scenario can fork it and read the projection. Its only ' +
-      'run read is a status poll of the run it just inserted (so the 201 lands after ' +
-      'the node ran) — never a source run whose metadata could flow in. The run IS created in the ' +
+      'run read, `storage.getRun(runId)`, is a status poll of the run it just inserted (so the 201 ' +
+      'lands after the node ran); it reads `.status` only, AFTER the insert, so no metadata can flow ' +
+      'into the new run from it. The run IS created in the ' +
       'CALLER\'s tenant rather than a fixture tenant — the scenario reads ' +
       '`GET /runs/{runId}/effects` back as the same caller, and a foreign-tenant ' +
       'run answers 403 id_tenant_mismatch.',
@@ -116,9 +117,11 @@ const CLASSIFIED: Record<string, { source: MetadataSource; why: string }> = {
     why:
       'The RFC 0176 era-2 seed seam composes the whole record itself — metadata is the literal ' +
       '`{ seededBy, era }` and there is no source run to copy from, because the point of the seam ' +
-      'is to plant a fixture no existing run could produce. Its append route reads a run back only ' +
-      'to check it is a seam-seeded run of the caller\'s tenant before appending events to it; no ' +
-      'run is created from that read. It DOES set `eventLogSchemaVersion: 2` explicitly, which is the one ' +
+      'is to plant a fixture no existing run could produce. Its append route calls `storage.getRun` ' +
+      'only to check the target is a seam-seeded (`metadata.seededBy`), non-terminal run of the ' +
+      'caller\'s tenant before appending events to it; that route creates no run, and the seed route ' +
+      'that does reads no run, so the loaded metadata never reaches an inserted one. ' +
+      'It DOES set `eventLogSchemaVersion: 2` explicitly, which is the one ' +
       'field it must not leave to the adapter default (that default is era 3).',
   },
 
@@ -127,26 +130,37 @@ const CLASSIFIED: Record<string, { source: MetadataSource; why: string }> = {
     source: 'COPIED_FROM_RUN',
     why:
       '`POST /v1/runs/{id}:fork` spreads `sourceRun` and rebuilds metadata from `sourceRun.metadata` ' +
-      '(re-deriving only actingUserId + the recorded authority block). ADR 0604 §D1. NOTE: the plain ' +
-      '`POST /v1/runs` creator in the same file is FRESH — client metadata through buildRunRecord.',
+      '(re-deriving only actingUserId + the recorded authority block). ADR 0604 §D1. The source is ' +
+      'loaded by `loadOwnedRun(req, storage, runId, \'runs:create\')`, the tenant-ownership gate, and its ' +
+      'metadata IS copied (hence `derivedFromRun: true`). NOTE: the plain `POST /v1/runs` creator in the ' +
+      'same file is FRESH — client metadata through buildRunRecord; its one run read, `storage.getRun` in ' +
+      '`admittedLinkage`, loads the wildcard-credential parent only to verify tenant and copy its frozen ' +
+      'compaction decision (ADR 0999 D1.3), never the blob. The file\'s other `storage.getRun` / ' +
+      '`loadOwnedRun` calls serve reads, diff, cancel/pause/resume and status polls and create no run.',
   },
   'routes/workflowDebug.ts': {
     source: 'COPIED_FROM_RUN',
     why:
-      'The bulk redrive copies `source.metadata`, deleting caller provenance and keeping execution ' +
+      'The bulk redrive loads each source with `loadOwnedRun(req, deps.storage, sourceRunId, ' +
+      '\'runs:create\')` and copies `source.metadata`, deleting caller provenance and keeping execution ' +
       'parameters. ADR 0604 review H1 — this is the site the §D1 enumeration missed. Reserved keys are ' +
       'stripped by `buildRunRecord`; the registered inherited stamps (`host/inheritedRunMetadata.ts`: the ' +
       'ADR 0941 goal, the ADR 0942 autonomy stamp and fork posture) are then re-taken from the STORED SOURCE ' +
       'ROW, never the request, and inserted with `derivedFromRun` (ADR 0942 P1). (The debug-run ' +
-      'creator in the same file is FRESH: `metadata: { launch: "draft" }` plus host stamps.)',
+      'creator in the same file is FRESH: `metadata: { launch: "draft" }` plus host stamps. Its other ' +
+      '`loadOwnedRun(req, deps.storage, runId, \'runs:read\')` is the pin-prefill route, which reads a ' +
+      'run\'s node outputs into pins and creates no run.)',
   },
 
   // ── Fresh creators that ALSO load a run (leg 2: each must say why) ─────
   'executor/subWorkflowDispatcher.ts': {
     source: 'FRESH',
     why:
-      'The child run is built from the reserved-stripped handoff plus two narrow parent reads, never the ' +
-      'parent metadata blob: the parent person as `orgScopeSubject` (ADR 0832 D3) and the keys features ' +
+      'Its `storage.getRun(cursorRunId)` walk loads the ancestor chain for the tenant, depth and cycle ' +
+      'guards and keeps the direct parent\'s metadata; a second `storage.getRun(childRunId)` reads the ' +
+      'child\'s final status after it ran. The child run is built from the reserved-stripped handoff plus ' +
+      'narrow parent reads, never the parent metadata blob: the ADR 1108 operator plan-exemption stamp ' +
+      '(`childPlanExemptionStamp`), the parent person as `orgScopeSubject` (ADR 0832 D3) and the keys features ' +
       'register in `host/inheritedRunMetadata.ts` (ADR 0941 D2b: the campaign run tag + frozen goal), ' +
       'copied through feature-owned projectors (campaign-ops projects orgId without approval authority). ' +
       'An inherited key that is ABSENT on the parent stays absent only if its contributor ' +
@@ -160,22 +174,30 @@ const CLASSIFIED: Record<string, { source: MetadataSource; why: string }> = {
       'The canvas child is a fresh unit of work: causationCanvasId, the causing member as orgScopeSubject, ' +
       'and registered feature-owned projections from the tenant-checked parent row. Campaign-ops inherits ' +
       'only orgId, never approval execution authority or parent node-keyed agentBindings; child contributors ' +
-      'freeze their own workflow bindings. Other parent reads enforce depth/cycle/tenant guards. ' +
+      'freeze their own workflow bindings. Three `storage.getRun` calls: the ancestor walk ' +
+      '(`storage.getRun(cursor)`) enforces depth/cycle/tenant guards and reads no metadata; ' +
+      '`storage.getRun(scope.runId)` loads the parent row only to pass its metadata through ' +
+      '`inheritedRunMetadata` (registered keys, never the blob); `storage.getRun(childRunId)` reads the ' +
+      'child\'s terminal status after it ran. ' +
       '(The c.metadata spreads describe CANVAS records, not runs.)',
   },
   'host/mcpSemantics.ts': {
     source: 'FRESH',
     why:
       'Every MCP-originated run composes its own metadata literal (launchResolved / source / ' +
-      'trustBoundary: "untrusted", RFC 0020 §D). Its run reads serve the MCP resource/status surface, ' +
-      'never run creation — an inbound MCP call is a new untrusted origin, so inheriting anything ' +
+      'trustBoundary: "untrusted", RFC 0020 §D). Its one run read, `deps.storage.getRun(runId)` in ' +
+      '`outcomeForRun`, reads the status of a run this file already created or resumed, AFTER the ' +
+      'insert, to report the tool outcome; it never feeds run creation — an inbound MCP call is a new ' +
+      'untrusted origin, so inheriting anything ' +
       'from an existing run would launder that trust boundary.',
   },
   'host/workflowEvalRunner.ts': {
     source: 'FRESH',
     why:
       'Each eval case builds `metadata: { launch: "draft" }` plus the host-side `launchResolved` / ' +
-      '`eval` stamps. It reads runs back only to settle the case verdict, after creation.',
+      '`eval` stamps. Its one run read, `deps.storage.getRun(run.runId)`, loads the case\'s OWN run in ' +
+      'the `onRunTerminal` callback to collect assertion evidence and settle the verdict — after the ' +
+      'insert, so nothing it reads can reach the new run\'s metadata.',
   },
   'routes/artifactTypeSeam.ts': {
     source: 'FRESH',
@@ -188,32 +210,39 @@ const CLASSIFIED: Record<string, { source: MetadataSource; why: string }> = {
     why:
       'Both creators (the seam workflow and its §21 replay) use `metadata: {}`. The replay links to its ' +
       'source through `parentRunId` + `forkMode: "replay"` and `replayInvocationsFromRunId` — the ' +
-      'EVENT stream, not the metadata blob. Nothing is copied.',
+      'EVENT stream, not the metadata blob. Nothing is copied. Its one `deps.storage.getRun(runId)` is ' +
+      'in the §21 operator route, which loads a held plan\'s run to hand to ' +
+      '`decideCompensationOperatorAction`; that route creates no run.',
   },
   'routes/triggerBridge.ts': {
     source: 'FRESH',
     why:
       'The trigger-delivered run composes launchResolved + triggerData + `trustBoundary: "untrusted"` ' +
-      'from the DELIVERY, not from a run. Its run reads back the row for the driver response.',
+      'from the DELIVERY, not from a run. Its one `deps.storage.getRun(result.runId)` is in the ingest ' +
+      'driver route: it reads `metadata.triggerData` off the run `ingestExternalEvent` already created, ' +
+      'to build the driver response. That route inserts no run itself, so the read feeds no creation.',
   },
 
   'features/channel-ingress/ingress.ts': {
     source: 'FRESH',
     why:
       'ADR 1042 D7 — the channel conversation run composes chatSessionId + channelIngress {lane, scope} + ' +
-      '`trustBoundary: "untrusted"` from the THREAD, plus the host launchResolved stamp. The run it loads is ' +
-      "the thread's previous conversation run, read only to see whether it is still open; when it has ended, " +
+      '`trustBoundary: "untrusted"` from the THREAD, plus the host launchResolved stamp. ' +
+      '`deps.storage.getRun(thread.runId)` loads the thread\'s previous conversation run, read only for its ' +
+      'status (plus its open conversation interrupt) to see whether it is still open, and ' +
+      '`deps.storage.getRun(run.runId)` polls the new run\'s status after the insert; when the old run has ended, ' +
       'its metadata is deliberately NOT carried over (the scope and owner come from the thread, and a new ' +
       'channel run must not inherit an old run\'s decisions).',
   },
 
-  // ── Fresh creators that never load a run ──────────────────────────────
+  // ── Other fresh creators (runStarter, agent-deployments and createEvalRun DO load a run) ──
   'host/runStarter.ts': {
     source: 'FRESH',
     why:
       'The shared starter composes `stripReservedRunMetadata(input.metadata)` + launchResolved from its CALLER. ' +
-      'Its run reads are the deterministic-run-id idempotency check (before and after the insert race) and, with ' +
-      '`inheritFromRunId`, the tenant-checked parent row, from which ONLY the keys registered in ' +
+      'Its `storage.getRun(input.runId)` calls are the deterministic-run-id idempotency check (before and after ' +
+      'the insert race; they return an existing id, never build metadata) and, with `inheritFromRunId`, ' +
+      '`storage.getRun(input.inheritFromRunId)` loads the tenant-checked parent row, from which ONLY the keys registered in ' +
       '`host/inheritedRunMetadata.ts` are projected (as in `executor/subWorkflowDispatcher.ts`) — never the parent ' +
       'metadata blob, so the new run resolves its own frozen decisions.',
   },
@@ -233,13 +262,19 @@ const CLASSIFIED: Record<string, { source: MetadataSource; why: string }> = {
     source: 'FRESH',
     why:
       'ADR 1005 deployment-management run (RFC 0254 §D): bare `storage.insertRun` with metadata composed in place ' +
-      'from the transition request (agentId, version, transition). Its two run reads gate the transition — the ' +
-      'cited eval run\'s verdict (`verifyEval`) and whether a held approval\'s run is still open (`claimPending`) — ' +
+      'from the transition request (agentId, version, transition). Its two `storage.getRun` reads gate the transition — ' +
+      '`storage.getRun(storedRunId)` checks the cited eval run\'s verdict (`verifyEval`) and ' +
+      '`storage.getRun(held.runId)` checks whether a held approval\'s run is still open (`claimPending`) — ' +
       'and neither run\'s metadata is copied. The management run never executes.',
   },
   'host/evals/createEvalRun.ts': {
     source: 'FRESH',
-    why: 'ADR 0889 eval run: metadata (`eval`, tags, caller metadata) is composed here from the request and the resolved suite; a baseline run is referenced by id, never copied.',
+    why:
+      'ADR 0889 eval run: metadata (`eval`, tags, caller metadata) is composed here from the request and the ' +
+      'resolved suite. `storage.getRun(id)` loads the baseline run only to validate it (same tenant, a ' +
+      'completed eval run whose `evalSummary.suiteId` matches); only its runId is recorded as ' +
+      '`eval.baselineRunId`, never its metadata. `storage.getRun(run.runId)` re-reads the run just inserted ' +
+      'to hand to the runner, after the insert.',
   },
   'host/anonymousActor.ts': {
     source: 'FRESH',
@@ -297,6 +332,8 @@ const creators = walk(SRC)
 
 /** Leg 2 — derived from the source, never declared: does this file also LOAD a run? */
 const loadsExistingRun = (f: string): boolean => /loadOwnedRun\s*\(|\.getRun\s*\(|\bgetRun\s*\(/.test(src(f));
+/** The same calls, capturing the identifier, so leg 2 can require the `why` to name each one. */
+const RUN_READ_CALL = /\b(loadOwnedRun|getRun)\s*\(/g;
 
 /** Leg 3 — the heuristic copy fingerprint (see the header for its blind spot). */
 const COPY_FINGERPRINT = /\.\.\.\s*\(*\s*(?:source|src|parent|prior|previous|prev|original|orig)\w*\.metadata\b/i;
@@ -356,16 +393,25 @@ describe('ADR 0604 H1 — every run-creation site declares where its metadata ca
     // is only worth having if it forces the judgment rather than the paperwork.
     const risky = creators.filter((f) => CLASSIFIED[f]?.source === 'FRESH' && loadsExistingRun(f));
     // MEASURED 2026-10-22 at 2404797bf: 11 FRESH creators also load a run (was asserted >= 6);
-    // 13 at d5b98aafaa (w115). The `why` length below is paperwork, not judgment: it
+    // 13 at d5b98aafaa (w115). A length check alone was paperwork, not judgment: it
     // passed the two rows corrected in w115 (runStarter, agent-deployments), whose
-    // prose said they read no run.
+    // prose said they read no run. So (owner decision TST-NZZ-4, 2026-11-18) the
+    // `why` must also NAME every run-read call this file makes (`getRun`,
+    // `loadOwnedRun`), derived from the source below, so it is about the read found.
     expect(risky.length, 'derivation broke: no FRESH creator reads a run, which cannot be true').toBeGreaterThanOrEqual(11);
     for (const f of risky) {
+      const why = CLASSIFIED[f]!.why;
       expect(
-        CLASSIFIED[f]!.why.length,
+        why.length,
         `${f} both loads an existing run and creates one, and is classified FRESH. Its \`why\` must say ` +
           'what the loaded run is read FOR and why its metadata does not reach the new run.',
       ).toBeGreaterThan(120);
+      const reads = [...new Set([...src(f).matchAll(RUN_READ_CALL)].map((m) => m[1]!))].sort();
+      expect(reads.length, `${f}: loadsExistingRun matched but no read call was extracted`).toBeGreaterThan(0);
+      expect(
+        reads.filter((r) => !why.includes(r)),
+        `${f} reads a run through these calls, but its \`why\` never names them. Say what each read is FOR.`,
+      ).toEqual([]);
     }
   });
 

@@ -121,3 +121,10 @@ Host-only presentation change; no wire surface. **No RFC needed.**
   > the full materialized OWNER_SCOPES (`accessControlService.ts:1026`), so no
   > owner special-case is needed. Routes annotate only authority narrower than
   > the admin-shell baseline; unannotated routes inherit the admin gate.
+
+
+### Correction — 2026-11-08: Read failure is not a permission decision
+
+The shared tenant-wide access cache now publishes loading, failed-read, or successful authority separately. A failed read stays fail-closed but the Admin layout reports inability to verify access with one explicit Retry, rather than asserting a removed role. A successful empty/NONE response still denies. One current auth/workspace epoch owns the singleflight read and synchronous neutralization; stale prior results cannot republish authority. Settled failures do not auto-poll as new consumers mount. The backend root-membership/superadmin decisions, endpoints and all roles remain unchanged.
+
+Actual deployed Media initially rendered, then access/menu reads produced six HTTP429s in a bounded server status window and the UI showed persistent admin denial/menu fallback. Correlation does not establish a sole trigger or rate-limit owner; it exposed the failed-read/stale-settle behavior addressed here. Deferred real-hook/provider and actual AdminLayout tests are authored; all checks remain NOT RUN during source preparation. Source-focused qualification, full canonical merge and deployed retry/negative/readback evidence are still owed. No backend auth change or RFC is required.

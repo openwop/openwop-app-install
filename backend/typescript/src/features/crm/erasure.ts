@@ -49,6 +49,8 @@ import { registerSubjectEraser, registerSubjectKeyResolver } from '../../host/su
 import { subjectKeyForms } from '../../host/subjectErasureRedaction.js';
 import { onMemberAuthorityLost } from '../../host/accessControlService.js';
 import { clearTaskAssignee } from './entities/tasks.js';
+import { redactNamesInDealTitles } from './entities/deals.js';
+import { redactCompaniesNamedAfter } from './entities/companies.js';
 import { createLogger } from '../../observability/logger.js';
 import { resolveContactIdByIdentifier, normalizeIdentifierValue, type ContactIdentifier } from './contactIdentityService.js';
 import { resolveContactSurvivor, type Contact, type ContactKeyClaim } from './contactsService.js';
@@ -60,6 +62,7 @@ import { eraseModelAttribution } from './leadIntel/modelStore.js';
 import { closeLeadBinding, eraseLeadAttribution, hasLeadBinding } from './leadIntel/leadStore.js';
 import { eraseSlaSettingsSubjects } from './leadIntel/speedToLead.js';
 import { eraseRoutingPolicySubjects } from './leadIntel/routingPolicy.js';
+import { eraseLeadRoutingOwnerSubject } from './leadIntel/routing.js';
 import { onCrmRecordDeleted } from '../../host/crmRecordLifecycle.js';
 import { eraseSenderHealthSeen } from './senderHealth.js';
 
@@ -341,6 +344,21 @@ export async function eraseCrmSubject(tenantId: string, subjectKey: string): Pro
     touched += 1;
   }
 
+  // 5c. CHAN-F19 #9 (user decision 2026-11-18) — the person's NAME in the org's deal
+  //     and company records. Convert titles a deal `<company> — <contact name>` and,
+  //     when no company name was given, used to name the company after the contact.
+  //     Each exact former name (the contact's and every tombstone's on the chain) is
+  //     replaced in the titles of deals linked to the chain, and a company those deals
+  //     point at that IS named exactly that is renamed. The deals and companies stay.
+  //     MUST run before leg 6: it reads the names leg 6 erases, so after it a retry
+  //     would find nothing to match (the fold-in B2 retry trap).
+  if (isOurs && contact) {
+    const names = [contact.name, ...tombstones.map((t) => t.name)];
+    const { touched: titled, companyIds } = await redactNamesInDealTitles(tenantId, chainIds, names, ERASED_VALUE);
+    touched += titled;
+    touched += await redactCompaniesNamedAfter(tenantId, companyIds, names, ERASED_VALUE);
+  }
+
   // 6. The contact row itself — anonymized, never deleted (see the docblock). It
   //    runs LATE, after every address-keyed leg above, because it is one of the two
   //    sources `values` is derived from (fold-in B2).
@@ -455,6 +473,7 @@ export async function eraseCrmTaskAssignees(tenantId: string, subjectKey: string
   await eraseLeadAttribution(tenantId, subjectKey);
   await eraseRoutingPolicySubjects(tenantId, subjectKey);
   await eraseSlaSettingsSubjects(tenantId, subjectKey);
+  await eraseLeadRoutingOwnerSubject(tenantId, subjectKey); // CHAN-F19 #7 — the owner's capacity pools
 }
 
 export function registerCrmErasure(): void {

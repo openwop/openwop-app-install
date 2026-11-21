@@ -41,6 +41,17 @@
  * and loading branches, where `ProfileTwinGrantsTab`, which would load `twin`, is not
  * mounted). Fix-probe: add `'twin'` to ProfilePage's hook and the `it.fails` reds.
  *
+ * CORRECTED 2026-11-19 (grade-tests w121): the pin is gone. #5775 (493157aeb8) fixed
+ * the last pair by loading `['profiles', 'twin']` in ProfilePage, and flipped the
+ * `it.fails` to a plain `it`, so the "Pinned as an `it.fails`" and "Fix-probe" lines
+ * above describe history. NSSPLIT-BORROW-1 is now a live guard: re-binding ProfilePage
+ * to `useTranslation('profiles')` turns it red. Because it now passes on an empty
+ * offender list, it also asserts that its scanner SAW cross-feature bare reads before
+ * the loaded-namespace filter (MEASURED 4 at 5ce02af8f6: cms/SectionRenderer:site,
+ * marketplace/BundleShopPage:billing, profiles/ProfilePage:twin,
+ * publishing/PublishingPage:cms, all loaded by their own hooks), so a broken scanner
+ * regex cannot pass it on nothing.
+ *
  * Sabotage (wave 51 probes): a cross-feature `useTranslation`, a shell file using a lazy
  * feature namespace, a second `featureToggles` user, a suspending `assistantAction`
  * hook, or a drift in any of the three shell-namespace lists each red one case. Wave 106
@@ -97,16 +108,21 @@ function hookLoadedIn(src: string): Set<string> {
   return out;
 }
 
+/** Every namespace a source text reads in a bare `t('ns:key')` / `i18n.t('ns:key')` or an
+ *  `{ ns: … }` option, loaded or not (the unfiltered half of `bareBorrowsIn`). */
+function bareRefsIn(src: string): string[] {
+  const out = new Set<string>();
+  for (const m of src.matchAll(/\bt\(\s*['"`]([a-z0-9-]+):/g)) out.add(m[1]!);
+  for (const m of src.matchAll(/\bns:\s*\[?\s*['"]([a-z0-9-]+)['"]/g)) out.add(m[1]!);
+  return [...out];
+}
 /** Namespaces a file reads WITHOUT loading them: a bare `t('ns:key')` / `i18n.t('ns:key')`
  *  or an `{ ns: … }` option, for a namespace its own hook does not name. A bare reference
  *  does not trigger `lazyNsBackend`, so a lazy namespace read this way paints raw keys. */
 function bareBorrowsIn(file: string): string[] {
   const src = readFileSync(file, 'utf8');
   const loaded = hookLoadedIn(src);
-  const out = new Set<string>();
-  for (const m of src.matchAll(/\bt\(\s*['"`]([a-z0-9-]+):/g)) out.add(m[1]!);
-  for (const m of src.matchAll(/\bns:\s*\[?\s*['"]([a-z0-9-]+)['"]/g)) out.add(m[1]!);
-  return [...out].filter((ns) => !loaded.has(ns));
+  return bareRefsIn(src).filter((ns) => !loaded.has(ns));
 }
 
 /** The shell-rendered feature namespaces, read from the module that owns them. */
@@ -148,14 +164,20 @@ describe('ADR 0490 — the eager/lazy namespace split stays safe', () => {
   it('no feature reads another feature namespace it does not load (NSSPLIT-BORROW-1)', () => {
     const feats = new Set(featureDirs());
     const offenders: string[] = [];
+    // Anti-vacuity: cross-feature bare reads the scanner saw BEFORE the loaded filter.
+    const scanned: string[] = [];
     for (const feat of feats) {
       for (const file of sourceFiles(join(FEATURES, feat))) {
+        for (const ns of bareRefsIn(readFileSync(file, 'utf8'))) {
+          if (ns !== feat && feats.has(ns)) scanned.push(ns);
+        }
         for (const ns of bareBorrowsIn(file)) {
           const key = `${file.slice(SRC.length + 1).split(sep).join('/')}:${ns}`;
           if (ns !== feat && feats.has(ns)) offenders.push(key);
         }
       }
     }
+    expect(scanned.length, 'the bare-borrow scanner matched no cross-feature read at all').toBeGreaterThan(0);
     expect(offenders).toEqual([]);
   });
 

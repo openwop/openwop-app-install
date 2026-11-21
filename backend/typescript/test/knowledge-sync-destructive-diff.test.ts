@@ -26,6 +26,10 @@
  *    the CLASS (either layer), not `readJson`. The unique `readJson` witnesses are "the
  *    thrown error names the cause" and the mid-pagination case (probe
  *    w23g1-dd-readjson-kind reds exactly those plus google).
+ *    CORRECTED (wave 121): since Drive's `kind` arm landed in `driveListingFiles`, an
+ *    `undefined` body is refused there too (no `kind`), so the google HTML case and the
+ *    mid-pagination case are CLASS witnesses like the other three. The one unique
+ *    `readJson` witness is "the thrown error names the cause" (`w121g2-dd-readjson`).
  *  - Two cases overlap others and are KEPT as protected incident witnesses: "the
  *    refusal survives the DIFF" (= the google proxy case + the `complete:false` arm of
  *    "prunes ONLY when completeness is literally true") and "does not change diffFolder"
@@ -355,9 +359,9 @@ describe('ADR 0605 R1 — Box may not infer completeness from its own page size'
  * filed `KSWF-16` for the doctrine; the destructive-diff invariant had none.
  */
 describe('ADR 0605 R1 — only `diffFolderListing` may call `diffFolder`', () => {
-  /** Strip comments, preserving line counts — a ratchet that counts a mention
-   *  inside a docblock polices a spelling rather than the invariant. */
-
+  // Every scanned file goes through the shared `stripComments` (helpers/, #5422):
+  // a ratchet that counts a mention inside a docblock polices a spelling rather
+  // than the invariant. (Defensive today: no src/ comment spells a `diffFolder(` call.)
   const walk = (dir: string): string[] =>
     readdirSync(dir).flatMap((n) => {
       const p = join(dir, n);

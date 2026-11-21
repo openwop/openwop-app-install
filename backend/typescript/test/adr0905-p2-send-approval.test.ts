@@ -13,11 +13,18 @@
  *
  * Sabotage-witnessed: dropping the self-approval check, the decide-time pin compare, the
  * approver-ref eligibility, the send gate in `assertSendAllowed`, or the audience's
- * approver-ref arm each reds at least one case.
+ * approver-ref arm each reds at least one case. Refusals assert the details only the
+ * named guard writes (`requiredScope`, `approvedVersion`, `reason`), because several
+ * guards share one status code.
+ *
+ * Double guard: a cross-tenant decide is refused by `loadPending`'s tenant check
+ * (404, `host/approvalDecision.ts`) and, behind it, by the email handler's
+ * `mayDecide` membership check (403, `features/email/sendApproval.ts`). The case
+ * asserts the exact 404, so dropping the first guard alone reds it.
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client } from './planningHarness.js';
+import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client, type Res } from './planningHarness.js';
 import { getApproval, getEmailSendApprovalHandler, listApprovals, type PendingApproval } from '../src/host/approvalService.js';
 import { DurableCollection, hostExtStorage } from '../src/host/hostExtPersistence.js';
 import { emailSendReviewHash, withdrawReview } from '../src/features/email/sendApproval.js';
@@ -46,10 +53,16 @@ const client = (): Client => makeClient(() => BASE);
 const APPROVALS = '/host/openwop-app/approvals';
 const E = (orgId: string, s = ''): string => `/host/openwop-app/email/orgs/${encodeURIComponent(orgId)}${s}`;
 
+/** The flat error envelope (`middleware/errorEnvelope.ts`). */
+interface ErrorBody { error: string; message: string; details?: Record<string, unknown> }
+/** A decide answer: the decided row on success, the error envelope on a refusal. */
+interface DecideBody { approvalId?: string; status?: string; error?: string; message?: string; details?: Record<string, unknown> }
+interface ApprovalList { items: Array<{ approvalId: string }> }
+
 async function signup(c: Client, tenantId: string): Promise<string> {
-  const r = await c.post('/host/openwop-app/test/login', { email: uniqEmail('emrv'), tenantId });
+  const r: Res<{ user: { userId: string } }> = await c.post('/host/openwop-app/test/login', { email: uniqEmail('emrv'), tenantId });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
-  return r.body.user.userId as string;
+  return r.body.user.userId;
 }
 async function addMember(owner: Client, orgId: string, subject: string, roles: string[]): Promise<void> {
   const r = await owner.post(`/host/openwop-app/test/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject, roles });
@@ -60,28 +73,28 @@ async function addMember(owner: Client, orgId: string, subject: string, roles: s
 async function team() {
   const tenantId = `org:emrv-${Date.now()}-${n++}`;
   const owner = client(); const ownerId = await signup(owner, tenantId);
-  const org = await owner.post('/host/openwop-app/orgs', { name: 'Agency' });
+  const org: Res<{ orgId: string }> = await owner.post('/host/openwop-app/orgs', { name: 'Agency' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  const orgId = org.body.orgId as string;
+  const orgId = org.body.orgId;
   const admin = client(); const adminId = await signup(admin, tenantId); await addMember(owner, orgId, adminId, ['admin']);
   const editor = client(); const editorId = await signup(editor, tenantId); await addMember(owner, orgId, editorId, ['editor']);
   const clientUser = client(); const clientId = await signup(clientUser, tenantId); await addMember(owner, orgId, clientId, ['editor']);
   expect((await owner.put(E(orgId, '/settings'), { senderAddress: 'news@agency.test' })).status).toBe(200);
-  const tpl = await editor.post(E(orgId, '/templates'), { name: 'Launch', subject: 'Big news', body: 'Hello {{contact.name}}' });
-  const cmp = await editor.post(E(orgId, '/campaigns'), { templateId: tpl.body.templateId });
+  const tpl: Res<{ templateId: string }> = await editor.post(E(orgId, '/templates'), { name: 'Launch', subject: 'Big news', body: 'Hello {{contact.name}}' });
+  const cmp: Res<{ campaignId: string }> = await editor.post(E(orgId, '/campaigns'), { templateId: tpl.body.templateId });
   expect(cmp.status, JSON.stringify(cmp.body)).toBe(201);
-  return { tenantId, orgId, owner, ownerId, admin, adminId, editor, editorId, clientUser, clientId, templateId: tpl.body.templateId as string, campaignId: cmp.body.campaignId as string };
+  return { tenantId, orgId, owner, ownerId, admin, adminId, editor, editorId, clientUser, clientId, templateId: tpl.body.templateId, campaignId: cmp.body.campaignId };
 }
 
 async function submit(c: Client, orgId: string, campaignId: string): Promise<string> {
-  const r = await c.post(E(orgId, `/campaigns/${campaignId}/submit-review`));
+  const r: Res<{ campaign: { status: string }; approvalId: string }> = await c.post(E(orgId, `/campaigns/${campaignId}/submit-review`));
   expect(r.status, JSON.stringify(r.body)).toBe(200);
   expect(r.body.campaign.status).toBe('in_review');
-  return r.body.approvalId as string;
+  return r.body.approvalId;
 }
 
 /** Existing lifecycle cases approve the displayed full review digest. */
-async function approve(c: Client, approvalId: string) {
+async function approve(c: Client, approvalId: string): Promise<Res<DecideBody>> {
   const row = await getApproval(approvalId);
   return c.post(`${APPROVALS}/${approvalId}/claim`, { expectedContentHash: row?.emailSend?.reviewHash });
 }
@@ -115,9 +128,9 @@ describe('ADR 0905 D3 — review lifecycle through the inbox', () => {
     let winner: PendingApproval | null = null;
     try {
       const [original] = (await listApprovals(t.tenantId)).filter((a) => a.emailSend?.campaignId === t.campaignId);
-      const second = await t.editor.post(E(t.orgId, `/campaigns/${t.campaignId}/submit-review`));
+      const second: Res<{ approvalId: string }> = await t.editor.post(E(t.orgId, `/campaigns/${t.campaignId}/submit-review`));
       expect(second.status, JSON.stringify(second.body)).toBe(200);
-      winner = await getApproval(second.body.approvalId as string);
+      winner = await getApproval(second.body.approvalId);
       expect(winner?.emailSend?.reviewHash).toBe(original?.emailSend?.reviewHash);
       expect(winner?.emailSendRevision).not.toBe(original?.emailSendRevision);
     } finally { release(); }
@@ -197,12 +210,12 @@ describe('ADR 0905 D3 — review lifecycle through the inbox', () => {
     expect(fresh.contentHash).toBe(old.contentHash);
     expect(fresh.reviewHash).not.toBe(old.reviewHash);
     const reviewUrl = `/host/openwop-app/reviews/${encodeURIComponent(`approval:${id}`)}`;
-    const projected = await t.admin.get(reviewUrl);
+    const projected: Res<{ emailSend: Record<string, unknown> }> = await t.admin.get(reviewUrl);
     expect(projected.status, JSON.stringify(projected.body)).toBe(200);
     expect(projected.body.emailSend).toMatchObject({ subject: fresh.subject, body: fresh.body, senderAddress: fresh.senderAddress, reviewHash: fresh.reviewHash });
     for (const url of [`${APPROVALS}/${id}/claim`, `${reviewUrl}/actions/approve`]) {
       for (const hash of [undefined, 'wrong-digest', old.reviewHash]) {
-        const result = await t.admin.post(url, hash === undefined ? {} : { expectedContentHash: hash });
+        const result: Res<ErrorBody> = await t.admin.post(url, hash === undefined ? {} : { expectedContentHash: hash });
         expect(result.status, JSON.stringify(result.body)).toBe(409);
         expect(result.body.details).toMatchObject({ reason: 'stale_review', campaignId: 'cmp:<redacted:high-entropy>' });
         expect(JSON.stringify(result.body)).not.toContain(t.campaignId);
@@ -232,9 +245,11 @@ describe('ADR 0905 D3 — review lifecycle through the inbox', () => {
       }
       return cas(key, expected, value);
     });
-    const result = await t.admin.post(`${APPROVALS}/${id}/claim`, { expectedContentHash: old.emailSend.reviewHash });
+    const result: Res<ErrorBody> = await t.admin.post(`${APPROVALS}/${id}/claim`, { expectedContentHash: old.emailSend.reviewHash });
     expect(injected).toBe(true);
     expect(result.status, JSON.stringify(result.body)).toBe(409);
+    // The snapshot CAS lost to the repin: the row is reported as still pending.
+    expect(result.body.details).toMatchObject({ status: 'pending' });
     expect(await getApproval(id)).toMatchObject({ status: 'pending', emailSend: { senderAddress: 'concurrent@agency.test', reviewHash: emailSend.reviewHash } });
     expect((await getCampaign(t.tenantId, t.orgId, t.campaignId))?.status).toBe('in_review');
   });
@@ -255,9 +270,10 @@ describe('ADR 0905 D3 — review lifecycle through the inbox', () => {
       }
       return cas(key, expected, value);
     });
-    const result = await t.admin.post(`${APPROVALS}/${id}/claim`, { expectedContentHash: row.emailSend.reviewHash });
+    const result: Res<ErrorBody> = await t.admin.post(`${APPROVALS}/${id}/claim`, { expectedContentHash: row.emailSend.reviewHash });
     expect(injected).toBe(true);
     expect(result.status, JSON.stringify(result.body)).toBe(409);
+    expect(result.body.details).toMatchObject({ reason: 'review_closed' });
     expect((await getApproval(id))?.status).toBe('pending');
     expect(await getCampaign(t.tenantId, t.orgId, t.campaignId)).toMatchObject({ status: 'in_review', review: { pin: { audienceHash: 'concurrent-audience' } } });
   });
@@ -312,6 +328,64 @@ describe('ADR 0905 D3 — review lifecycle through the inbox', () => {
     expect(await getApproval(id)).toMatchObject({ status: 'approved', note: 'newer protected decision', decidedBy: 'another-instance' });
   });
 
+  // Wave 120: the two cases above race at the CAS itself, AFTER `resolveApproval` /
+  // `reopenApproval` would have read the row, so they cannot tell the decide's own
+  // snapshot from a fresh read (probes w120g1-sa-snapshot-cas / -sa-comp-snapshot were
+  // vacuous). These two land the other instance's write BEFORE that read: only the
+  // snapshot argument keeps the decision bound to the row the decider validated.
+  it('a repin landing after the decide read its row is refused: the approval CAS is bound to that snapshot', async () => {
+    const t = await team();
+    const id = await submit(t.editor, t.orgId, t.campaignId);
+    const old = await getApproval(id);
+    if (!old?.emailSend) throw new Error('missing fixture review');
+    const emailSend = { ...old.emailSend, senderAddress: 'late@agency.test' };
+    emailSend.reviewHash = emailSendReviewHash(emailSend);
+    const next: PendingApproval = { ...old, emailSend, proposal: 'Late sender repin' };
+    const db = hostExtStorage(); const cas = db.kvCompareAndSwap.bind(db); const get = db.kvGet.bind(db);
+    const approvalKey = `hostext:approval:${id}`;
+    let injected = false;
+    // The decide's first campaign read comes after both approval reads and before
+    // the resolve: the other instance's repin commits here.
+    vi.spyOn(db, 'kvGet').mockImplementation(async (key) => {
+      if (!injected && key === `hostext:email:campaign:${t.campaignId}`) {
+        injected = true;
+        const raw = await get(approvalKey);
+        expect((await cas(approvalKey, raw, JSON.stringify(next))).swapped).toBe(true);
+      }
+      return get(key);
+    });
+    const result: Res<ErrorBody> = await t.admin.post(`${APPROVALS}/${id}/claim`, { expectedContentHash: old.emailSend.reviewHash });
+    expect(injected).toBe(true);
+    expect(result.status, JSON.stringify(result.body)).toBe(409);
+    expect(result.body.details).toMatchObject({ status: 'pending' });
+    expect(await getApproval(id)).toMatchObject({ status: 'pending', emailSend: { senderAddress: 'late@agency.test', reviewHash: emailSend.reviewHash } });
+    expect((await getCampaign(t.tenantId, t.orgId, t.campaignId))?.status).toBe('in_review');
+  });
+
+  it('a newer decision landing before compensation reads the row is not reopened', async () => {
+    const t = await team();
+    const id = await submit(t.editor, t.orgId, t.campaignId);
+    const row = await getApproval(id);
+    const db = hostExtStorage(); const cas = db.kvCompareAndSwap.bind(db); const get = db.kvGet.bind(db);
+    const approvalKey = `hostext:approval:${id}`;
+    let raced = false;
+    vi.spyOn(db, 'kvCompareAndSwap').mockImplementation(async (key, expected, value) => {
+      if (!raced && key === `hostext:email:campaign:${t.campaignId}` && JSON.parse(value).status === 'approved') {
+        // Another instance re-decides the row between the failed campaign write and
+        // the compensation's read of it.
+        raced = true;
+        const raw = await get(approvalKey);
+        expect(raw && JSON.parse(raw).status).toBe('approved');
+        expect((await cas(approvalKey, raw, JSON.stringify({ ...JSON.parse(raw!), note: 'newer protected decision', decidedBy: 'another-instance' }))).swapped).toBe(true);
+        throw new Error('campaign write fault');
+      }
+      return cas(key, expected, value);
+    });
+    expect((await t.admin.post(`${APPROVALS}/${id}/claim`, { expectedContentHash: row?.emailSend?.reviewHash })).status).toBe(500);
+    expect(raced).toBe(true);
+    expect(await getApproval(id)).toMatchObject({ status: 'approved', note: 'newer protected decision', decidedBy: 'another-instance' });
+  });
+
   it('submit creates one row (resubmit repins it); an admin approves; the campaign is `approved`', async () => {
     const t = await team();
     const approvalId = await submit(t.editor, t.orgId, t.campaignId);
@@ -320,15 +394,21 @@ describe('ADR 0905 D3 — review lifecycle through the inbox', () => {
     expect(row).toMatchObject({ kind: 'email-campaign-send', status: 'pending', emailSend: { campaignId: t.campaignId, templateVersion: 1, subject: 'Big news', senderAddress: 'news@agency.test' } });
 
     // Visibility: the admin sees the card; a plain editor does not.
-    const seen = async (c: Client) => ((await c.get(`${APPROVALS}?status=pending`)).body.items as Array<{ approvalId: string }>).some((a) => a.approvalId === approvalId);
+    const seen = async (c: Client): Promise<boolean> => {
+      const list: Res<ApprovalList> = await c.get(`${APPROVALS}?status=pending`);
+      return list.body.items.some((a) => a.approvalId === approvalId);
+    };
     expect(await seen(t.admin)).toBe(true);
     expect(await seen(t.clientUser)).toBe(false);
 
     const ok = await approve(t.admin, approvalId);
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
-    expect((await t.editor.get(E(t.orgId, '/campaigns'))).body.campaigns.find((c: { campaignId: string }) => c.campaignId === t.campaignId)).toMatchObject({ status: 'approved', review: { outcome: 'approved' } });
+    const campaigns: Res<{ campaigns: Array<{ campaignId: string; status: string; review?: { outcome?: string } }> }> = await t.editor.get(E(t.orgId, '/campaigns'));
+    expect(campaigns.body.campaigns.find((c) => c.campaignId === t.campaignId)).toMatchObject({ status: 'approved', review: { outcome: 'approved' } });
     // CAS: a second approve is a 409, not a second transition.
-    expect((await approve(t.owner, approvalId)).status).toBe(409);
+    const again = await approve(t.owner, approvalId);
+    expect(again.status).toBe(409);
+    expect(again.body.details).toMatchObject({ status: 'approved' });
   });
 
   // NYI-EMAIL-1 — this was `/approvals`, a path the SPA has no route for.
@@ -339,9 +419,9 @@ describe('ADR 0905 D3 — review lifecycle through the inbox', () => {
     const group = await createGroup({ tenantId: t.tenantId, orgId: t.orgId, name: 'Client approvers', memberIds: [member.memberId] });
     expect((await t.owner.put(E(t.orgId, '/settings/approvers'), { groupRefs: [group.groupId] })).status).toBe(200);
     const approvalId = await submit(t.editor, t.orgId, t.campaignId);
-    const inbox = await t.clientUser.get('/host/openwop-app/notifications?limit=50');
+    const inbox: Res<{ notifications: Array<{ type: string; actionUrl?: string }> }> = await t.clientUser.get('/host/openwop-app/notifications?limit=50');
     expect(inbox.status, JSON.stringify(inbox.body)).toBe(200);
-    const sent = (inbox.body.notifications as Array<{ type: string; actionUrl?: string }>).filter((n) => n.type === 'approval.email-send-review-requested');
+    const sent = inbox.body.notifications.filter((n) => n.type === 'approval.email-send-review-requested');
     expect(sent).toHaveLength(1);
     expect(sent[0]!.actionUrl).toBe(`/inbox?approval=${encodeURIComponent(approvalId)}`);
   });
@@ -357,7 +437,10 @@ describe('ADR 0905 D3 — review lifecycle through the inbox', () => {
   it('a plain editor cannot decide (403); a configured approver-group member can see and approve', async () => {
     const t = await team();
     const approvalId0 = await submit(t.editor, t.orgId, t.campaignId);
-    expect((await approve(t.clientUser, approvalId0)).status).toBe(403);
+    const refused = await approve(t.clientUser, approvalId0);
+    expect(refused.status, JSON.stringify(refused.body)).toBe(403);
+    // Only the email handler's admin-or-approver check names this scope.
+    expect(refused.body.details).toMatchObject({ requiredScope: 'host:members:manage' });
     expect((await getApproval(approvalId0))?.status).toBe('pending');
     await t.editor.post(E(t.orgId, `/campaigns/${t.campaignId}/withdraw-review`));
 
@@ -365,24 +448,30 @@ describe('ADR 0905 D3 — review lifecycle through the inbox', () => {
     const member = (await listMembers(t.tenantId, t.orgId)).find((m) => m.subject === t.clientId)!;
     const group = await createGroup({ tenantId: t.tenantId, orgId: t.orgId, name: 'Client approvers', memberIds: [member.memberId] });
     expect((await t.editor.put(E(t.orgId, '/settings/approvers'), { groupRefs: [group.groupId] })).status).toBe(403);
-    expect((await t.owner.put(E(t.orgId, '/settings/approvers'), { groupRefs: ['grp-does-not-exist'] })).status).toBe(400);
+    const unknownGroup: Res<ErrorBody> = await t.owner.put(E(t.orgId, '/settings/approvers'), { groupRefs: ['grp-does-not-exist'] });
+    expect(unknownGroup.status).toBe(400);
+    expect(unknownGroup.body.details).toMatchObject({ unresolved: ['grp-does-not-exist'] });
     expect((await t.owner.put(E(t.orgId, '/settings/approvers'), { groupRefs: [group.groupId] })).status).toBe(200);
 
     const approvalId = await submit(t.editor, t.orgId, t.campaignId);
     expect((await getApproval(approvalId))?.policy).toMatchObject({ requiredApprovals: 1, approverGroupRefs: [group.groupId] });
-    const listed = (await t.clientUser.get(`${APPROVALS}?status=pending`)).body.items as Array<{ approvalId: string }>;
-    expect(listed.some((a) => a.approvalId === approvalId)).toBe(true);
+    const listed: Res<ApprovalList> = await t.clientUser.get(`${APPROVALS}?status=pending`);
+    expect(listed.body.items.some((a) => a.approvalId === approvalId)).toBe(true);
     const ok = await approve(t.clientUser, approvalId);
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
   });
 
-  it('stale_review: a template edit while in review returns the campaign to draft and closes the row (review_closed on decide)', async () => {
+  // Retitled (wave 120): the decide is refused by the closed ROW (409 "already
+  // rejected", `loadPending`), never reaching the handler's `review_closed` branch.
+  it('stale_review: a template edit while in review returns the campaign to draft and closes the row (a later decide is refused)', async () => {
     const t = await team();
     const approvalId = await submit(t.editor, t.orgId, t.campaignId);
     expect((await t.editor.patch(E(t.orgId, `/templates/${t.templateId}`), { subject: 'Edited' })).status).toBe(200);
     expect((await getCampaign(t.tenantId, t.orgId, t.campaignId))?.status).toBe('draft');
     expect((await getApproval(approvalId))?.status).toBe('rejected');
-    expect((await approve(t.admin, approvalId)).status).toBe(409);
+    const late = await approve(t.admin, approvalId);
+    expect(late.status).toBe(409);
+    expect(late.body.details).toMatchObject({ status: 'rejected' });
   });
 
   it('stale_review: a sender change the eager path misses still refuses the approve and keeps the row pending', async () => {
@@ -394,7 +483,8 @@ describe('ADR 0905 D3 — review lifecycle through the inbox', () => {
     await raw.put({ tenantId: t.tenantId, orgId: t.orgId, senderAddress: 'other@agency.test', updatedBy: 'x', updatedAt: new Date().toISOString() });
     const r = await approve(t.admin, approvalId);
     expect(r.status).toBe(409);
-    expect(JSON.stringify(r.body)).toContain('stale_review');
+    // `approvedVersion` is written only by the decide-time pin compare (not the digest check).
+    expect(r.body.details).toMatchObject({ reason: 'stale_review', approvedVersion: 1, currentVersion: 1 });
     expect((await getApproval(approvalId))?.status).toBe('pending');
   });
 
@@ -405,7 +495,7 @@ describe('ADR 0905 D3 — review lifecycle through the inbox', () => {
       const approvalId = await submit(t.admin, t.orgId, t.campaignId);
       const r = await approve(t.admin, approvalId);
       expect(r.status, JSON.stringify(r.body)).toBe(403);
-      expect(r.body?.details?.reason).toBe('separation-of-duties');
+      expect(r.body.details?.reason).toBe('separation-of-duties');
       expect((await getApproval(approvalId))?.status).toBe('pending');
       expect((await approve(t.owner, approvalId)).status).toBe(200);
     } finally { await enableToggle('email-approval-gate', 'off'); }
@@ -418,7 +508,10 @@ describe('ADR 0905 D3 — review lifecycle through the inbox', () => {
     const t = await team();
     const other = await team();
     const approvalId = await submit(t.editor, t.orgId, t.campaignId);
-    expect([403, 404]).toContain((await approve(other.owner, approvalId)).status);
+    // Exactly 404 (the title's claim): a 403 would confirm the row exists.
+    const r = await approve(other.owner, approvalId);
+    expect(r.status, JSON.stringify(r.body)).toBe(404);
+    expect(r.body.message).toBe('Approval not found.');
     expect((await getApproval(approvalId))?.status).toBe('pending');
   });
 
@@ -426,9 +519,9 @@ describe('ADR 0905 D3 — review lifecycle through the inbox', () => {
     const t = await team();
     await enableToggle('email-approval-gate', 'on');
     try {
-      const r = await t.editor.post(E(t.orgId, `/campaigns/${t.campaignId}/send`), {});
+      const r: Res<ErrorBody> = await t.editor.post(E(t.orgId, `/campaigns/${t.campaignId}/send`), {});
       expect(r.status, JSON.stringify(r.body)).toBe(409);
-      expect(JSON.stringify(r.body)).toContain('approval_required');
+      expect(r.body.details).toMatchObject({ reason: 'approval_required', status: 'draft' });
     } finally { await enableToggle('email-approval-gate', 'off'); }
   });
 });
@@ -465,7 +558,7 @@ describe('ADR 0905 D3/D4 — the service-level send gate', () => {
       expect(rest?.status).toBe('sent');
       expect(delivered).toHaveLength(3);
       // …but a RESEND under the gate needs a fresh approval cycle.
-      await expect(sendCampaign(T, T, c.campaignId, { provider, resend: true })).rejects.toMatchObject({ httpStatus: 409 });
+      await expect(sendCampaign(T, T, c.campaignId, { provider, resend: true })).rejects.toMatchObject({ httpStatus: 409, details: { reason: 'approval_required' } });
     } finally { await enableToggle('email-approval-gate', 'off'); }
   });
 
@@ -484,8 +577,8 @@ describe('ADR 0905 D3/D4 — the service-level send gate', () => {
       const sent = await sendCampaign(t.tenantId, t.orgId, t.campaignId, { provider });
       expect(sent?.status).toBe('sent');
       expect(sent?.sendPin).toMatchObject({ templateVersion: 1, subject: 'Big news' });
-      expect(delivered.length).toBeGreaterThan(0);
-      expect(delivered.every((m) => m.subject === 'Big news')).toBe(true);
+      // Both contacts of the fixture, each with the approved subject.
+      expect(delivered.map((m) => [m.to, m.subject]).sort()).toEqual([['a@y.com', 'Big news'], ['b@y.com', 'Big news']]);
     } finally { await enableToggle('email-approval-gate', 'off'); }
   });
 
@@ -497,7 +590,7 @@ describe('ADR 0905 D3/D4 — the service-level send gate', () => {
     expect((await getCampaign(t.tenantId, t.orgId, t.campaignId))?.status).toBe('draft');
     await enableToggle('email-approval-gate', 'on');
     try {
-      await expect(sendCampaign(t.tenantId, t.orgId, t.campaignId, { provider })).rejects.toMatchObject({ httpStatus: 409 });
+      await expect(sendCampaign(t.tenantId, t.orgId, t.campaignId, { provider })).rejects.toMatchObject({ httpStatus: 409, details: { reason: 'approval_required' } });
       expect(delivered).toHaveLength(0);
     } finally { await enableToggle('email-approval-gate', 'off'); }
   });

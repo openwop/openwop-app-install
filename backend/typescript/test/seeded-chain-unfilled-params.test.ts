@@ -247,8 +247,15 @@ import {
  *  rest. A param-less copy writes nothing: each step's `get-brief` fails `not_found`
  *  before any model call or page draft, and the parent fails before `create`; a bad
  *  product id is refused by the funnels write (offers are org-checked). A declared +5
- *  for one family, not a silent raise. */
-const CEILING = 152;
+ *  for one family, not a silent raise.
+ *
+ *  152 → 153 (2026-11-19, ADR 0962 P2): `campaign-studio.mcp.propose-budget-change`
+ *  :: clientId (+ the optional changes / campaignId / note). The same MCP-projection
+ *  family as request-change: params arrive as the tool call's AJV-validated
+ *  `arguments`, the chain is `internal: true`, and a param-less copy fails closed
+ *  at `bindExternal` (typed `validation_error`, or `no_acting_user` first when no
+ *  person is behind it) before any budget read, plan or approval. A declared +1. */
+const CEILING = 153;
 
 /** ADR 0507 — the EMBEDDED family, invisible until the detector was widened. These
  *  freeze to `''` rather than `undefined`, so the node SUCCEEDS on truncated input

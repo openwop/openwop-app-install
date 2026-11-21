@@ -3,6 +3,8 @@
  *
  * Exit criteria: the snapshot's numbers equal the source functions'; a client-B
  * report is a 404 to an operator who holds client A only.
+ * Correction: only new KPI numerator-dependent fields project explicit count0
+ * to null; source math/counts and historic snapshots retain their contracts.
  *
  * Setup is the ADR 0921 posture: a `ws:` agency workspace with clients A and B.
  * The operator holds `editor` on A only; the admin holds `admin` on the root.
@@ -16,14 +18,16 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { randomBytes } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { signSession, COOKIE_TTL_SECONDS } from '../src/middleware/cookieSession.js';
 import { createMember, createOrg, createWorkspace } from '../src/host/accessControlService.js';
 import { upsertFromPrincipal } from '../src/features/users/usersService.js';
+import * as performanceService from '../src/features/campaign-connectors/performanceService.js';
 import { persistRecords, kpiSummary } from '../src/features/campaign-connectors/performanceService.js';
+import type { AdPlatform } from '../src/features/campaign-connectors/types.js';
 import { buildAttribution } from '../src/features/campaign-intel/attribution.js';
 import { createCampaign as createEmailCampaign, createTemplate } from '../src/features/email/emailService.js';
 import { engagementStats } from '../src/features/email/engagementService.js';
@@ -94,6 +98,26 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 
 const DEF = { title: 'Monthly results', sections: [{ kind: 'kpi' }, { kind: 'attribution' }], period: { kind: 'month', timezone: 'Europe/London' } };
 
+// New availability fixtures use separate clients, never changing the original
+// org-A source math, org-B isolation, version/CAS or erasure populations.
+async function kpiFixture(name: string, rows: Parameters<typeof persistRecords>[2]) {
+  const orgId = (await createOrg({ tenantId: TENANT, createdBy: 'seed', name })).orgId;
+  await createMember({ tenantId: TENANT, orgId, subject: operatorUserId, displayName: 'Operator', roles: ['editor'] });
+  expect((await call(adminCookie, 'POST', '/clients', { name, orgId })).status).toBe(201);
+  await persistRecords(TENANT, orgId, rows, 'csv');
+  const definition = await call<DefRes>(operatorCookie, 'POST', `/clients/${orgId}/report-definitions`, { ...DEF, sections: [{ kind: 'kpi' }] });
+  expect(definition.status, definition.raw).toBe(201);
+  return { orgId, definitionId: definition.body.definition.definitionId };
+}
+async function computeKpi(fixture: { orgId: string; definitionId: string }): Promise<ClientReport> {
+  const result = await call<ReportRes>(operatorCookie, 'POST', `/clients/${fixture.orgId}/report-definitions/${fixture.definitionId}/reports`, {});
+  expect(result.status, result.raw).toBe(201);
+  return result.body.report;
+}
+async function missingKpi(name: string): Promise<ClientReport> {
+  return computeKpi(await kpiFixture(name, [row('2026-09-01', 100, 10, null)]));
+}
+
 describe('ADR 0957 P0 — client reports', () => {
   it('source feature shutoff refuses a fresh computation without persisting an empty or stale report', async () => {
     const created = await call<DefRes>(operatorCookie, 'POST', `/clients/${orgA}/report-definitions`, DEF);
@@ -138,6 +162,10 @@ describe('ADR 0957 P0 — client reports', () => {
     expect(report.snapshot.metrics['kpi.spend'].lineage.notes).toContain('unreported-conversions:1');
     expect(report.snapshot.tables['kpi.byPlatform'].rows).toHaveLength(kpi.byPlatform.length);
     expect(kpi.totals.reportedRevenueRecordCount).toBe(1);
+    expect(kpi.totals.reportedConversionRecordCount).toBe(1);
+    expect(report.snapshot.metrics['kpi.reportedConversionRecordCount']).toMatchObject({ value: 1, unit: 'count', previous: null });
+    expect(report.snapshot.metrics['kpi.reportedConversionRecordCount']).not.toHaveProperty('currency');
+    expect(report.snapshot.tables['kpi.byPlatform'].columns).toContain('reportedConversionRecordCount');
     expect(report.snapshot.metrics['kpi.reportedRevenueRecordCount']).toMatchObject({ value: 1, unit: 'count', previous: null });
     expect(report.snapshot.metrics['kpi.reportedRevenueRecordCount']).not.toHaveProperty('currency');
     expect(report.snapshot.tables['kpi.byPlatform'].columns).toContain('reportedRevenueRecordCount');
@@ -159,19 +187,19 @@ describe('ADR 0957 P0 — client reports', () => {
     {
       name: 'all-unreported',
       rows: [row('2026-09-01', 100, 10, null), row('2026-09-02', 100, 10, null)],
-      expected: 0, platforms: { meta: 0 },
+      expected: 0, platforms: { meta: 0 }, sourceValues: { revenue: 0, roas: 0, conversions: 0, cvr: 0, cpa: 0 },
     },
     {
       name: 'measured-zero',
       rows: [{ ...row('2026-09-01', 100, 10, 0), platform: 'google', revenue: 0 }],
-      expected: 1, platforms: { google: 1 },
+      expected: 1, platforms: { google: 1 }, sourceValues: { revenue: 0, roas: 0, conversions: 0, cvr: 0, cpa: 0 },
     },
     {
       name: 'mixed-platform',
       rows: [row('2026-09-01', 100, 10, null), { ...row('2026-09-01', 100, 10, 0), platform: 'google', revenue: 0 }, { ...row('2026-09-02', 100, 10, 1), platform: 'google', revenue: 50 }],
-      expected: 2, platforms: { meta: 0, google: 2 },
+      expected: 2, platforms: { meta: 0, google: 2 }, sourceValues: { revenue: 50, roas: 0.25, conversions: 1, cvr: 0.05, cpa: 200 },
     },
-  ] satisfies Array<{ name: string; rows: Parameters<typeof persistRecords>[2]; expected: number; platforms: Record<string, number> }>)('copies $name revenue reporting counts verbatim into a frozen client snapshot', async ({ rows, expected, platforms }) => {
+  ] satisfies Array<{ name: string; rows: Parameters<typeof persistRecords>[2]; expected: number; platforms: Record<string, number>; sourceValues: Record<string, number> }>)('copies $name revenue reporting counts verbatim into a frozen client snapshot', async ({ rows, expected, platforms, sourceValues }) => {
     // Isolate these fixtures so the original client-A totals/authorization
     // assertions above retain their exact independent input population.
     const clientOrg = (await createOrg({ tenantId: TENANT, createdBy: 'seed', name: 'Count fixture' })).orgId;
@@ -183,24 +211,170 @@ describe('ADR 0957 P0 — client reports', () => {
     const computed = await call<ReportRes>(operatorCookie, 'POST', `/clients/${clientOrg}/report-definitions/${definition.body.definition.definitionId}/reports`, {});
     expect(computed.status, computed.raw).toBe(201);
     const source = await kpiSummary(TENANT, clientOrg);
+    expect(source.totals).toMatchObject(sourceValues);
     expect(source.totals.reportedRevenueRecordCount).toBe(expected);
+    expect(source.totals.reportedConversionRecordCount).toBe(expected);
+    expect(computed.body.report.snapshot.metrics['kpi.reportedConversionRecordCount']).toMatchObject({ value: expected, unit: 'count' });
+    expect(computed.body.report.snapshot.metrics['kpi.reportedConversionRecordCount']).not.toHaveProperty('currency');
+    expect(computed.body.report.snapshot.tables['kpi.byPlatform'].columns).toContain('reportedConversionRecordCount');
     const snapshot = computed.body.report.snapshot;
     expect(snapshot.metrics['kpi.reportedRevenueRecordCount']).toMatchObject({ value: expected, unit: 'count' });
     expect(snapshot.metrics['kpi.reportedRevenueRecordCount']).not.toHaveProperty('currency');
-    // Preserve all source numeric sentinels, including real zero ROAS.
-    for (const [key, value] of Object.entries(source.totals)) expect(snapshot.metrics[`kpi.${key}`]?.value, key).toBe(value);
-    expect(snapshot.tables['kpi.byPlatform'].rows).toEqual(source.byPlatform);
+    // Accepted ADR 0957 correction: source numeric math stays intact, but a NEW
+    // snapshot projects only these five unavailable amounts/ratios to null.
+    // Every unaffected key/count retains the original all-totals equality.
+    const unavailable = new Set(expected === 0 ? ['revenue', 'roas', 'conversions', 'cvr', 'cpa'] : []);
+    for (const [key, value] of Object.entries(source.totals)) expect(snapshot.metrics[`kpi.${key}`]?.value, key).toBe(unavailable.has(key) ? null : value);
+    // Only the three existing platform amount cells change, per fixture's own
+    // platform count. All other fields/count metadata still match the source.
+    const expectedPlatformCounts: Partial<Record<AdPlatform, number>> = platforms;
+    expect(snapshot.tables['kpi.byPlatform'].rows).toEqual(source.byPlatform.map((entry) => expectedPlatformCounts[entry.platform] === 0 ? { ...entry, revenue: null, roas: null, conversions: null } : entry));
     expect(snapshot.tables['kpi.byPlatform'].columns).toContain('reportedRevenueRecordCount');
     expect(source.byPlatform.map((platform) => platform.platform).sort()).toEqual(Object.keys(platforms).sort());
     for (const [name, count] of Object.entries(platforms)) {
       const platform = source.byPlatform.find((entry) => entry.platform === name);
       if (!platform) throw new Error(`source platform missing: ${name}`);
       expect(platform.reportedRevenueRecordCount).toBe(count);
+      expect(platform.reportedConversionRecordCount).toBe(count);
     }
     const stored = await call<ReportRes>(operatorCookie, 'GET', `/clients/${clientOrg}/reports/${computed.body.report.reportId}`);
     expect(stored.status, stored.raw).toBe(200);
     expect(stored.body.report.snapshot).toEqual(snapshot);
     expect(stored.body.report.snapshotHash).toBe(snapshotHashOf(snapshot));
+  });
+
+  // Five separate real-HTTP witnesses: each has its own first null-vs-zero
+  // assertion, so Revenue cannot mask ROAS or the three conversion failures.
+  it('a newly computed report stores missing Revenue as null, not the source zero sentinel', async () => {
+    const report = await missingKpi('Missing Revenue');
+    expect(report.snapshot.metrics['kpi.revenue'].value).toBeNull();
+    expect(report.snapshot.metrics['kpi.revenue']).toMatchObject({ unit: 'currency', currency: 'USD', previous: null });
+    expect(report.snapshot.metrics['kpi.revenue'].lineage.notes).toContain('unreported-revenue:1');
+  });
+  it('a newly computed report stores missing ROAS as null, not the source zero sentinel', async () => {
+    const report = await missingKpi('Missing ROAS');
+    expect(report.snapshot.metrics['kpi.roas'].value).toBeNull();
+    expect(report.snapshot.metrics['kpi.roas']).toMatchObject({ unit: 'ratio', previous: null });
+  });
+  it('a newly computed report stores missing Conversions as null, not the source zero sentinel', async () => {
+    const report = await missingKpi('Missing Conversions');
+    expect(report.snapshot.metrics['kpi.conversions'].value).toBeNull();
+    expect(report.snapshot.metrics['kpi.reportedConversionRecordCount'].value).toBe(0);
+  });
+  it('a newly computed report stores missing CVR as null, not the source zero sentinel', async () => {
+    const report = await missingKpi('Missing CVR');
+    expect(report.snapshot.metrics['kpi.cvr'].value).toBeNull();
+    expect(report.snapshot.metrics['kpi.cvr']).toMatchObject({ unit: 'ratio', previous: null });
+  });
+  it('a newly computed report stores missing CPA as null, not the source zero sentinel', async () => {
+    const report = await missingKpi('Missing CPA');
+    expect(report.snapshot.metrics['kpi.cpa'].value).toBeNull();
+    expect(report.snapshot.metrics['kpi.cpa']).toMatchObject({ unit: 'currency', currency: 'USD', previous: null });
+  });
+
+  it('measured zero remains numeric in all five report metrics and platform cells', async () => {
+    const fixture = await kpiFixture('Measured zero', [row('2026-09-01', 100, 10, 0)]);
+    const report = await computeKpi(fixture);
+    for (const key of ['revenue', 'roas', 'conversions', 'cvr', 'cpa']) expect(report.snapshot.metrics[`kpi.${key}`].value, key).toBe(0);
+    expect(report.snapshot.metrics['kpi.reportedRevenueRecordCount'].value).toBe(1);
+    expect(report.snapshot.metrics['kpi.reportedConversionRecordCount'].value).toBe(1);
+    expect(report.snapshot.tables['kpi.byPlatform'].rows).toEqual([{ platform: 'meta', spend: 100, impressions: 200, clicks: 10, conversions: 0, revenue: 0, reportedRevenueRecordCount: 1, reportedConversionRecordCount: 1, roas: 0 }]);
+  });
+
+  it('partial reporting preserves source math while only the unavailable platform cells become null', async () => {
+    const fixture = await kpiFixture('Partial platform', [row('2026-09-01', 100, 10, null), row('2026-09-02', 100, 10, 2), { ...row('2026-09-01', 100, 10, null), platform: 'google' }]);
+    const report = await computeKpi(fixture);
+    const source = await kpiSummary(TENANT, fixture.orgId);
+    expect(source.totals).toMatchObject({ spend: 300, revenue: 100, conversions: 2, roas: 1, cpa: 50, cvr: 0.2, reportedRevenueRecordCount: 1, reportedConversionRecordCount: 1 });
+    for (const [key, value] of Object.entries(source.totals)) expect(report.snapshot.metrics[`kpi.${key}`]?.value, key).toBe(value);
+    expect(report.snapshot.tables['kpi.byPlatform'].rows).toEqual([
+      { platform: 'meta', spend: 200, impressions: 400, clicks: 20, revenue: 100, conversions: 2, reportedRevenueRecordCount: 1, reportedConversionRecordCount: 1, roas: 1 },
+      { platform: 'google', spend: 100, impressions: 200, clicks: 10, revenue: null, conversions: null, reportedRevenueRecordCount: 0, reportedConversionRecordCount: 0, roas: null },
+    ]);
+    expect(report.snapshot.metrics['kpi.revenue'].lineage).toMatchObject({ rows: 3, notes: expect.arrayContaining([WINDOW_NOTE, 'unreported-revenue:2', 'unreported-conversions:2']) });
+  });
+
+  it('missing revenue does not erase independently reported conversions, CVR or CPA', async () => {
+    const report = await computeKpi(await kpiFixture('Revenue only missing', [{ ...row('2026-09-01', 100, 10, 2), revenue: null }]));
+    expect(report.snapshot.metrics['kpi.revenue'].value).toBeNull();
+    expect(report.snapshot.metrics['kpi.roas'].value).toBeNull();
+    expect(report.snapshot.metrics['kpi.conversions'].value).toBe(2);
+    expect(report.snapshot.metrics['kpi.cvr'].value).toBe(0.2);
+    expect(report.snapshot.metrics['kpi.cpa'].value).toBe(50);
+    expect(report.snapshot.tables['kpi.byPlatform'].rows[0]).toMatchObject({ revenue: null, roas: null, conversions: 2, reportedRevenueRecordCount: 0, reportedConversionRecordCount: 1 });
+  });
+
+  it('missing conversions do not erase independently reported revenue or ROAS', async () => {
+    const report = await computeKpi(await kpiFixture('Conversions only missing', [{ ...row('2026-09-01', 100, 10, null), revenue: 50 }]));
+    expect(report.snapshot.metrics['kpi.conversions'].value).toBeNull();
+    expect(report.snapshot.metrics['kpi.cvr'].value).toBeNull();
+    expect(report.snapshot.metrics['kpi.cpa'].value).toBeNull();
+    expect(report.snapshot.metrics['kpi.revenue'].value).toBe(50);
+    expect(report.snapshot.metrics['kpi.roas'].value).toBe(0.5);
+    expect(report.snapshot.tables['kpi.byPlatform'].rows[0]).toMatchObject({ revenue: 50, roas: 0.5, conversions: null, reportedRevenueRecordCount: 1, reportedConversionRecordCount: 0 });
+  });
+
+  it('a zero-spend reporting row retains source zero-denominator sentinels rather than becoming unavailable', async () => {
+    const fixture = await kpiFixture('Zero spend reporting', [row('2026-09-01', 0, 10, 2)]);
+    const report = await computeKpi(fixture);
+    const source = await kpiSummary(TENANT, fixture.orgId);
+    expect(source.totals).toMatchObject({ revenue: 100, conversions: 2, cvr: 0.2, cpa: 0, roas: 0, reportedRevenueRecordCount: 1, reportedConversionRecordCount: 1 });
+    for (const [key, value] of Object.entries(source.totals)) expect(report.snapshot.metrics[`kpi.${key}`]?.value, key).toBe(value);
+    expect(report.snapshot.tables['kpi.byPlatform'].rows).toEqual(source.byPlatform);
+  });
+
+  it('a newly computed empty population is unavailable only for the five numerator-dependent metrics', async () => {
+    const fixture = await kpiFixture('Empty source', []);
+    const report = await computeKpi(fixture);
+    for (const key of ['revenue', 'roas', 'conversions', 'cvr', 'cpa']) expect(report.snapshot.metrics[`kpi.${key}`].value, key).toBeNull();
+    for (const key of ['spend', 'impressions', 'clicks', 'ctr', 'cpc', 'reportedRevenueRecordCount', 'reportedConversionRecordCount']) expect(report.snapshot.metrics[`kpi.${key}`].value, key).toBe(0);
+    expect(report.snapshot.tables['kpi.byPlatform'].rows).toEqual([]);
+    expect(report.snapshot.metrics['kpi.revenue'].lineage).toMatchObject({ rows: 0, notes: expect.arrayContaining([WINDOW_NOTE]) });
+  });
+
+  it('an older source without optional counts keeps numeric behavior through the actual HTTP report adapter', async () => {
+    const fixture = await kpiFixture('Legacy source counts', [row('2026-09-01', 100, 10, null)]);
+    const legacy = structuredClone(await kpiSummary(TENANT, fixture.orgId));
+    delete legacy.totals.reportedRevenueRecordCount;
+    delete legacy.totals.reportedConversionRecordCount;
+    for (const platform of legacy.byPlatform) { delete platform.reportedRevenueRecordCount; delete platform.reportedConversionRecordCount; }
+    // Only the existing source DTO boundary is substituted to represent an old
+    // server. No copied reducer/adapter, module registry mock or route bypass.
+    const read = vi.spyOn(performanceService, 'kpiSummary').mockResolvedValueOnce(legacy);
+    try {
+      const report = await computeKpi(fixture);
+      expect(read).toHaveBeenCalledExactlyOnceWith(TENANT, fixture.orgId, undefined);
+      for (const key of ['revenue', 'roas', 'conversions', 'cvr', 'cpa']) expect(report.snapshot.metrics[`kpi.${key}`].value, key).toBe(0);
+      expect(report.snapshot.tables['kpi.byPlatform'].rows).toEqual(legacy.byPlatform);
+      const stored = await call<ReportRes>(operatorCookie, 'GET', `/clients/${fixture.orgId}/reports/${report.reportId}`);
+      expect(stored.status, stored.raw).toBe(200);
+      expect(stored.body.report.snapshot).toEqual(report.snapshot);
+    } finally { read.mockRestore(); }
+  });
+
+  it('fresh unavailable data creates a distinct report while the previous numeric snapshot and hash remain frozen on GET', async () => {
+    const fixture = await kpiFixture('Availability history', [row('2026-09-01', 100, 10, 0)]);
+    const previous = await computeKpi(fixture);
+    const oldSnapshot = structuredClone(previous.snapshot);
+    const oldHash = previous.snapshotHash;
+    expect(previous.snapshot.metrics['kpi.revenue'].value).toBe(0);
+    // Replace exactly the same natural key; this is source data, not an edit to
+    // either immutable report. Existing historical zero amounts stay numeric.
+    expect(await persistRecords(TENANT, fixture.orgId, [row('2026-09-01', 100, 10, null)], 'csv')).toEqual({ imported: 0, deduped: 1 });
+    const current = await computeKpi(fixture);
+    expect(current.reportId).not.toBe(previous.reportId);
+    expect(current.snapshotHash).not.toBe(oldHash);
+    expect(current.snapshot.metrics['kpi.revenue'].value).toBeNull();
+    expect(current.snapshot.metrics['kpi.conversions'].value).toBeNull();
+    const oldRead = await call<ReportRes>(operatorCookie, 'GET', `/clients/${fixture.orgId}/reports/${previous.reportId}`);
+    const newRead = await call<ReportRes>(operatorCookie, 'GET', `/clients/${fixture.orgId}/reports/${current.reportId}`);
+    expect(oldRead.status, oldRead.raw).toBe(200);
+    expect(newRead.status, newRead.raw).toBe(200);
+    expect(oldRead.body.report.snapshot).toEqual(oldSnapshot);
+    expect(oldRead.body.report.snapshotHash).toBe(oldHash);
+    expect(oldRead.body.report).toEqual(previous);
+    expect(newRead.body.report.snapshot).toEqual(current.snapshot);
+    expect(newRead.body.report.snapshotHash).toBe(snapshotHashOf(current.snapshot));
   });
 
   it('an email section reads its campaign only when it is this client\'s', async () => {

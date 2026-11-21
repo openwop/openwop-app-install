@@ -9,9 +9,11 @@
  * `cms/__tests__/headingSlug.test.tsx` "headingSlug (shared algorithm)" — its
  * backend-parity cases — and is not re-tested here (/grade-tests w52 cut the copy).
  *
- * Sabotage-witnessed (/grade-tests w52): adding h4 to the selector, dropping the
- * dedupe suffix, `>= 1` for the two-heading floor, ignoring `h.id`, and a flat
- * level each turn one case red.
+ * Sabotage-witnessed (/grade-tests w52; re-probed in wave 121): adding h4 to the selector,
+ * dropping the dedupe suffix, `>= 1` for the two-heading floor, ignoring `h.id`, and a flat
+ * level each turn one case red. ADR 1057 D1 / grade-ux row 88 finding 3 adds two more:
+ * adding h1 back to the selector, or no longer skipping headings inside
+ * `.visitor-consent`, turns the "skips the page title" case red.
  */
 import { describe, expect, it } from 'vitest';
 import { deriveToc } from '../docsToc.js';
@@ -41,6 +43,9 @@ describe('deriveToc', () => {
   it('skips the page title (h1) and the consent banner\'s heading (grade-ux row 88, finding 3)', () => {
     const el = container('<h1>Welcome</h1><h2>Install</h2><div class="visitor-consent"><h2>Analytics on this site</h2></div><h2>Usage</h2>');
     expect(deriveToc(el).map((e) => e.text)).toEqual(['Install', 'Usage']);
+    // Skipped headings are left alone: the title and the banner get no stamped id.
+    expect(el.querySelector('h1')!.id).toBe('');
+    expect(el.querySelector('.visitor-consent h2')!.id).toBe('');
   });
 
   it('returns [] under 2 headings (no lonely TOC)', () => {

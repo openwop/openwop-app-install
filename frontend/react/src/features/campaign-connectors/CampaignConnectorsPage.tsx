@@ -229,8 +229,8 @@ export function CampaignConnectorsPage(): JSX.Element {
                 <KpiCard label={t('kpiSpend')} value={orgMoney(kpi.totals.spend, kpi)} />
                 <KpiCard label={t('kpiImpressions')} value={fmt(kpi.totals.impressions)} />
                 <KpiCard label={t('kpiClicks')} value={fmt(kpi.totals.clicks)} />
-                <KpiCard label={t('kpiConversions')} value={fmt(kpi.totals.conversions)} />
-                <KpiCard label={t('kpiRevenue')} value={orgMoney(kpi.totals.revenue, kpi)} />
+                <KpiCard label={t('kpiConversions')} value={kpi.totals.reportedConversionRecordCount === 0 ? t('notReported') : fmt(kpi.totals.conversions)} />
+                <KpiCard label={t('kpiRevenue')} value={kpi.totals.reportedRevenueRecordCount === 0 ? t('notReported') : orgMoney(kpi.totals.revenue, kpi)} />
                 <KpiCard label={t('kpiRoas')} value={revenueRoas(kpi.totals.roas, kpi.totals.reportedRevenueRecordCount)} />
               </div>
 
@@ -253,7 +253,7 @@ export function CampaignConnectorsPage(): JSX.Element {
                         <td className="u-py-2"><span className="data-stack-label">{t('colPlatform')}</span><span className="chip chip--muted">{t(`platform_${p.platform}`, { defaultValue: p.platform })}</span></td>
                         <td className="u-text-right u-py-2"><span className="data-stack-label">{t('kpiSpend')}</span>{orgMoney(p.spend, kpi)}</td>
                         <td className="u-text-right u-py-2"><span className="data-stack-label">{t('kpiClicks')}</span>{fmt(p.clicks)}</td>
-                        <td className="u-text-right u-py-2"><span className="data-stack-label">{t('kpiConversions')}</span>{fmt(p.conversions)}</td>
+                        <td className="u-text-right u-py-2"><span className="data-stack-label">{t('kpiConversions')}</span>{p.reportedConversionRecordCount === 0 ? t('notReported') : fmt(p.conversions)}</td>
                         <td className="u-text-right u-py-2"><span className="data-stack-label">{t('kpiRoas')}</span>{revenueRoas(p.roas, p.reportedRevenueRecordCount)}</td>
                       </tr>
                     ))}

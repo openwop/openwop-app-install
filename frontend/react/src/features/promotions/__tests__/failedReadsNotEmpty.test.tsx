@@ -1,4 +1,8 @@
 /**
+ * Promotions (ADR 0274) failure honesty: a failed read is never presented as an
+ * empty one (ADR 0779 D7's empty-on-fail family), the HG-1 / HG-4 org states,
+ * ORG-HON-2 (no organization, no write) and the feature toggle that gates the page.
+ *
  * Both shapes on one page, which is why this trio was taken whole rather than
  * split across two sweeps.
  *
@@ -12,6 +16,13 @@
  *     a promotion above — a cart threshold, a product discount, or a
  *     budget-capped loss-leader." The instruction is the half that reads as the
  *     answer.
+ *
+ * Sabotages that turn it red: the org-failure branch of `OrgSelectionState` off,
+ * the hook's catch presenting the failure as `[]`, the failed-clause copy, the
+ * zero-org branch off, a retry that does not re-read, the `orgId` gate on the
+ * promotions load, the rows catch writing `[]`, the empty-store copy, the rows
+ * dropped, `add()` refusing everything, and the toggle's card / read / loading
+ * gates.
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent } from '@testing-library/react';
@@ -137,11 +148,15 @@ describe('a failed store read is not an empty store list', () => {
   it('the retry re-runs the store read and the page recovers', async () => {
     listOrgs.mockRejectedValueOnce(new Error('503')).mockResolvedValue([ORG]);
     await mount();
+    // Settled on the failure card before the click (not a read while loading).
+    expect(document.body.textContent).toContain('Could not load your organizations');
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Try again' })); });
     expect(listOrgs).toHaveBeenCalledTimes(2);
-    // Recovered: the create form and the store's promotions are back.
-    expect(await screen.findByLabelText(/Promotion name/)).toBeTruthy();
-    expect(await screen.findByText('Spring sale')).toBeTruthy();
+    // Recovered: the failure card is gone, the create form and the store's
+    // promotions are back — read as values once the retry's act has drained.
+    expect(document.body.textContent).not.toContain('Could not load your organizations');
+    expect(screen.queryAllByLabelText(/Promotion name/)).toHaveLength(1);
+    expect(screen.queryAllByText('Spring sale')).toHaveLength(1);
     expect(listPromotions).toHaveBeenCalledWith('o1');
   });
 });

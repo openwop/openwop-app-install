@@ -118,14 +118,18 @@ describe('WF-CONS-14 — the governance decision log holds no raw subject identi
     // A floor below the real population would let the matcher silently break.
     // Re-derive with:
     //   grep -rn 'recordGovernanceDecision(' backend/typescript/src --include='*.ts' | grep -v '\.test\.ts'
-    // RE-DERIVED 2026-10-30 (never a copied number): EIGHT production call sites
-    // -- consentService x5 (readmitSubject's allow row, the isAllowed denial,
-    // deleteSubject's erasure row, its CONS-4 legal-hold refusal and its CONS-29
-    // mid-request hold deny), cdp/identityService x1, host/laneFirewall.ts x2
-    // (:113, :121 — they moved there from host/conversationToolLoop). The
-    // definition itself is not a call and is not matched. A LIVENESS floor at the
-    // measured count: raise it deliberately when a writer is added.
-    expect(sites.length).toBeGreaterThanOrEqual(8);
+    // RE-DERIVED 2026-11-18 at 0ca7f76944 (never a copied number): THIRTEEN
+    // production call sites -- consentService x5 (:946 :993 :1021 :1036 :1209:
+    // readmitSubject's allow row, the isAllowed denial, deleteSubject's erasure
+    // row, its CONS-4 legal-hold refusal and its CONS-29 mid-request hold deny),
+    // host/laneFirewall.ts x2 (:121 :129), cdp/collectService x2 (:100 :104),
+    // cdp/routes x2 (:222 :239), cdp/identityService x1 (:147) and
+    // analytics/replayStore x1 (:771). The definition itself is not a call and is
+    // not matched. A LIVENESS floor at the measured count (owner decision
+    // TST-NZV-2; it was 8, so five non-consent sites could leave the scan
+    // unnoticed): raise it deliberately when a writer is added, lower it in the
+    // same PR that removes one.
+    expect(sites.length).toBeGreaterThanOrEqual(13);
     // The consent lane is the one the defect lived in; if the scan stops seeing
     // it, every assertion below is hollow.
     expect(sites.some((s) => s.file.includes('consent'))).toBe(true);

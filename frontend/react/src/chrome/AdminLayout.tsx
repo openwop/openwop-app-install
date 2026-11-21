@@ -10,9 +10,10 @@ import { ChevronDownIcon, ChevronRightIcon } from '../ui/icons/index.js';
 import { IconButton } from '../ui/IconButton.js';
 import { useFeatureBadge, useFeatureLocked } from '../featureToggles/FeatureAccessContext.js';
 import { useLockedNav } from '../featureToggles/lockedTargets.js';
-import { useResolvedNav } from './navConfig/NavConfigProvider.js';
+import { useNavConfig, useResolvedNav } from './navConfig/NavConfigProvider.js';
 import { readExpandedHeaders, toggleExpandedHeader } from './navConfig/navCollapseCookie.js';
 import { isAdminCaller, useEffectiveAccessState } from '../client/useEffectiveAccess.js';
+import { Button } from '../ui/Button.js';
 import { StateCard } from '../ui/StateCard.js';
 import { Skeleton } from '../ui/Skeleton.js';
 import { ShieldIcon } from '../ui/icons/index.js';
@@ -66,6 +67,7 @@ export function AdminLayout(): JSX.Element {
   // config + feature-gated by `resolveNav` (a `beta` feature renders a badge).
   const badgeFor = useFeatureBadge();
   const { admin: navGroups, degraded } = useResolvedNav();
+  const navConfig = useNavConfig();
   // Per-section collapse (ADR 0139, inverted 2026-07-06: collapsed by default),
   // shared cookie with the workspace rail. Mirrors Sidebar: the active route's
   // group is revealed in state (mount + navigation), never written to the cookie.
@@ -122,7 +124,22 @@ export function AdminLayout(): JSX.Element {
   // StateCard, no redirect (deep links stay shareable; the auth-change
   // re-resolve lands an admin who signs in on this URL correctly). Demo host
   // unaffected (anon resolves basis:'tenant-owner' server-side).
-  const { access, resolved } = useEffectiveAccessState();
+  const { access, resolved, failed, retry } = useEffectiveAccessState();
+  if (failed) {
+    return (
+      <div className="admin-shell">
+        <div className="admin-content">
+          <StateCard
+            icon={<ShieldIcon size={20} />}
+            title={t('adminAccessReadFailedTitle')}
+            body={t('adminAccessReadFailedBody')}
+            action={<Button variant="secondary" onClick={retry}>{t('common:retry')}</Button>}
+            announce
+          />
+        </div>
+      </div>
+    );
+  }
   if (!resolved) {
     // UXDEF-2 — a visible skeleton beats a momentarily blank shell on slow
     // networks (one resolve per page load; usually sub-100ms).
@@ -225,7 +242,8 @@ export function AdminLayout(): JSX.Element {
       <div className={narrow ? 'admin-content admin-content--narrow' : 'admin-content'}>
         {degraded ? (
           <Notice variant="warning" announce={t('adminNavDegraded')}>
-            {t('adminNavDegraded')}
+            <span>{t('adminNavDegraded')}</span>
+            <Button variant="secondary" size="sm" onClick={navConfig.reload} loading={navConfig.loading}>{t('common:retry')}</Button>
           </Notice>
         ) : null}
         {navGroups.length === 0 ? <StateCard title={t('adminNavEmptyTitle')} body={t('adminNavEmptyBody')} /> : null}

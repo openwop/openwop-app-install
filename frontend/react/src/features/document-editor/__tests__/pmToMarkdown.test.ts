@@ -8,6 +8,12 @@
  * paren escape, either block-lead escape, the paragraph-only scope of that escape,
  * the deletion→strike export, the nested-list indent, the table pipe escape, or the
  * final trim → the named case goes red.
+ *
+ * ADR 1055 D7 (export hygiene, re-probed wave 117): exporting every link mark
+ * regardless of `isDocumentHrefAllowed`, skipping its control-character strip
+ * (`java\tscript:` then reads as a relative href), dropping `mailto` from the
+ * allowed schemes, or fencing a chart/embed with a fixed ``` instead of
+ * `fenceFor(body)` → the export-hygiene cases go red.
  */
 import { describe, it, expect } from 'vitest';
 import { pmToMarkdown } from '../pmToMarkdown.js';

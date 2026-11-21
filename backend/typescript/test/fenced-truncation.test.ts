@@ -387,6 +387,16 @@ describe('CALL-SITE RATCHET — every handler of fenced text is classified', () 
         + 'other `slice` in the file bounds the MODEL OUTPUT (`validatePrefix`), which '
         + 'is never fenced text and is refused outright if it echoes a fence marker.',
     },
+    'features/campaign-ops/externalRead.ts': {
+      kind: 'PRODUCES',
+      why:
+        'ADR 0962 P2 / D5 — `mcpProposeBudgetChange` REFUSES an outside agent\'s `note` over '
+        + 'MCP_BUDGET_NOTE_MAX (a typed 400, never a cut), then `neutralizeUntrusted` + '
+        + '`fenceUntrustedBlock` it. The fenced string is passed whole to `proposeReallocation`, '
+        + 'whose `planTable` appends it as the last line of the approval text, stored verbatim by '
+        + '`createCampaignSpendApproval`. The file\'s other `slice`s bound campaign, run and event '
+        + 'LISTS, never fenced text.',
+    },
     'features/chat-autotitle/titleGenerator.ts': {
       kind: 'PRODUCES',
       why:

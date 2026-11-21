@@ -9,13 +9,20 @@
  *
  * So the headline test is a NEGATIVE one: prose cannot reach ranking.
  *
- * Tracker TST-DHA-4 (wave 71). Red when: the campaign pass — the ONE place that
- * reads steering into a score — folds the goals prose into its profile
- * (`w71g3-st-prose-r2`); a velocity field is not clamped to its exact cap
- * (`st-clamp`, `st-clampfallback-r2`); tier C or junk survives (`st-tiers`);
- * the prose is unbounded (`st-goalsmax`); unknown policy keys survive
- * (`st-closed`); erasure touches another author's row (`st-eraseother`) or
- * resets the workspace policy (`st-keeppolicy`).
+ * ADR 1036 D7 — steering is one row PER PERSON (`<tenantId>:<subjectId>`): a
+ * colleague in the same workspace reads defaults, never my goals or policy, and
+ * erasure DELETES the person's row (it used to redact a shared tenant row).
+ *
+ * Tracker TST-DHA-4 (wave 71, re-graded wave 118). Red when: the campaign pass — the
+ * ONE place that reads steering into a score — folds the goals prose into its
+ * profile (`w118g2-st-prose`); the ranking signature or the steering module's
+ * imports change (`st-numbers`, `st-noimport`); the defaults are incomplete or
+ * loosened (`st-defaults`, `st-conservative`); a velocity field is not clamped to
+ * its exact cap (`st-clamp`); tier C or junk survives (`st-tiers`); the prose is
+ * unbounded (`st-goalsmax`); unknown policy keys survive (`st-closed`); a partial
+ * write resets the other half (`st-keeppolicy`, `st-keepgoals`); the row is not
+ * tenant- or person-keyed (`st-tenant`, `st-person`); erasure leaves the person's
+ * row (`st-erase`) or touches another person's (`st-eraseother`).
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -60,8 +67,11 @@ describe('ADR 0543 P5 / OQ-2 — the PROSE never reaches ranking', () => {
     // Structural, and the reason the ADR's P5 row was wrong: the scores argument
     // is `Record<string, number>`. Feeding goals text in would require inventing
     // a semantic scorer, whose output cannot be reproduced on replay.
+    // Anchored to `computePriority` itself: `scoreCompleteness` carries the same
+    // parameter text, so an unanchored `toContain` stayed green with the ranking
+    // function's signature widened.
     const src = readFileSync(join(process.cwd(), 'src', 'host', 'weightedScoring.ts'), 'utf8');
-    expect(src).toContain('scores: Record<string, number>');
+    expect(src).toMatch(/export function computePriority\(set: CriteriaSet, scores: Record<string, number>\): number \{/);
   });
 
   it('changing the goals PROSE does not change a single score', async () => {
@@ -122,8 +132,9 @@ describe('ADR 0543 P5 — the POLICY is what governs, and it is bounded', () => 
 
   it('a tenant that never steered reads complete DEFAULTS, not null', async () => {
     // Every caller then reads a full policy, and none has to invent one locally.
+    // Pinned as literals: comparing to the exported DEFAULT_POLICY would move with it.
     const s = await getSteering(TENANT, 'user-1');
-    expect(s.policy).toEqual(DEFAULT_POLICY);
+    expect(s.policy).toEqual({ roles: [], locations: [], remote: null, minMatchScore: 5, dailyCap: 10, ratePerHour: 4, tiers: ['A'] });
     expect(s.goals).toBe('');
   });
 
@@ -173,6 +184,7 @@ describe('ADR 0543 P5 — the POLICY is what governs, and it is bounded', () => 
 
   it('is tenant-isolated', async () => {
     await putSteering(TENANT, { goals: 'mine' }, 'user-1');
+    expect((await getSteering(TENANT, 'user-1')).goals, 'positive control: the write landed').toBe('mine');
     expect((await getSteering('user:t-other', 'user-1')).goals).toBe('');
   });
 
@@ -195,6 +207,7 @@ describe('ADR 0464 / ADR 1036 D7 — erasure deletes the person\'s own steering'
     // workspace's policy alive. It is now one row per person (D7); nothing in
     // it outlives them.
     await putSteering(TENANT, { goals: 'I want to move into platform work', policy: { roles: ['Platform'], dailyCap: 7 } }, 'user-erased');
+    expect((await getSteering(TENANT, 'user-erased')).policy.dailyCap, 'positive control: the row exists').toBe(7);
     await eraseSubjectSteering(TENANT, 'user-erased');
 
     const after = await getSteering(TENANT, 'user-erased');
@@ -205,7 +218,11 @@ describe('ADR 0464 / ADR 1036 D7 — erasure deletes the person\'s own steering'
 
   it('leaves another person\'s steering untouched', async () => {
     await putSteering(TENANT, { goals: 'mine' }, 'user-keep');
+    // The erased person HAS a row, so the erasure really runs and deletes something;
+    // only theirs may go.
+    await putSteering(TENANT, { goals: 'theirs' }, 'user-other');
     await eraseSubjectSteering(TENANT, 'user-other');
+    expect((await getSteering(TENANT, 'user-other')).goals, 'the erasure ran').toBe('');
     expect((await getSteering(TENANT, 'user-keep')).goals).toBe('mine');
   });
 });

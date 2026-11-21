@@ -175,6 +175,24 @@ get that escalation again (stated).
 - `CP71WF-10`: an unmapped conversions or revenue CSV column records `null`, not 0.
 - `CP71WF-26`: a failed `narrate` sets `narrativeError` instead of reporting nothing.
 - `CP71WF-23`: the reallocation approval passes `orgId` and `submitters:[createdBy]`.
+  > **CORRECTED 2026-11-20 — this did NOT stop the proposer approving their own plan.**
+  > `submitters` is read only by the decide-time eligibility check
+  > (`host/autonomyPolicy/spendEligibility.ts`), and that check returns early for a row
+  > that names no approvers. The route (`POST …/reallocations/propose`), the Analyst's
+  > chat tool and the reallocate chain's node all wrote rows with no `policy`, so the
+  > check never ran and the proposer could approve their own reallocation. This item
+  > was marked closed on the shape of the row, not on a refused vote. Fixed by naming
+  > approvers on every lane through ONE helper, `reallocationApprovers`
+  > (`campaign-intel/reallocation.ts`), the same binding ADR 0962 P2 gives the MCP
+  > lane: the run's ADR 0942 policy when one governs it (`blocked` refuses before
+  > anything is written, `approve` uses the policy's approvers and requesters), else
+  > the client org's owner or admin, with the proposer as a submitter. The sole-admin
+  > self-approval exception (ADR 0942 D10.2 correction) still applies (approve only, the proposer's own session, no
+  > other approver on the client). One consequence the old row hid: a proposer can no
+  > longer REJECT their own plan either. That is the existing rule for a row that
+  > names approvers (ADR 0942 D10.2, either direction); another approver rejects it, and an
+  > unapproved plan never applies and expires after 7 days. Witnessed (designed) by
+  > `backend/typescript/test/reallocation-self-approval.test.ts`.
 - `CP71WF-28`: erasure writes in UTM governance and attribution settings use CAS with retry;
   plan-creator erasure retries like the caps loop.
 - `CP71WF-29`: `sync` emits a `summary` string (counts only: accounts, rows, failures; no campaign

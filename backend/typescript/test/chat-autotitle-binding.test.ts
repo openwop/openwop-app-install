@@ -17,6 +17,15 @@
  * Sabotage (2026-10-31, each reds a case): drop the `firstExchange` gate; drop the
  * `isPlainChat` guard; claim with casChatSessionTitle (title rewritten mid-call); move
  * the claim after the call; CAS on 'default' instead of 'claimed'; announce on a lost CAS.
+ *
+ * Double guards (grade-tests w119), each witnessed by ONE break-both edit:
+ *  - the `titleSource` gate and the D2 claim: a non-placeholder session is refused by
+ *    both, so dropping the gate alone is masked by the claim (and the claim alone by the
+ *    gate for those rows); the concurrent case forces both calls PAST the gate, so the
+ *    claim alone is witnessed there;
+ *  - `!chatSessionId` and `getChatSession(t, undefined)` → null.
+ * Each `isPlainChat` field is witnessed by a row only that field refuses (the
+ * agent-typed board, project, DM and branch rows; the type check by the channel row).
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
@@ -70,7 +79,7 @@ function harness(out: string | null | (() => Promise<string | null>), over: Part
     },
     ...over,
   };
-  return { params, calls, resolves, titles };
+  return { params, calls, resolves, titles, dispatch };
 }
 
 describe('ADR 0151 / 1019 — autotitleOnFirstExchange', () => {
@@ -144,6 +153,9 @@ describe('ADR 0151 / 1019 — autotitleOnFirstExchange', () => {
     ['an agent DM', { type: 'agent', participants: ['agent:iris'], dmKey: 'agent:iris|user:u1' }],
     ['a project/notebook room', { type: 'group', participants: [], ownerSubject: { kind: 'project', id: 'p1' } }],
     ['a branch', { type: 'agent', participants: [], branchedFrom: { conversationId: 'parent', fromSeq: 3 } }],
+    // Agent-typed, so only the binding field refuses them (the type check passes).
+    ['a board-bound agent chat', { type: 'agent', boardId: 'b1', participants: [] }],
+    ['a project-bound agent chat', { type: 'agent', participants: [], ownerSubject: { kind: 'project', id: 'p1' } }],
   ];
   for (const [label, meta] of legacyEntityMetas) {
     it(`D1 legacy guard — never renames ${label} created before 'given' (NULL title_source)`, async () => {
@@ -202,7 +214,21 @@ describe('ADR 0151 / 1019 — autotitleOnFirstExchange', () => {
     await seedSession();
     const a = harness('Title A');
     const b = harness('Title B');
+    // Force the window: hold each call at the dispatch resolve (after the titleSource
+    // gate, before the claim) until both have arrived, so the claim is the only guard.
+    let arrived = 0;
+    let release: () => void = () => {};
+    const bothIn = new Promise<void>((r) => { release = r; });
+    const held = (d: HeadlessDispatch) => async (): Promise<HeadlessDispatch> => {
+      arrived += 1;
+      if (arrived === 2) release();
+      await Promise.race([bothIn, new Promise((r) => setTimeout(r, 2000))]);
+      return d;
+    };
+    a.params.resolveDispatch = held(a.dispatch);
+    b.params.resolveDispatch = held(b.dispatch);
     await Promise.all([autotitleOnFirstExchange(a.params), autotitleOnFirstExchange(b.params)]);
+    expect(arrived, 'both calls passed the titleSource gate before either claimed').toBe(2);
     expect(a.calls.length + b.calls.length).toBe(1);
     expect([...a.titles, ...b.titles]).toHaveLength(1);
   });
@@ -221,10 +247,11 @@ describe('ADR 0151 / 1019 — autotitleOnFirstExchange', () => {
 });
 
 /**
- * ATC-3/4 — the auto-title write is now a `title_source`-gated CAS at the STORE layer,
- * so the sub-ms window between the binding's re-read and its write (and a concurrent
- * second autotitle pass) cannot clobber a manual rename. Tested directly against real
- * sqlite so the atomicity is real, not mocked.
+ * ATC-3/4 — the auto-title write is a `title_source`-gated CAS at the STORE layer, so
+ * a manual rename landing while the model runs (or a concurrent second autotitle pass)
+ * cannot be clobbered. Tested directly against real sqlite so the atomicity is real, not
+ * mocked. (Since ADR 1019 the binding CASes on 'claimed'; the 'default' precondition here
+ * is the store contract, which the claim statement shares.)
  */
 describe('ATC-3/4 — casChatSessionTitle (atomic, title_source-gated)', () => {
   const store = openSqliteStorage(':memory:'); // own instance — the block above closes `storage`

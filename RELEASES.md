@@ -48,6 +48,32 @@ upgrade is neither: list it in `breakingConfig`.
 
 ## Version log
 
+### v0.17.0 — 2026-11-21
+
+- **Required stop:** no. **Rolling-safe:** yes.
+- **Schema:** sqlite 54 / postgres 52 (unchanged) · **App migrations:** 26 (unchanged).
+- **Breaking:** none. No route, env var or config key is removed or renamed. Behaviour
+  changes: an unpaged media asset list is newest first (#6112); replacing an
+  already-imported node pack answers `409 pack_restart_required` (#6157); a
+  reallocation proposer cannot decide their own plan (#6161); an erased person leaves
+  every beta cohort (#6153).
+- **New optional settings, all unchanged by default:**
+  - `OPENWOP_MEDIA_INDEX_SWEEP_MS`;
+  - `OPENWOP_PUBSUB_PING_INTERVAL_MS`, `OPENWOP_PUBSUB_PING_TIMEOUT_MS`;
+  - `VITE_BRAND_CONSENT_CLEARANCE`, `VITE_BRAND_CONSENT_FOOTER` (frontend build).
+
+  No setting changes meaning.
+- Subject erasure covers seven more stores (ADR 0464 §9, CHAN-F19 #6–#12).
+- A refused A2A push URL no longer echoes its credential (ADR 1147 GUARD-3).
+- MCP `campaign_propose_budget_change`, human-gated (ADR 0962 P2); collaborator grant
+  renewal (ADR 0958); browser-agent sign-in take-over (ADR 1136 P3a).
+- CMS split columns, linked gallery tiles, video hero and CTA photo band; consent
+  placement options (ADR 1150, ADR 1153).
+- Media assets record width and height; media lists can be paged (#6112).
+- Webhook retries arrive on schedule (RFC 0173); the Postgres event listener recovers
+  from a silent socket (#6133).
+- [CHANGELOG §0.17.0](./CHANGELOG.md#0170--2026-11-21)
+
 ### v0.16.0 — 2026-11-18
 
 - **Required stop:** no. **Rolling-safe:** yes.

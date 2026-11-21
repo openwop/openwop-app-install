@@ -1,3 +1,20 @@
+/**
+ * ReviewCard (ADR 0068) — the ONE normalized human-review card (chat, side panel,
+ * inbox). Protected: it is the HITL approval surface.
+ *
+ * Guards: actions come from the backend record and an empty list renders read-only;
+ * the chosen verb and note reach `onDecide`; ADR 0778 APUX-1/3/5/9/10 (kept failure on
+ * remount, canDecide:false, localized errors, reject confirms first, same-tick double
+ * click posts once) and the D10 typed answers; ADR 0600 interrupt-reject copy;
+ * CC-GATE-2 (a refused self-approval says why); ADR 0473 approve-what-you-see (the
+ * approve echoes the LIVE hash, no unpinned Approve without it); ADR 0905 D3 (an email
+ * send approves only with its full review digest); ADR 0862 (an assistant action
+ * approve echoes the content hash; reject never carries a hash).
+ *
+ * What breaks if this goes red: an approve that posts without the hash the reviewer
+ * saw, a declined reject that still posts, or a refusal shown as the wrong reason.
+ * Sabotage-witnessed per claim (wave 118, TST-CNV-49).
+ */
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { t } from 'i18next';
 vi.mock('../ReviewHandoff.js', () => ({ ReviewHandoff: () => null })); // own tests: reviewHandoff.test.tsx
@@ -184,12 +201,12 @@ describe('ReviewCard', () => {
     return onDecide;
   }
 
-  it('interrupt rejection confirmation describes workflow-dependent outcome and a declined confirm posts nothing', async () => {
+  it('interrupt reject: a declined confirm posts nothing; the confirm describes the workflow-dependent outcome (ADR 0600)', async () => {
     const onDecide = await rejectInterrupt(false);
     expect(onDecide).not.toHaveBeenCalled();
   });
 
-  it('interrupt rejection confirmation describes workflow-dependent outcome and preserves the confirmed payload', async () => {
+  it('interrupt reject: a confirmed reject posts once with the payload unchanged (ADR 0600)', async () => {
     const onDecide = await rejectInterrupt(true);
     expect(onDecide).toHaveBeenCalledTimes(1);
     expect(onDecide).toHaveBeenCalledWith('reject', {});
@@ -289,7 +306,8 @@ describe('ReviewCard composed-workflow section (ADR 0473)', () => {
   it('shows the edited-since-proposed notice and approves with the LIVE hash (approve-what-you-see)', async () => {
     const onDecide = vi.fn().mockResolvedValue(undefined);
     render(<MemoryRouter><ReviewCard review={composed} onDecide={onDecide} /></MemoryRouter>);
-    expect(await screen.findByText(/Edited since proposed/)).toBeTruthy();
+    expect(await screen.findByText('feature.crm.nodes.search')).toBeTruthy(); // section settled
+    expect(screen.getByText(/Edited since proposed/)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: /Approve & run/ }));
     await waitFor(() => expect(onDecide).toHaveBeenCalledWith('approve', { expectedDefinitionHash: 'live-2' }));
   });
@@ -313,7 +331,8 @@ describe('ReviewCard composed-workflow section (ADR 0473)', () => {
   it('renders the expired notice and the frozen run inputs', async () => {
     const expired = { ...composed, composedWorkflow: { ...composed.composedWorkflow!, expired: true } };
     render(<MemoryRouter><ReviewCard review={expired} onDecide={vi.fn()} /></MemoryRouter>);
-    expect(await screen.findByText(/Expired — ask the agent/)).toBeTruthy();
+    expect(await screen.findByText('feature.crm.nodes.search')).toBeTruthy(); // section settled
+    expect(screen.getByText(/Expired — ask the agent/)).toBeTruthy();
     expect(screen.getByText('Run inputs')).toBeTruthy();
   });
 
@@ -353,7 +372,8 @@ describe('ADR 0905 — a unified email send review', () => {
   ])('%s: Approve is dead and posts nothing, and Reject still works', async (_name, review) => {
     const onDecide = vi.fn().mockResolvedValue(undefined);
     render(<MemoryRouter><ReviewCard review={review} onDecide={onDecide} /></MemoryRouter>);
-    expect(await screen.findByText(/out of date and can.t be approved/)).toBeTruthy();
+    expect(await screen.findByRole('button', { name: /^Reject$/ })).toBeTruthy(); // card settled
+    expect(screen.getByText(/out of date and can.t be approved/)).toBeTruthy();
     const approve = screen.getByRole('button', { name: /^Approve$/ }) as HTMLButtonElement;
     expect(approve.disabled).toBe(true);
     fireEvent.click(approve);

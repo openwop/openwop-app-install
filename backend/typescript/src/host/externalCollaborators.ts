@@ -92,6 +92,11 @@ export interface CollaboratorGrant {
    *  {@link EXPIRY_NOTICE_DAYS} days. Set by CAS before the notice is sent,
    *  so each grant is announced at most once across instances. */
   expiryNoticeAt?: string;
+  /** ADR 0958 Q1 (decided 2026-11-19) — the last renewal. A renewal moves
+   *  `expiresAt` and makes the renewer the grant's `createdBy`, so the per-use
+   *  granter check follows the member who last vouched for it (the ADR 0887 D5
+   *  link-adoption precedent). The grant id never changes. */
+  renewedAt?: string;
 }
 
 declarePiiFields('externalCollaborators.collaborator', ['email', 'displayName', 'company']);
@@ -555,6 +560,53 @@ export async function grantAccess(input: {
   if (!(await grants.compareAndSwap(null, row))) throw new OpenwopError('conflict', 'Try again.', 409, {});
   await audit(input.tenantId, { action: 'grant.create', grantId: row.grantId, collaboratorId: row.collaboratorId, orgId: row.orgId, resource: row.resource, actions: row.actions, by: row.createdBy });
   return row;
+}
+
+/**
+ * ADR 0958 Q1 (decided 2026-11-19, the user) — renew a grant. Each grant still
+ * lasts at most {@link MAX_GRANT_DAYS} days, now counted from the renewal; there
+ * is no total-lifetime cap and no never-expire. A renewal is a member's fresh
+ * decision, so it re-runs everything a mint checks (the collaborator, the
+ * owning feature, the kind surface's switch and org rule, the resource, the
+ * kind's `mayGrantTo`) and refuses a revoked or already-expired grant (that
+ * needs a new grant). The new expiry must be later than the current one. It
+ * re-arms the expiry notice and is audited (`grant.extend`, with `by`).
+ * Authority is the caller's: the host route checks the kind's grant scope.
+ */
+export async function extendGrant(input: {
+  tenantId: string; orgId: string; grantId: string; expiresInDays: unknown; actor: string; now?: Date;
+}): Promise<CollaboratorGrant> {
+  const cur = await getGrant(input.tenantId, input.orgId, input.grantId);
+  if (!cur) throw notFound();
+  const now = input.now ?? new Date();
+  if (cur.status === 'revoked') throw new OpenwopError('conflict', 'This grant was revoked. Grant access again instead.', 409, { reason: 'grant_revoked' });
+  if (!(Date.parse(cur.expiresAt) > now.getTime())) throw new OpenwopError('conflict', 'This grant has expired. Grant access again instead.', 409, { reason: 'grant_expired' });
+  const days = input.expiresInDays;
+  if (typeof days !== 'number' || !Number.isInteger(days) || days < 1 || days > MAX_GRANT_DAYS) {
+    throw new OpenwopError('validation_error', `\`expiresInDays\` must be a whole number from 1 to ${MAX_GRANT_DAYS}.`, 400, { field: 'expiresInDays' });
+  }
+  const expiresAt = new Date(now.getTime() + days * DAY_MS).toISOString();
+  if (!(Date.parse(expiresAt) > Date.parse(cur.expiresAt))) {
+    throw new OpenwopError('validation_error', 'A renewal must end later than the grant does now.', 400, { field: 'expiresInDays', reason: 'expiry_not_later' });
+  }
+  const kind = kinds.get(cur.resource.kind);
+  if (!kind || (kind.systemMintOnly && !input.actor.startsWith('system:'))) throw notFound();
+  const collaborator = await getCollaborator(input.tenantId, input.orgId, cur.collaboratorId);
+  if (!collaborator || collaborator.status !== 'active') throw new OpenwopError('conflict', 'This collaborator is not active.', 409, { reason: 'collaborator_inactive' });
+  if (!(await ownerOn(kind, input.tenantId)) || !(await kindCollaborationOn(cur.resource.kind, input.tenantId))
+    || !(await kindOrgOpen(kind, input.tenantId, input.orgId)) || !(await kind.exists(input.tenantId, input.orgId, cur.resource.id))) throw notFound();
+  const mayGrantTo = kind.mayGrantTo;
+  if (mayGrantTo) {
+    const recipient: GrantRecipient = { collaboratorId: collaborator.collaboratorId, kind: collaborator.kind, displayName: collaborator.displayName, ...(collaborator.company ? { company: collaborator.company } : {}) };
+    if (!(await safely(() => mayGrantTo(input.tenantId, input.orgId, cur.resource.id, recipient)))) {
+      throw new OpenwopError('validation_error', `This ${cur.resource.kind} cannot be granted to this collaborator.`, 400, { field: 'collaboratorId', reason: 'grant_recipient_refused' });
+    }
+  }
+  const { expiryNoticeAt: _rearmed, ...rest } = cur;
+  const next: CollaboratorGrant = { ...rest, expiresAt, createdBy: input.actor, renewedAt: now.toISOString() };
+  if (!(await grants.compareAndSwap(cur, next))) throw new OpenwopError('conflict', 'The grant changed. Reload and try again.', 409, { reason: 'grant_changed' });
+  await audit(input.tenantId, { action: 'grant.extend', grantId: cur.grantId, collaboratorId: cur.collaboratorId, orgId: input.orgId, resource: cur.resource, by: input.actor });
+  return next;
 }
 
 export async function revokeGrant(tenantId: string, orgId: string, grantId: string, actor: string): Promise<CollaboratorGrant> {

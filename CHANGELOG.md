@@ -18,6 +18,167 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-11-21
+
+A MINOR release under ADR 0052. **Nothing is breaking for API callers or operators:**
+no route, env var or config key is removed or renamed, and no default changes
+meaning. Four behaviour changes are worth reading before you upgrade (see "Upgrading
+from 0.16.0"): an unpaged media list now comes back newest first, replacing a node
+pack this process has already imported answers `409 pack_restart_required`, a
+reallocation proposer can no longer decide their own plan, and an erased person
+leaves every feature-toggle beta cohort. Subject erasure covers seven more stores
+(ADR 0464 §9). An outside agent can propose a human-gated budget change over MCP
+(ADR 0962 P2), collaborator grants can be renewed (ADR 0958), and the browser agent
+can hand a sign-in to the person (ADR 1136 P3a). The CMS gains split columns, linked
+gallery tiles, a video hero and a CTA photo band (ADR 1150, ADR 1153). Media assets
+record their pixel size and their lists can be paged. Webhook retries arrive on
+schedule, and the Postgres event listener recovers from a silent socket. No schema
+migration (sqlite 54 / postgres 52) and no app migration (26). It is rolling-safe,
+not a required stop.
+
+### Security
+
+- **A refused A2A push URL no longer echoes its credential (ADR 1147 GUARD-3,
+  #6118).** The 30 direct error writes in `routes/agents.ts` now go through the error
+  envelope. A `?token=…` in a refused push URL used to come back verbatim in the 400.
+  The same move puts the job-search, podcasts, runtime-posture and tutorials error
+  writes through the credential scrub and locale (#6116, #6117).
+- **A reallocation proposer cannot approve their own budget plan (ADR 1022
+  CP71WF-23, #6161).** The Intelligence route, the Analyst's chat tool and the
+  reallocate chain wrote the approval with no named approvers, so the decide-time
+  check passed the proposer. Every lane now binds approvers from the ADR 0942 policy,
+  or else the client org's owner or admin. The sole-admin exception (ADR 1131) stays.
+- **Subject erasure reaches seven more stores (ADR 0464 §9, CHAN-F19 #6–#12):**
+  - private-prompt import claims (#6114);
+  - a lead owner's capacity pools, which routing no longer re-creates (#6123);
+  - notebook source summaries, with a strict backstop behind the best-effort seam
+    (#6128);
+  - a contact's name in deal titles and in companies named after them; a name-less
+    convert now names the company after the email domain (#6129);
+  - a connection's pairing, inbound-session and settings rows, deleted strictly
+    (#6134);
+  - stale builder-pair room keys (#6139);
+  - feature-toggle beta cohorts and their pending replay copies (#6153).
+- **The undeclared-key rewrite skips revoked and expired keys (#6138).** `report`
+  counts live keys only, dead ones are counted as `inactive`, and `apply` never widens
+  a dead key to `['*']`.
+- **Dependencies:** the two stale desktop audit exceptions are deleted, so
+  `scripts/audit-exceptions.json` is empty again (#6125). Desktop's Electron moves
+  45.0.0 → 45.3.0 (#5435).
+
+### Added
+
+- **Campaign ops:** the MCP tool `campaign_propose_budget_change` creates a proposed
+  reallocation plan and one Inbox approval. Nothing applies it until a person at the
+  client approves and applies it (ADR 0962 P2, #6154).
+- **Collaboration:** renew a collaborator grant, 180 days per renewal with no lifetime
+  cap, at `POST /host/openwop-app/orgs/:orgId/collaborators/:id/grants/:gid/extend`
+  (ADR 0958 Q1, #6145).
+- **Browser agent take-over (ADR 1136 P3a, #6137).** In the host-loop lane, a sign-in
+  step pauses the session and asks the person who opened it to sign in themselves.
+  It expires after 15 minutes, allows at most 3 per session, and no field value
+  reaches the model or the record. Production still constructs no browser adapter.
+- **CMS:**
+  - a `split` columns layout, linked gallery tiles and a same-origin `video` hero
+    with a Pause/Play control (ADR 1150, #6132);
+  - a `cta` can carry a photo behind the band (`imageToken`, `alt` required) and the
+    hero's queue card (ADR 1153, #6160);
+  - marquee cards with only a picture are drawn, named by their alt text (#6160).
+- **Consent (ADR 1153, #6160):**
+  - the built-in `/privacy` page shows and changes the visitor's analytics choice,
+    exported as `VisitorConsentChoices`;
+  - brand options `VITE_BRAND_CONSENT_CLEARANCE=off` and
+    `VITE_BRAND_CONSENT_FOOTER=link`.
+- **Media:**
+  - every new asset records its pixel `width` and `height`, read from the image
+    header; existing assets are not backfilled (#6141);
+  - org caps and lists read an index, and lists take optional `?limit=` and
+    `?cursor=` (#6112).
+- **Notifications:** an approval names its project for board and campaign runs too
+  (ADR 1109 D4, #6122).
+
+### Changed
+
+- **Media:** an unpaged asset list is now newest first; it used to be in id order
+  (#6112).
+- **Packs:** replacing a node pack this process has already imported answers `409
+  pack_restart_required`; restart the host to load the new code (ADR 1152, #6157).
+- **Consent:** in the grouped footer, "Privacy choices" sits in the bottom bar beside
+  the utility links (#6160).
+- **Pack versions:** `feature.campaign-ops.nodes` 1.5.0,
+  `core.openwop.workflows.campaign-studio-mcp` 1.1.0, `feature.computer-use.nodes`
+  1.2.0 and `feature.production.nodes` 1.2.1 (#6154, #6137, #6152).
+- Planning docs: the film creative ADRs 1126–1131 (#5964), the Campaign Studio guided
+  flow ADR 1154 (#6159), and the ADR 0942 D10.2 sole-admin correction (#6151).
+- Test and tooling only: grade-tests waves 117–121 and floors, brand-agnostic public
+  tests, a 375px CTA e2e case, and `tracegate-ci` 0.10.4 (#6127, #6130, #6140, #6143,
+  #6149, #6120, #5729, #6115, #6131).
+
+### Fixed
+
+- **Production:** a campaign run in a workspace with Production off skips the plan
+  step instead of failing, and run preflight no longer refuses it (ADR 0356 P1,
+  #6152).
+- **Webhooks:** retries arrive on their backoff schedule, not on the next free poll
+  tick (RFC 0173, #6146).
+- **Host events:** the Postgres listener survives a clean end, a half-open socket and
+  a failed re-listen. `/host/events` had stopped delivering hours into a revision
+  (#6133, #6136).
+- **Campaign reports:** metrics a source never reported show as unavailable, not as a
+  measured 0 (ADR 0159, ADR 0957, #5695, #6158).
+- **Mobile:** the chat pocket and tutorial hints clear the mobile navigation bar (ADR
+  0768, ADR 0488, #6158).
+- **Admin:** a failed access or menu read shows a retry instead of looking like a
+  denial or an empty menu (ADR 0203, ADR 0139, #5693).
+- **Accessibility:** a scrolling table region is focusable in the same render that
+  makes it overflow (#6144).
+- **CDP:** a dropped purpose label counts as a violation in `isNonWidening` (RFC 0128,
+  #6121).
+
+#### Upgrading from 0.16.0
+
+- **Nothing breaking.** No route, env var or config key is removed or renamed, and no
+  default changes meaning. These behaviours change:
+  - `GET` media asset and collection lists without `?limit=`/`?cursor=` still answer
+    `{ assets }` / `{ collections }`, but the asset list is now newest first (#6112);
+  - replacing an already-imported node pack in a running process answers `409
+    pack_restart_required`. Boot installs, cold installs, same-version no-ops and
+    agent, chain and data packs are unaffected (#6157);
+  - the proposer of a reallocation can neither approve nor reject it (#6161). This
+    applies only to plans proposed after the upgrade. **Plans still awaiting approval
+    when you upgrade were created without named approvers, so their proposer can
+    still approve them.** Reject every pending reallocation plan in the Inbox and
+    propose it again after the upgrade. Plans expire 7 days after they were proposed,
+    so after a week none are left;
+  - an erased person leaves every beta cohort on the host, not only the erasing
+    tenant's, including a same-string principal from another IdP (#6153);
+  - protocol-route errors in `routes/agents.ts` gain `details: {}`, which the schema
+    allows (#6118).
+- **Schema:** no migration. SQLite stays at 54 and Postgres at 52.
+- **App migrations:** none. It stays at 26.
+- **Media index (not a versioned migration):** the first request after deploy builds
+  the org index inline for a tenant with up to 500 assets. A larger tenant reads the
+  old way until its background build finishes (#6112).
+- **New optional environment variables.** Each defaults to today's behaviour:
+  - `OPENWOP_MEDIA_INDEX_SWEEP_MS`: the media index upkeep poll (unfinished index
+    writes, queued builds, and the hourly counter drift check). Default: 60 s,
+    minimum 10 s.
+  - `OPENWOP_PUBSUB_PING_INTERVAL_MS`, `OPENWOP_PUBSUB_PING_TIMEOUT_MS`: the Postgres
+    listener's self-ping. Default: 60 s and 10 s.
+  - `VITE_BRAND_CONSENT_CLEARANCE` (`off`) and `VITE_BRAND_CONSENT_FOOTER` (`link`):
+    frontend build options. Default: unset, which keeps the 0.16.0 behaviour.
+- **Forks that run the frontend tests:** reinstall the frontend (`npm ci`). A new
+  `patches/cssstyle+4.6.0.patch` is applied by `postinstall`, and nothing else
+  triggers it (#6158).
+- **No env var or route is removed.** A rolling upgrade needs no downtime; back up
+  first, as the planner says below.
+
+`node scripts/upgrade-plan.mjs 0.16.0`: **1 step, not a required stop, rolling-safe.**
+0.16.0 instances run against the unchanged schema. Back up the database (and object
+store) first, because rollback is a restore, not a downgrade. Then start 0.17.0, and
+its migrations replay on boot: sqlite 54 → 54, postgres 52 → 52, app 26 → 26. Check
+that `/readiness` reports `version 0.17.0`.
+
 ## [0.16.0] — 2026-11-18
 
 A MINOR release under ADR 0052. It carries one change that is **breaking for API

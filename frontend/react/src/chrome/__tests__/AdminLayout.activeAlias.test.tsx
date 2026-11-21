@@ -17,6 +17,7 @@ vi.mock('../../client/useEffectiveAccess.js', () => ({
   isAdminCaller: () => true,
 }));
 vi.mock('../navConfig/NavConfigProvider.js', () => ({
+  useNavConfig: () => ({ reload: () => {}, loading: false }),
   useResolvedNav: () => ({
     workspace: [], site: [], degraded: false,
     admin: [{

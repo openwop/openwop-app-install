@@ -14,10 +14,15 @@
  * money display). What breaks it: bare `price currency`, a silent 12-row or
  * 3-value cap, a disclosure that fires when everything fits, the cap shown as
  * the total, a failed read rendering "shoppers see everything".
- * Sabotage-witnessed (round 1/2): formatCurrency, PRODUCT_CAP slice + its
- * disclosure condition, FACET_CAP slice + its disclosure condition, the real
- * `total`, the hiddenByRules line (and its position outside the non-empty
- * branch), the rules empty/failed branches, the search-failure clear + retry.
+ * ADR 1110 P2: when the server's candidate read was bounded
+ * (`candidatesTruncated`), the match total reads "more than N" and the facet
+ * counts carry a floor note.
+ *
+ * Sabotage-witnessed (round 1/2, re-probed wave 119 `w119g4-pd-*`):
+ * formatCurrency, PRODUCT_CAP slice + its disclosure condition, FACET_CAP slice
+ * + its disclosure condition, the real `total`, both ADR 1110 floor wordings,
+ * the hiddenByRules line (and its position outside the non-empty branch), the
+ * rules loading/empty/failed branches, the search-failure clear + retry.
  * Every "says nothing" case settles on rendered rows FIRST — an absence checked
  * while the search is in flight cannot fail (round 1: `pd-quiet-total`,
  * `pd-facet-disclose` were vacuous that way / via a regex that never matched
@@ -101,11 +106,13 @@ describe('PD-G2: truncation is disclosed', () => {
   it('says how many of how many when the list is capped', async () => {
     search.mockResolvedValue({ products: products(40), facets: [], total: 40, truncated: false, hiddenByRules: 0, candidatesTruncated: false });
     await runSearch();
-    expect(await screen.findByText('Showing the first 12 of 40 matches.')).toBeTruthy();
+    // Settle on the last row the cap keeps, then read the line's exact copy, so a
+    // dropped or wrong disclosure reds on its value, not on a lookup that expires.
+    expect(await screen.findByText('Product 11 — $1,299.50')).toBeTruthy();
+    expect(screen.getByText(/^Showing the first/).textContent).toBe('Showing the first 12 of 40 matches.');
     // …and the list really stopped at 12 (PRODUCT_CAP): rows 0–11, not row 12.
     const list = screen.getByText('Product 0 — $1,299.50').closest('ul') as HTMLElement;
     expect(within(list).getAllByRole('listitem')).toHaveLength(12);
-    expect(screen.getByText('Product 11 — $1,299.50')).toBeTruthy();
     expect(screen.queryByText(/^Product 12 —/)).toBeNull();
   });
 
@@ -120,9 +127,9 @@ describe('PD-G2: truncation is disclosed', () => {
   it('discloses the per-facet cap when a facet has more values', async () => {
     search.mockResolvedValue({ products: products(1), facets: [facet(9)], total: 1, truncated: false, hiddenByRules: 0, candidatesTruncated: false });
     await runSearch();
-    expect(await screen.findByText('Top 3 of 9 values per facet.')).toBeTruthy(); // review M2 — say of HOW MANY
+    expect(await screen.findByText('Category: cat0 (1,000)')).toBeTruthy();
+    expect(screen.getByText(/values per facet/).textContent).toBe('Top 3 of 9 values per facet.'); // review M2 — say of HOW MANY
     // …and the facet really stopped at 3 (FACET_CAP): cat0–cat2 shown, cat3 not.
-    expect(screen.getByText('Category: cat0 (1,000)')).toBeTruthy();
     expect(screen.getByText('Category: cat2 (1,002)')).toBeTruthy();
     expect(screen.queryByText(/Category: cat3/)).toBeNull();
   });
@@ -133,6 +140,8 @@ describe('PD-G2: truncation is disclosed', () => {
     // Settle on the rendered facet chips first, then the (real-copy) line is absent.
     expect(await screen.findByText('Category: cat1 (1,001)')).toBeTruthy();
     expect(screen.queryByText(/values per facet/i)).toBeNull();
+    // …nor the ADR 1110 P2 floor note: this read was not bounded.
+    expect(screen.queryByText(/Counts cover the first/i)).toBeNull();
   });
 });
 
@@ -184,17 +193,19 @@ describe('PD-G3: the rules table has a loading and an empty state', () => {
     // The server caps the page at 48 and reports the true match count separately.
     search.mockResolvedValue({ products: products(48), facets: [], total: 5000, truncated: true, hiddenByRules: 0, candidatesTruncated: false });
     await runSearch();
-    // "Showing the first {{shown}} of {{total}}" — the total must be 5,000, not 48.
-    const line = await screen.findByText(/first 12 of/i);
-    expect(line.textContent).toContain('5,000');
-    expect(line.textContent).not.toContain('48');
+    // "Showing the first {{shown}} of {{total}}" — the total must be 5,000, not 48,
+    // and an unbounded read is not worded as a floor.
+    expect(await screen.findByText('Product 11 — $1,299.50')).toBeTruthy();
+    expect(screen.getByText(/^Showing the first/).textContent).toBe('Showing the first 12 of 5,000 matches.');
   });
 
   it('ADR 1110 P2 — a count from a bounded candidate read is a floor, and says so', async () => {
-    search.mockResolvedValue({ products: products(48), facets: [], total: 1000, truncated: true, hiddenByRules: 0, candidatesTruncated: true });
+    // Both counts on the panel are floors: the match total and the facet counts.
+    search.mockResolvedValue({ products: products(48), facets: [facet(2)], total: 1000, truncated: true, hiddenByRules: 0, candidatesTruncated: true });
     await runSearch();
-    const line = await screen.findByText(/first 12 of more than/i);
-    expect(line.textContent).toContain('1,000');
+    expect(await screen.findByText('Product 11 — $1,299.50')).toBeTruthy();
+    expect(screen.getByText(/^Showing the first/).textContent).toBe('Showing the first 12 of more than 1,000 matches.');
+    expect(screen.getByText(/^Counts cover the first/).textContent).toBe('Counts cover the first 1,000 matches.');
   });
 
   it('says so even when hide rules removed EVERY match (review M1)', async () => {
@@ -202,13 +213,16 @@ describe('PD-G3: the rules table has a loading and an empty state', () => {
     // did they go?" most needs answering rendered a bare "No products matched."
     search.mockResolvedValue({ products: [], facets: [], total: 0, truncated: false, hiddenByRules: 4, candidatesTruncated: false });
     await runSearch();
-    expect(await screen.findByText(/hidden from this preview/i)).toBeTruthy();
+    // Settle on the empty result, which renders with or without the line.
+    expect(await screen.findByText('No products matched.')).toBeTruthy();
+    expect(screen.getByText(/hidden from this preview/i).textContent).toBe('4 products were hidden from this preview by your rules.');
   });
 
   it('says when hide rules removed products from the preview', async () => {
     search.mockResolvedValue({ products: products(3), facets: [], total: 3, truncated: false, hiddenByRules: 7, candidatesTruncated: false });
     await runSearch();
-    expect(await screen.findByText(/hidden from this preview/i)).toBeTruthy();
+    expect(await screen.findByText('Product 2 — $1,299.50')).toBeTruthy();
+    expect(screen.getByText(/hidden from this preview/i).textContent).toBe('7 products were hidden from this preview by your rules.');
   });
 
   it('stays quiet when nothing was hidden (the disclosure must not become noise)', async () => {

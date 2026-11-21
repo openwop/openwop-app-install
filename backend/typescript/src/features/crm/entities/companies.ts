@@ -231,6 +231,28 @@ export async function casUpdateCompany(
   return swapped ? next : null;
 }
 
+/**
+ * CHAN-F19 #9 (ADR 0464 §9, user decision 2026-11-18) — convert used to name a new
+ * company after the contact when no company name was given. On erasure, a company the
+ * subject's deals point at whose name IS exactly one of their former names is renamed to
+ * `placeholder`. Its deals, domain and firmographics stay. CAS per row.
+ */
+export async function redactCompaniesNamedAfter(
+  tenantId: string, orgCompanyIds: ReadonlySet<string>, names: readonly string[], placeholder: string,
+): Promise<number> {
+  const live = new Set(names.map((n) => n.trim()).filter((n) => n.length > 0 && n !== placeholder));
+  let touched = 0;
+  for (const oc of orgCompanyIds) {
+    const [orgId, companyId] = oc.split('::') as [string, string];
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const cur = await getCompanyForCas(tenantId, orgId, companyId);
+      if (!cur || cur.tenantId !== tenantId || !live.has(cur.name.trim())) break;
+      if (await companies.cas(cur, { ...cur, name: placeholder, updatedAt: nowIso() })) { touched++; break; }
+    }
+  }
+  return touched;
+}
+
 /** GEN-7 — clear a merge tombstone (company unmerge restore). CAS-guarded, idempotent
  *  (already-live → true). The source row's own domain/industry/tags/customFields were
  *  left intact by `tombstoneCompany`, so un-tombstoning restores the source fully. */

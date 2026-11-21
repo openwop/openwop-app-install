@@ -29,15 +29,15 @@
  * ADR 0572, not here: a build-only invariant forbids `src/` from referencing
  * it, and that guard matches the filename in ANY spelling, comments included.)
  *
- * Manifest census at generation time (766 distinct typeIds):
- *    315  side-effect
+ * Manifest census at generation time (767 distinct typeIds):
+ *    316  side-effect
  *    273  action
  *    114  pure
  *     38  read
  *     16  streaming-output
  *     10  gate
  *
- * Floor 391 = served 323 + held 68:
+ * Floor 392 = served 324 + held 68:
  *     34  held: ai-invocation-log
  *      9  held: ai-opaque-not-logged
  *     24  held: deferred-role-semantics
@@ -305,6 +305,7 @@ export const MANIFEST_SIDE_EFFECT_FLOOR: ReadonlySet<string> = new Set([
   'feature.campaign-ops.nodes.compute-snapshot',
   'feature.campaign-ops.nodes.execute',
   'feature.campaign-ops.nodes.interpret',
+  'feature.campaign-ops.nodes.mcp-propose-budget-change',
   'feature.campaign-ops.nodes.mcp-request-change',
   'feature.campaign-ops.nodes.propose',
   'feature.campaign-ops.nodes.publish-report',
@@ -657,6 +658,7 @@ export const MANIFEST_FAST_PATH_SERVED: ReadonlySet<string> = new Set([
   'feature.campaign-ops.nodes.client-note-propose',
   'feature.campaign-ops.nodes.compute-snapshot',
   'feature.campaign-ops.nodes.execute',
+  'feature.campaign-ops.nodes.mcp-propose-budget-change',
   'feature.campaign-ops.nodes.mcp-request-change',
   'feature.campaign-ops.nodes.publish-report',
   'feature.campaign-orchestration.nodes.autonomy-digest',
@@ -1232,6 +1234,7 @@ export const MANIFEST_DECLARED_TYPE_IDS: ReadonlySet<string> = new Set([
   'feature.campaign-ops.nodes.mcp-campaign-performance',
   'feature.campaign-ops.nodes.mcp-explain',
   'feature.campaign-ops.nodes.mcp-pending-gates',
+  'feature.campaign-ops.nodes.mcp-propose-budget-change',
   'feature.campaign-ops.nodes.mcp-request-change',
   'feature.campaign-ops.nodes.mcp-run-status',
   'feature.campaign-ops.nodes.propose',

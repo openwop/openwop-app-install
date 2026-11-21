@@ -13,7 +13,9 @@
  * deterministic `doc:${idemBase}` id; key the surface on a fixed tenant; dispatch without
  * an adAccountId; drop an ADR 0223 input; let `requires_approval`, a platform failure or
  * a typo'd platform fall through to the document handoff; fail on no_connection /
- * no_developer_token.
+ * no_developer_token. ADR 0907 P0: also red if euPoliticalAdvertising stops passing
+ * through, is invented when absent, is not refused when malformed, or a missing one
+ * stops being the typed `eu_political_declaration_required`.
  *
  * CCH-FORK-1 (BLOCKED-ON-PRODUCT, `it.fails` below): `publishToDocument` keys its
  * document on `${runId}:${nodeId}`, so a `:fork` mints a SECOND draft document — the
@@ -238,7 +240,7 @@ describe('publish-ad-variants — real dispatch branch (ADR 0167) vs document fa
     const ads = { publishAd: async () => { called++; return published; } };
     const out = await publishAd({ features: { documents: { createDraftDocument: async () => ({}) }, 'campaign-brief': briefSurface('o1') }, ads, inputs: { draft: adWithMeta, adAccountId: '12345', platform: 'google', euPoliticalAdvertising: 'no' }, runId: 'r1', nodeId: 'n1' });
     expect(out.status).toBe('failed');
-    expect(out.error?.code).toBe('validation_error');
+    expect(out.error).toEqual({ code: 'validation_error', message: "euPoliticalAdvertising must be 'contains' or 'does_not_contain'." });
     expect(called).toBe(0);
   });
 

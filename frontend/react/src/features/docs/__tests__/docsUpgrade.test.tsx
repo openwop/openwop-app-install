@@ -14,11 +14,18 @@
  * nav each turn one case red. The group fixtures are HYPHENATED
  * (`getting-started`) on purpose: `guides` alone could not show a missing
  * humanisation.
+ *
+ * ADR 1057 D1 (grade-ux row 88): the article is an <article>, never a second
+ * <main>, and the index sets "Documentation — <product>" as the document title
+ * and restores the previous one on unmount. Red on a `role="main"` article, a
+ * title not set, or a title not restored.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import type { DocsNavItem } from '../docsClient.js';
+// The configured product name the index title carries (a config value, not the subject).
+import { brand } from '../../../brand/brand.js';
 
 const getDocsNav = vi.fn<() => Promise<DocsNavItem[] | null>>();
 vi.mock('../docsClient.js', () => ({ getDocsNav: () => getDocsNav() }));
@@ -114,12 +121,15 @@ describe('docs sidebar — grouping (D-G2) + filter (D-G1)', () => {
     const input = await screen.findByRole('textbox', { name: /filter documentation/i });
     expect(document.activeElement).not.toBe(input);
 
+    // The handler focuses synchronously, so each key is checked at once (a wrong key
+    // reds on the value, not on a wait running out).
     fireEvent.keyDown(document, { key: '/' });
-    await waitFor(() => expect(document.activeElement).toBe(input));
+    expect(document.activeElement).toBe(input);
 
-    (document.activeElement as HTMLElement).blur();
+    input.blur();
+    expect(document.activeElement).not.toBe(input);
     fireEvent.keyDown(document, { key: 'k', metaKey: true });
-    await waitFor(() => expect(document.activeElement).toBe(input));
+    expect(document.activeElement).toBe(input);
   });
 });
 
@@ -190,10 +200,12 @@ describe('docs landmarks + index title (grade-ux row 88)', () => {
   it('renders no <main> of its own, and the index sets its own document title', async () => {
     getDocsNav.mockResolvedValue(nav());
     document.title = 'generic app title';
-    renderDocs(null);
+    const { container } = renderDocs(null);
     await sidebarWithDocs();
-    expect(screen.queryByRole('main')).toBeNull();
-    expect(document.title).toMatch(/^Documentation — /);
+    // Positive control: the docs body rendered, as an <article>.
+    expect(container.querySelectorAll('article.docs-body')).toHaveLength(1);
+    expect(screen.queryAllByRole('main')).toHaveLength(0);
+    expect(document.title).toBe(`Documentation — ${brand.productName}`);
     cleanup();
     expect(document.title, 'the title is restored on unmount').toBe('generic app title');
   });

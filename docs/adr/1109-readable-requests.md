@@ -105,6 +105,16 @@ never taken from a client:
   sends only `manual.source: 'project'`. The run route would stamp the project id only
   after checking the caller can read the project.
 
+> **CORRECTED 2026-11-18 (`PPR-1`, ADR 1133 residue; product decision by David):**
+> the source is no longer the schedule branch alone. `runSubjectOf` now asks the ONE
+> project resolver, `runProject` (`host/runProjectBinding.ts`, ADR 1133). That covers a
+> card run on a project board (`metadata.kanban.boardId` → the board's project owner,
+> same tenant only), a project schedule, and registered feature resolvers such as
+> campaigns. So a board or campaign run's approval names its project too. The
+> "stores no name" rule below is unchanged, and it is what keeps a private project's
+> name from anyone outside it: they see an opaque id the SPA renders as "a project". A
+> failed board read leaves the notification unnamed; it never fails the notification.
+
 **The record stores no name.** The SPA resolves it at read time through the projects list
 the reader can already see. An id the reader cannot see renders as a generic "a project",
 so a private project's name (#5755, ADR 0054 D5) never reaches someone outside it.

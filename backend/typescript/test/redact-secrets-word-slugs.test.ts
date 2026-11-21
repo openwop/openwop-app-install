@@ -1,17 +1,23 @@
 /**
- * `scrubSecretShaped` keeps readable URL slugs and still redacts credentials.
+ * `scrubSecretShaped` keeps readable URL slugs and still redacts credentials
+ * (issue #5044; slug fix 7fb38d8221, embedded-key guard 0f4eff818b).
  *
  * The opaque-blob rule (`[A-Za-z0-9_-]{40,}`) used to redact any long hyphenated
  * slug, and `safeUrl` scrubs through `cleanString`, so a 41-char blog slug's
- * `canonicalUrl` was stored as `[REDACTED:secret-shaped]` on kicktodo.com from
- * 2026-09-19 on (every re-save reproduced it).
+ * `canonicalUrl` was stored as `[REDACTED:secret-shaped]` on an adopter's blog from
+ * 2026-09-19 on (every re-save reproduced it). #5044 reported the same for an
+ * article slug inside CMS text: the log lane keeps it through the slug exemption,
+ * and the content lane (`cleanContent`) refuses only the high-precision credential
+ * shapes, never the 40+ run.
  *
- * Sabotage (witnessed, grade-tests wave 64): returning the marker for every
- * match reds the slug and safeUrl legs (8fw5g5-rsw-replace); dropping the `sk-`
- * guard in `isWordSlug` reds the embedded/hyphenated-key legs (rsw-skguard);
- * loosening the segment count, the segment length or the lowercase/no-underscore
- * character class each reds the opaque-blob leg (rsw-segcount, rsw-seglen,
- * rsw-charclass-r2).
+ * Sabotage (witnessed, grade-tests wave 64; re-probed wave 121 as w121g1-rsw-*):
+ * returning the marker for every match reds the slug, #5044 and safeUrl legs
+ * (rsw-replace); dropping the `sk-` guard in `isWordSlug` reds the
+ * embedded/hyphenated-key legs (rsw-skguard); loosening the segment count, the
+ * segment length or the lowercase/no-underscore character class each reds the
+ * opaque-blob leg (rsw-segcount, rsw-seglen, rsw-charclass-r2); narrowing the
+ * `AKIA` or `xox?-` rule reds the named-key leg; adding the 40+ run to the
+ * content lane's credential shapes reds the #5044 CMS leg.
  */
 import { describe, expect, it } from 'vitest';
 import { scrubSecretShaped } from '../src/host/redactSecrets.js';

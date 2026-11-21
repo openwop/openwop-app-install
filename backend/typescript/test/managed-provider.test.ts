@@ -20,6 +20,16 @@
  *   8. MMXC-1 / ADR 0611 — the per-tenant cache-scope sentinel leads the system
  *      prompt; ADR 0786 D6 + ADR 0821 D2 — the prepaid draw discounts cached
  *      reads past the free allowance while the cap rail keeps full weight.
+ *   9. ADR 1011 — a managed tools round hands the tool loop the provider's stop
+ *      reason and marks a call whose arguments are not a JSON object, never
+ *      running it on `{}` as if complete.
+ *
+ * The two `daily_limit_reached` refusals (per-tenant cap, global ceiling) and the
+ * two `managed_unavailable` ones share a code, so each case asserts the message
+ * only its own guard writes. Sabotage-witnessed (w120): each gate, the usage and
+ * global-bucket writes, the user-facing id rewrite, the default/env/caller system
+ * prompt rules, the cache-scope sentinel, the D6 weighting, the readiness probe and
+ * both tools-round pass-throughs.
  *
  * Hermetic: `fetch` fails closed in every case (a broken gate can never reach the
  * live MiniMax API), Date is faked to one UTC day, and every env key a case sets
@@ -198,7 +208,7 @@ describe('dispatchManagedChat — gating', () => {
         tenantId: 'user:alice',
         messages: [{ role: 'user', content: 'hi' }],
       }),
-    ).rejects.toMatchObject({ code: 'managed_unavailable' });
+    ).rejects.toMatchObject({ code: 'managed_unavailable', message: 'Free tier is temporarily unavailable. Try again later or bring your own key.' });
   });
 
   it('rejects unknown user-facing provider id', async () => {
@@ -228,7 +238,7 @@ describe('dispatchManagedChat — gating', () => {
         tenantId: 'user:alice',
         messages: [{ role: 'user', content: 'hi' }],
       }),
-    ).rejects.toMatchObject({ code: 'daily_limit_reached' });
+    ).rejects.toMatchObject({ code: 'daily_limit_reached', message: 'Daily limit reached (100 tokens). Resets at 00:00 UTC.' });
   });
 
   it('global ceiling rejects a FRESH tenant once cross-tenant usage hits the cap', async () => {
@@ -249,7 +259,7 @@ describe('dispatchManagedChat — gating', () => {
           tenantId: 'user:fresh-never-seen',
           messages: [{ role: 'user', content: 'hi' }],
         }),
-      ).rejects.toMatchObject({ code: 'daily_limit_reached' });
+      ).rejects.toMatchObject({ code: 'daily_limit_reached', message: 'The free tier is at capacity for today. Resets at 00:00 UTC — or bring your own key.' });
     } finally {
       delete process.env.OPENWOP_MANAGED_GLOBAL_DAILY_TOKEN_CAP;
     }
@@ -575,6 +585,7 @@ describe('dispatchManagedToolsRound (ADR 1011)', () => {
       tools: [{ name: 'send', description: 'd', inputSchema: { type: 'object' } }],
     });
     expect(round.finishReason).toBe('length');
-    expect(round.toolUses[0]).toMatchObject({ input: {}, argumentsInvalid: true });
+    // Exact: the truncated arguments are NOT partially parsed into the input.
+    expect(round.toolUses).toEqual([{ id: 'c1', name: 'send', input: {}, argumentsInvalid: true }]);
   });
 });

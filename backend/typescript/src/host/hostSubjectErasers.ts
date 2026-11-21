@@ -38,6 +38,7 @@ import { registerSelfHostedRunnerErasure } from './selfHostedRunner.js';
 import { registerAgentProfileTwinErasure } from './agentProfileService.js';
 import { registerCompensationErasure } from './compensationLedger.js';
 import { registerApprovalErasure } from './approvalService.js';
+import { registerFeatureToggleErasure } from './featureToggles/erasure.js';
 import { registerApprovalDelegationsErasure } from './approvalDelegations.js';
 import { registerTeamsDeliveryErasure } from './teamsApprovalDelivery.js';
 import { registerReviewDecisionErasure } from './reviewDecisionLedger.js';
@@ -104,4 +105,5 @@ export function registerHostSubjectErasers(): void {
   registerRelayOwnerErasure(); // ADR 1042 D8 — a relay device's owner row (DELETED; the device then fails empty)
   registerRelayDeliveryLogLifecycle(); // ADR 1043 RELAY-LOG-RETENTION-1 — delivery-log rows for a contact id (DELETED) + its 7-day age-out
   registerRelayOutboundRetention(); // ADR 1043 CHAN-F12 — undelivered relay egress ages out at the device token's lifetime
+  registerFeatureToggleErasure(); // ADR 0464 §9 CHAN-F19 #12 — the subject leaves every beta cohort (host-global); `updatedBy` redacted
 }

@@ -17,6 +17,14 @@
  * asserts the second option is acknowledged read-only (the old "no picker" line
  * could not fail — this card never had one); the cancelled-confirm cases drain
  * before asserting nothing was sent; a confirmed reject asserts the full payload.
+ *
+ * w118 (detection-only, 18 → 18 cases): every assertion that used to red only by a
+ * lookup timing out now settles on a state both the real and the broken code render
+ * and then reds on a VALUE — the read-only options case pins the card's exact button
+ * set (so the "no picker" claim can fail), absence checks run after the evidence read
+ * settles and before the positive check, the empty/unrenderable copy is exact, and a
+ * cancelled confirm waits for EITHER the confirm or a send before asserting which one
+ * happened. Sabotage ids `w118g4-ge-*`.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { t } from 'i18next';
@@ -54,6 +62,21 @@ function expectGenericRejectConfirmation(): void {
   });
   expect(call[0].title).toBe('Reject this request?');
   expect(call[0].body).toBe('What happens next depends on the workflow; rejection can end the run. Work already done is not undone.');
+}
+
+/** The inbox card's evidence block once its artifact read has settled (the
+ *  "Loading preview…" line is gone). Rendered on success AND failure. */
+async function settledEvidence(): Promise<HTMLElement> {
+  await waitFor(() => expect(art.getArtifactRevision).toHaveBeenCalledTimes(1));
+  const block = screen.getByTestId('gate-evidence');
+  await waitFor(() => expect(within(block).queryByText('Loading preview…')).toBeNull());
+  return block;
+}
+
+/** Wait until a reject click produced EITHER a confirm or a send, so a missing
+ *  confirm reds on the call counts below rather than on a wait that expires. */
+async function firstDecision(sent: { mock: { calls: unknown[] } }): Promise<void> {
+  await waitFor(() => expect(api.confirm.mock.calls.length + sent.mock.calls.length).toBeGreaterThan(0));
 }
 
 function view(data: unknown): void {
@@ -94,16 +117,19 @@ describe('inbox / runs ApprovalCard — the approver sees what they are approvin
     // …and the second option is acknowledged as read-only evidence ("+1 more"),
     // not offered as a picker: this card resolves with {action, comment} and
     // cannot carry a chosen resume value.
-    expect(screen.getByText('+1 more item under review.')).toBeTruthy();
+    expect(screen.getByText(/more items? under review/).textContent).toBe('+1 more item under review.');
     expect(screen.queryByRole('button', { name: /^pick$/i })).toBeNull();
+    // The card's exact controls: View full + the five verbs, and no picker beside them.
+    expect(screen.getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['View full', 'Approve', 'Reject', 'Request changes', 'Defer', 'Escalate']);
   });
 
   it('a FAILED evidence read refuses to read as "no preview available"', async () => {
     art.getArtifactRevision.mockRejectedValue(new Error('boom'));
     view({ prompt: GATE_PROMPT, artifactId: 'a-1', revisionId: 'rev-1' });
-    const failed = await screen.findByTestId('gate-evidence-failed');
+    const block = await settledEvidence();
+    expect(within(block).queryByText(/No preview available/i)).toBeNull(); // settled first, so this can fail
+    const failed = screen.getByTestId('gate-evidence-failed');
     expect(failed.textContent).toMatch(/couldn’t load/i);
-    expect(screen.queryByText(/No preview available/i)).toBeNull();
   });
 
   it('…and it ANNOUNCES, from the one region this app trusts', async () => {
@@ -116,15 +142,19 @@ describe('inbox / runs ApprovalCard — the approver sees what they are approvin
     art.getArtifactRevision.mockRejectedValue(new Error('boom'));
     view({ prompt: GATE_PROMPT, artifactId: 'a-1', revisionId: 'rev-1' });
     await screen.findByTestId('gate-evidence-failed');
-    await waitFor(() => expect(currentAnnouncements().assertive).toMatch(/Don’t decide from this card/i));
+    await act(async () => {}); // the Notice's announce effect has run; read the value, do not wait for it
+    expect(currentAnnouncements().assertive).toMatch(/Don’t decide from this card/i);
   });
 
   it('a SUCCESSFUL evidence read announces NOTHING (the polarity — no double-announce)', async () => {
     view({ prompt: GATE_PROMPT, artifactId: 'a-1', revisionId: 'rev-1' });
-    expect(await screen.findByText(/labor variance -18\.4% vs plan/)).toBeTruthy();
-    // Flush passive effects first: a negative read right after findBy would pass before a late announcement lands.
+    await settledEvidence();
+    // Flush passive effects first: a negative read right after the settle would pass before a late announcement lands.
     await act(async () => {});
     expect(currentAnnouncements().assertive).toBe('');
+    expect(await screen.findByText(/labor variance -18\.4% vs plan/)).toBeTruthy();
+    await act(async () => {});
+    expect(currentAnnouncements().assertive).toBe(''); // still nothing once the content is up
   });
 
   it('a gate that captured NOTHING says so — a blind card announces it is blind', async () => {
@@ -133,6 +163,7 @@ describe('inbox / runs ApprovalCard — the approver sees what they are approvin
     view({ prompt: GATE_PROMPT });
     const none = await screen.findByTestId('gate-evidence-none');
     expect(none.textContent).toMatch(/Nothing was captured/i);
+    expect(none.textContent).toBe('Nothing was captured for this gate, so there is no preview of what you’re approving. Open the run before deciding.');
   });
 
   it('an UNRECOGNIZED payload does not become "nothing was captured"', async () => {
@@ -144,6 +175,7 @@ describe('inbox / runs ApprovalCard — the approver sees what they are approvin
     const none = await screen.findByTestId('gate-evidence-none');
     expect(none.textContent).not.toMatch(/Nothing was captured/i);
     expect(none.textContent).toMatch(/can’t display/i);
+    expect(none.textContent).toBe('This gate carries something this card can’t display. Open the run to see what you’re approving before deciding.');
   });
 
   it('a SEND gate renders the envelope about to leave, and makes no "nothing captured" claim', async () => {
@@ -158,16 +190,23 @@ describe('inbox / runs ApprovalCard — the approver sees what they are approvin
         provider: 'Gmail',
       },
     });
-    expect(await screen.findByText(/a\.person@example\.com/)).toBeTruthy();
+    await screen.findByTestId('gate-evidence'); // rendered whatever the envelope reads as
+    expect(screen.queryByTestId('gate-evidence-none')).toBeNull();
+    expect(screen.getByText(/a\.person@example\.com/)).toBeTruthy();
     expect(screen.getByText(/Happy 10th anniversary/)).toBeTruthy();
     expect(screen.getByText(/Congratulations on ten years/)).toBeTruthy();
-    expect(screen.queryByTestId('gate-evidence-none')).toBeNull();
+    const send = screen.getByTestId('gate-evidence-send');
+    expect(send.textContent).toContain('a.person@example.com');
+    expect(send.textContent).toContain('Happy 10th anniversary');
+    expect(send.textContent).toContain('Congratulations on ten years, A. Person.');
   });
 
   it('the prompt and the actions still render (the fix did not displace them)', async () => {
     view({ prompt: GATE_PROMPT, artifactId: 'a-1', revisionId: 'rev-1' });
     expect(await screen.findByText(GATE_PROMPT)).toBeTruthy();
     expect(screen.getByRole('button', { name: /approve/i })).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: /^(Approve|Reject|Request changes|Defer|Escalate)$/ }).map((b) => b.textContent?.trim()))
+      .toEqual(['Approve', 'Reject', 'Request changes', 'Defer', 'Escalate']);
   });
 
   it('"View full" opens the modal over the same asset', async () => {
@@ -272,7 +311,8 @@ describe('chat ApprovalCard — the send envelope survives the unification', () 
       />,
     );
     fireEvent.click(await screen.findByRole('button', { name: /^reject$/i }));
-    await waitFor(() => expect(api.confirm).toHaveBeenCalled());
+    await firstDecision(onAction);
+    expect(api.confirm).toHaveBeenCalledTimes(1);
     expectGenericRejectConfirmation();
     await act(async () => {}); // let the declined confirm settle
     expect(onAction).not.toHaveBeenCalled();
@@ -317,7 +357,8 @@ describe('inbox / runs ApprovalCard — reject confirms, approve does not', () =
     api.confirm.mockResolvedValue(false);
     view({ prompt: GATE_PROMPT, artifactId: 'a-1', revisionId: 'rev-1' });
     fireEvent.click(await screen.findByRole('button', { name: /^reject$/i }));
-    await waitFor(() => expect(api.confirm).toHaveBeenCalled());
+    await firstDecision(api.resolveByRun);
+    expect(api.confirm).toHaveBeenCalledTimes(1);
     expectGenericRejectConfirmation();
     await act(async () => {}); // let the declined confirm settle
     expect(api.resolveByRun).not.toHaveBeenCalled();

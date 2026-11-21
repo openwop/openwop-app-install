@@ -13,16 +13,36 @@
  *
  *   "the executor + routes don't care about the backing store"
  *
- * Coverage:
- *   - runs lifecycle (insert → get → update → list)
- *   - events atomic append + sequence ordering
+ * Coverage (each with the decision it guards):
+ *   - runs lifecycle (insert → get → update → list), the ADR 0551 P1 dispatch
+ *     outbox, ADR 0287 retention of a run's artifact rows, `listRunsByParent`,
+ *     `listRunSummaries` (#4531)
+ *   - events atomic append + sequence ordering, `findFirstEventByPayload` (ADR 0754)
  *   - interrupts insert → tokenized lookup → resolve
  *   - idempotency claim (insert-or-return-existing)
- *   - audit append (write-only)
- *   - secrets upsert → get → delete → list
- *   - tenant-scoped secrets isolation
- *   - tenant hard delete cascade
- *   - tenant reassign (anon → user migration)
+ *   - the auto-title claim (ADR 1019 D2)
+ *   - webhooks: WHD-16 (delete drops pending deliveries), ADR 0747 / RFC 0201
+ *     rotation, WHROT-1..3 (no secret copy outlives its use)
+ *   - audit append, read back through `listAudit`
+ *   - secrets upsert → get → delete → list; tenant-scoped secrets isolation
+ *   - tenant hard delete cascade (ADR 0284)
+ *   - tenant reassign (ADR 0003 Phase 4c, incl. the 2026-11-03 bounded fold read)
+ *   - request-notification retirement (ADR 1114)
+ *
+ * Sabotage probes (grade-tests wave 119, `w119g2-sap-*`): each named statement
+ * broken in ONE adapter reds that adapter's case — e.g. the title claim's
+ * source guard, the ADR 1114 interrupt / archived / already-stamped / request-only
+ * filters, the audit `resource`/`payload` columns, the teardown's interrupt and
+ * secret counts, the fold read's value needle, the WHD-16 pending delete, the
+ * rotation's `previous_secret = secret`, the dead transition's secret blank (read
+ * BEFORE the backfill runs, so the backfill cannot mask it), the late-failure
+ * `status != 'delivered'` guard, the open-interrupt filter.
+ *
+ * Ceilings (recorded, `TST-OAP-1`/`-2`): every `PG_MEM_INCOMPAT` postgres half
+ * returns early and REPORTS AS PASSED; those halves run against a real Postgres
+ * only in the testcontainers twin (`ci:full`). The reassign scaffolding exclusion
+ * is a cross-file double guard (the SQL `NOT LIKE` here and the prefix list in
+ * `storage/tenantMigration.ts`), so no one-edit probe can red it.
  *
  * Postgres backend is exercised via `pg-mem` (in-memory Postgres
  * implementation, dev dependency). No live Postgres required.
@@ -456,8 +476,8 @@ describe('Storage parity: interrupts', () => {
     await s.resolveInterrupt(i1.interruptId, { ok: true }, baseTime);
     const open = await s.listOpenInterrupts(run.runId);
     const ids = open.map((i) => i.interruptId);
-    expect(ids).toContain(i2.interruptId);
-    expect(ids).not.toContain(i1.interruptId);
+    // The run is this case's own, so the open set is exact.
+    expect(ids).toEqual([i2.interruptId]);
   });
 });
 
@@ -471,7 +491,7 @@ describe('Storage parity: idempotency claim', () => {
     expect(first.existing).toBeNull();
     const second = await s.claimOnce(key, baseTime);
     expect(second.claimed).toBe(false);
-    expect(second.existing).not.toBeNull();
+    expect(second.existing?.key).toBe(key);
   });
 
   it.each(backendNames)('%s: putOnce upgrades the pending placeholder', async (name) => {
@@ -504,7 +524,11 @@ describe('Storage parity: chat-session title claim (ADR 1019 D2)', () => {
     expect(new Date(claimed!.updatedAt).getTime()).toBe(new Date(baseTime).getTime());
     expect(await s.claimChatSessionTitleSource(tenantId, sessionId, 'default', 'claimed')).toBe(false);
     expect(await s.casChatSessionTitle(tenantId, sessionId, { title: 'Auto', titleSource: 'auto', updatedAt: baseTime }, 'claimed')).toBe(true);
-    expect((await s.getChatSession(tenantId, sessionId))?.titleSource).toBe('auto');
+    const titled = await s.getChatSession(tenantId, sessionId);
+    expect([titled?.title, titled?.titleSource]).toEqual(['Auto', 'auto']);
+    // The CAS refuses a stale expectation too, and writes nothing.
+    expect(await s.casChatSessionTitle(tenantId, sessionId, { title: 'Late', titleSource: 'auto', updatedAt: baseTime }, 'claimed')).toBe(false);
+    expect((await s.getChatSession(tenantId, sessionId))?.title).toBe('Auto');
   });
 });
 
@@ -628,6 +652,10 @@ describe('Storage parity: webhooks', () => {
       await s.enqueueWebhookDelivery(row(id, st));
     }
     await s.rescheduleWebhookDelivery(`${name}-w3-dying`, t + 1, t + 2, true, 'gave up');
+    // The dead transition blanks on its own: read BEFORE the backfill, which would
+    // otherwise blank the same row and hide a transition that kept the copy.
+    const dying = (await s.listWebhookDeliveries({ limit: 500 })).find((d) => d.deliveryId === `${name}-w3-dying`);
+    expect([dying?.status, dying?.secret], 'the dead transition itself drops the copy').toEqual(['dead', '']);
     let drained = 0;
     for (let n = await s.blankTerminalDeliverySecrets(1); n > 0; n = await s.blankTerminalDeliverySecrets(1)) drained += n;
     expect(drained).toBeGreaterThanOrEqual(2);
@@ -648,6 +676,7 @@ describe('Storage parity: BYOK secrets', () => {
     expect(refs).toContain(ref);
     await s.deleteSecret(ref);
     expect(await s.getEncryptedSecret(ref)).toBeNull();
+    expect(await s.listSecretRefs()).not.toContain(ref);
   });
 
   it.each(backendNames)('%s: tenant-scoped secrets isolate across tenants', async (name) => {
@@ -711,6 +740,9 @@ describe('Storage parity: tenant hard delete cascade', () => {
 
     expect(await s.getRun(r1.runId)).toBeNull();
     expect(await s.getRun(r2.runId)).toBeNull();
+    // The children are read back, not only counted.
+    expect(await s.listEvents(r1.runId)).toEqual([]);
+    expect(await s.getInterrupt(mkInterrupt(r1.runId, `del-n1-${name}`).interruptId)).toBeNull();
     expect(await s.getTenantSecret(T, 'del-ref')).toBeNull();
   });
 });
@@ -777,6 +809,8 @@ describe('Storage parity: tenant reassign (anon → user migration)', () => {
     expect((await s.getNotification(`${t}-a`))?.metadata?.resolution).toEqual({ state: 'approved', at });
     expect((await s.getNotification(`${t}-c`))?.metadata?.resolution).toBeUndefined();
     expect((await s.getNotification(`${t}-d`))?.metadata?.resolution).toBeUndefined();
+    // Status moves only on the stamped rows.
+    expect(await Promise.all(['a', 'b', 'c', 'd'].map(async (x) => (await s.getNotification(`${t}-${x}`))?.status))).toEqual(['read', 'read', 'unread', 'archived']);
     expect(await s.resolveRequestNotifications({ tenantId: t, runId: 'run-1', resolution: { state: 'run-ended', at } })).toBe(0);
   });
 

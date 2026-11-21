@@ -15,7 +15,7 @@
  *
  * @see docs/adr/0139-configurable-navigation-menu.md
  */
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { FEATURES } from '../features.js';
 import { useFeatureVisible } from '../../featureToggles/FeatureAccessContext.js';
 import { onAuthChange } from '../../client/config.js';
@@ -55,33 +55,58 @@ export function NavConfigProvider({ children }: { children: ReactNode }): JSX.El
   /** The menu-config read FAILED — distinct from "this tenant has no overrides",
    *  which is what the EMPTY bundle legitimately means. */
   const [failed, setFailed] = useState(false);
+  const live = useRef(false);
+  const epoch = useRef(0);
+  const issued = useRef(0);
 
   const reload = useCallback(() => {
+    const owner = epoch.current;
+    const request = ++issued.current;
+    const current = (): boolean => live.current && owner === epoch.current && request === issued.current;
     setLoading(true);
-    // NO `.catch` here meant an unhandled rejection AND `setLoading(false)` never
-    // running — so `/menu-settings` sat on its loading card forever and this
-    // provider, which wraps the whole app, silently kept the EMPTY bundle. The
-    // empty bundle is the right fallback for NAV (better a default menu than
-    // none); what was missing is that anyone could tell it had happened.
-    void client().then((m) => m.getMenuConfig())
-      .then((b) => { setBundle(b); setFailed(false); setLoading(false); })
-      .catch(() => { setFailed(true); setLoading(false); });
+    setFailed(false);
+    setBundle(EMPTY_MENU_CONFIG_BUNDLE);
+    void client().then((m) => current() ? m.getMenuConfig() : null)
+      .then((b) => {
+        if (!current() || b === null) return;
+        setBundle(b); setFailed(false); setLoading(false);
+      })
+      .catch(() => {
+        if (!current()) return;
+        setFailed(true); setLoading(false);
+      });
   }, []);
 
-  // Initial load + refetch whenever the auth identity changes (sign-in/out): the
-  // per-user layer is identity-scoped, so a fresh login must re-resolve.
   useEffect(() => {
+    live.current = true;
+    epoch.current += 1;
     reload();
-    return onAuthChange(() => reload());
+    const unsubscribe = onAuthChange(() => {
+      epoch.current += 1;
+      reload();
+    });
+    return () => {
+      live.current = false;
+      epoch.current += 1;
+      unsubscribe();
+    };
   }, [reload]);
 
   const saveTenant = useCallback(async (cfg: MenuConfig) => {
-    const saved = await (await client()).putTenantMenuConfig(cfg);
+    const owner = epoch.current;
+    const api = await client();
+    if (!live.current || owner !== epoch.current) return;
+    const saved = await api.putTenantMenuConfig(cfg);
+    if (!live.current || owner !== epoch.current) return;
     setBundle((b) => ({ ...b, tenant: saved }));
   }, []);
 
   const saveUser = useCallback(async (cfg: MenuConfig) => {
-    const saved = await (await client()).putMyMenuConfig(cfg);
+    const owner = epoch.current;
+    const api = await client();
+    if (!live.current || owner !== epoch.current) return;
+    const saved = await api.putMyMenuConfig(cfg);
+    if (!live.current || owner !== epoch.current) return;
     setBundle((b) => ({ ...b, user: saved }));
   }, []);
 

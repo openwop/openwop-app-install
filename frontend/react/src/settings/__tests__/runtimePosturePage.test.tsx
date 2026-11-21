@@ -53,7 +53,7 @@ const requestButtons = (): HTMLElement[] => screen.queryAllByRole('button').filt
 afterEach(cleanup);
 beforeEach(() => {
   vi.resetAllMocks();
-  useEffectiveAccessState.mockReturnValue({ access: SUPERADMIN, resolved: true });
+  useEffectiveAccessState.mockReturnValue({ access: SUPERADMIN, resolved: true, failed: false, retry: vi.fn() });
 });
 
 describe('runtime posture page', () => {
@@ -90,7 +90,7 @@ describe('runtime posture page', () => {
 
 describe('ADR 0742 defect 1 — the pre-auth window (measured on rev 00737-vkq)', () => {
   it('does NOT read the posture until the access state resolves', async () => {
-    useEffectiveAccessState.mockReturnValue({ access: { roles: [], scopes: [], basis: 'none' }, resolved: false });
+    useEffectiveAccessState.mockReturnValue({ access: { roles: [], scopes: [], basis: 'none' }, resolved: false, failed: false, retry: vi.fn() });
     await mount();
     expect(getRuntimePosture, 'asking before the session binds measures the anonymous session').not.toHaveBeenCalled();
     expect(document.body.textContent).not.toContain('failed read');

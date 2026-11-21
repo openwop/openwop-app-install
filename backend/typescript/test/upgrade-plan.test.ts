@@ -28,6 +28,13 @@
  * the last one reds it), and the printed plan orders breaking configuration after the
  * backup and any old-binary stop and before the new binary starts (ADR 0981 P3;
  * printing it after the Start line reds both rows).
+ * Re-graded (wave 118, TST-8W6-1): 0.14.0 is the first REQUIRED stop (ADR 1045
+ * CHAN-F18, the last release with the legacy env-key id rewrite). An upgrade that
+ * crosses it lands on it first, its step carries the requiredStop flag and reason,
+ * and the printed plan says REQUIRED STOP; the 0.1.0 case counts one step per
+ * required stop crossed (counted from releases.json, not from the planner). A
+ * planner that ignores requiredStop, drops the flag or the reason, or a manifest
+ * that clears 0.14.0's flag each red the 0.14.0 case.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';

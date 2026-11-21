@@ -1059,9 +1059,14 @@ a:where(:hover) {
 .app-mobile-nav { display: none; }
 
 @media (max-width: 860px) {
+  /* The body portal cannot inherit .app-body properties. Reserve shell space
+     only while the production navigation exists; public pages keep zero. */
+  body:has(.app-mobile-nav) {
+    --app-mobile-nav-reserve: calc(var(--app-mobile-nav-block-size) + env(safe-area-inset-bottom) + var(--space-1));
+  }
   .app-body {
     box-sizing: border-box;
-    padding-bottom: calc(64px + env(safe-area-inset-bottom));
+    padding-bottom: calc(var(--app-mobile-nav-block-size) + env(safe-area-inset-bottom));
   }
   .app-sidebar {
     position: fixed;
@@ -1096,7 +1101,7 @@ a:where(:hover) {
     z-index: 70;
     display: flex;
     align-items: stretch;
-    min-height: calc(64px + env(safe-area-inset-bottom));
+    min-height: calc(var(--app-mobile-nav-block-size) + env(safe-area-inset-bottom));
     padding: var(--space-1) var(--space-1) env(safe-area-inset-bottom);
     border-top: 1px solid var(--rule);
     background: color-mix(in oklab, var(--paper) 92%, transparent);
@@ -8445,11 +8450,12 @@ button.teampage-skill-chip:not(:disabled):hover { background: var(--clay-soft); 
 /* ADR 0768 P5 — the Pocket: the one embedded chat as a compact, NON-modal
    popover over a feature surface, launched from a pill. Below 640px it is a
    full-width bottom sheet. */
-.chat-pocket-launcher { position: fixed; inset-inline-end: var(--space-5); inset-block-end: var(--space-5); z-index: 30; display: inline-flex; align-items: center; gap: var(--space-2); min-height: 44px; padding: 0 var(--space-3) 0 var(--space-1-5); border-radius: var(--radius-pill); background: var(--ink); color: var(--paper); border: 0; box-shadow: 0 8px 24px var(--ink-shadow); font-weight: var(--weight-emphasis); }
+.chat-pocket, .chat-pocket-launcher { --chat-pocket-bottom-reserve: max(var(--app-mobile-nav-reserve), var(--tutorial-hint-occupied-bottom)); }
+.chat-pocket-launcher { position: fixed; inset-inline-end: var(--space-5); inset-block-end: calc(var(--space-5) + var(--chat-pocket-bottom-reserve)); z-index: 30; display: inline-flex; align-items: center; gap: var(--space-2); min-height: 44px; padding: 0 var(--space-3) 0 var(--space-1-5); border-radius: var(--radius-pill); background: var(--ink); color: var(--paper); border: 0; box-shadow: 0 8px 24px var(--ink-shadow); font-weight: var(--weight-emphasis); }
 .chat-pocket-launcher:hover { background: var(--ink-2); color: var(--paper); }
 .chat-pocket-launcher__kbd { font-family: var(--mono); font-size: var(--text-eyebrow); color: var(--rule-2); }
 .chat-pocket__avatar { display: inline-flex; align-items: center; justify-content: center; inline-size: 32px; block-size: 32px; border-radius: 50%; background: var(--clay-wash); color: var(--clay-text); font-weight: var(--weight-head); font-size: var(--text-sm); flex-shrink: 0; }
-.chat-pocket { position: fixed; inset-inline-end: var(--space-5); inset-block-end: var(--space-5); z-index: 30; inline-size: min(420px, calc(100vw - 2 * var(--space-5))); block-size: min(620px, calc(100dvh - 2 * var(--space-6))); display: flex; flex-direction: column; background: var(--paper); border: 1px solid var(--rule-2); border-radius: var(--radius-lg); box-shadow: 0 16px 40px var(--ink-shadow); overflow: hidden; animation: chat-pocket-in var(--dur-enter) var(--ease-enter); }
+.chat-pocket { position: fixed; inset-inline-end: var(--space-5); inset-block-end: calc(var(--space-5) + var(--chat-pocket-bottom-reserve)); z-index: 30; inline-size: min(420px, calc(100vw - 2 * var(--space-5))); block-size: min(620px, max(0px, calc(100dvh - var(--chat-pocket-bottom-reserve) - 2 * var(--space-6)))); display: flex; flex-direction: column; background: var(--paper); border: 1px solid var(--rule-2); border-radius: var(--radius-lg); box-shadow: 0 16px 40px var(--ink-shadow); overflow: hidden; animation: chat-pocket-in var(--dur-enter) var(--ease-enter); }
 .chat-pocket__head { display: flex; align-items: center; gap: var(--space-2-5); padding: var(--space-2-5) var(--space-3); border-bottom: 1px solid var(--rule); }
 .chat-pocket__title { flex: 1; margin: 0; font-size: var(--text-body); font-weight: var(--weight-head); }
 .chat-pocket__body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
@@ -8457,8 +8463,8 @@ button.teampage-skill-chip:not(:disabled):hover { background: var(--clay-soft); 
 @keyframes chat-pocket-in { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) { .chat-pocket { animation: none; } }
 @media (max-width: 639px) {
-  .chat-pocket { inset-inline: 0; inset-block-end: 0; inline-size: 100%; block-size: min(85dvh, 640px); border-radius: var(--radius-lg) var(--radius-lg) 0 0; border-inline: 0; border-block-end: 0; }
-  .chat-pocket-launcher { inset-inline-end: var(--space-4); inset-block-end: var(--space-4); }
+  .chat-pocket { inset-inline: 0; inset-block-end: var(--chat-pocket-bottom-reserve); inline-size: 100%; block-size: min(85dvh, 640px, max(0px, calc(100dvh - var(--chat-pocket-bottom-reserve) - var(--space-4)))); border-radius: var(--radius-lg) var(--radius-lg) 0 0; border-inline: 0; border-block-end: 0; }
+  .chat-pocket-launcher { inset-inline-end: var(--space-4); inset-block-end: calc(var(--space-4) + var(--chat-pocket-bottom-reserve)); }
   .chat-pocket-launcher__kbd { display: none; }
 }
 .cms-hero-heading { font-size: 1.2em; }
@@ -9901,6 +9907,13 @@ button.teampage-skill-chip:not(:disabled):hover { background: var(--clay-soft); 
 .replay-pointer { fill: var(--clay); fill-opacity: 0.6; stroke: var(--clay); }
 .replay-pointer--down { fill-opacity: 1; }
 .public-shell .visitor-consent__slot { margin-top: var(--space-2); }
+/* #6155 — in the grouped footer's bottom bar the control is one of the utility
+   links (or sits in the bar when there are none), in the same link style. */
+.public-shell .app-footer__bottom .visitor-consent__slot { margin-top: 0; }
+.public-shell .app-footer--grouped .app-footer__bottom :is(.visitor-consent__footer-btn, .visitor-consent__footer-link) {
+  color: var(--ink-2); text-decoration: none; font-size: var(--text-sm);
+}
+.public-shell .app-footer--grouped .app-footer__bottom :is(.visitor-consent__footer-btn, .visitor-consent__footer-link):is(:hover, :focus-visible) { color: var(--ink); text-decoration: underline; text-underline-offset: 0.2em; }
 
 /* ── Staggered load reveal ──────────────────────────────────────────────── */
 @keyframes fp-rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
@@ -12584,7 +12597,7 @@ a.dash-activity__row:hover .dash-activity__name { color: var(--clay-text); text-
      Anchoring to the end edge is correct at every sidebar width.
      Caught on the live deploy by the /browser pass — build-green and the token
      checks both said this was fine. */
-  position: fixed; bottom: var(--space-3); inset-inline-end: var(--space-3); z-index: 40;
+  position: fixed; bottom: calc(var(--space-3) + var(--app-mobile-nav-reserve)); inset-inline-end: var(--space-3); z-index: 40;
   display: flex; align-items: center; gap: var(--space-2);
   max-width: min(28rem, calc(100vw - var(--space-6)));
   padding: var(--space-2) var(--space-3);
@@ -12994,7 +13007,7 @@ a.dash-activity__row:hover .dash-activity__name { color: var(--clay-text); text-
 .fp-tone + .fp-section, .fp-section + .fp-tone { border-top-color: transparent; }
 .fp-tone--muted { background: var(--paper-2); }
 .fp-tone--muted .fp-card, .fp-tone--muted .fp-col { background: var(--site-card-bg, var(--paper)); }
-.fp-tone--inverse, .fp-tone--accent {
+.fp-tone--inverse, .fp-tone--accent, .fp-cta--photo {
   --ink: var(--tone-inverse-ink);
   --ink-2: color-mix(in oklab, var(--tone-inverse-ink) 82%, transparent);
   --ink-3: color-mix(in oklab, var(--tone-inverse-ink) 68%, transparent);
@@ -13317,6 +13330,27 @@ mark.fp-mark { padding: 0 0.06em; background: linear-gradient(transparent 62%, c
   .fp-cta--split .fp-cta__inner { display: flex; align-items: center; justify-content: space-between; gap: var(--space-6); }
   .fp-cta--split .fp-cta__title { max-width: 14em; }
   .fp-cta--split .fp-cta__actions { margin-top: 0; flex: none; align-items: flex-end; }
+}
+/* #6150 — a photo behind the band. The band takes the inverse (dark-ground)
+   tokens in both themes (the selector list above), and a shade of the inverse
+   ground lies between the photo and the copy so the text holds its contrast
+   whatever the photo. A brand restyles both through these classes. */
+.fp-cta--photo { position: relative; isolation: isolate; overflow: hidden; background: var(--tone-inverse-bg); border-top-color: transparent; }
+.fp-cta--photo > .fp-cta__photo { position: absolute; inset: 0; z-index: -2; inline-size: 100%; block-size: 100%; max-inline-size: none; object-fit: cover; }
+.fp-cta--photo::before { content: ''; position: absolute; inset: 0; z-index: -1; background: color-mix(in srgb, var(--tone-inverse-bg) 72%, transparent); }
+/* With a queue card: copy and button in one column, the card in the other from
+   900px; stacked (card last) below that. */
+.fp-cta--queue { text-align: start; }
+.fp-cta--queue .fp-cta__inner { max-width: 1140px; }
+.fp-cta--queue .fp-cta__lede { margin-inline: 0; }
+.fp-cta--queue .fp-cta__actions { align-items: flex-start; }
+.fp-cta--queue .fp-queue { margin-top: var(--space-6); color: var(--ink); }
+@media (min-width: 900px) {
+  .fp-cta--queue .fp-cta__inner { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); column-gap: calc(var(--space-6) * 2); align-items: center; }
+  .fp-cta--queue .fp-cta__copy, .fp-cta--queue .fp-cta__actions { grid-column: 1; }
+  .fp-cta--queue .fp-cta__copy { align-self: end; }
+  .fp-cta--queue .fp-cta__actions { align-self: start; }
+  .fp-cta--queue .fp-queue { grid-column: 2; grid-row: 1 / span 2; margin-top: 0; }
 }
 /* ADR 1064 — the form card: the head and lede beside a card holding the form,
    headed by who reads the message; stacked under 900px. */

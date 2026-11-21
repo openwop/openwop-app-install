@@ -1,7 +1,7 @@
 /**
  * Media agent tool (XCH-HOLE-7, LLM-EXCHANGE-AUDIT round 3) — the ADR 0308
  * seam. `openwop:media.list` — "what assets do we have?" via the SAME
- * `listAssets` the HTTP route calls, with the SAME org RBAC the route
+ * `listAssetsPage` the HTTP route's paged read calls, with the SAME org RBAC the route
  * enforces (`resolveEffectiveAccess` workspace:read — the documents.get
  * "same boundary as the HTTP read path" pattern). Media is always-on
  * (ADR 0027) — no toggle check, matching its routes.
@@ -12,7 +12,7 @@
  */
 import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
-import { listAssets } from './mediaService.js';
+import { listAssetsPage } from './mediaService.js';
 
 export const MEDIA_LIST_TOOL_ID = 'openwop:media.list';
 
@@ -27,7 +27,7 @@ export function registerMediaAgentTools(): void {
     def: {
       name: MEDIA_LIST_TOOL_ID,
       description:
-        'List media-library assets in an organization (name, content type, size, tags, alt text, usage). '
+        'List media-library assets in an organization (name, content type, size, pixel width/height when known, tags, alt text, usage). '
         + 'Optional filters: free-text q, tag, collectionId. Use it to reference REAL existing assets instead of '
         + 'inventing file names. Read-only.',
       inputSchema: {
@@ -71,18 +71,25 @@ export function registerMediaAgentTools(): void {
         ...(typeof input.collectionId === 'string' && input.collectionId.trim() ? { collectionId: input.collectionId.trim() } : {}),
       };
       const limit = Math.min(100, Math.max(1, Number(input.limit) || 50));
-      const assets = await listAssets(scope.tenantId, orgId, filter);
+      // #5928 — one keyset page of the org's index slice, never the whole library.
+      // `total` is the slice's size when no q/tag filter is set (from the counter);
+      // a filtered read reports `more` instead of counting every match.
+      const page = await listAssetsPage(scope.tenantId, orgId, { ...filter, limit });
+      const assets = page.assets;
       return {
         content: JSON.stringify({
           orgId,
-          total: assets.length,
+          ...(page.total !== undefined ? { total: page.total } : {}),
+          ...(page.nextCursor ? { more: true } : {}),
           // Safe projection — storageRef/serveToken (internal storage
           // credentials) are deliberately absent.
-          assets: assets.slice(0, limit).map((a) => ({
+          assets: assets.map((a) => ({
             assetId: a.assetId,
             name: a.name,
             contentType: a.contentType,
             sizeBytes: a.sizeBytes,
+            // #5928 ask 4 — pixel size when known, so an agent can pick an image that fits.
+            ...(a.width !== undefined && a.height !== undefined ? { width: a.width, height: a.height } : {}),
             ...(a.collectionId ? { collectionId: a.collectionId } : {}),
             tags: a.tags,
             ...(a.altText !== undefined ? { altText: a.altText } : {}),

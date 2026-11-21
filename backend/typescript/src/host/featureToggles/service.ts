@@ -488,6 +488,73 @@ export async function purgeTenantOverrides(tenantId: string): Promise<string[]> 
   return nexts.map((cfg) => cfg.id);
 }
 
+// ── Subject erasure (ADR 0464 §9, CHAN-F19 #12) ──────────────────────────────
+
+/**
+ * The entry an emptied closed-beta cohort keeps. `resolveConfig` reads an EMPTY
+ * cohort as an OPEN beta (everyone eligible), so removing the last member would
+ * turn a closed beta on for every tenant. The cohort keeps this one entry instead,
+ * and the beta stays closed. It is the host's reserved redaction sentinel
+ * (`ERASED`, `[erased]`): `inBetaCohort` compares cohort entries only to a tenant
+ * id and a principal id, and neither is ever issued in that shape. Principals carry
+ * their lane's scheme (`oidc:`, `saml:`, `scim:`, `session:`, `apikey:`, …) and
+ * tenant ids are minted by the host. No IdP lane can issue `[erased]`.
+ */
+export const ERASED_COHORT_MEMBER = '[erased]';
+
+/**
+ * A toggle row with the subject removed, or null when the row does not name them.
+ * Drops every `ids` entry from `betaCohort` (an emptied cohort keeps
+ * {@link ERASED_COHORT_MEMBER}, so a closed beta stays closed) and replaces an
+ * `updatedBy` that is theirs with `erasedRef`. Pure: shared by the host eraser and
+ * the session-replay copy of written rows.
+ */
+export function stripToggleSubject(cfg: ToggleConfig, ids: ReadonlySet<string>, erasedRef: string): ToggleConfig | null {
+  const cohort = cfg.betaCohort;
+  const kept = cohort?.filter((m) => !ids.has(m));
+  const cohortChanged = cohort !== undefined && kept!.length !== cohort.length;
+  const byThem = cfg.updatedBy !== undefined && ids.has(cfg.updatedBy);
+  if (!cohortChanged && !byThem) return null;
+  return {
+    ...cfg,
+    ...(cohortChanged ? { betaCohort: kept!.length > 0 ? kept! : [ERASED_COHORT_MEMBER] } : {}),
+    ...(byThem ? { updatedBy: erasedRef } : {}),
+  };
+}
+
+/**
+ * Remove a subject (every id they appear under) from every stored toggle row:
+ * beta cohorts and `updatedBy`. Each row goes through the real write path (write
+ * intents prepared, CAS, listeners notified) like {@link enableTenantOverride}, so
+ * the session-replay fence sees the change if it moves a tenant's resolution.
+ * HOST-GLOBAL: the rows are shared by every tenant, so the subject leaves every
+ * cohort, not only the erasing tenant's. Returns the toggle ids changed.
+ */
+export async function eraseToggleSubject(ids: ReadonlySet<string>, erasedRef: string): Promise<string[]> {
+  if (ids.size === 0) return [];
+  const changed: string[] = [];
+  for (const first of await store.list()) {
+    let stored: ToggleConfig | null = first;
+    for (let attempt = 0; stored && attempt < 6; attempt += 1) {
+      const cur: ToggleConfig = stored;
+      const next = stripToggleSubject(cur, ids, erasedRef);
+      if (!next) { stored = null; break; }
+      const write = toggleWrite({ [next.id]: next });
+      await prepareToggleWrite(write);
+      if (await storeToggleWrite(write, () => store.compareAndSwap(cur, next))) {
+        await notifyToggleWrite(write);
+        changed.push(next.id);
+        stored = null;
+        break;
+      }
+      await abandonToggleWrite(write);
+      stored = await store.get(first.id); // lost the race: re-read and retry
+    }
+    if (stored) throw new Error(`eraseToggleSubject: CAS contention on toggle '${first.id}'`);
+  }
+  return changed;
+}
+
 // ── Feature dependency lifecycle (ADR 0194) ───────────────────────────────────
 
 /** The effective status of a config for one tenant: its override, else the global

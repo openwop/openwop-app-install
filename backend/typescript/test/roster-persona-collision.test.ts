@@ -13,7 +13,9 @@
  * another member's persona with 409' — that file already boots the app.
  *
  * Breaks it: `personaKey` without trim/lowercase (8fw2g2-rpc-case), the throw
- * removed (rpc-throw), listing siblings across tenants (rpc-tenant).
+ * removed (rpc-throw), listing siblings across tenants (rpc-tenant); wave 120
+ * adds the trim half alone, a patch that clears `roleKey`, and a rename that
+ * returns without persisting (the read-backs).
  *
  * DOUBLE GUARD on "self-rename allowed" (`rosterService.ts` applyRosterPatch):
  * the OUTER `personaKey(patch) !== personaKey(entry)` skips the sibling scan for
@@ -74,6 +76,8 @@ describe('persona rename collision (ADR 0414 M3-2)', () => {
     expect(renamed?.rosterId).toBe(bot.rosterId);
     expect(renamed?.roleKey).toBe('acme-guide');
     expect(renamed?.agentRef).toEqual(bot.agentRef);
+    // Persisted, not only returned.
+    expect((await getRosterEntry(TENANT, bot.rosterId))?.persona).toBe('Coach Ada');
   });
 
   it('the same persona in a DIFFERENT tenant does not collide', async () => {
@@ -81,5 +85,6 @@ describe('persona rename collision (ADR 0414 M3-2)', () => {
     const bot = await createRosterEntry({ tenantId: TENANT, persona: 'GuideBot', agentRef: AGENT });
     const renamed = await updateRosterEntry(TENANT, bot.rosterId, { persona: 'Iris' });
     expect(renamed?.persona).toBe('Iris');
+    expect((await getRosterEntry(TENANT, bot.rosterId))?.persona).toBe('Iris');
   });
 });

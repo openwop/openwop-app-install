@@ -8,6 +8,11 @@
  *    empties is DEACTIVATED (disable-don't-destroy); category/all scopes and
  *    other ids survive.
  * Bystander refs to OTHER products are untouched; a re-fire is a no-op.
+ *
+ * Red when: `deleteProduct` stops firing the seam; discovery stops filtering the
+ * collection, strips every pin instead of the deleted product's, or keeps an emptied
+ * rule live; promotions stop shrinking `scope.productIds`, keep an emptied scope live,
+ * or deactivate a category- or all-scoped promotion; a re-fire touches rows again.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -50,6 +55,9 @@ describe('merch product-lifecycle consumers (RI-4)', () => {
     // empty but which ALSO scopes a category, or everything, still has a scope.
     const scopedCategory = await createPromotion({ tenantId: T, orgId: ORG, createdBy: 'test', name: 'Doomed + beans', type: 'product_discount', reward: { kind: 'percentage', value: 7 }, scope: { productIds: [doomed.productId], categories: ['beans'] } });
     const scopedAll = await createPromotion({ tenantId: T, orgId: ORG, createdBy: 'test', name: 'Doomed + all', type: 'product_discount', reward: { kind: 'percentage', value: 3 }, scope: { productIds: [doomed.productId], all: true } });
+
+    // Positive controls: everything starts LIVE, so each "deactivated" below is a change.
+    expect([pinOnly.active, mixed.active, scopedOnly.active, scopedBoth.active, scopedCategory.active, scopedAll.active]).toEqual([true, true, true, true, true, true]);
 
     expect(await deleteProduct(T, ORG, doomed.productId)).toBe(true);
 

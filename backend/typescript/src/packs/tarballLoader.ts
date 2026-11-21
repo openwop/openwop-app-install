@@ -26,6 +26,7 @@ import { isInstalledPack, verifyInstalledPack } from './registryInstaller.js';
 import { classifyPackDir, type PackTrustVerdict } from '../host/packTrust.js';
 import { packNodeEligibility } from '../host/packIsolationPolicy.js';
 import { classifyUnbuiltPackNode, recordRuntimeFloorDecision } from '../executor/sideEffects.js';
+import { claimNodePackImport, assertNodePackImportUnchanged } from './nodePackImportLifetime.js';
 
 const log = createLogger('packs.tarballLoader');
 
@@ -135,7 +136,9 @@ export async function loadPackFromManifest(packDir: string): Promise<NodeModule 
 
   // Dynamic import. Best-effort — no sandbox. Real hosts run packs
   // in a worker_threads sandbox or wasm runtime per RFC 0008.
+  const importClaim = claimNodePackImport(packDir, manifestRaw);
   const loaded = (await import(moduleUrl)) as { nodes?: Record<string, unknown> };
+  assertNodePackImportUnchanged(importClaim);
   if (!loaded.nodes || typeof loaded.nodes !== 'object') {
     log.warn('pack export missing `nodes` map', { packDir });
     return null;

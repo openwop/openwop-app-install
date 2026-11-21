@@ -1014,7 +1014,7 @@ export const BACKGROUND_APP_JOBS: readonly BackgroundAppJob[] = [
       const mode = undeclaredRewriteMode();
       if (mode === null) return { complete: false };
       const r = await rewriteUndeclaredKeys(mode);
-      log.info('app_bg_job_api_key_undeclared_rewrite', { mode, scanned: r.scanned, undeclared: r.undeclared, rewritten: r.rewritten, tenants: Object.keys(r.byTenant).length });
+      log.info('app_bg_job_api_key_undeclared_rewrite', { mode, scanned: r.scanned, undeclared: r.undeclared, inactive: r.inactive, rewritten: r.rewritten, tenants: Object.keys(r.byTenant).length });
       for (const [tenantId, count] of Object.entries(r.byTenant)) log.info('app_bg_job_api_key_undeclared_rewrite_tenant', { mode, tenantId, undeclared: count });
       return { complete: mode === 'apply' };
     },

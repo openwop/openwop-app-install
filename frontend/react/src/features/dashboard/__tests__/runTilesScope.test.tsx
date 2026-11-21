@@ -1,5 +1,5 @@
 /**
- * Issue 4511 — the home's run tiles show a MEMBER only what is theirs.
+ * Issue #4511 (ADR 0844 home tiles) — the home's run tiles show a MEMBER only what is theirs.
  *
  *  - Run health / Run activity read the workspace's runs, so they are admin-tier
  *    like the /runs pages.
@@ -7,25 +7,41 @@
  *    read), never the workspace list; an admin keeps the workspace view.
  *  - Needs you never links a member into the admin-tier Access page, and does
  *    not list a workspace connection they cannot fix.
- *  - Get started ticks "Run a workflow" from the viewer's own runs.
+ *  - Get started ticks "Run a workflow" from the viewer's own runs, and "Add your
+ *    own model key" only for a stored ref that names an AI provider (measured on
+ *    myndhyve.ai 2026-11-02).
  *  - Coming back to the home re-reads the activity reads (no 30 s stale tick).
+ *
+ * What breaks it: a member's tile reading `readRecentRuns` / `listMyRuns` (the
+ * workspace list), `readMyRuns` pointed at the workspace read, a run or Access
+ * link for a member, the workspace-connection filter or the admin tier check
+ * dropped, Get started counting a colleague's run or any stored secret, the
+ * active-runs status filter dropped, or `invalidateHomeActivity` skipping the
+ * caller's runs. Each is a w117 probe. Every UI case waits for the tile to leave
+ * its skeleton (renders under the real code and every sabotage alike) and then
+ * asserts the exact rows it shows, so a break reds on a value. The workflows read
+ * is stubbed so Needs you titles runs by id (#5788 §4).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { render, screen, cleanup, waitFor } from '@testing-library/react';
-import type { RunListItem } from '../../../client/runsClient.js';
+import type { OwnRunRow } from '../dashboardClient.js';
+
+type RunsClient = typeof import('../../../client/runsClient.js');
+type DashboardClient = typeof import('../dashboardClient.js');
+type ConnectionsClient = typeof import('../../connections/connectionsClient.js');
 
 const access = vi.hoisted(() => ({ admin: false }));
-const listMyRuns = vi.fn();
-const listOwnRuns = vi.fn();
-const listConnections = vi.fn();
+const listMyRuns = vi.fn<RunsClient['listMyRuns']>();
+const listOwnRuns = vi.fn<DashboardClient['listOwnRuns']>();
+const listConnections = vi.fn<ConnectionsClient['listConnections']>();
 
 vi.mock('../../../client/useEffectiveAccess.js', () => ({
   useEffectiveAccessState: () => ({ access: { admin: access.admin }, resolved: true }),
   isAdminCaller: (a: { admin?: boolean }) => a.admin === true,
 }));
-vi.mock('../../../client/runsClient.js', () => ({ listMyRuns: (...a: unknown[]) => listMyRuns(...a) }));
-vi.mock('../dashboardClient.js', () => ({ listOwnRuns: (...a: unknown[]) => listOwnRuns(...a) }));
+vi.mock('../../../client/runsClient.js', () => ({ listMyRuns: (...a: Parameters<RunsClient['listMyRuns']>) => listMyRuns(...a) }));
+vi.mock('../dashboardClient.js', () => ({ listOwnRuns: (...a: Parameters<DashboardClient['listOwnRuns']>) => listOwnRuns(...a) }));
 vi.mock('../../connections/connectionsClient.js', () => ({ listConnections: () => listConnections() }));
 vi.mock('../../../agents/approvalsClient.js', () => ({ listApprovals: async () => [] }));
 vi.mock('../../../client/chatSessionsClient.js', () => ({ listChatSessions: async () => [] }));
@@ -44,12 +60,20 @@ const { readMyRuns } = await import('../runsWindow.js');
 const { invalidateHomeActivity, __resetSharedReads } = await import('../sharedRead.js');
 
 const recent = (min: number): string => new Date(Date.now() - min * 60_000).toISOString();
-const run = (runId: string, workflowId: string, status: string): RunListItem =>
+// The my-runs route's row shape (every row has a start); it is also a valid workspace row.
+const run = (runId: string, workflowId: string, status: string): OwnRunRow =>
   ({ runId, workflowId, status, startedAt: recent(30), completedAt: recent(20) });
 
 // The workspace list holds a colleague's failure; the caller's own list holds theirs.
 const COLLEAGUE_FAILED = run('r-other', 'colleague-workflow', 'failed');
 const MY_FAILED = run('r-mine', 'my-workflow', 'failed');
+
+/** The tile left its skeleton (role=status) — true under the real code and every sabotage. */
+async function loaded(): Promise<void> {
+  await waitFor(() => expect(screen.queryByRole('status')).toBeNull());
+}
+/** The texts of the elements a tile renders under `selector`, in order. */
+const texts = (selector: string): string[] => Array.from(document.querySelectorAll(selector)).map((e) => e.textContent ?? '');
 
 beforeEach(() => {
   __resetSharedReads();
@@ -80,8 +104,8 @@ describe('tier gating', () => {
 describe('Needs you', () => {
   it("a member sees only their own runs — never a colleague's failure — and no run link", async () => {
     render(<MemoryRouter><NeedsYouTile compact={false} /></MemoryRouter>);
-    expect(await screen.findByText('my-workflow')).toBeTruthy();
-    expect(screen.queryByText('colleague-workflow')).toBeNull();
+    await loaded();
+    expect(texts('.dash-needs__title')).toEqual(['my-workflow']);
     expect(listOwnRuns).toHaveBeenCalled();
     expect(listMyRuns).not.toHaveBeenCalled(); // the workspace list never reaches a member's browser
     expect(screen.queryByRole('link', { name: /inspect/i })).toBeNull();
@@ -90,10 +114,10 @@ describe('Needs you', () => {
   it('an admin sees the workspace, with links', async () => {
     access.admin = true;
     render(<MemoryRouter><NeedsYouTile compact={false} /></MemoryRouter>);
-    expect(await screen.findByText('colleague-workflow')).toBeTruthy();
-    expect(screen.getByText('my-workflow')).toBeTruthy();
+    await loaded();
+    expect(texts('.dash-needs__title').sort()).toEqual(['colleague-workflow', 'my-workflow']);
     expect(listMyRuns).toHaveBeenCalled();
-    expect(screen.getAllByRole('link').some((a) => a.getAttribute('href') === '/runs/r-other')).toBe(true);
+    expect(screen.getAllByRole('link').map((a) => a.getAttribute('href')).sort()).toEqual(['/runs/r-mine', '/runs/r-other']);
   });
 
   const t = (k: string): string => k;
@@ -126,7 +150,8 @@ describe('Get started', () => {
 
   it("ticks it from the viewer's own run", async () => {
     render(<MemoryRouter><GetStartedTile compact={false} /></MemoryRouter>);
-    await waitFor(() => expect(screen.getByText('Run a workflow').closest('li')!.className).toContain('is-done'));
+    const step = (await screen.findByText('Run a workflow')).closest('li');
+    expect(step?.className).toContain('is-done');
   });
 
   // Measured on myndhyve.ai 2026-11-02: a workspace with no model key showed
@@ -135,13 +160,14 @@ describe('Get started', () => {
     access.admin = true;
     storedRefs.refs = ['postmark-token', 'webhook:signing'];
     render(<MemoryRouter><GetStartedTile compact={false} /></MemoryRouter>);
-    const step = (await screen.findByText('Add your own model key')).closest('li')!;
-    expect(step.className).not.toContain('is-done');
+    const step = (await screen.findByText('Add your own model key')).closest('li');
+    expect(step?.className).not.toContain('is-done');
     cleanup();
     __resetSharedReads();
     storedRefs.refs = ['postmark-token', 'anthropic:work'];
     render(<MemoryRouter><GetStartedTile compact={false} /></MemoryRouter>);
-    await waitFor(() => expect(screen.getByText('Add your own model key').closest('li')!.className).toContain('is-done'));
+    const keyed = (await screen.findByText('Add your own model key')).closest('li');
+    expect(keyed?.className).toContain('is-done');
   });
 });
 
@@ -150,9 +176,9 @@ describe('Active runs', () => {
     listMyRuns.mockResolvedValue([run('r-x', 'colleague-running', 'running')]);
     listOwnRuns.mockResolvedValue({ runs: [run('r-y', 'my-running', 'running'), MY_FAILED], truncated: false });
     render(<MemoryRouter><ActiveRunsTile compact={false} /></MemoryRouter>);
-    expect(await screen.findByText('my-running')).toBeTruthy();
-    expect(screen.queryByText('colleague-running')).toBeNull();
-    expect(screen.queryByText('my-workflow')).toBeNull(); // failed is not active
+    await loaded();
+    // Only their own RUNNING run: not the colleague's, and not their failed one.
+    expect(texts('.dash-tile__row-main')).toEqual(['my-running']);
     expect(screen.queryByRole('link')).toBeNull();
     expect(listMyRuns).not.toHaveBeenCalled();
   });
@@ -160,12 +186,15 @@ describe('Active runs', () => {
 
 describe('cache invalidation on returning home', () => {
   it('re-reads the caller runs after invalidateHomeActivity, and shares within one paint', async () => {
-    await Promise.all([readMyRuns(), readMyRuns()]);
+    const [a, b] = await Promise.all([readMyRuns(), readMyRuns()]);
     expect(listOwnRuns).toHaveBeenCalledTimes(1); // two tiles, one request
-    await readMyRuns();
-    expect(listOwnRuns).toHaveBeenCalledTimes(1); // inside the TTL: cached
+    expect([a.map((r) => r.runId), b.map((r) => r.runId)]).toEqual([['r-mine'], ['r-mine']]);
+    // The server's next answer differs, so a cached read and a re-read are told apart by VALUE.
+    listOwnRuns.mockResolvedValue({ runs: [run('r-new', 'new-workflow', 'running')], truncated: false });
+    expect((await readMyRuns()).map((r) => r.runId)).toEqual(['r-mine']); // inside the TTL: cached
+    expect(listOwnRuns).toHaveBeenCalledTimes(1);
     invalidateHomeActivity();
-    await readMyRuns();
+    expect((await readMyRuns()).map((r) => r.runId)).toEqual(['r-new']);
     expect(listOwnRuns).toHaveBeenCalledTimes(2);
   });
 });

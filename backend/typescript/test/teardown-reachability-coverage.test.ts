@@ -288,6 +288,7 @@ const HOST_RESIDUAL_CLASSIFICATION: Record<string, { bucket: Bucket; reason: str
   'kb:reindex': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type ReindexJob carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   'kb:veccache': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type VecCacheRow carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   'knowledge-sync:filestate': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type SyncFileState carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
+  'media:index-hour': { bucket: 'EXEMPT', reason: '#5928: host-global UTC-hour lease for the media-index drift check ({k, hour}); no tenant dimension, no subject data' },
   'navigation-settings:config': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type StoredMenuConfig carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   // notifications:prefs is AUTO-reachable — its composite key references
   // `.tenantId` (per-(tenant,user)); no map entry needed.

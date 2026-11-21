@@ -41,8 +41,19 @@ export function TableScroll({ label, className, children }: {
   const ref = useRef<HTMLDivElement>(null);
   const [scrolls, setScrolls] = useState(false);
 
-  // A ResizeObserver reports each target once on observe, then on every resize:
-  // the wrapper (the card narrowed) and the table (rows or columns grew).
+  // Measured SYNCHRONOUSLY in the commit that changes the content (`children`), so
+  // a render that makes it overflow (rows arrived, a column grew) makes the wrapper
+  // focusable and named in the same task. Waiting for the ResizeObserver alone left a window between that
+  // commit and its async callback where the region scrolled but had no tab stop, and
+  // an axe run landing in it failed `scrollable-region-focusable` intermittently
+  // (train 296, /capabilities). Same value ⇒ React bails out, so this costs a read.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (el) setScrolls(el.scrollWidth > el.clientWidth);
+  }, [children]);
+
+  // A ResizeObserver catches what no render causes: the wrapper narrowing (the
+  // window or card resized) and the table growing on its own.
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el || typeof ResizeObserver === 'undefined') return;

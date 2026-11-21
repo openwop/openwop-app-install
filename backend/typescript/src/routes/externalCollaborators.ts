@@ -18,7 +18,7 @@ import { tenantOf } from '../features/featureRoute.js';
 import { createLink, purgeLinksForResource, resolveActiveResource } from '../features/sharing/sharingService.js';
 import { getOrg, type Scope } from '../host/accessControlService.js';
 import {
-  anySurfaceAdmits, assertGrantAuthority, bindCollaborator, checkGrantUse, createCollaborator, getCollaborator, grantAccess, grantResourceKind,
+  anySurfaceAdmits, assertGrantAuthority, bindCollaborator, checkGrantUse, createCollaborator, extendGrant, getCollaborator, grantAccess, grantResourceKind,
   grantScopeOf, kindAdmits, projectForGrant, kindCollaborationOn, listCollaborationAudit, listCollaborators, listGrantableResources, listGrants, revokeGrant,
   usableGrantsForUser, type ExternalCollaborator, type GrantUse,
 } from '../host/externalCollaborators.js';
@@ -203,6 +203,21 @@ export function registerExternalCollaboratorRoutes(app: Express): void {
       if (kind && typeof r.kind === 'string' && !(await kindCollaborationOn(r.kind, tenantId))) throw new OpenwopError('not_found', 'Not found.', 404, {});
       const grant = await grantAccess({ tenantId, orgId, collaboratorId: req.params.collaboratorId, resource: body.resource, actions: body.actions, expiresInDays: body.expiresInDays, createdBy: userId });
       res.status(201).json({ grant });
+    } catch (err) { next(err); }
+  });
+
+  /** ADR 0958 Q1 — renew: whoever may grant this grant's kind here may renew it,
+   *  for at most 180 more days from today. The grant id stays the same. */
+  app.post(`${MEMBER_BASE}/:collaboratorId/grants/:grantId/extend`, async (req, res, next) => {
+    try {
+      const user = await resolveCallerUser(req);
+      const tenantId = tenantOf(req);
+      const orgId = req.params.orgId;
+      const grant = (await listGrants(tenantId, orgId, req.params.collaboratorId)).find((g) => g.grantId === req.params.grantId);
+      if (!grant) throw new OpenwopError('not_found', 'Grant not found.', 404, {});
+      await assertGrantAuthority(tenantId, orgId, user.userId, grantScopeOf(grantResourceKind(grant.resource.kind)));
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      res.json({ grant: await extendGrant({ tenantId, orgId, grantId: grant.grantId, expiresInDays: body.expiresInDays, actor: user.userId }) });
     } catch (err) { next(err); }
   });
 

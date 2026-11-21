@@ -268,6 +268,9 @@ export const messages = {
   heroVisualRun: 'Run ledger (the run as its event log)',
   heroVisualFilm: 'Intro film (demo site only; elsewhere the run ledger)',
   heroVisualImage: 'Authored image',
+  heroVisualVideo: 'Background video (muted, looping)',
+  heroVideoSrcLabel: 'Video path on this site',
+  heroVideoPosterLabel: 'Poster image path on this site',
   heroVisualNone: 'No visual',
   heroVisualPlan: 'Example plan card',
 
@@ -284,6 +287,7 @@ export const messages = {
   ctaButtonLabelLabel: 'Button label',
   ctaButtonUrlLabel: 'Button URL',
   ctaButtonUrlPlaceholder: '/agents or https://…',
+  ctaPhotoLabel: 'Photo behind the band',
 
   // ADR 1029 D5 — activity card, timeline, bento, marquee
   heroVisualActivity: 'Activity card (approvals)',
@@ -419,6 +423,7 @@ export const messages = {
   layoutStats: 'Stats (value + label)',
   layoutPrompts: 'Prompts (tag + example prompt)',
   layoutDives: 'Deep dives (claim + built-in illustration)',
+  layoutSplit: 'Split (photo beside text, alternating)',
   layoutRuled: 'Ruled columns (hairline over each)',
   layoutPanels: 'Panels (filled, small drawing)',
   layoutProgress: 'Progress cards (label + bar)',

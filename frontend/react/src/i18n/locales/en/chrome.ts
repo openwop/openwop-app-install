@@ -5,6 +5,8 @@
 export const messages = {
   copyFailedManual: "Couldn't copy — select the text and copy it manually.",
   adminSections: 'Admin sections',
+  adminAccessReadFailedTitle: "Access could not be verified",
+  adminAccessReadFailedBody: "Your workspace access could not be read. Retry to check it again; this does not mean your administrator role was removed.",
   adminAccessRequiredTitle: 'Administrator access required',
   adminNavDegraded: 'Menu preferences could not be loaded. Showing the safe default navigation.',
   adminNavEmptyTitle: 'No admin destinations are available',

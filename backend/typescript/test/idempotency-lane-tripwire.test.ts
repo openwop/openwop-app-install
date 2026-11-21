@@ -23,7 +23,9 @@
  *
  * The daemon allowlist is NO-GROWTH. Adding an entry means a new daemon needs
  * the mutex, which is legitimate — but it is a deliberate edit with a reason,
- * not something that drifts in.
+ * not something that drifts in. That holds for BOTH halves: the host list below
+ * and, since TST-OAD-1 (2026-11-18), the feature-declared `fireOnceMutexCallers`
+ * (ADR 1031 P2), which are pinned in `REVIEWED_DECLARED_MUTEX_CALLERS`.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
@@ -146,11 +148,19 @@ const FILES = walk(SRC).map((p) => ({
  *  `src/`-relative), so a feature carries its own reviewed entry. Same NO-GROWTH
  *  and no-ghost assertions over the union. */
 let MUTEX_ALLOWLIST: ReadonlySet<string> = HOST_MUTEX_ALLOWLIST;
+let DECLARED_MUTEX_CALLERS: readonly string[] = [];
 beforeAll(async () => {
   const declared = (await collectFeatureRatchetDeclarations())
     .flatMap((d) => (d.declarations.fireOnceMutexCallers ?? []).map((f) => `${d.srcRel}/${f}`));
+  DECLARED_MUTEX_CALLERS = [...declared].sort();
   MUTEX_ALLOWLIST = new Set([...HOST_MUTEX_ALLOWLIST, ...declared]);
 });
+
+/** Owner decision TST-OAD-1 (2026-11-18): the feature-declared half of the allowlist is
+ *  pinned here, so it is NO-GROWTH like the host list. A feature's `fireOnceMutexCallers`
+ *  entry still lives in its package, but it cannot land without an edit to this list,
+ *  i.e. a reviewed change to this tripwire. MEASURED at 0ca7f76944: no feature declares one. */
+const REVIEWED_DECLARED_MUTEX_CALLERS: readonly string[] = [];
 
 describe('ADR 0549 — idempotency lane separation', () => {
   it('no route module calls the fire-once mutex', () => {
@@ -176,6 +186,14 @@ describe('ADR 0549 — idempotency lane separation', () => {
     const callers = FILES.filter((f) => MUTEX_CALLS.test(f.text)).map((f) => f.rel).sort();
     const unexpected = callers.filter((r) => !MUTEX_ALLOWLIST.has(r));
     expect(unexpected).toEqual([]);
+  });
+
+  it('feature-declared mutex callers are pinned (they cannot grow without an edit here)', () => {
+    expect(
+      DECLARED_MUTEX_CALLERS,
+      'a feature package declared a new fireOnceMutexCallers entry. Add it to ' +
+        'REVIEWED_DECLARED_MUTEX_CALLERS in this file with the reason in review (TST-OAD-1).',
+    ).toEqual(REVIEWED_DECLARED_MUTEX_CALLERS);
   });
 
   it('the mutex allowlist does not grow silently', () => {

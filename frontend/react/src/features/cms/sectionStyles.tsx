@@ -37,7 +37,7 @@ export function sectionMotionClass(d: Record<string, unknown>): string {
 
 /** The hero's art directions, in the server's order: mirrors `HERO_VISUALS` in
  *  cmsService.ts (pinned by adr1029-mirror-parity, ADR 1050 D4). */
-export const HERO_VISUALS = ['workflow', 'journey', 'run', 'film', 'image', 'none', 'plan', 'activity', 'hub', 'flow', 'receipt', 'apps', 'versus', 'fanout', 'phone', 'wall', 'tally', 'log', 'queue'] as const; // ADR 1080 D7: queue
+export const HERO_VISUALS = ['workflow', 'journey', 'run', 'film', 'image', 'video', 'none', 'plan', 'activity', 'hub', 'flow', 'receipt', 'apps', 'versus', 'fanout', 'phone', 'wall', 'tally', 'log', 'queue'] as const; // ADR 1080 D7: queue
 export type HeroVisual = typeof HERO_VISUALS[number];
 
 /** ADR 1038 D2 — mirrors the server's `HERO_EMPHASES` (pinned by adr1029-mirror-parity). */

@@ -31,6 +31,7 @@ import { tenantToggleSubject } from '../../host/operatorPlanExemption.js';
 import { getClient } from './clientService.js';
 import { createRequest } from './requestService.js';
 import { CAMPAIGN_OPS_RUN_STAMP, bindRunToClient } from './surface.js';
+import { fenceUntrustedBlock, neutralizeUntrusted } from '../../host/untrustedContent.js';
 import type { ExternalAgentsAccess } from './types.js';
 
 const MCP_SOURCE = 'mcp-server-mount';
@@ -292,5 +293,130 @@ export async function mcpRequestChange(scope: BundleScope, args: { clientId: str
     clientId: args.clientId, requestId: request.requestId, runId, status: 'awaiting-input',
     next: 'The change is planned, then waits for a person at the client to approve it in the app. Nothing changes until then.',
     inbox: '/campaign-ops',
+  };
+}
+
+// ── ADR 0962 P2 — `campaign_propose_budget_change`. A PROPOSAL, never a spend:
+// it writes one ADR 0952 reallocation plan in `proposed` state and opens ONE
+// campaign-spend approval over it. Nothing here, and no node in its chain,
+// applies a plan. A person at the client approves it in the Inbox, then applies
+// it from Campaign Intelligence on their own connections (the existing route).
+//
+// Who may decide is bound at propose time: the client's ADR 0942 policy for
+// `ads.budget`, resolved through the ONE chokepoint helper on this MCP run (its
+// MCP-origin floor clamps `auto` to `approve`; a `blocked` policy refuses), or the
+// default owner/admin approvers when the run carries no policy. The approval names
+// those approvers, lists the person behind the key as a requester and points at
+// this run, so the decide-time check (`autonomyPolicy/spendEligibility.ts`) refuses
+// that person with no sole-admin escape (ADR 0942 D10.2, ADR 0962 D4.2).
+
+/** Bounds on one requested daily budget, minor units. The floor is the
+ *  reallocation module's own (a scale-down never zeroes a campaign). */
+export const MCP_BUDGET_MIN_DAILY_MINOR = 100;
+export const MCP_BUDGET_MAX_DAILY_MINOR = 100_000_000;
+const MCP_BUDGET_MAX_CHANGES = 20;
+const MCP_BUDGET_NOTE_MAX = 500;
+const BUDGET_PLATFORMS = new Set(['meta', 'google']);
+
+const invalidChange = (message: string, reason: string, field: string): OpenwopError =>
+  new OpenwopError('validation_error', message, 400, { reason, field });
+
+/** Closed-world validation of the agent's requested changes. A bad amount is a
+ *  typed failure, never a silently dropped op. */
+function parseBudgetChanges(raw: unknown): Array<{ platform: string; campaignId: string; toDailyMinor: number }> | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > MCP_BUDGET_MAX_CHANGES) {
+    throw invalidChange(`\`changes\` must list 1 to ${MCP_BUDGET_MAX_CHANGES} budget changes.`, 'invalid_budget_change', 'changes');
+  }
+  const seen = new Set<string>();
+  return raw.map((c, i) => {
+    const row = (c ?? {}) as { platform?: unknown; platformCampaignId?: unknown; toDailyMinor?: unknown };
+    const platform = typeof row.platform === 'string' ? row.platform : '';
+    const campaignId = typeof row.platformCampaignId === 'string' ? row.platformCampaignId.trim() : '';
+    if (!BUDGET_PLATFORMS.has(platform)) throw invalidChange(`changes[${i}].platform must be meta or google.`, 'invalid_budget_change', `changes[${i}].platform`);
+    if (!campaignId || campaignId.length > 200) throw invalidChange(`changes[${i}].platformCampaignId is required.`, 'invalid_budget_change', `changes[${i}].platformCampaignId`);
+    const to = row.toDailyMinor;
+    if (typeof to !== 'number' || !Number.isSafeInteger(to) || to < MCP_BUDGET_MIN_DAILY_MINOR || to > MCP_BUDGET_MAX_DAILY_MINOR) {
+      throw invalidChange(
+        `changes[${i}].toDailyMinor must be a whole number of minor units from ${MCP_BUDGET_MIN_DAILY_MINOR} to ${MCP_BUDGET_MAX_DAILY_MINOR}.`,
+        'invalid_budget_amount', `changes[${i}].toDailyMinor`,
+      );
+    }
+    const key = `${platform}:${campaignId}`;
+    if (seen.has(key)) throw invalidChange(`changes[${i}] repeats a campaign.`, 'invalid_budget_change', `changes[${i}]`);
+    seen.add(key);
+    return { platform, campaignId, toDailyMinor: to };
+  });
+}
+
+/** A refused or empty proposal as ONE typed failure. Most fundamental first. */
+function budgetRefusal(dropped: ReadonlyArray<{ reason: string }>): OpenwopError {
+  const count = (p: (r: string) => boolean): number => dropped.filter((d) => p(d.reason)).length;
+  const notOrg = count((r) => r === 'not_an_org_campaign');
+  if (notOrg) return new OpenwopError('not_found', `${notOrg} of the requested campaigns are not this client's ad campaigns. Nothing was proposed.`, 404, { reason: 'budget_change_target_not_found' });
+  const invalid = count((r) => r === 'invalid_budget');
+  if (invalid) return invalidChange(`${invalid} of the requested budgets are not valid amounts. Nothing was proposed.`, 'invalid_budget_amount', 'changes');
+  const unreadable = count((r) => r.startsWith('budget_unreadable'));
+  if (unreadable) return new OpenwopError('conflict', `The current budget of ${unreadable} campaign(s) could not be read, so no change can be proposed for them. Nothing was proposed.`, 409, { reason: 'budget_unreadable' });
+  const capped = count((r) => r.startsWith('cap_'));
+  if (capped) return new OpenwopError('conflict', `A spend cap does not allow ${capped} of the requested increases. Nothing was proposed.`, 409, { reason: 'budget_change_cap_blocked' });
+  return invalidChange('The requested budgets already match the live ones; there is nothing to propose.', 'budget_change_no_change', 'changes');
+}
+
+export async function mcpProposeBudgetChange(
+  scope: BundleScope,
+  args: { clientId: string; changes?: unknown; campaignId?: string; note?: unknown },
+): Promise<Record<string, unknown>> {
+  // Fails EMPTY without a person: live budgets are read on the acting person's
+  // ad connections, exactly as the propose route requires a signed-in caller.
+  if (!scope.actingUserId) {
+    throw new OpenwopError('forbidden_scope', 'A budget change needs a person behind the run.', 403, { reason: 'no_acting_user' });
+  }
+  // The route's access predicate: workspace:write on the CLIENT (`bindRunToClient`
+  // → assertRunOrgScope), not-found first, then `externalAgents === 'request'`.
+  const person = await bindExternal(scope, args.clientId, 'request');
+  if (await featureAccessRefusal('campaign-intel', scope.tenantId, tenantToggleSubject(scope))) {
+    throw new OpenwopError('forbidden_scope', 'Budget changes are unavailable because Campaign Intelligence is off for this workspace.', 403, { reason: 'source_feature_unavailable', feature: 'campaign-intel' });
+  }
+  const campaignId = args.campaignId ? (await campaignOf(scope.tenantId, args.clientId, args.campaignId)).id : undefined;
+  const changes = parseBudgetChanges(args.changes);
+  if (args.note !== undefined && args.note !== null && (typeof args.note !== 'string' || args.note.length > MCP_BUDGET_NOTE_MAX)) {
+    throw invalidChange(`\`note\` must be text of at most ${MCP_BUDGET_NOTE_MAX} characters.`, 'invalid_budget_change', 'note');
+  }
+  const note = typeof args.note === 'string' ? neutralizeUntrusted(args.note) : '';
+  // ADR 0962 D5 — the note is data from outside the app. It reaches the approval
+  // text (which people AND assistants read) only inside the untrusted fence.
+  const externalNote = note ? fenceUntrustedBlock(note, 'an outside agent (MCP)') : undefined;
+
+  const storage = hostExtStorage();
+  const { makeAdsAdapter } = await import('../../host/adsAdapter.js');
+  const { proposeReallocation, reallocationApprovers } = await import('../campaign-intel/reallocation.js');
+  const runId = scope.runId ?? `hostext:mcp-budget:${args.clientId}`;
+  const adapter = makeAdsAdapter({ storage, tenantId: scope.tenantId, runId, actingUserId: person, orgId: args.clientId });
+
+  const out = await proposeReallocation(adapter, scope.tenantId, args.clientId, {
+    ...(changes ? { ops: changes } : {}),
+    ...(campaignId ? { campaignId } : {}),
+    runId, actor: person,
+    allOrNothing: changes !== undefined,
+    requestedVia: { protocol: 'mcp', ...(scope.runId ? { runId: scope.runId } : {}) },
+    ...(externalNote ? { externalNote } : {}),
+    // The ONE binding every proposing lane uses (ADR 1022 CP71WF-23). The MCP run
+    // is the approval's source, so its MCP-origin floor closes the sole-admin escape.
+    bindApproval: reallocationApprovers({
+      tenantId: scope.tenantId, orgId: args.clientId, requester: person,
+      ...(scope.runId ? { policyRunId: scope.runId, sourceRunId: scope.runId } : {}),
+    }),
+  });
+  if (out.outcome === 'no_change') throw budgetRefusal(out.dropped);
+  const plan = out.plan;
+  return {
+    clientId: args.clientId, planId: plan.planId, approvalId: plan.approvalId ?? null, status: 'awaiting-input',
+    // Ids and amounts only (D5): no campaign names, account details or other clients.
+    changes: plan.ops.map((o) => ({ platform: o.platform, platformCampaignId: o.campaignId, fromDailyMinor: o.fromDailyMinor, toDailyMinor: o.toDailyMinor })),
+    leftOut: plan.dropped.map((d) => ({ platform: d.platform, platformCampaignId: d.campaignId, reason: d.reason })),
+    expiresAt: plan.expiresAt,
+    next: 'The plan waits for an approver at the client to approve it in the Inbox and then apply it in the app. No budget changes until then, and you cannot approve it.',
+    inbox: '/inbox',
   };
 }

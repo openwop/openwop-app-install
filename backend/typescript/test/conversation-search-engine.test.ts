@@ -9,10 +9,17 @@
  * `searchVisibleConversations` — the ONE helper the route and the
  * `openwop:conversations.search` agent tool share (XCH-HOLE-5).
  *
- * Breaks if: the visible-set post-filter, the visibility predicate call, the role
- * facet, the title-hit loop, the empty-query guard or the freshness watermark
- * regresses (sabotage probes w24g1-eng-* / -r2, /grade-tests wave 24), or the
- * ADR 0997 D3 semantics (all words, substring, Unicode tokens, `truncated`) do.
+ * The visible-set scope is a DOUBLE guard: `Storage.searchChatMessages` receives only
+ * the visible ids (a SQL `IN` prefilter) and the engine re-checks each row. A probe on
+ * either half alone stays green by design, so it is witnessed by one edit that widens
+ * the storage call AND drops the re-check (`w118g2-eng-scope-both`). The every-word
+ * rule is doubled the same way (one `LIKE` per needle, then `scoreText`).
+ *
+ * Breaks if: the scope (both halves), the visibility predicate (lax or strict), the
+ * role facet, the title-hit loop, the empty-query guard, the jump anchor / snippet,
+ * a stale result cache, the Unicode tokenizer (case, de-dup, the 8-token cap), the
+ * all-words rule (both halves), the tombstone check, or the `truncated` boundary
+ * regresses (probes w24g1-eng-* / -r2, re-probed at ADR 0997 as `w118g2-eng-*`).
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -23,6 +30,7 @@ import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { ensureConversationMeta } from '../src/host/conversationStore.js';
 import type { Storage } from '../src/storage/storage.js';
+import type { ChatMessageRecord } from '../src/types.js';
 import {
   searchConversations,
   searchVisibleConversations,
@@ -38,7 +46,7 @@ let storage: Storage;
 async function seedConversation(
   conversationId: string,
   title: string,
-  msgs: Array<{ role: string; content: string }>,
+  msgs: Array<{ role: ChatMessageRecord['role']; content: string }>,
 ): Promise<void> {
   const now = new Date().toISOString();
   await storage.createChatSession({ sessionId: conversationId, tenantId: TENANT, title, createdAt: now, updatedAt: now, messageCount: 0 });
@@ -47,7 +55,7 @@ async function seedConversation(
     await storage.appendChatMessage({
       messageId: `${conversationId}-m${i}`,
       sessionId: conversationId,
-      role: m.role as 'user' | 'assistant' | 'system' | 'workflow_run',
+      role: m.role,
       content: m.content,
       meta: null,
       authorSubject: null,
@@ -69,8 +77,10 @@ beforeAll(async () => {
 
 describe('searchConversations', () => {
   it('finds a message by content and returns conversation + snippet + jump anchor', async () => {
+    // Only the SECOND message says "forecast", so the jump anchor has one right answer.
+    const seededAt = Date.now();
     await seedConversation('c-quarterly', 'Quarterly planning', [
-      { role: 'user', content: 'What is our pipeline forecast?' },
+      { role: 'user', content: 'What is our pipeline outlook?' },
       { role: 'assistant', content: 'The forecast shows a strong Q3 with growing revenue.' },
     ]);
     const { hits } = await searchConversations(storage, scope({
@@ -79,18 +89,20 @@ describe('searchConversations', () => {
     }), 'forecast');
     expect(hits).toHaveLength(1);
     expect(hits[0]!.conversationId).toBe('c-quarterly');
-    expect(hits[0]!.messageId).toBeTruthy();
-    expect(hits[0]!.snippet.toLowerCase()).toContain('forecast');
-    expect(hits[0]!.matchedAt).toBeTruthy();
+    expect(hits[0]!.title).toBe('Quarterly planning');
+    expect(hits[0]!.messageId, 'the jump anchor is the matching message').toBe('c-quarterly-m1');
+    expect(hits[0]!.role).toBe('assistant');
+    expect(hits[0]!.snippet).toBe('The forecast shows a strong Q3 with growing revenue.');
+    // m1 is stamped one second after the seed started (the seed spaces rows 1 s apart).
+    expect(Date.parse(hits[0]!.matchedAt ?? '')).toBeGreaterThanOrEqual(seededAt + 1000);
   });
 
   it('NEVER returns a conversation outside the visible set (scoping / no existence leak)', async () => {
     await seedConversation('c-private', 'Secret', [{ role: 'user', content: 'the codeword is platypus' }]);
-    // Index c-private FIRST (positive control), so the surface really holds its doc.
-    // Without this the conversation was never indexed and the post-filter under
-    // test never ran (wave-24 probe: vacuous).
+    // Positive control: c-private IS findable by a caller who may see it, so the
+    // empty result below is the scope at work, not a missing row (wave-24 lesson).
     expect((await searchConversations(storage, scope({ visibleConversationIds: ['c-private'] }), 'platypus')).hits).toHaveLength(1);
-    // Now platypus is IN the index, but c-private is not in this caller's visible set.
+    // The row matches "platypus", but c-private is not in this caller's visible set.
     const { hits } = await searchConversations(storage, scope({ visibleConversationIds: ['c-other'] }), 'platypus');
     expect(hits).toHaveLength(0);
   });
@@ -177,7 +189,9 @@ describe('ADR 0997 D3 — query semantics', () => {
 
   it('matches non-ASCII text', async () => {
     await seedConversation('c-cafe', 'Notes', [{ role: 'user', content: JSON.stringify({ role: 'user', content: 'Réunion au café demain' }) }]);
-    const { hits } = await searchConversations(storage, scope({ visibleConversationIds: ['c-cafe'] }), 'café');
+    // A decoy that an ASCII-only tokenizer would match: it splits "café" into "caf".
+    await seedConversation('c-caf', 'Decoy', [{ role: 'user', content: 'the caf menu is up' }]);
+    const { hits } = await searchConversations(storage, scope({ visibleConversationIds: ['c-cafe', 'c-caf'] }), 'café');
     expect(hits.map((h) => h.conversationId)).toEqual(['c-cafe']);
     expect(hits[0]!.snippet).toContain('café');
   });
@@ -194,7 +208,7 @@ describe('ADR 0997 D3 — query semantics', () => {
   });
 
   it('reports truncated when the candidate cap is reached, and not below it', async () => {
-    const many = Array.from({ length: CANDIDATE_LIMIT }, () => ({ role: 'user', content: 'heron' }));
+    const many = Array.from({ length: CANDIDATE_LIMIT }, () => ({ role: 'user' as const, content: 'heron' }));
     await seedConversation('c-cap', 'Cap', many);
     const visible = { visibleConversationIds: ['c-cap'] };
     expect((await searchConversations(storage, scope(visible), 'heron')).truncated).toBe(true);

@@ -18,6 +18,15 @@
  * Every export the page calls is mocked — `getDocument` included, which the
  * reader cases used to send to the real network (ADR 0661 allowlist line,
  * dropped 2026-10-09). The announcer is module state and is reset per case.
+ *
+ * Every confirmation case also asserts the exact write it confirms (a toast is
+ * not the write), and the UI cases settle on an element that renders under
+ * both the real code and a sabotage, then read VALUES. Sabotages that turn it
+ * red: the 409 / 5xx arms of `kbActionReason`, the fallback in `kbActionError`,
+ * any KBX-11 `toast.success`, a success toast before the write, either KBX-12
+ * `setPendingFocus`, the `searching` state, the outcome `announce`, a write
+ * control gated on `searching`, `cfgPending.mode` in the select's value, the
+ * `finally` that drops it, and the `url` arm of `SOURCE_KEY` / the reader chip.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor, act, fireEvent } from '@testing-library/react';
@@ -178,6 +187,8 @@ describe('KBX-11 — the four silent write paths now confirm', () => {
     fireEvent.change(screen.getByLabelText('Paste text to chunk + embed into this collection…'), { target: { value: 'hello' } });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Ingest/ })); });
     await waitFor(() => expect(toasts.success).toHaveBeenCalledWith('Document added.'));
+    // A toast is not the write (wave 51): the request it confirms, exactly.
+    expect(api.ingestText).toHaveBeenCalledWith('o1', 'c1', 'Untitled', 'hello');
   });
 
   it('create-collection confirms, by name', async () => {
@@ -186,13 +197,18 @@ describe('KBX-11 — the four silent write paths now confirm', () => {
     fireEvent.change(screen.getByLabelText('New collection'), { target: { value: 'Handbook' } });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Create collection' })); });
     await waitFor(() => expect(toasts.success).toHaveBeenCalledWith('Collection “Handbook” created.'));
+    expect(api.createCollection).toHaveBeenCalledWith('o1', 'Handbook');
   });
 
   it('delete-document confirms — the row no longer just vanishes', async () => {
     api.deleteDocument.mockResolvedValue(undefined);
     await view();
-    await act(async () => { fireEvent.click(screen.getAllByRole('button', { name: /Delete document/ })[0]!); });
+    // Await the row (the documents read lands after the heading — wave 107: a
+    // synchronous lookup here raced it).
+    const deleteButton = await screen.findByRole('button', { name: /Delete document/ });
+    await act(async () => { fireEvent.click(deleteButton); });
     await waitFor(() => expect(toasts.success).toHaveBeenCalledWith('Document deleted.'));
+    expect(api.deleteDocument).toHaveBeenCalledWith('o1', 'c1', 'd1');
   });
 
   it('delete-collection confirms, by name', async () => {
@@ -200,6 +216,7 @@ describe('KBX-11 — the four silent write paths now confirm', () => {
     await view();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Delete collection/ })); });
     await waitFor(() => expect(toasts.success).toHaveBeenCalledWith('Collection “HR Policies” deleted.'));
+    expect(api.deleteCollection).toHaveBeenCalledWith('o1', 'c1');
   });
 
   it('negative control: a FAILED write confirms nothing', async () => {
@@ -223,7 +240,8 @@ describe('KBX-12 — focus survives a delete', () => {
     api.listDocuments.mockResolvedValueOnce([TEXT_DOC]).mockResolvedValue([]);
     await view();
 
-    await act(async () => { fireEvent.click(screen.getAllByRole('button', { name: /Delete document/ })[0]!); });
+    const deleteButton = await screen.findByRole('button', { name: /Delete document/ });
+    await act(async () => { fireEvent.click(deleteButton); });
     await waitFor(() => expect(screen.getByText('No documents')).toBeTruthy());
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Documents' })));
   });
@@ -251,15 +269,17 @@ describe('KBX-8 / KB-UX-9 — the search says what it is doing and what it found
     api.search.mockReturnValue(new Promise((r) => { resolve = r; }));
     await view();
     fireEvent.change(screen.getByLabelText('Ask a question…'), { target: { value: 'pto' } });
+    // The click commits the `searching` state synchronously (set before the
+    // first await), so this reads a VALUE, not a lookup that can only time out.
     fireEvent.click(screen.getByRole('button', { name: /Search/ }));
 
-    expect(await screen.findByText('Searching for “pto”…')).toBeTruthy();
+    expect(screen.queryAllByText('Searching for “pto”…')).toHaveLength(1);
     // KB-UX-1 is NOT weakened by the new arm: no previous answer survives it.
-    expect(screen.queryByText('No matches — add documents, or try a different question.')).toBeNull();
+    expect(screen.queryAllByText('No matches — add documents, or try a different question.')).toHaveLength(0);
 
     await act(async () => { resolve([]); });
-    expect(await screen.findByText('No matches — add documents, or try a different question.')).toBeTruthy();
-    expect(screen.queryByText('Searching for “pto”…')).toBeNull();
+    expect(screen.queryAllByText('No matches — add documents, or try a different question.')).toHaveLength(1);
+    expect(screen.queryAllByText('Searching for “pto”…')).toHaveLength(0);
   });
 
   it('a resolved search announces its count', async () => {
@@ -272,7 +292,8 @@ describe('KBX-8 / KB-UX-9 — the search says what it is doing and what it found
     fireEvent.change(screen.getByLabelText('Ask a question…'), { target: { value: 'pto' } });
     fireEvent.click(screen.getByRole('button', { name: /Search/ }));
     await screen.findByText('15 days of PTO');
-    await waitFor(() => expect(currentAnnouncements().polite).toContain('2 matching passages'));
+    // `announce` is called in the same tick as the results state, so it has run.
+    expect(currentAnnouncements().polite).toContain('2 matching passages');
   });
 
   it('an empty search announces the no-matches outcome, not silence', async () => {
@@ -282,7 +303,7 @@ describe('KBX-8 / KB-UX-9 — the search says what it is doing and what it found
     fireEvent.change(screen.getByLabelText('Ask a question…'), { target: { value: 'pto' } });
     fireEvent.click(screen.getByRole('button', { name: /Search/ }));
     await screen.findByText('No matches — add documents, or try a different question.');
-    await waitFor(() => expect(currentAnnouncements().polite).toContain('No matches'));
+    expect(currentAnnouncements().polite).toContain('No matches');
   });
 });
 
@@ -343,23 +364,28 @@ describe('KB-UX-8 — a URL-sourced document renders its provenance', () => {
   it('the chip and the sub-line name the source and its origin', async () => {
     api.listDocuments.mockResolvedValue([URL_DOC]);
     await view();
-    // `SOURCE_KEY` had no `url` arm, so both of these evaluated `t(undefined)`.
-    expect(await screen.findByText('Web page — vendor.example.com')).toBeTruthy();
-    expect(screen.getByText('Web page')).toBeTruthy();
+    // Await the row by its title (renders whatever the label says), then read the
+    // labels as values. `SOURCE_KEY` had no `url` arm, so both evaluated `t(undefined)`.
+    await screen.findAllByText('Vendor terms');
+    expect(screen.queryAllByText('Web page — vendor.example.com')).toHaveLength(1);
+    expect(screen.queryAllByText('Web page')).toHaveLength(1);
   });
 
   it('positive control: a text document is unchanged', async () => {
     await view();
     // Two nodes by design — the sub-line and the chip both carry it, which is
     // exactly the pair that rendered `t(undefined)` for a URL document.
-    expect((await screen.findAllByText('Pasted text')).length).toBe(2);
+    await screen.findAllByText('PTO Policy');
+    expect(screen.queryAllByText('Pasted text')).toHaveLength(2);
   });
 
   it('the reader labels a URL document too', async () => {
     api.listDocuments.mockResolvedValue([URL_DOC]);
     await view('/kb?org=o1&collection=c1&doc=d2');
+    // The reader REPLACES the list, so its chip is the only 'Web page' on screen.
     // `docSource_url` — the reader used to degrade to the raw literal "url".
-    await waitFor(() => expect(screen.getAllByText('Web page').length).toBeGreaterThan(0));
+    await screen.findByRole('button', { name: /Back to documents/ });
+    expect(screen.queryAllByText('Web page')).toHaveLength(1);
     expect(screen.queryByText('url')).toBeNull();
   });
 });

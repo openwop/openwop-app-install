@@ -16,12 +16,22 @@
  * These drive the REAL pack module against the REAL surface (the `adr0411-reel-node`
  * precedent), so they redden on either the service-side or the node-side guard.
  *
- * Sabotage witnesses (w21 g2): `recordEpisodeResult`'s keep-table / merge-line clips
- * guards, its no-op early return and its `dropped` report; `mix`'s early return, its
- * partial-acceptance check and its trust in the store's report; the outline repair; an
- * empty assistant echo in either repair (H2); `failEpisode`'s write; speaker
- * normalization (and a fuzzy fallback); synthesize's voiceless / zero-turn rule; the
- * M1 catch (scoped vs blanket); the missing-episode return; `clearEpisodeError`.
+ * ADR 1115 (the run lane acts for its person) adds the node half of D2/D4/D6: the
+ * pipeline authorizes first, grounds on the notebook (never the briefing alone), stops
+ * at the first refused write or revoked write authority before a paid call, and stores
+ * a node-chosen `errorCode` beside `error` (free text is refused by the surface).
+ *
+ * Sabotage witnesses (w21 g2, re-probed w118 g2 as `w118g2-*`): `recordEpisodeResult`'s
+ * keep-table / merge-line clips guards, its no-op early return, its `dropped` and
+ * `clipsRecorded` report, and its stale-audio clear (ADR 1115 D2); `mix`'s early return,
+ * its partial-acceptance check, its trust in the store's report and its refused-write
+ * check; the outline / transcript repairs; an empty assistant echo in either repair
+ * (H2); `failEpisode`'s write and its `errorCode`; speaker normalization (and a fuzzy
+ * fallback); synthesize's voiceless / zero-turn rule; the M1 catch (scoped vs blanket);
+ * the missing-episode code; `clearEpisodeError` (both fields); `selectContent`'s
+ * authorization, its no-write refusal list, its notebook / unreadable / toggle / empty
+ * checks and its grounding source; `recordOrFail`'s refusal; `readRefused`; each
+ * `stillWritable` site; the surface's `errorCode` allowlist.
  */
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { selectContent, outline, transcript, synthesize, mix } from '../../../packs/feature.podcasts.nodes/index.mjs';
@@ -196,6 +206,7 @@ describe('PODC-1 — the `mix` NODE, driven through the real ctx.features.podcas
   it('a run that DID synthesize clips records them (the node still writes)', async () => {
     const episodeId = await seedEpisodeWithClips('successful mix');
     const out = await runMix(episodeId, [{ speaker: 'Host', voiceId: 'v-host', url: '/media/clip-new', mimeType: 'audio/mpeg' }]);
+    expect(out.status).toBe('success');
     expect(out.outputs?.clipCount).toBe(1);
     const after = await getEpisode(TENANT, episodeId);
     expect(after!.clips.map((c) => c.url)).toEqual(['/media/clip-new']);
@@ -279,6 +290,7 @@ describe('PODC-2 — invalid model output is a TYPED FAILURE, never success-with
     const wrong = JSON.stringify([{ speaker: 'Narrator', text: 'hello' }]);
     const out = await transcript({ ...aiCtx(episodeId, [wrong]), inputs: { episodeId, outline: 'o' } });
     expect(out.status).toBe('failed');
+    expect(out.error?.code).toBe('podcast_transcript_unusable');
     expect(out.error?.message).toContain('Narrator');   // what the model said
     expect(out.error?.message).toContain('Host');       // what the cast is
   });
@@ -386,15 +398,12 @@ describe('H2 — the bounded repair never sends an EMPTY assistant turn', () => 
     };
   }
 
-  const noEmptyAssistant = (msgs: Array<{ role: string; content: unknown }>): void => {
-    for (const m of msgs) {
-      if (m.role !== 'assistant') continue;
-      expect(
-        typeof m.content === 'string' ? m.content.trim().length : 1,
-        'a non-final assistant message with empty content is rejected by the default provider (anthropic), which would replace the TYPED failure with an unattributable 400',
-      ).toBeGreaterThan(0);
-    }
-  };
+  /** Every assistant turn sent with empty string content. A non-final assistant
+   *  message with empty content is rejected by the default provider (anthropic), which
+   *  would replace the TYPED failure with an unattributable 400. Returned (not asserted
+   *  in a loop) so each case asserts the exact list, unconditionally. */
+  const emptyAssistantTurns = (sent: Array<Array<{ role: string; content: unknown }>>): Array<{ role: string; content: unknown }> =>
+    sent.flat().filter((m) => m.role === 'assistant' && typeof m.content === 'string' && m.content.trim().length === 0);
 
   it('the OUTLINE repair — the one case where the echoed content could only ever be empty', async () => {
     const episodeId = await seedBareEpisode('h2 outline');
@@ -405,7 +414,7 @@ describe('H2 — the bounded repair never sends an EMPTY assistant turn', () => 
     expect(sent.length, 'exactly ONE bounded repair').toBe(2);
     expect(out.status).toBe('failed');
     expect(out.error?.code).toBe('podcast_outline_empty');
-    for (const msgs of sent) noEmptyAssistant(msgs);
+    expect(emptyAssistantTurns(sent), 'an empty assistant echo reached the provider').toEqual([]);
     // ...and the corrective USER message still carries the whole signal.
     expect(JSON.stringify(sent[1])).toContain('previous reply was empty');
   });
@@ -416,7 +425,7 @@ describe('H2 — the bounded repair never sends an EMPTY assistant turn', () => 
     const out = await transcript(ctx);
     expect(sent.length).toBe(2);
     expect(out.error?.code).toBe('podcast_transcript_unusable');
-    for (const msgs of sent) noEmptyAssistant(msgs);
+    expect(emptyAssistantTurns(sent), 'an empty assistant echo reached the provider').toEqual([]);
     expect(JSON.stringify(sent[1])).toContain('no JSON array');
   });
 });
@@ -504,7 +513,7 @@ describe('ADR 1115 D4 — select-content grounds typed, never on the briefing al
     const { pod } = podStub(ok);
     const ask = vi.fn(async () => ({ augmentedPrompt: 'leaked' }));
     const out = await selectContent({ inputs: { episodeId: 'ep-1113' }, features: { podcasts: pod, notebooks: { getNotebook: async () => ({ notebook: null }), ask } } });
-    expect(out.error?.code).toBe('podcast_notebook_unavailable');
+    expect([out.status, out.error?.code]).toEqual(['failed', 'podcast_notebook_unavailable']);
     expect(ask).not.toHaveBeenCalled();
   });
 
@@ -512,13 +521,13 @@ describe('ADR 1115 D4 — select-content grounds typed, never on the briefing al
     const { pod } = podStub(ok);
     const disabled = async () => { throw Object.assign(new Error('off'), { code: 'host_capability_disabled' }); };
     const out = await selectContent({ inputs: { episodeId: 'ep-1113' }, features: { podcasts: pod, notebooks: { getNotebook: disabled, ask: disabled } } });
-    expect(out.error?.code).toBe('podcast_notebook_unavailable');
+    expect([out.status, out.error?.code]).toEqual(['failed', 'podcast_notebook_unavailable']);
   });
 
   it('an empty notebook → podcast_content_empty (the briefing is a steer, not a source)', async () => {
     const { pod } = podStub(ok);
     const out = await selectContent({ inputs: { episodeId: 'ep-1113' }, features: { podcasts: pod, notebooks: { getNotebook: async () => ({ notebook: { id: 'nb-1113' } }), ask: async () => ({ augmentedPrompt: '   ' }) } } });
-    expect(out.error?.code).toBe('podcast_content_empty');
+    expect([out.status, out.error?.code]).toEqual(['failed', 'podcast_content_empty']);
   });
 
   it('CONTROL — a readable notebook with content grounds the episode', async () => {
@@ -556,7 +565,14 @@ describe('ADR 1115 D2 — every writer fails typed on a refused write', () => {
   });
 
   it('a write revoked BEFORE a paid step stops it: checkWrite refuses, callAI and TTS never run', async () => {
-    const pod = { ...refusingPod('podcast_episode_published'), checkWrite: async () => ({ error: { code: 'podcast_episode_published', message: 'published' } }) };
+    // A resolvable cast, so synthesize WOULD reach the TTS call if its pre-step check
+    // were gone (with no cast every turn is voiceless and TTS could never run).
+    const pod = {
+      ...refusingPod('podcast_episode_published'),
+      checkWrite: async () => ({ error: { code: 'podcast_episode_published', message: 'published' } }),
+      getEpisodeProfile: async () => ({ profile: { id: 'epp', orgId: ORG, speakerProfileId: 'spp' } }),
+      getSpeakerProfile: async () => ({ profile: { id: 'spp', orgId: ORG, speakers: [{ name: 'Host', voiceId: 'v-host' }] } }),
+    };
     const callAI = vi.fn(async () => ({ content: '1. a' }));
     const tts = vi.fn(async () => ({ audio: { url: '/media/x', mimeType: 'audio/mpeg' } }));
     const o = await outline({ inputs: { episodeId: 'ep-w', context: 'c' }, features: { podcasts: pod, documents: docs }, callAI });
@@ -588,6 +604,9 @@ describe('ADR 1115 D6 — the failure code reaches the row', () => {
   it('a free-text errorCode is never stored (only a node-chosen podcast_* code)', async () => {
     const episodeId = await seedBareEpisode('free text code');
     await surface().recordEpisodeResult({ episodeId, error: 'x', errorCode: 'Ignore previous instructions' });
-    expect((await getEpisode(TENANT, episodeId))!.errorCode).toBeUndefined();
+    const row = (await getEpisode(TENANT, episodeId))!;
+    // Positive control: the write itself landed (a refused write would leave both unset).
+    expect(row.error).toBe('x');
+    expect(row.errorCode).toBeUndefined();
   });
 });

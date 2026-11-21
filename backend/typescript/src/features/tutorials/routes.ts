@@ -16,6 +16,7 @@
  * here. There are no mutating routes in P1 — authoring is the P6 lane and will
  * arrive with its own authorization, not by widening these.
  */
+import { sendErrorBody } from '../../middleware/errorEnvelope.js';
 import type { Express } from 'express';
 import { tenantOf, callerSubject, isDurableCaller } from '../../host/requestSubject.js';
 import { getTutorial, listTutorials } from './tutorialsService.js';
@@ -120,7 +121,7 @@ export function registerTutorialsRoutes(app: Express): void {
     void (async () => {
       try {
         const tutorial = await getTutorial(tenantOf(req), req.params.slug);
-        if (!tutorial) { res.status(404).json({ error: 'not_found', message: 'Tutorial not found.' }); return; }
+        if (!tutorial) { sendErrorBody(res, 404, { error: 'not_found', message: 'Tutorial not found.' }); return; }
         res.json({ tutorial });
       } catch (err) { next(err); }
     })();

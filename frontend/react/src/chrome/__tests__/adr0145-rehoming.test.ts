@@ -1,3 +1,18 @@
+/**
+ * ADR 0145 — surface re-homing. Asserts the manifest wiring that consolidates
+ * five scattered Platform surfaces: two new consoles project their own tabs (and
+ * only their own), the legacy nav entries collapse via `hiddenWhenFeature` while
+ * their routes stay reachable, and Channels / Work patterns move to their correct
+ * homes. Pure manifest derivations — a manifest edit that breaks the IA is caught.
+ * The CDC-2 case (ADR 0610 D6) is the authz half: a non-admin keeps both
+ * workspace-tier Chat deployment tabs through `visibleHubRoutes`' tier filter.
+ *
+ * Sabotage-witnessed (wave 119 `w119g4-rh-*`): letting a hub claim another hub's
+ * tabs, dropping the toggle or tier filter, reversing the tab order, a tab gated
+ * on a retired or a shared toggle, a container or route moved to the wrong tier,
+ * a dropped `hiddenWhenFeature`, the model leaderboard link sent back to
+ * `/leaderboard`, and the `/leaderboard` route renamed each turn a case red.
+ */
 import { describe, it, expect } from 'vitest';
 import { FEATURES } from '../features.js';
 import { readFileSync } from 'node:fs';
@@ -18,13 +33,6 @@ const RETIRED_TOGGLES = new Set<string>(['models', 'context-economy', 'run-input
 const REGISTERED_TOGGLES = new Set(['campaign-intel', 'campaign-brief', 'campaign-connectors', 'campaign-orchestration', 'evals', 'model-router', 'scheduled-agent-chats', 'chat-widget']);
 import { visibleHubRoutes, tabIdOf } from '../hubProjection.js';
 
-/**
- * ADR 0145 — surface re-homing. Asserts the manifest wiring that consolidates
- * five scattered Platform surfaces: two new consoles project their own tabs (and
- * only their own), the legacy nav entries collapse via `hiddenWhenFeature` while
- * their routes stay reachable, and Channels / Work patterns move to their correct
- * homes. Pure manifest derivations — a manifest edit that breaks the IA is caught.
- */
 const byPath = (p: string) => FEATURES.find((r) => r.path === p);
 
 /**
@@ -65,9 +73,9 @@ describe('ADR 0145 — Models console', () => {
     // They drop their nav blocks rather than keep a `hiddenWhenFeature: 'models'`
     // that can never fire — otherwise the hub AND the standalone entries render.
     expect(byPath('/model-router')?.nav).toBeUndefined();
-    // The EVALS entry carries no nav — but ADR 0718: it is not the entry that renders.
-    // `kicktodo-engagement` also claims `/leaderboard` and DOES supply a nav entry, so
-    // asserting the evals entry alone says nothing about what the rail shows.
+    // The EVALS entry carries no nav. (ADR 0718 added that `kicktodo-engagement` also
+    // claimed `/leaderboard` with a nav entry; KickTodo left this repo in ADR 1031, so
+    // the evals entry is the only claimant again — see the reachability case below.)
     expect(FEATURES.find((r) => r.path === '/leaderboard' && r.ownerFeatureId === 'evals')?.nav).toBeUndefined();
   });
 
@@ -76,10 +84,15 @@ describe('ADR 0145 — Models console', () => {
     expect(resolves('/model-router')?.ownerFeatureId).toBe('model-router');
   });
 
-  // ADR 0718 — which feature `/leaderboard` resolves to (KickTodo's engagement page,
-  // by site-tier pre-emption) is asserted with that feature:
-  // features/kicktodo/__tests__/chromeOwnership.test.ts (ADR 1031 P2).
-
+  // CORRECTED wave 119: this said the `/leaderboard` ownership case moved to
+  // features/kicktodo/__tests__/chromeOwnership.test.ts (ADR 1031 P2). KickTodo then
+  // left the repo (ADR 1031 P3), that file is not here, and the evals entry is the
+  // only `/leaderboard` claimant. ADR 0145's "routes stay reachable" holds for it again.
+  it('keeps /leaderboard reachable for deep links: it resolves to the evals page', () => {
+    expect(FEATURES.filter((r) => r.path === '/leaderboard').map((r) => r.ownerFeatureId)).toEqual(['evals']);
+    expect(resolves('/leaderboard')?.ownerFeatureId).toBe('evals');
+    expect(resolves('/leaderboard')?.tier).toBe('admin');
+  });
 
   it('ADR 0719 (corrects ADR 0718) — the model leaderboard is reachable via a tab that ACTUALLY RENDERS', () => {
     // ADR 0718 asserted `hubTab?.hub === 'models'` here and called it "projected into the
@@ -105,6 +118,8 @@ describe('ADR 0145 — Models console', () => {
     // check (`hub-tab-featureid-parity.test.ts`); this is the FE-side tripwire.
     for (const hub of ['models', 'chat-deployment'] as const) {
       const declared = FEATURES.filter((f) => f.hubTab && f.hubTab.hub === hub);
+      // Positive control: the loop below asserts nothing over an empty list.
+      expect(declared.length, hub).toBe(2);
       for (const d of declared) {
         const id = d.hubTab?.featureId;
         expect(
@@ -223,6 +238,10 @@ describe('ADR 0145 — consoles are isolated by the hub discriminator', () => {
     const models = visibleHubRoutes(FEATURES, all, true, 'models').map(tabIdOf);
     const chat = visibleHubRoutes(FEATURES, all, true, 'chat-deployment').map(tabIdOf);
     const overlap = (a: string[], b: string[]): string[] => a.filter((x) => b.includes(x));
+    // Positive control: an empty console overlaps nothing.
+    expect(access.length).toBeGreaterThan(0);
+    expect(models).toEqual(['model-router', 'leaderboard']);
+    expect(chat).toEqual(['scheduled-chats', 'widgets']);
     expect(overlap(access, models)).toEqual([]);
     expect(overlap(access, chat)).toEqual([]);
     expect(overlap(models, chat)).toEqual([]);

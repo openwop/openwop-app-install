@@ -1,7 +1,12 @@
 /**
- * Template pre-flight mapping (day-1 UX P3 / B1) — chainParamsToVariables is
- * the seam between a chain pack's JSON-Schema `parameters` and the shared
+ * Template pre-flight mapping (day-1 UX P3 / B1, ADR 0191) — chainParamsToVariables
+ * is the seam between a chain pack's JSON-Schema `parameters` and the shared
  * RunVariable shape the ONE run-input renderer (ui/RunInputsForm) consumes.
+ *
+ * Also the gallery's "Start here" predicate `runsWithZeroConnections` (ADR 1065:
+ * only an explicit `connectionUsage: 'none'` may earn the positive label; ADR 0766
+ * D3: a pin mismatch withholds it), the ADR 0191 Phase 2 feature rows, and the
+ * Run-gate connection collector. Pure functions, literal expectations.
  */
 import { describe, expect, it } from 'vitest';
 
@@ -41,6 +46,11 @@ describe('runsWithZeroConnections', () => {
   const base = { chainId: 'c', packName: 'p', label: 'L', description: 'd' };
   it('true only for an explicitly account-free requirements block', () => {
     expect(runsWithZeroConnections({ ...base, requirements: { missingNodeTypeIds: [], connections: [], connectionUsage: 'none' } })).toBe(true);
+    // ADR 1065 — the same empty rows WITHOUT the explicit audit never qualify: an
+    // older or unaudited block, and a chain that uses accounts the rows do not list.
+    expect(runsWithZeroConnections({ ...base, requirements: { missingNodeTypeIds: [], connections: [] } })).toBe(false);
+    expect(runsWithZeroConnections({ ...base, requirements: { missingNodeTypeIds: [], connections: [], connectionUsage: 'unknown' } })).toBe(false);
+    expect(runsWithZeroConnections({ ...base, requirements: { missingNodeTypeIds: [], connections: [], connectionUsage: 'uses' } })).toBe(false);
   });
   it('false when requirements are absent (older backend — never overpromise)', () => {
     expect(runsWithZeroConnections({ ...base })).toBe(false);

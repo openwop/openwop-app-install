@@ -25,11 +25,24 @@
  * too (they used to fetch live, hence a live-fetch allowlist line); the
  * "genuinely empty queue" arm now asserts the empty state itself (deleting it
  * was invisible in round 1); the 403 arm asserts EXACTLY one operator-only card.
+ *
+ * w117: every case waits for a SETTLE signal no probe touches (the outbox panel,
+ * read in the same `allSettled` batch, or a refresh's own new outbox count) and
+ * then asserts exact counts, so a sabotage reds on a value, not on a lookup that
+ * times out. The shell live region is reset per case (module-level state). The
+ * one exception is the spoken stale state, which is written by an effect after
+ * commit and is read with `waitFor` on the region itself.
+ * Sabotage that turns it red (w117 probes): dropping either stale Notice or its
+ * `announce`, rendering a cold failure as loading, discarding the last-known
+ * health on a failed refresh, a DLQ 403 or failure leaking into the health panel,
+ * a provider chip without its ok/failed word, an empty provider row, a missing
+ * web-search check shown as "not configured", the three web-search words swapped,
+ * the source lane dropped, and a danger web-search chip.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { GlobalLiveRegion } from '../../../ui/announce.js';
+import { GlobalLiveRegion, announce } from '../../../ui/announce.js';
 
 type Client = typeof import('../../../client/operationsClient.js');
 const api = vi.hoisted(() => ({
@@ -96,7 +109,12 @@ function page(): ReturnType<typeof within> {
 
 /** The app-shell polite live region — what a screen reader actually hears. */
 function spoken(): string {
-  return document.querySelector('[aria-live="polite"]')?.textContent ?? '';
+  return document.querySelector('[data-owp-live="polite"]')?.textContent ?? '';
+}
+
+/** One hub panel, found by its heading, so a count cannot include a neighbour. */
+function section(heading: string): ReturnType<typeof within> {
+  return within(page().getByRole('heading', { name: heading }).closest('section') as HTMLElement);
 }
 
 // ADR 0987 D6 — the hub's sixth read. Answered here so this file's panels stay the
@@ -106,8 +124,31 @@ const ADMISSION: AdmissionSummary = {
   concurrencyRefusals: {}, windowUnavailable: 0, perInstance: true, fetchedAt: '2026-10-31T00:00:00Z',
 };
 
+/**
+ * The hub's reads settle in ONE `allSettled` batch, so once the outbox panel
+ * (never a probe target here) shows its answer, every panel shows its final state.
+ */
+async function settled(): Promise<void> {
+  await page().findByText(en.outboxHealthy);
+}
+
+/** Click Refresh and wait until THAT load landed: the outbox answers a new count. */
+async function refreshAndSettle(): Promise<void> {
+  api.getOutboxSummary.mockResolvedValue({ ...OUTBOX, counts: { pending: 4, dead: 0 } });
+  fireEvent.click(screen.getByRole('button', { name: en.refresh }));
+  await page().findByText('4 waiting to start');
+}
+
+/** The web-search chip, found by its fixed prefix. */
+function webSearchChip(): HTMLElement {
+  return page().getByText(new RegExp(`^${en.checkWebSearch} · `));
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  // The shell live region is module-level: a previous case's stale announcement
+  // would otherwise be read by the next case's "not yet spoken" check.
+  announce('');
   api.getHealthSummary.mockResolvedValue(HEALTH);
   api.getDlqSummary.mockResolvedValue(DLQ);
   api.getOutboxSummary.mockResolvedValue(OUTBOX);
@@ -127,30 +168,33 @@ describe('DATA-OPS-STALE — a failed REFRESH must not pass last-known numbers o
   // same lie as an empty state, better dressed.
   it('marks health as last-known after a refresh fails, without discarding it', async () => {
     renderHub();
-    expect(await page().findByText(/v1\.0\.0/)).toBeTruthy();
-    expect(page().queryByText(en.healthStale)).toBeNull();
+    await settled();
+    expect(page().getAllByText(/v1\.0\.0/)).toHaveLength(1);
+    expect(page().queryAllByText(en.healthStale)).toHaveLength(0);
 
     api.getHealthSummary.mockRejectedValue(new Error('health_503'));
-    fireEvent.click(screen.getByRole('button', { name: en.refresh }));
+    await refreshAndSettle();
 
-    expect(await page().findByText(en.healthStale)).toBeTruthy();
+    expect(page().queryAllByText(en.healthStale)).toHaveLength(1);
     // The numbers STAY. Replacing them with a failure card would be dishonest in
     // the other direction — it discards the most recent truth we actually hold.
-    expect(page().getByText(/v1\.0\.0/)).toBeTruthy();
+    expect(page().queryAllByText(/v1\.0\.0/)).toHaveLength(1);
     expect(page().queryByText(en.healthUnavailableTitle)).toBeNull();
   });
 
   it('marks the DLQ as last-known after a refresh fails', async () => {
     api.getDlqSummary.mockResolvedValue({ ...DLQ, subjects: [{ subject: 's1', depth: 2, tenantId: 't1', reasons: ['boom'], messageIds: ['m1'] }] });
     renderHub();
-    expect(await page().findByText(/s1/)).toBeTruthy();
-    expect(page().queryByText(en.dlqStale)).toBeNull();
+    await settled();
+    expect(page().getAllByText('s1')).toHaveLength(1);
+    expect(page().queryAllByText(en.dlqStale)).toHaveLength(0);
 
     api.getDlqSummary.mockRejectedValue(new Error('dlq_503'));
-    fireEvent.click(screen.getByRole('button', { name: en.refresh }));
+    await refreshAndSettle();
 
-    expect(await page().findByText(en.dlqStale)).toBeTruthy();
-    expect(page().getByText(/s1/)).toBeTruthy();
+    expect(page().queryAllByText(en.dlqStale)).toHaveLength(1);
+    expect(page().queryAllByText('s1')).toHaveLength(1);
+    expect(page().queryByText(en.dlqUnavailableTitle)).toBeNull();
   });
 
   it('SPEAKS the stale state — the banner is invisible to a screen reader', async () => {
@@ -159,12 +203,14 @@ describe('DATA-OPS-STALE — a failed REFRESH must not pass last-known numbers o
     // signal is a warning banner. A user who cannot see it is left reading a
     // stale queue depth as current — the original defect, wearing the fix.
     renderHub();
-    await page().findByText(/v1\.0\.0/);
+    await settled();
     expect(spoken()).not.toContain(en.healthStale);
 
     api.getHealthSummary.mockRejectedValue(new Error('health_503'));
-    fireEvent.click(screen.getByRole('button', { name: en.refresh }));
+    await refreshAndSettle();
 
+    // The region is written by the Notice's effect after commit (wave 43): wait
+    // for the region itself, not for the banner.
     await waitFor(() => expect(spoken()).toContain(en.healthStale));
   });
 
@@ -173,8 +219,9 @@ describe('DATA-OPS-STALE — a failed REFRESH must not pass last-known numbers o
     // we hold nothing, and saying "last known" would invent one.
     api.getHealthSummary.mockRejectedValue(new Error('health_500'));
     renderHub();
+    await settled();
 
-    expect(await page().findByText(en.healthUnavailableTitle)).toBeTruthy();
+    expect(page().queryAllByText(en.healthUnavailableTitle)).toHaveLength(1);
     expect(page().queryByText(en.healthStale)).toBeNull();
   });
 });
@@ -183,56 +230,63 @@ describe('UX-OPS-1 — one read failing never speaks for the other panel', () =>
   it('DLQ FAILS: the DLQ panel says unavailable and NEVER says the queue is empty', async () => {
     api.getDlqSummary.mockRejectedValue(new Error('dlq_500'));
     renderHub();
-    expect(await page().findByText(/Dead-letter queue unavailable/i)).toBeTruthy();
+    await settled();
+    expect(page().queryAllByText(en.dlqUnavailableTitle)).toHaveLength(1);
     // The claim that would send an operator home happy.
-    expect(page().queryByText(/No dead-lettered/i)).toBeNull();
+    expect(page().queryByText(en.dlqEmpty)).toBeNull();
   });
 
   it('DLQ FAILS: the Health panel still renders the health it DID read', async () => {
     // Before the fix this panel span forever on `StateCard loading`.
     api.getDlqSummary.mockRejectedValue(new Error('dlq_500'));
     renderHub();
-    await page().findByText(/Dead-letter queue unavailable/i);
-    expect(page().queryByText(/Health check unavailable/i)).toBeNull();
-    expect(page().getByText(/v1\.0\.0/)).toBeTruthy();
+    await settled();
+    expect(page().queryByText(en.healthUnavailableTitle)).toBeNull();
+    expect(page().queryAllByText(/v1\.0\.0/)).toHaveLength(1);
   });
 
   it('DLQ 403 ONLY: health is not claimed operator-only', async () => {
     api.getDlqSummary.mockRejectedValue(new OperationsRequestError('forbidden', 403));
     renderHub();
-    await page().findByText(/v1\.0\.0/); // health rendered
+    await settled();
+    expect(page().queryAllByText(/v1\.0\.0/)).toHaveLength(1); // health rendered
     // Exactly one operator-only card — the DLQ one, not both panels.
-    expect(page().getAllByText(en.operatorOnlyTitle)).toHaveLength(1);
-    expect(page().queryByText(/Health check unavailable/i)).toBeNull();
+    expect(page().queryAllByText(en.operatorOnlyTitle)).toHaveLength(1);
+    expect(section(en.dlqHeading).queryAllByText(en.operatorOnlyTitle)).toHaveLength(1);
+    expect(page().queryByText(en.healthUnavailableTitle)).toBeNull();
   });
 
   it('BOTH OK + genuinely empty queue: the real empty state still renders', async () => {
     // The other arm. Without it, "always say unavailable" would pass the tests
     // above while destroying the accurate all-clear an operator relies on.
     renderHub();
-    expect(await page().findByText(/v1\.0\.0/)).toBeTruthy();
-    expect(page().queryByText(/Dead-letter queue unavailable/i)).toBeNull();
-    expect(page().queryByText(/Health check unavailable/i)).toBeNull();
+    await settled();
+    expect(page().queryAllByText(/v1\.0\.0/)).toHaveLength(1);
+    expect(page().queryByText(en.dlqUnavailableTitle)).toBeNull();
+    expect(page().queryByText(en.healthUnavailableTitle)).toBeNull();
     // The accurate all-clear itself — not merely the absence of a failure.
-    expect(page().getByText(en.dlqEmpty)).toBeTruthy();
+    expect(page().queryAllByText(en.dlqEmpty)).toHaveLength(1);
   });
 
   it('HEALTH FAILS: says unavailable rather than spinning, and does not claim degraded', async () => {
     api.getHealthSummary.mockRejectedValue(new Error('health_500'));
     renderHub();
-    expect(await page().findByText(/Health check unavailable/i)).toBeTruthy();
+    await settled();
+    expect(page().queryAllByText(en.healthUnavailableTitle)).toHaveLength(1);
     // Assert the CLAIM, not the word. This used to be `queryByText(/Degraded/i)`,
     // which broke the moment the failure copy started saying "unknown rather than
     // degraded" — an honest sentence that mentions the word in order to deny it.
-    // The claim is the status chip at OperationsHubPage.tsx:106, so match that
-    // chip's exact catalog string. A test that forbids a WORD forbids explaining
-    // yourself; a test that forbids the CLAIM is the one worth having.
+    // The claim is the status chip in the health card, so match that chip's exact
+    // catalog string. A test that forbids a WORD forbids explaining yourself; a
+    // test that forbids the CLAIM is the one worth having.
     expect(page().queryByText(en.statusDegraded)).toBeNull();
     expect(page().queryByText(en.statusReady)).toBeNull();
   });
 });
 
 describe('UX-OPS-2 — the server-computed provider block is rendered, not dropped', () => {
+  const providerChips = (): HTMLElement[] => page().queryAllByText(/^(anthropic|openai) · /);
+
   it('shows a per-provider readiness chip when the server sends one', async () => {
     api.getHealthSummary.mockResolvedValue({
       ...HEALTH,
@@ -246,16 +300,22 @@ describe('UX-OPS-2 — the server-computed provider block is rendered, not dropp
       },
     });
     renderHub();
-    // The explanation for `degraded` that used to be discarded.
-    expect(await page().findByText(/openai/)).toBeTruthy();
-    expect(page().getByText(/anthropic/)).toBeTruthy();
+    await settled();
+    // The explanation for `degraded` that used to be discarded — each provider
+    // with its readiness as a WORD (WCAG 1.4.1), not colour alone.
+    expect(providerChips().map((c) => c.textContent)).toEqual([`anthropic · ${en.checkOk}`, `openai · ${en.checkFailed}`]);
+    expect(providerChips().map((c) => c.className)).toEqual(['chip chip--success', 'chip chip--danger']);
   });
 
-  it('renders nothing extra when the server omits the block', async () => {
+  it('renders no provider row when the server omits the block', async () => {
     // The other arm — an older host without the block must not gain an empty row.
     renderHub();
-    await page().findByText(/v1\.0\.0/);
-    expect(page().queryByText(/openai/)).toBeNull();
+    await settled();
+    expect(providerChips()).toHaveLength(0);
+    // The health card holds exactly one paragraph: the checks row. An empty
+    // provider row would be a second.
+    const card = page().getByText(/v1\.0\.0/).closest('article');
+    expect(card?.querySelectorAll('p')).toHaveLength(1);
   });
 });
 
@@ -276,8 +336,8 @@ describe('UX-OPS-3 — the web-search check is three-valued, and "unknown" is no
       checks: { ...HEALTH.checks, webSearch: { configured: true, source: 'host-vault' as const } },
     });
     renderHub();
-    expect(await page().findByText(/host-vault/)).toBeTruthy();
-    expect(page().queryByText(new RegExp(en.webSearchAbsent))).toBeNull();
+    await settled();
+    expect(webSearchChip().textContent).toBe('web search · configured (host-vault)');
   });
 
   it('says NOT configured when the probe answered cleanly and found nothing', async () => {
@@ -286,8 +346,8 @@ describe('UX-OPS-3 — the web-search check is three-valued, and "unknown" is no
       checks: { ...HEALTH.checks, webSearch: { configured: false, source: null } },
     });
     renderHub();
-    expect(await page().findByText(new RegExp(en.webSearchAbsent))).toBeTruthy();
-    expect(page().queryByText(new RegExp(en.webSearchUnknown))).toBeNull();
+    await settled();
+    expect(webSearchChip().textContent).toBe(`web search · ${en.webSearchAbsent}`);
   });
 
   it('says COULD NOT CHECK — never "not configured" — when the vault probe threw', async () => {
@@ -300,11 +360,11 @@ describe('UX-OPS-3 — the web-search check is three-valued, and "unknown" is no
       },
     });
     renderHub();
-    expect(await page().findByText(new RegExp(en.webSearchUnknown))).toBeTruthy();
+    await settled();
     expect(
-      page().queryByText(new RegExp(en.webSearchAbsent)),
+      webSearchChip().textContent,
       'an unreadable vault reported as "not configured" is the false negative this fixes',
-    ).toBeNull();
+    ).toBe(`web search · ${en.webSearchUnknown}`);
   });
 
   it('never renders the chip as a failure — search is optional and does not gate readiness', async () => {
@@ -313,19 +373,19 @@ describe('UX-OPS-3 — the web-search check is three-valued, and "unknown" is no
       checks: { ...HEALTH.checks, webSearch: { configured: false, source: null } },
     });
     renderHub();
-    const chip = await page().findByText(new RegExp(en.webSearchAbsent));
+    await settled();
     expect(
-      chip.className,
+      webSearchChip().className,
       'a danger chip would claim a healthy host is broken — the backend deliberately does not gate on this',
     ).not.toContain('danger');
   });
 
-  it('renders nothing extra when the server omits the block', async () => {
+  it('renders no web-search chip when the server omits the block', async () => {
     // Older revisions have no such field. A missing check must not render as a
     // false negative — "we did not ask" is not "there is no key".
     renderHub();
-    await page().findByText(/v1\.0\.0/);
-    expect(page().queryByText(new RegExp(en.webSearchAbsent))).toBeNull();
-    expect(page().queryByText(new RegExp(en.checkWebSearch))).toBeNull();
+    await settled();
+    expect(page().queryAllByText(new RegExp(en.webSearchAbsent))).toHaveLength(0);
+    expect(page().queryAllByText(new RegExp(en.checkWebSearch))).toHaveLength(0);
   });
 });

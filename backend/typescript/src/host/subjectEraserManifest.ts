@@ -341,6 +341,34 @@ import { featureSubjectErasers } from './featureContributions.js';
  *      of both is keyed to one person, so a DSAR deletes the subject's prefs row and
  *      day counters; nothing shared or tenant-level lives in either store.
  */
+/*
+ *  +1 (2026-11-18, ADR 0464 §9 CHAN-F19 #6):
+ *    + `erasePortabilitySubject` — `portability:import-claims` keeps a permanent
+ *      dedup claim per imported item, and a PRIVATE prompt's claim key carries the
+ *      importer's `User.userId` and the prompt's name. A DSAR deletes the subject's
+ *      private-prompt claims; roster, schedule and org-visible claims name no person.
+ */
+/*
+ *  +1 (2026-11-18, ADR 0464 §9 CHAN-F19 #8):
+ *    + `eraseNotebookSourceStateSubject` — `notebook-source-summary` holds model text
+ *      derived from a KB source. kb's eraser deletes the subject's documents and the
+ *      best-effort KB lifecycle seam drops their summaries; this strict leg runs after
+ *      kb's and deletes every summary and level whose source no longer exists, so a
+ *      swallowed seam failure cannot leave one behind.
+ */
+/*
+ *  +1 (2026-11-19, ADR 0464 §9 CHAN-F19 #12, user decision):
+ *    + `eraseFeatureToggleSubject` — the HOST `feature-toggle` store's `betaCohort`
+ *      holds principal ids (a SAML subject can be an email) and `updatedBy` the
+ *      saving operator. It was ledgered "no-subject". A DSAR removes the subject's
+ *      ids (key forms + home-tenant principal) from every cohort, host-global, and
+ *      redacts their `updatedBy`; an emptied cohort keeps a sentinel so a closed
+ *      beta stays closed.
+ *  +1 (same change):
+ *    + `eraseReplayToggleWriteSubject` — `analytics:replay-toggle-writes` copies whole
+ *      toggle rows for the settle window and the next sweep, so the same ids sit in
+ *      the copies. The same strip rule, by CAS per pending write.
+ */
 export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseChannelIngressSubject', // ADR 1042 D8
   'eraseRelayOwnerSubject', // ADR 1042 D8
@@ -469,6 +497,10 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseSuggestionSubject',
   'eraseSuggesterQueueSubject', // CHAN-F19 #2 — the decision suggester's queued chat text
   'eraseSettingsSubject', // CHAN-F19 #4 — personal settings prefs + BYOK day counters
+  'erasePortabilitySubject', // CHAN-F19 #6 — private-prompt import claims
+  'eraseNotebookSourceStateSubject', // CHAN-F19 #8 — summaries of vanished KB sources
+  'eraseFeatureToggleSubject', // CHAN-F19 #12 — the subject leaves every beta cohort
+  'eraseReplayToggleWriteSubject', // CHAN-F19 #12 — same, in session replay's pending toggle-row copies
   'eraseSyncBindingSubject',
   'eraseTeamLedgerSubject',
   'eraseTeamsDelivery',

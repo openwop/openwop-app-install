@@ -137,6 +137,20 @@ describe('RFC 0100 §2/§4 — host-sample durable A2A task seams', () => {
     expect(((await res.json()) as ErrorBody).error).toBe('a2a_push_egress_denied');
   });
 
+  // ADR 1147 GUARD-3: the refusal echoes the caller's URL (A2aPushUrlDeniedError), so a
+  // credential in that URL came back verbatim while the route wrote the 400 directly.
+  // Through the error envelope the message is scrubbed. Red when the route writes the
+  // body itself again.
+  it('push-config scrubs a credential carried in a refused push URL', async () => {
+    const secret = 'sk_live_' + 'A1b2C3d4E5f6G7h8J9k0L1m2N3p4Q5r6';
+    const res = await post('/host/openwop-app/a2a/tasks/push-config', { taskId: 'run_x', url: `http://10.0.0.5/push?token=${secret}` });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as ErrorBody;
+    expect(body.error).toBe('a2a_push_egress_denied');
+    expect(body.message, 'the refused URL is still named').toContain('10.0.0.5');
+    expect(body.message, 'the credential in it is not').not.toContain(secret);
+  });
+
   it('push-config accepts a public https URL but 404s when the task does not exist', async () => {
     const res = await post('/host/openwop-app/a2a/tasks/push-config', {
       taskId: 'run_absent',

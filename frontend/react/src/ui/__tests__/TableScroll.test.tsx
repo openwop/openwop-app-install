@@ -3,6 +3,12 @@
  * (axe `scrollable-region-focusable`), and adds no tab stop while it fits.
  * jsdom has neither layout nor ResizeObserver: widths are stubbed on the
  * prototype, and the observer reports each target once on observe, as browsers do.
+ *
+ * Train 296: the observer's callback is ASYNC in a browser, so a render that made the
+ * content overflow left a window with a scrolling region and no tab stop, and axe
+ * caught it intermittently on /capabilities. The 'inert observer' cases below never
+ * fire the callback, so they pass only if the wrapper measures synchronously after
+ * each render. Red when the measurement waits for the observer.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render } from '@testing-library/react';
@@ -39,5 +45,35 @@ describe('<TableScroll>', () => {
     const el = container.firstElementChild!;
     expect(el.hasAttribute('tabindex')).toBe(false);
     expect(el.hasAttribute('role')).toBe(false);
+  });
+
+  describe('without waiting for the ResizeObserver (an inert observer)', () => {
+    beforeEach(() => {
+      vi.stubGlobal('ResizeObserver', class {
+        observe(): void {}
+        disconnect(): void {}
+      });
+    });
+
+    it('is focusable and named in the same render that overflows', () => {
+      widths(900, 300);
+      const { container } = render(<TableScroll label="Week by week">{table}</TableScroll>);
+      const el = container.firstElementChild!;
+      expect(el.getAttribute('tabindex')).toBe('0');
+      expect(el.getAttribute('role')).toBe('region');
+      expect(el.getAttribute('aria-label')).toBe('Week by week');
+    });
+
+    it('becomes focusable when a re-render makes the content overflow (rows arrived)', () => {
+      widths(300, 300);
+      const { container, rerender } = render(<TableScroll label="Week by week">{table}</TableScroll>);
+      const el = container.firstElementChild!;
+      expect(el.hasAttribute('tabindex')).toBe(false);
+      vi.restoreAllMocks();
+      widths(900, 300);
+      rerender(<TableScroll label="Week by week">{table}<span>more</span></TableScroll>);
+      expect(el.getAttribute('tabindex')).toBe('0');
+      expect(el.getAttribute('role')).toBe('region');
+    });
   });
 });

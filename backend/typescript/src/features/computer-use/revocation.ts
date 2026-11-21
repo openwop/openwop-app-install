@@ -81,6 +81,10 @@ export async function sweepComputerUseSessions(storage: Pick<Storage, 'getRun'>)
   for (const s of live) {
     const lapsed = await authorityLapse(s).catch(() => null);
     if (lapsed) { await endSession(adapter, s, lapsed); ended += 1; continue; }
+    // ADR 1136 P3a — a take-over nobody answered in time ends, releasing the browser.
+    if (s.status === 'awaiting_takeover' && s.takeover && Date.parse(s.takeover.expiresAt) <= Date.now()) {
+      await endSession(adapter, s, 'takeover_expired'); ended += 1; continue;
+    }
     if (s.runId) {
       const run = await storage.getRun(s.runId).catch(() => null);
       if (run && (run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled')) {

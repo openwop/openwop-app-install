@@ -111,3 +111,56 @@ export async function verifiedApprovalInterrupt(input: { runId: string | undefin
   }
   return refuse();
 }
+
+/** ADR 1136 P3a — the resume key of take-over `n`. One per take-over. */
+export const takeoverResumeKey = (sessionId: string, n: number): string => `cu-takeover:${sessionId}:${n}`;
+
+/**
+ * ADR 1136 P3a — prove the opener answered THIS take-over with "continue", from
+ * the run record, the way `verifiedApprovalInterrupt` proves an approval:
+ *  - the node is a computer-use decide node in this run's definition;
+ *  - the interrupt carries this take-over's resume key, and the take-over fields
+ *    it rendered are exactly the session's (origin, reason, number);
+ *  - its approver list is exactly the opener, so the host gave its token and its
+ *    resolution to the opener alone (ADR 0932);
+ *  - no body-declared `voter`, and the action is `continue`;
+ *  - not already spent (`consumedApprovals`).
+ * Returns the interrupt id, or refuses.
+ */
+export async function verifiedTakeoverAnswer(input: { runId: string | undefined; nodeId: string; session: CuSession }): Promise<string> {
+  const refuse = (): never => {
+    throw new OpenwopError('approval_required', 'Continue in the run, where the browser agent asked you.', 409, { sessionId: input.session.sessionId });
+  };
+  const tk = input.session.takeover;
+  if (!reader || !input.runId || !input.nodeId || !tk) return refuse();
+  const { storage, catalog } = reader;
+  const run = await storage.getRun(input.runId);
+  if (!run || run.tenantId !== input.session.tenantId) return refuse();
+  const def = await resolveRunDefinition(run, catalog);
+  const node = def?.definition.nodes.find((x) => x.nodeId === input.nodeId);
+  if (!node || node.typeId.split('@')[0] !== DECIDE_NODE_TYPE) return refuse();
+  const key = takeoverResumeKey(input.session.sessionId, tk.n);
+  const consumed = new Set(input.session.consumedApprovals ?? []);
+  for (let fromSeq = -1; ;) {
+    const page = await storage.listEvents(input.runId, { fromSeq, limit: EVENT_PAGE });
+    for (const e of page) {
+      if (e.type !== 'node.suspended' || e.nodeId !== input.nodeId) continue;
+      const interruptId = (e.payload as { interruptId?: unknown } | null)?.interruptId;
+      if (typeof interruptId !== 'string' || consumed.has(interruptId)) continue;
+      const rec = await storage.getInterrupt(interruptId);
+      if (!rec || rec.runId !== input.runId || rec.nodeId !== input.nodeId || rec.kind !== 'clarification' || !rec.resolvedAt) continue;
+      const data = (rec.data ?? {}) as Record<string, unknown>;
+      if (data.__resumeKey !== key || data.__resumeStyle !== 'reinvoke') continue;
+      const shown = (data.computerUseTakeover ?? null) as { sessionId?: unknown; n?: unknown; origin?: unknown; reason?: unknown } | null;
+      if (!shown || shown.sessionId !== input.session.sessionId || shown.n !== tk.n || shown.origin !== tk.origin || shown.reason !== tk.reason) continue;
+      const refs = data.approverRefs;
+      if (!Array.isArray(refs) || refs.length !== 1 || refs[0] !== input.session.createdBy) continue;
+      const value = (rec.resolvedValue ?? null) as { action?: unknown; voter?: unknown } | null;
+      if (value && Object.prototype.hasOwnProperty.call(value, 'voter')) continue;
+      if (value?.action === 'continue') return interruptId;
+    }
+    if (page.length < EVENT_PAGE) break;
+    fromSeq = page[page.length - 1]!.sequence;
+  }
+  return refuse();
+}

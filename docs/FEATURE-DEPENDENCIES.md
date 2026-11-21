@@ -12,7 +12,7 @@
 | Declared (`dependsOn`) | 17 | real hard deps, disable-lock active |
 | Undeclared → always-on target | 119 | correctly undeclared — an always-on dep can never lock (ADR 0439) |
 | **[1] Primitive** (undeclared → toggleable) | **0** | misfiled cross-cutting infra → **extract to a `host/` seam** |
-| **[2] Soft-read** (undeclared → toggleable) | **108** | domain read, target vacuous-when-off → **leave documented** (no lock) |
+| **[2] Soft-read** (undeclared → toggleable) | **109** | domain read, target vacuous-when-off → **leave documented** (no lock) |
 | **[3] Hard-dep** (undeclared → toggleable) | **0** | target refuses when off → **declare `dependsOn`** |
 
 The goal (ADR 0446) is **not** "drive the total to zero." It is: extract the **[1]**
@@ -47,7 +47,7 @@ _None._
 | `campaign-intel` | `campaign-connectors` | dyn | syncService, performanceService, types | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `campaign-ops` | `campaign-connectors` | static | performanceService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `campaign-brief` | `campaign-intel` | dyn | utmGovernance | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
-| `campaign-ops` | `campaign-intel` | static | budgetPlanner | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
+| `campaign-ops` | `campaign-intel` | dyn | budgetPlanner, reallocation | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `campaign-journeys` | `campaign-ops` | static | clientService, surface | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `campaign-orchestration` | `campaign-ops` | static | assetService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `sharing` | `campaign-ops` | static | portal | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
@@ -116,6 +116,7 @@ _None._
 | `bi` | `entities` | static | entitiesService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `cms` | `entities` | static | entitiesService, kernelAdapter | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `commerce` | `entities` | static | entitiesService, systemIndex, kernelAdapter | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
+| `media` | `entities` | static | systemIndex | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `service-desk` | `entities` | static | entitiesService, kernelAdapter | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `tutorials` | `entities` | static | entitiesService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `crm` | `forms` | static | submissionSinks, formsService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |

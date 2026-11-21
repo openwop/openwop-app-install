@@ -31,8 +31,10 @@ describe('market-intel.shift-detect', () => {
     const set = { records: [{ quote: 'onboarding is slow', tagType: 'pain' }], angles: [{ id: 'a1', score: 0.7 }] };
     const out = await run(set, set);
     expect(out.status).toBe('success');
-    expect(out.outputs.alert.hasShift).toBe(false);
-    expect(out.outputs.alert.newPains).toEqual([]);
+    expect(out.outputs.alert).toEqual({
+      newPains: [], resolvedPains: [], intensifiedPains: [], angleDeltas: [],
+      summary: 'No material market shift since the prior research run.', hasShift: false,
+    });
   });
 
   it('detects new + resolved pain points', async () => {
@@ -40,8 +42,8 @@ describe('market-intel.shift-detect', () => {
     const curr = { records: [{ quote: 'setup takes forever', tagType: 'pain' }] };
     const out = await run(prev, curr);
     expect(out.outputs.alert.hasShift).toBe(true);
-    expect(out.outputs.alert.newPains.map((p: { quote: string }) => p.quote)).toContain('setup takes forever');
-    expect(out.outputs.alert.resolvedPains.map((p: { quote: string }) => p.quote)).toContain('billing is confusing');
+    expect(out.outputs.alert.newPains).toEqual([{ tagType: 'pain', quote: 'setup takes forever' }]);
+    expect(out.outputs.alert.resolvedPains).toEqual([{ tagType: 'pain', quote: 'billing is confusing' }]);
     expect(out.outputs.alert.summary).toBe('Market shift detected: 1 new pain point(s), 1 resolved.');
   });
 
@@ -79,6 +81,7 @@ describe('market-intel.shift-detect', () => {
   it('a missing previous set is a typed failure', async () => {
     const out = await call({ current: { records: [] } });
     expect(out.status).toBe('error');
+    expect(out.error!.code).toBe('INVALID_INPUTS');
     expect(out.error!.message).toContain('previous is required');
   });
 
@@ -98,6 +101,6 @@ describe('market-intel.shift-detect', () => {
   it('previous is still read from config when inputs lack it (back-compat)', async () => {
     const out = await call({ current: { records: [{ quote: 'x', tagType: 'pain' }] } }, { previous: { records: [{ quote: 'x', tagType: 'pain' }] } });
     expect(out.status).toBe('success');
-    expect(out.outputs!.alert.hasShift).toBe(false);
+    expect(out.outputs!.alert).toMatchObject({ hasShift: false, newPains: [], resolvedPains: [] });
   });
 });

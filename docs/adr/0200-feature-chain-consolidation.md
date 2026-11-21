@@ -181,6 +181,11 @@ chips automatically — no new code path. Backend `tsc` clean; dependency suite 
 
 ## Open questions
 
+> **CORRECTED 2026-11-20 (ADR 1154 D9).** The hub's nav entry is now shown
+> whenever any campaign feature is on, not only when `campaigns` is on. Under
+> the sub-toggle `campaigns.guided` the hub renders a home, not the six tabs.
+> The tab metadata and the legacy paths stay until ADR 1154 P6.
+
 - [ ] Phase 2: does the "Campaign Studio" hub nav entry show when NO sub-feature is
       enabled (empty-state prompt to enable in Marketplace), or hide entirely? (The
       access-hub/models precedent always-shows; a "hide when empty" needs an OR-gate

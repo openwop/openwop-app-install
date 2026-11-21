@@ -20,6 +20,8 @@ import { cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { RenderSection } from '../SectionRenderer.js';
 import type { Section } from '../cmsClient.js';
+import { brand } from '../../../brand/brand.js';
+import { isStockOpenwopBrand } from '../../../brand/defaults.js';
 
 afterEach(cleanup);
 
@@ -45,12 +47,19 @@ describe('CMS hero visual treatments', () => {
     expect(container.querySelector('.fp-hero__product')).toBeNull(); // the default artwork is replaced
   });
 
-  it('preserves the workflow motif for existing pages and supports no visual', () => {
+  it('defaults to the workflow motif on the stock brand (no art on a white-label brand) and supports no visual', () => {
     const first = view({});
     // The facelift (3080f2f24) rebuilt the default hero motif: HeroSchematic now renders
     // `.fp-hero__product`, and `.fp-hero__schematic` survives only on HeroJourney's svg —
     // it is in NO stylesheet at all. Assert the markup the default actually emits.
-    expect(first.container.querySelector('.fp-hero--workflow .fp-hero__product')).toBeTruthy();
+    // #5226: the OpenWOP art is the default only for the stock identity; an adopter's
+    // build (its own VITE_BRAND_PRODUCT_NAME) runs this suite too and defaults to none.
+    if (isStockOpenwopBrand(brand)) {
+      expect(first.container.querySelector('.fp-hero--workflow .fp-hero__product')).toBeTruthy();
+    } else {
+      expect(first.container.querySelector('.fp-hero--none')).toBeTruthy();
+      expect(first.container.querySelector('.fp-hero__product, .fp-hero__journey, .fp-hero__image')).toBeNull();
+    }
     cleanup();
     const second = view({ visual: 'none' });
     expect(second.container.querySelector('.fp-hero--none')).toBeTruthy();

@@ -52,13 +52,17 @@ export function intersectLabels(inputs: readonly PurposeLabel[]): string[] | und
  * adds no purpose the inbound grant did not carry.
  *   - inbound UNLABELLED (undefined) ⇒ no constraint ⇒ any onward label is allowed.
  *   - otherwise every onward purpose MUST be in the inbound set (narrowing/equal ok, widening not).
- *   - an `[]` inbound permits only an `[]` (or unlabelled→[]) onward — nothing may be forwarded.
+ *   - an `[]` inbound permits only an `[]` onward — nothing may be forwarded.
+ *   - a LABELLED inbound with an UNLABELLED onward is a violation: RFC 0128's negative example
+ *     says "a host that simply drops the label on the onward hop also fails (the promise is
+ *     propagation, not silent loss)". Until 2026-11-18 this returned `true` ("dropping the label
+ *     is a narrowing"), which let the reEmit property check miss a dropped label (TST-NZZ-2).
  */
 export function isNonWidening(inbound: PurposeLabel, onward: PurposeLabel): boolean {
   const inb = normalizeLabel(inbound);
   const onw = normalizeLabel(onward);
   if (inb === undefined) return true; // no inbound constraint
-  if (onw === undefined) return true; // dropping the label is a narrowing (safe)
+  if (onw === undefined) return false; // dropping the label is silent loss (RFC 0128 negative example)
   return onw.every((p) => inb.includes(p));
 }
 

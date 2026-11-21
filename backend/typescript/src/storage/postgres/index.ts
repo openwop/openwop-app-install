@@ -36,6 +36,7 @@
 
 import { Pool, type PoolClient, type PoolConfig } from 'pg';
 import { jsonbStringify, nulSafe } from '../jsonbSafe.js';
+import { createPubSubListener } from './pubsubListener.js';
 import { aggregateHostExtTenantActivity, HOSTEXT_ACTIVITY_ROW_CAP } from '../hostExtActivity.js';
 import { withRemovalStamp } from '../runRetentionStamp.js';
 import { planHostExtRekey, rekeyTenantSegment, runBudgetBucketBelongsTo, tenantFoldNeedles } from '../tenantMigration.js';
@@ -373,6 +374,11 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
   const pool = new Pool({
     max: poolMax,
     idleTimeoutMillis: 30_000,
+    // #6133 — TCP keepalive. The pub/sub LISTEN connection is a checked-out client
+    // that can sit idle for hours, which is what a connector or NAT idle cut kills.
+    // Keepalive prevents most cuts; the listener's self-ping catches the rest.
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10_000,
     // Bound how long we wait to acquire a connection and how long a single
     // statement may run, so a stuck query can't hold a pool slot forever
     // (DATA-1). Both overridable through the caller's opts.
@@ -418,47 +424,21 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
   }
 
   // ── cross-instance pub/sub via LISTEN/NOTIFY ──
-  // One physical channel (`openwop_host_ext`) multiplexes all logical
-  // channels; the payload is `{ c: logicalChannel, p: payload }`. A single
-  // dedicated connection (held out of the pool) LISTENs and fans incoming
-  // notifications to the registered handlers. It self-heals on connection drop.
+  // One physical channel (`openwop_host_ext`) multiplexes all logical channels;
+  // the payload is `{ c: logicalChannel, p: payload }`. A dedicated connection
+  // (held out of the pool) LISTENs and fans notifications to the handlers. It
+  // recovers on 'error' AND on a clean 'end', and a periodic self-ping recycles a
+  // connection that has gone silent (#6133, pubsubListener.ts).
   const PUBSUB_CHANNEL = 'openwop_host_ext';
-  const channelHandlers = new Map<string, Set<(payload: string) => void>>();
-  let listenClient: import('pg').PoolClient | null = null;
-  let listenStarting: Promise<void> | null = null;
-  let closing = false;
-
-  async function startListener(): Promise<void> {
-    const client = await pool.connect();
-    client.on('notification', (msg) => {
-      if (msg.channel !== PUBSUB_CHANNEL || !msg.payload) return;
-      try {
-        const { c, p } = JSON.parse(msg.payload) as { c: string; p: string };
-        const handlers = channelHandlers.get(c);
-        if (handlers) for (const h of handlers) {
-          try { h(p); } catch { /* a handler must not break delivery */ }
-        }
-      } catch { /* ignore a malformed payload */ }
-    });
-    client.on('error', () => {
-      // Connection dropped: reset + re-establish if anyone is still listening.
-      if (listenClient === client) listenClient = null;
-      try { client.release(); } catch { /* already gone */ }
-      if (!closing && channelHandlers.size > 0) {
-        setTimeout(() => { void ensureListener().catch(() => undefined); }, 1000);
-      }
-    });
-    await client.query(`LISTEN ${PUBSUB_CHANNEL}`);
-    listenClient = client;
-  }
-
-  async function ensureListener(): Promise<void> {
-    if (listenClient || closing) return;
-    if (!listenStarting) {
-      listenStarting = startListener().finally(() => { listenStarting = null; });
-    }
-    await listenStarting;
-  }
+  const pubsub = createPubSubListener({
+    connect: () => pool.connect(),
+    notify: async (channel, payload) => { await pool.query(`SELECT pg_notify($1, $2)`, [channel, payload]); },
+    physicalChannel: PUBSUB_CHANNEL,
+    log,
+    // Overridable for the Postgres-live test of a half-open connection; defaults 60 s / 10 s.
+    ...(Number(process.env.OPENWOP_PUBSUB_PING_INTERVAL_MS) > 0 ? { pingIntervalMs: Number(process.env.OPENWOP_PUBSUB_PING_INTERVAL_MS) } : {}),
+    ...(Number(process.env.OPENWOP_PUBSUB_PING_TIMEOUT_MS) > 0 ? { pingTimeoutMs: Number(process.env.OPENWOP_PUBSUB_PING_TIMEOUT_MS) } : {}),
+  });
 
   const INSERT_RUN_SQL = `INSERT INTO runs (
           run_id, workflow_id, tenant_id, scope_id, status,
@@ -3731,19 +3711,7 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       await pool.query(`SELECT pg_notify($1, $2)`, [PUBSUB_CHANNEL, JSON.stringify({ c: channel, p: payload })]);
     },
     async subscribe(channel, handler) {
-      let handlers = channelHandlers.get(channel);
-      if (!handlers) {
-        handlers = new Set();
-        channelHandlers.set(channel, handlers);
-      }
-      handlers.add(handler);
-      await ensureListener();
-      return async () => {
-        const set = channelHandlers.get(channel);
-        if (!set) return;
-        set.delete(handler);
-        if (set.size === 0) channelHandlers.delete(channel);
-      };
+      return pubsub.subscribe(channel, handler);
     },
 
     // ── app metadata (ADR 0052) ──
@@ -3761,11 +3729,7 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
     },
 
     async close() {
-      closing = true;
-      if (listenClient) {
-        try { listenClient.release(); } catch { /* already gone */ }
-        listenClient = null;
-      }
+      pubsub.close();
       poolPressure.stop();
       await pool.end();
     },

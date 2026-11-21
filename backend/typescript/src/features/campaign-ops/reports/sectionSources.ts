@@ -2,6 +2,8 @@
  * ADR 0957 D1 — `REPORT_SECTION_SOURCES`, the closed registry of report
  * sections. Each kind calls a function the app already has and copies its
  * figures verbatim. Reporting adds no metric math: no sums, no ratios, no FX.
+ * Correction (ADR 0957/0159): new KPI snapshots preserve explicit numerator
+ * unavailability as null in the existing nullable contract; source math stays intact.
  *
  * Honesty carries through:
  * - a mixed or unknown currency leaves `currency` unset, with a note;
@@ -55,24 +57,37 @@ const kpi: SectionSource = async (section, ctx, into) => {
   const lin = lineage('campaign-connectors.kpiSummary', ctx, { rows: s.recordCount, notes });
   const money = s.currencyMixed || s.currencyKnown === false ? undefined : s.currency;
   const t = s.totals;
+  // ADR 0957/0159: a NEW snapshot records unavailable numerators as null.
+  // Explicit zero counts differ from measured zero; undefined preserves legacy
+  // source behavior. Never infer availability from spend, ratios or notes.
+  const revenueUnavailable = t.reportedRevenueRecordCount === 0;
+  const conversionsUnavailable = t.reportedConversionRecordCount === 0;
   const k = section.key;
   Object.assign(into.metrics, {
     [`${k}.spend`]: metric(t.spend, 'currency', lin, money),
-    [`${k}.revenue`]: metric(t.revenue, 'currency', lin, money),
+    [`${k}.revenue`]: metric(revenueUnavailable ? null : t.revenue, 'currency', lin, money),
     // Availability is a source count, not revenue truthiness or a spend ratio.
     [`${k}.reportedRevenueRecordCount`]: metric(t.reportedRevenueRecordCount, 'count', lin),
+    [`${k}.reportedConversionRecordCount`]: metric(t.reportedConversionRecordCount, 'count', lin),
     [`${k}.impressions`]: metric(t.impressions, 'count', lin),
     [`${k}.clicks`]: metric(t.clicks, 'count', lin),
-    [`${k}.conversions`]: metric(t.conversions, 'count', lin),
+    [`${k}.conversions`]: metric(conversionsUnavailable ? null : t.conversions, 'count', lin),
     [`${k}.ctr`]: metric(t.ctr, 'ratio', lin),
-    [`${k}.cvr`]: metric(t.cvr, 'ratio', lin),
+    [`${k}.cvr`]: metric(conversionsUnavailable ? null : t.cvr, 'ratio', lin),
     [`${k}.cpc`]: metric(t.cpc, 'currency', lin, money),
-    [`${k}.cpa`]: metric(t.cpa, 'currency', lin, money),
-    [`${k}.roas`]: metric(t.roas, 'ratio', lin),
+    [`${k}.cpa`]: metric(conversionsUnavailable ? null : t.cpa, 'currency', lin, money),
+    [`${k}.roas`]: metric(revenueUnavailable ? null : t.roas, 'ratio', lin),
   });
   into.tables[`${k}.byPlatform`] = {
-    columns: ['platform', 'spend', 'impressions', 'clicks', 'conversions', 'revenue', 'reportedRevenueRecordCount', 'roas'],
-    rows: s.byPlatform.map((p) => ({ platform: p.platform, spend: p.spend, impressions: p.impressions, clicks: p.clicks, conversions: p.conversions, revenue: p.revenue, ...(p.reportedRevenueRecordCount !== undefined ? { reportedRevenueRecordCount: p.reportedRevenueRecordCount } : {}), roas: p.roas })),
+    columns: ['platform', 'spend', 'impressions', 'clicks', 'conversions', 'revenue', 'reportedRevenueRecordCount', 'reportedConversionRecordCount', 'roas'],
+    rows: s.byPlatform.map((p) => ({
+      platform: p.platform, spend: p.spend, impressions: p.impressions, clicks: p.clicks,
+      conversions: p.reportedConversionRecordCount === 0 ? null : p.conversions,
+      revenue: p.reportedRevenueRecordCount === 0 ? null : p.revenue,
+      ...(p.reportedRevenueRecordCount !== undefined ? { reportedRevenueRecordCount: p.reportedRevenueRecordCount } : {}),
+      ...(p.reportedConversionRecordCount !== undefined ? { reportedConversionRecordCount: p.reportedConversionRecordCount } : {}),
+      roas: p.reportedRevenueRecordCount === 0 ? null : p.roas,
+    })),
     lineage: lin,
   };
 };

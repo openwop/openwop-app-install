@@ -76,7 +76,7 @@ import type { HostAdapterSuite } from '../host/index.js';
 import type { Storage } from '../storage/storage.js';
 import { OpenwopError, type UserAgentRecord } from '../types.js';
 import { agentVisibleToTenant, resolveAgentForTenant } from '../host/agentVisibility.js';
-import { sendError, sendErrorWithMintedIds } from '../middleware/errorEnvelope.js';
+import { sendError, sendErrorWithMintedIds, sendErrorBody } from '../middleware/errorEnvelope.js';
 import { assetServeUrl } from '../host/assetServePath.js';
 import { currentRevision } from '../host/userAgentRevisions.js';
 
@@ -265,7 +265,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
     if (!a) {
       // Same 404 for "absent" and "not yours" — never leak that a
       // cross-tenant agent exists by returning a distinct status.
-      res.status(404).json({ error: 'not_found', message: `agent '${req.params.agentId}' is not installed on this host` });
+      sendErrorBody(res, 404, { error: 'not_found', message: `agent '${req.params.agentId}' is not installed on this host` });
       return;
     }
     res.json(toEntry(a));
@@ -282,7 +282,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
     const tenant = tenantForInventory(req);
     const a = await resolveAgentForTenant(req.params.agentId, tenant);
     if (!a) {
-      res.status(404).json({ error: 'not_found', message: `agent '${req.params.agentId}' is not installed on this host` });
+      sendErrorBody(res, 404, { error: 'not_found', message: `agent '${req.params.agentId}' is not installed on this host` });
       return;
     }
     res.json(toEntry(a));
@@ -305,7 +305,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
     // AND not-yours with the same 404 below (AgentNotFoundError path).
     const gateAgent = await resolveAgentForTenant(req.params.agentId, dispatchTenant);
     if (!gateAgent) {
-      res.status(404).json({ error: 'not_found', message: `agent '${req.params.agentId}' is not installed on this host` });
+      sendErrorBody(res, 404, { error: 'not_found', message: `agent '${req.params.agentId}' is not installed on this host` });
       return;
     }
     const body = (req.body ?? {}) as Partial<AgentDispatchRequest> & { live?: boolean };
@@ -358,7 +358,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       res.status(200).json(runAgentDispatch(reqShape));
     } catch (err) {
       if (err instanceof AgentNotFoundError) {
-        res.status(404).json({ error: 'agent_not_found', message: err.message });
+        sendErrorBody(res, 404, { error: 'agent_not_found', message: err.message });
         return;
       }
       // API-1 / DATA-6: this inline error path bypasses the central
@@ -367,7 +367,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       // err.message must not become a secret-leak channel in the response body.
       const raw = err instanceof Error ? err.message : String(err);
       log.error('agent_dispatch_error', { error: raw });
-      res.status(500).json({ error: 'dispatch_error', message: sanitizeForErrorMessage(raw) });
+      sendErrorBody(res, 500, { error: 'dispatch_error', message: sanitizeForErrorMessage(raw) });
     }
   });
 
@@ -398,7 +398,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   const aiCallSeam = async (req: Request, res: Response): Promise<void> => {
     const body = (req.body ?? {}) as { messages?: unknown; provider?: unknown; model?: unknown };
     if (!Array.isArray(body.messages) || body.messages.length === 0) {
-      res.status(400).json({ error: 'validation_error', message: 'messages[] (non-empty) is required' });
+      sendErrorBody(res, 400, { error: 'validation_error', message: 'messages[] (non-empty) is required' });
       return;
     }
     const provider = typeof body.provider === 'string' ? body.provider : 'anthropic';
@@ -465,17 +465,17 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
     try {
       const body = (req.body ?? {}) as { provider?: unknown; mode?: unknown; scope?: unknown; acknowledgedRisk?: unknown; value?: unknown };
       if (typeof body.provider !== 'string' || body.provider.trim().length === 0) {
-        res.status(400).json({ error: 'validation_error', message: '`provider` (non-empty string) is required.' });
+        sendErrorBody(res, 400, { error: 'validation_error', message: '`provider` (non-empty string) is required.' });
         return;
       }
       if (typeof body.mode !== 'string' || typeof body.scope !== 'string') {
-        res.status(400).json({ error: 'validation_error', message: 'Fields `mode` and `scope` (strings) are required.' });
+        sendErrorBody(res, 400, { error: 'validation_error', message: 'Fields `mode` and `scope` (strings) are required.' });
         return;
       }
       // This seam is subscription-scope-only for now (the safety-rail witness);
       // any other mode is not acquirable here.
       if (body.mode !== 'subscription') {
-        res.status(400).json({ error: 'validation_error', message: 'This seam only binds `mode: "subscription"` (RFC 0121 §B.8 scope rail).' });
+        sendErrorBody(res, 400, { error: 'validation_error', message: 'This seam only binds `mode: "subscription"` (RFC 0121 §B.8 scope rail).' });
         return;
       }
       // §B.8 UNCONDITIONAL (checked BEFORE consent): a tenant/workspace scope
@@ -498,7 +498,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       // connect flow (least scope is guaranteed by our registration); a pasted
       // token of unknown scope is refused.
       if (CLEARED_SUBSCRIPTION_PROVIDERS.has(body.provider)) {
-        res.status(400).json({
+        sendErrorBody(res, 400, {
           error: 'validation_error',
           message: `'${body.provider}' is connected through its sign-in flow, not a pasted token (POST /host/openwop-app/subscription/${body.provider}/authorize).`,
         });
@@ -507,7 +507,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       // A credential IS supplied → an AT-OWN-RISK acquisition (ADR 0180). REQUIRE
       // explicit consent naming the ToS/account-suspension risk.
       if (body.acknowledgedRisk !== true) {
-        res.status(400).json({
+        sendErrorBody(res, 400, {
           error: 'validation_error',
           message: 'Binding a subscription credential requires acknowledgedRisk:true — reusing your personal subscription may violate the provider’s terms of service and risk account suspension (RFC 0121 at-own-risk).',
         });
@@ -521,7 +521,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       // NOTHING, so it stays reachable unauthenticated for the conformance scenario.)
       const actorId = req.principal?.principalId;
       if (!actorId) {
-        res.status(401).json({
+        sendErrorBody(res, 401, {
           error: 'unauthenticated',
           message: 'Binding a subscription credential requires an authenticated principal to own it at user scope (RFC 0121 §B.8).',
         });
@@ -604,7 +604,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   // spec-canonical `/v1/host/sample/ai/*` the vendored suite drives.
   const callSpeechSynthesizerSeam = async (req: Request, res: Response): Promise<void> => {
     if (!deps.hostSuite) {
-      res.status(404).json({ error: 'not_found', message: 'aiProviders adapter not wired' });
+      sendErrorBody(res, 404, { error: 'not_found', message: 'aiProviders adapter not wired' });
       return;
     }
     const body = (req.body ?? {}) as { text?: unknown; voiceId?: unknown; stream?: unknown };
@@ -709,7 +709,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   // the app-canonical prefix and the spec-canonical `/v1/host/sample/ai/*`.
   const callTranscriberSeam = async (req: Request, res: Response): Promise<void> => {
     if (!deps.hostSuite) {
-      res.status(404).json({ error: 'not_found', message: 'aiProviders adapter not wired' });
+      sendErrorBody(res, 404, { error: 'not_found', message: 'aiProviders adapter not wired' });
       return;
     }
     const body = (req.body ?? {}) as { audio?: { streamRef?: unknown; url?: unknown }; languageCode?: unknown };
@@ -808,7 +808,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   // when the host does not advertise the verifier, so the scenario soft-skips.
   app.post('/host/openwop-app/agents/verify-run', async (req, res) => {
     if (process.env.OPENWOP_AGENT_VERIFIER_GATING !== 'true') {
-      res.status(404).json({ error: 'not_found', message: 'verifier gating disabled (set OPENWOP_AGENT_VERIFIER_GATING=true)' });
+      sendErrorBody(res, 404, { error: 'not_found', message: 'verifier gating disabled (set OPENWOP_AGENT_VERIFIER_GATING=true)' });
       return;
     }
     const body = (req.body ?? {}) as { simulateVerdict?: unknown; task?: unknown };
@@ -847,7 +847,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   // the v0.3 AgentCard.
   app.post('/host/openwop-app/a2a', (req, res, next) => {
     if (process.env.OPENWOP_A2A_SERVER_ENABLED !== 'true') {
-      res.status(404).json({ error: 'not_found', message: 'a2a server endpoint disabled (set OPENWOP_A2A_SERVER_ENABLED=true)' });
+      sendErrorBody(res, 404, { error: 'not_found', message: 'a2a server endpoint disabled (set OPENWOP_A2A_SERVER_ENABLED=true)' });
       return;
     }
     // ADR 1045 D1 (CHAN-P6-1) — the caller is resolved BEFORE the body is read,
@@ -1000,7 +1000,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   // owns the rule and carries the reversed decision's reasoning.
   app.get('/.well-known/agent-card.json', (req, res) => {
     if (process.env.OPENWOP_A2A_SERVER_ENABLED !== 'true') {
-      res.status(404).json({ error: 'not_found', message: 'a2a server endpoint disabled (set OPENWOP_A2A_SERVER_ENABLED=true)' });
+      sendErrorBody(res, 404, { error: 'not_found', message: 'a2a server endpoint disabled (set OPENWOP_A2A_SERVER_ENABLED=true)' });
       return;
     }
     const asked = dispositionForA2AVersionHeader(req.headers[A2A_VERSION_HEADER]);
@@ -1062,7 +1062,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   const a2aInvokeSeam = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       if (process.env.OPENWOP_TEST_SEAM_ENABLED !== 'true' || process.env.OPENWOP_A2A_SERVER_ENABLED !== 'true') {
-        res.status(404).json({ error: 'not_found', message: 'a2a invoke seam disabled (set OPENWOP_TEST_SEAM_ENABLED=true OPENWOP_A2A_SERVER_ENABLED=true)' });
+        sendErrorBody(res, 404, { error: 'not_found', message: 'a2a invoke seam disabled (set OPENWOP_TEST_SEAM_ENABLED=true OPENWOP_A2A_SERVER_ENABLED=true)' });
         return;
       }
       const body = (req.body ?? {}) as {
@@ -1073,7 +1073,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
         scenario?: string;
       };
       if (typeof body.peerUrl !== 'string' || body.peerUrl === '') {
-        res.status(400).json({ error: 'validation_error', message: 'Field `peerUrl` is required.' });
+        sendErrorBody(res, 400, { error: 'validation_error', message: 'Field `peerUrl` is required.' });
         return;
       }
       const { tenantId } = resolveA2aCaller(req);
@@ -1153,7 +1153,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   const a2aTasksStartSeam = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       if (!durableTasksEnabled() || !deps.storage || !deps.hostSuite) {
-        res.status(404).json({ error: 'not_found', message: 'a2a durable tasks disabled (set OPENWOP_A2A_SERVER_ENABLED=true OPENWOP_A2A_DURABLE_TASKS=true)' });
+        sendErrorBody(res, 404, { error: 'not_found', message: 'a2a durable tasks disabled (set OPENWOP_A2A_SERVER_ENABLED=true OPENWOP_A2A_DURABLE_TASKS=true)' });
         return;
       }
       // ADR 1045 D1/D4 — the seam drives the real store, so it takes the real
@@ -1164,7 +1164,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       const { tenantId } = caller;
       const scenario = (req.body as { scenario?: string })?.scenario ?? 'paused-at-approval';
       if (scenario !== 'paused-at-approval') {
-        res.status(400).json({ error: 'validation_error', message: 'Only scenario `paused-at-approval` is supported by this sample seam.' });
+        sendErrorBody(res, 400, { error: 'validation_error', message: 'Only scenario `paused-at-approval` is supported by this sample seam.' });
         return;
       }
       // A real approval-gated run — it suspends at `core.approvalGate`, which the
@@ -1175,7 +1175,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
         { tenantId, workflowId: 'openwop-app.approval-gate' },
       );
       if (!runId) {
-        res.status(500).json({ error: 'internal', message: 'sample approval-gate workflow did not resolve' });
+        sendErrorBody(res, 500, { error: 'internal', message: 'sample approval-gate workflow did not resolve' });
         return;
       }
       await upsertA2aTask({ taskId: runId, runId, tenantId, principalId: caller.principalId, state: 'input-required', interruptKind: 'approval' });
@@ -1192,7 +1192,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   const a2aTasksGetSeam = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       if (!durableTasksEnabled()) {
-        res.status(404).json({ error: 'not_found', message: 'a2a durable tasks disabled (set OPENWOP_A2A_SERVER_ENABLED=true OPENWOP_A2A_DURABLE_TASKS=true)' });
+        sendErrorBody(res, 404, { error: 'not_found', message: 'a2a durable tasks disabled (set OPENWOP_A2A_SERVER_ENABLED=true OPENWOP_A2A_DURABLE_TASKS=true)' });
         return;
       }
       // ADR 1045 D4 — tenant-bound read: a foreign task is 404, exactly as a
@@ -1201,7 +1201,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       await requireProtocolScopeIn(req, caller.tenantId, 'runs:read');
       const rec = await getA2aTaskFor(req.params.taskId, caller.tenantId, 'strict');
       if (!rec) {
-        res.status(404).json({ error: 'not_found', message: 'durable task not found' });
+        sendErrorBody(res, 404, { error: 'not_found', message: 'durable task not found' });
         return;
       }
       // The persisted record is already the a2a-task-state.schema.json shape
@@ -1221,21 +1221,21 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   const a2aPushConfigSeam = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       if (!durableTasksEnabled()) {
-        res.status(404).json({ error: 'not_found', message: 'a2a durable tasks disabled (set OPENWOP_A2A_SERVER_ENABLED=true OPENWOP_A2A_DURABLE_TASKS=true)' });
+        sendErrorBody(res, 404, { error: 'not_found', message: 'a2a durable tasks disabled (set OPENWOP_A2A_SERVER_ENABLED=true OPENWOP_A2A_DURABLE_TASKS=true)' });
         return;
       }
       const caller = resolveA2aCaller(req);
       await requireProtocolScopeIn(req, caller.tenantId, 'webhooks:manage');
       const body = (req.body ?? {}) as { taskId?: string; url?: string; tokenFingerprint?: string; authentication?: unknown; token?: unknown };
       if (typeof body.taskId !== 'string' || typeof body.url !== 'string') {
-        res.status(400).json({ error: 'validation_error', message: 'Fields `taskId` and `url` are required.' });
+        sendErrorBody(res, 400, { error: 'validation_error', message: 'Fields `taskId` and `url` are required.' });
         return;
       }
       try {
         assertPushUrlAllowed(body.url); // throws A2aPushUrlDeniedError for a denied target
       } catch (err) {
         if (err instanceof A2aPushUrlDeniedError) {
-          res.status(400).json({ error: 'a2a_push_egress_denied', message: err.message });
+          sendErrorBody(res, 400, { error: 'a2a_push_egress_denied', message: err.message });
           return;
         }
         throw err;
@@ -1243,7 +1243,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       // ADR 1045 D4 — authorize the task before touching the push store, so a
       // config cannot be attached to (or used to probe for) a foreign task.
       if (!(await getA2aTaskFor(body.taskId, caller.tenantId, 'strict'))) {
-        res.status(404).json({ error: 'not_found', message: 'durable task not found' });
+        sendErrorBody(res, 404, { error: 'not_found', message: 'durable task not found' });
         return;
       }
       // RFC 0214 §A — the same destination credential the JSON-RPC Create takes.
@@ -1252,7 +1252,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
         authorization = pushAuthorizationFrom(body);
       } catch (err) {
         if (err instanceof A2aPushCredentialInvalidError) {
-          res.status(400).json({ error: 'validation_error', message: err.message });
+          sendErrorBody(res, 400, { error: 'validation_error', message: err.message });
           return;
         }
         throw err;
@@ -1263,7 +1263,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
         ...(authorization !== undefined ? { authorization } : {}),
       });
       if (!updated) {
-        res.status(404).json({ error: 'not_found', message: 'durable task not found' });
+        sendErrorBody(res, 404, { error: 'not_found', message: 'durable task not found' });
         return;
       }
       res.status(200).json(publicTaskRecord(updated));

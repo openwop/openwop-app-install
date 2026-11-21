@@ -110,7 +110,7 @@ describe('pseudo-localization', () => {
 describe('catalogs', () => {
   // ADR 0329 — only `en` is eager; every other locale (pt-BR included) loads
   // through the lazy per-locale path, so these tests exercise that loader.
-  it('aggregates en eagerly across all namespaces; pt-BR is lazy-only', () => {
+  it('the en namespace list (eager + test-preloaded) covers the catalog; pt-BR is lazy-only', () => {
     // 132 namespaces MEASURED 2026-10-16 (e3c2492be) — the floor is the truth, not 40.
     // 128 after KickTodo's four namespaces left (ADR 1031 P3).
     // CAUTION (grade-tests w116, TST-OAF-1): this counts more than the EAGER set.
@@ -119,7 +119,11 @@ describe('catalogs', () => {
     // this suite it holds eager + lazy (inferred: the tree has 35 eager catalogs at
     // 63e4c73654, so 128 is reachable no other way). The eager/lazy split itself is
     // pinned by namespaceSplit.test.ts, not here.
-    expect(NAMESPACES.length).toBeGreaterThanOrEqual(128);
+    // Owner decision TST-OAF-1 (2026-11-18): keep this as an eager + preloaded count
+    // (no new product export) and say so in the title; the floor is MEASURED below.
+    // MEASURED 130 at 0ca7f76944 (a run of this case, not a file count). A namespace
+    // removed on purpose lowers it in the same PR.
+    expect(NAMESPACES.length).toBeGreaterThanOrEqual(130);
     expect(Object.keys(resourcesByLocale)).toEqual(['en']);
   });
   it('lazy pt-BR has exact key parity with en in every namespace (no fallback leak)', async () => {

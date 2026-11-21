@@ -16,6 +16,11 @@
  * either `primaries > 1` guard (the disabled button, the submit check) reds the
  * picker case; rendering an
  * `unavailable` section as a count reds the linked-work case.
+ *
+ * w118 (`w118g4-cdp-*`): dropping the per-route `key` reds both late-response cases;
+ * reading a "not found" message as `failed` reds the missing case on its copy; the
+ * Strategist hand-off asserts the EXACT agent route and draft, so another agent or a
+ * dropped brief/org id reds it (a `/^\/\?agent=/` prefix passed any agent).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 vi.mock('../CampaignLedgerSection.js', () => ({ CampaignLedgerSection: () => null })); // own tests: campaignLedgerSection.test.tsx
@@ -138,7 +143,11 @@ describe('ADR 0941 P3 — campaign detail', () => {
   it('a missing campaign says not found', async () => {
     h.getCampaign.mockRejectedValue(new Error('Campaign not found.'));
     open();
-    expect(await screen.findByText('Campaign not found')).toBeTruthy();
+    // The back button renders on both the missing and the failed card; settle on it,
+    // then the copy reds on a value if the error is read as a failure.
+    await screen.findByRole('button', { name: 'Campaigns' });
+    expect(screen.queryByText('Could not load this')).toBeNull();
+    expect(screen.getByText('Campaign not found')).toBeTruthy();
   });
 
   it('commerce off says so instead of offering a picker', async () => {
@@ -151,10 +160,14 @@ describe('ADR 0941 P3 — campaign detail', () => {
   it('a failed links read is a failure, never "no products" or "0 linked"', async () => {
     h.getCampaignLinks.mockRejectedValue(new Error('boom'));
     open();
-    expect(await screen.findByText(/Couldn't load the linked products/)).toBeTruthy();
-    expect(screen.getByText(/Couldn't load this campaign's linked work/)).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Spring push' })).toBeTruthy();
+    await waitFor(() => expect(h.getCampaignLinks).toHaveBeenCalledTimes(1));
+    await act(async () => {}); // the rejected read has been handled
+    // Absence first, after the read settled: an empty-sections mapping reds here on a value.
     expect(screen.queryByText(/No catalog products are linked yet/)).toBeNull();
     expect(screen.queryByText(/0 linked/)).toBeNull();
+    expect(screen.getByText(/Couldn't load the linked products/)).toBeTruthy();
+    expect(screen.getByText(/Couldn't load this campaign's linked work/)).toBeTruthy();
   });
 
   it('the picker reads the campaign org\'s catalog, refuses two primaries, and saves the refs', async () => {
@@ -235,12 +248,9 @@ describe('CC-HUB-2 — Run with the Strategist names the campaign', () => {
     );
     expect(await screen.findByRole('heading', { name: 'Spring push' })).toBeTruthy();
     fireEvent.click(screen.getAllByRole('button', { name: /Run with the Strategist/ })[0]!);
-    expect((await screen.findByTestId('chat-probe')).textContent).toMatch(/^\/\?agent=/);
+    expect((await screen.findByTestId('chat-probe')).textContent).toBe('/?agent=vendor.openwop-app.campaign-orchestration.agents.campaign-strategist');
     const draft = takeStagedComposerDraft();
-    expect(draft).toContain('Spring push');
-    expect(draft).toContain('cmp_a');
-    expect(draft).toContain('b1');
-    expect(draft).toContain('org-a');
-    expect(draft).toMatch(/before you start anything/);
+    expect(draft).toBe('Check whether campaign “Spring push” (cmp_a, brief b1, organization org-a) is ready with campaign-orchestration.status, and tell me what will run before you start anything.');
+    expect(takeStagedComposerDraft()).toBeNull(); // one-shot: taken once
   });
 });

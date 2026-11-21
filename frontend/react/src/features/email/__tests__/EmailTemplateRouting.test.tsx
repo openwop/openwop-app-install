@@ -27,7 +27,11 @@
  * cell, a single-line create Body, loading a different id, the editor bound to
  * the wrong field, the 404 treated as a load failure or as an empty editor,
  * removing the detail Delete, deleting the wrong id, and leaving to the hub
- * without its workspace each turn a case red.
+ * without its workspace each turn a case red. Wave 119 (`w119g4-etr-*`) re-probed
+ * them at the issue 5962 classifier: dropping the status half reds the proxy row,
+ * and a 500 that lands anywhere but the load-failed state reds the 500 case. The
+ * `code === 'not_found'` half is not reached by any fixture here: every real
+ * not-found response is also a 404, so the status half alone decides both rows.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -172,7 +176,11 @@ describe('the template detail page', () => {
     renderDetail('/email/templates/tpl1?org=o1');
     await waitFor(() => expect(client.getTemplate).toHaveBeenCalled());
     await act(async () => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); });
-    expect(screen.queryByRole('heading', { level: 1, name: 'Template not found' })).toBeNull();
+    // The load-failed state itself, by value: an absence check alone also passed a
+    // page left on its loading card (wave 113 lesson). The server's message is shown.
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Couldn’t load this template');
+    expect(screen.getByText('Storage unavailable.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /^save$/i })).toBeNull();
   });
 
   it('owns the delete action: Delete removes THIS template and returns to its workspace on the hub', async () => {

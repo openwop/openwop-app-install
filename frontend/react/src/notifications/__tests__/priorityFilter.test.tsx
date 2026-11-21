@@ -5,9 +5,15 @@
  * The behaviours worth pinning are the restraint ones: the toggle appears only
  * when it would actually change the list, and it narrows WITHIN the active tab
  * rather than across it — the tab counts must keep meaning what they say.
+ *
+ * Also here: R2 IB-SP-9 (a failed first read is not "all clear"), IB-SP-2 (the
+ * stale notice) and IB-R2-1 (the j/k/e/u/Enter queue grammar, with ADR 1125 D3:
+ * `e` skips an open request). The `e` guard cases (dialog, input) run on NEWS rows
+ * in Updates, because an open request is ALSO refused by the D3 skip, which would
+ * hide a removed dialog/input guard. Fixed `createdAt`; no clock reads.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { Notification } from '../types.js';
 import type { useNotificationStore as RealStore } from '../notificationStore.js';
@@ -69,15 +75,18 @@ describe('inbox — priority filter (IB-G1)', () => {
     renderInbox();
 
     await screen.findByText('Weekly digest');
+    // fireEvent runs inside act(), so the filtered list is committed when it returns:
+    // every check below is synchronous and fails on the list, not on a timeout.
     fireEvent.click(screen.getByRole('button', { name: /urgent & high \(2\)/i }));
 
-    await waitFor(() => expect(screen.queryByText('Weekly digest')).toBeNull());
+    expect(screen.queryByText('Weekly digest')).toBeNull();
     expect(screen.getByText('Server on fire')).toBeTruthy();
     expect(screen.getByText('Budget nearly spent')).toBeTruthy();
     expect(screen.queryByText('FYI')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: /urgent & high/i }));
-    await waitFor(() => expect(screen.getByText('Weekly digest')).toBeTruthy());
+    expect(screen.getByText('Weekly digest')).toBeTruthy();
+    expect(screen.getByText('FYI')).toBeTruthy();
   });
 
   it('reports its own state via aria-pressed and a live count', async () => {
@@ -86,7 +95,7 @@ describe('inbox — priority filter (IB-G1)', () => {
     const toggle = await screen.findByRole('button', { name: /urgent & high/i });
     expect(toggle.getAttribute('aria-pressed')).toBe('false');
     fireEvent.click(toggle);
-    await waitFor(() => expect(toggle.getAttribute('aria-pressed')).toBe('true'));
+    expect(toggle.getAttribute('aria-pressed')).toBe('true');
     expect(screen.getByText(/showing 1 of 3/i)).toBeTruthy();
   });
 
@@ -120,17 +129,22 @@ describe('R2 IB-SP-9 — a failed FIRST read is not "all clear" under a 0/0/0 ba
     withNotifications([]);
     storeState = { ...storeState, error: '/host/openwop-app/notifications → 500', connectionStatus: 'connected' };
     renderInbox();
-    // The localized failure copy renders; the RAW endpoint path never does.
-    await screen.findByText(/couldn.t be loaded/i);
+    // Settle on the Retry (it renders whatever the copy says), then read the copy:
+    // the localized failure copy renders; the RAW endpoint path never does.
+    await screen.findByRole('button', { name: /retry/i });
+    expect(screen.getByText(/couldn.t be loaded/i)).toBeTruthy();
     // Matches the canonical root, with `/v1` optional. The fixture above now
     // seeds a `/host/openwop-app/…` error string, so asserting only on
     // `/v1/host` would have passed because the text it looks for no longer
     // exists anywhere — true for the wrong reason, and silently so.
     expect(screen.queryByText(/(?:\/v1)?\/host\/openwop-app/)).toBeNull();
     // No "you're all clear" claim, no 0/0/0 band asserting facts a failed
-    // read cannot know.
-    expect(screen.queryByText(/all clear|no notifications yet/i)).toBeNull();
-    expect(screen.queryByRole('button', { name: /action needed/i })).toBeNull();
+    // read cannot know. ADR 1125 P3 renamed both: the empty state now reads
+    // "Nothing needs you right now." and the band's first figure "Needs you", so
+    // the old `/all clear/` and `/action needed/` matchers matched nothing at all
+    // and could not fail. The old words stay in the pattern as a superset.
+    expect(screen.queryByText(/nothing needs you|all clear|no notifications yet/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /needs you|action needed/i })).toBeNull();
     expect(screen.getByRole('button', { name: /retry/i })).toBeTruthy();
   });
 
@@ -150,7 +164,8 @@ describe('R2 IB-SP-2 — the page-level stale notice', () => {
     withNotifications([note('n1', 'normal', 'Row')]);
     storeState = { ...storeState, connectionStatus: 'error' };
     renderInbox();
-    await screen.findByText(/live updates are interrupted/i);
+    await screen.findByText('Row');
+    expect(screen.getByText(/live updates are interrupted/i)).toBeTruthy();
     cleanup();
     withNotifications([note('n1', 'normal', 'Row')]);
     storeState = { ...storeState, connectionStatus: 'connected' };
@@ -163,6 +178,9 @@ describe('R2 IB-SP-2 — the page-level stale notice', () => {
 
 describe('inbox — keyboard queue nav (IB-R2-1, first tests: review F13)', () => {
   const kd = (key: string): void => { fireEvent.keyDown(window, { key }); };
+  const cursorOn = (id: string): string => document.querySelector(`[data-notification-id="${id}"]`)!.className;
+  // ADR 1125 D3 — `e` archives news; an open request is skipped. A news row sits on Updates.
+  const newsRow = (id: string, title: string): Notification => ({ ...note(id, 'normal', title), type: 'workflow.completed' });
 
   it('j moves the cursor down, k back up (cursor class follows)', async () => {
     withNotifications([note('n1', 'normal', 'First'), note('n2', 'normal', 'Second')]);
@@ -177,8 +195,7 @@ describe('inbox — keyboard queue nav (IB-R2-1, first tests: review F13)', () =
   });
 
   it('e archives the cursor row through the store action', async () => {
-    // ADR 1125 D3 — `e` archives news; an open request is skipped (next case).
-    const newsRow = (id: string, title: string): Notification => ({ ...note(id, 'normal', title), type: 'workflow.completed' });
+    // News rows: an open request is skipped by `e` (next case).
     withNotifications([newsRow('n1', 'First'), newsRow('n2', 'Second')]);
     renderInbox();
     fireEvent.click(screen.getByRole('button', { name: /^Updates/ }));
@@ -196,6 +213,8 @@ describe('inbox — keyboard queue nav (IB-R2-1, first tests: review F13)', () =
     await screen.findByText('First');
     kd('j');
     kd('j');
+    // Positive control: the cursor IS on a row, so only the D3 skip can stop `e`.
+    expect(cursorOn('n2')).toContain('notifpage-card--cursor');
     kd('e');
     expect(storeState.archive).not.toHaveBeenCalled();
   });
@@ -210,10 +229,13 @@ describe('inbox — keyboard queue nav (IB-R2-1, first tests: review F13)', () =
   });
 
   it('the grammar DISARMS under an open dialog (review F5 — no mutation behind a modal)', async () => {
-    withNotifications([note('n1', 'normal', 'First')]);
+    // A NEWS row: an open request would also be refused by the D3 skip.
+    withNotifications([newsRow('n1', 'First')]);
     renderInbox();
+    fireEvent.click(screen.getByRole('button', { name: /^Updates/ }));
     await screen.findByText('First');
     kd('j');
+    expect(cursorOn('n1')).toContain('notifpage-card--cursor');
     const dialog = document.createElement('div');
     dialog.setAttribute('role', 'dialog');
     document.body.appendChild(dialog);
@@ -224,10 +246,13 @@ describe('inbox — keyboard queue nav (IB-R2-1, first tests: review F13)', () =
   });
 
   it('typing in an input never drives the queue (the INPUT guard)', async () => {
-    withNotifications([note('n1', 'normal', 'First'), note('n2', 'normal', 'Second')]);
+    // NEWS rows: an open request would also be refused by the D3 skip.
+    withNotifications([newsRow('n1', 'First'), newsRow('n2', 'Second')]);
     renderInbox();
+    fireEvent.click(screen.getByRole('button', { name: /^Updates/ }));
     await screen.findByText('First');
     kd('j');
+    expect(cursorOn('n1')).toContain('notifpage-card--cursor');
     const input = document.createElement('input');
     document.body.appendChild(input);
     try {

@@ -258,3 +258,65 @@ describe('media library — followup hardening', () => {
     expect(uncat.body.assets[0].name).toBe('out.png');
   });
 });
+
+describe('media library — width and height on the record (#5928 ask 4)', () => {
+  // Real 5×3 fixtures (see test/media-image-dimensions.test.ts for how they were made).
+  const JPEG_5x3 = '/9j/4AAQSkZJRgABAQAASABIAAD/4QBMRXhpZgAATU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAABaADAAQAAAABAAAAAwAAAAD/7QA4UGhvdG9zaG9wIDMuMAA4QklNBAQAAAAAAAA4QklNBCUAAAAAABDUHYzZjwCyBOmACZjs+EJ+/8AAEQgAAwAFAwEiAAIRAQMRAf/EAB8AAAEFAQEBAQEBAAAAAAAAAAABAgMEBQYHCAkKC//EALUQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+v/EAB8BAAMBAQEBAQEBAQEAAAAAAAABAgMEBQYHCAkKC//EALURAAIBAgQEAwQHBQQEAAECdwABAgMRBAUhMQYSQVEHYXETIjKBCBRCkaGxwQkjM1LwFWJy0QoWJDThJfEXGBkaJicoKSo1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoKDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uLj5OXm5+jp6vLz9PX29/j5+v/bAEMAAgICAgICAwICAwUDAwMFBgUFBQUGCAYGBgYGCAoICAgICAgKCgoKCgoKCgwMDAwMDA4ODg4ODw8PDw8PDw8PD//bAEMBAgICBAQEBwQEBxALCQsQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEP/dAAQAAf/aAAwDAQACEQMRAD8A77w54B8G+LNa1DRNd0iCWx0eEC0ijXyBEE1DULBQPJ2EgW1jboASR8hb77uzdr/woL4R/wDQvp/3/uP/AI5UPw5/5G/xF/1xb/0+a3Xs9fofC2DoyyzDSlBNuEG3ZatxTbfm3qz4L/WTMaN6VLEzjFbJTkkvRJn/2Q==';
+  const WEBP_5x3 = 'UklGRlQAAABXRUJQVlA4IEgAAADwAQCdASoFAAMAAsBMJbACdAD0kBm9oAAAywst0f8Af1FP6WI+P2MIx234jfQPPhy4ZBLamgRBj22ZhUl/ltMQ7ig+lEIAAAA=';
+  interface Dimmed { assetId: string; width?: number; height?: number }
+  it('single and bulk uploads come back with width and height, read from the header; a non-image has none', async () => {
+    const { owner, orgId } = await ownerWithViewer();
+    const one = await owner.post<Dimmed>(m(orgId, '/assets'), { contentBase64: PNG_1x1, contentType: 'image/png', name: 'dot.png' });
+    expect(one.status, JSON.stringify(one.body)).toBe(201);
+    expect([one.body.width, one.body.height]).toEqual([1, 1]);
+    // A JPEG declared as PNG is relabelled (ADR 0818 §2) and still measured.
+    const jpg = await owner.post<Dimmed>(m(orgId, '/assets'), { contentBase64: JPEG_5x3, contentType: 'image/png', name: 'photo.png' });
+    expect(jpg.status, JSON.stringify(jpg.body)).toBe(201);
+    expect([jpg.body.width, jpg.body.height]).toEqual([5, 3]);
+    const bulk = await owner.post<{ results: Array<{ status: string; asset?: Dimmed }> }>(m(orgId, '/assets/bulk'), {
+      items: [{ contentBase64: WEBP_5x3, contentType: 'image/webp', name: 'w.webp' }, { contentBase64: Buffer.from('hello').toString('base64'), contentType: 'text/plain', name: 'n.txt' }],
+    });
+    expect(bulk.status).toBe(207);
+    expect(bulk.body.results.map((r) => r.status)).toEqual(['created', 'created']);
+    expect([bulk.body.results[0]!.asset!.width, bulk.body.results[0]!.asset!.height]).toEqual([5, 3]);
+    expect(bulk.body.results[1]!.asset!.width).toBeUndefined();
+    // The read routes carry them too.
+    const read = await owner.get<Dimmed>(m(orgId, `/assets/${encodeURIComponent(jpg.body.assetId)}`));
+    expect([read.body.width, read.body.height]).toEqual([5, 3]);
+    const list = await owner.get<{ assets: Dimmed[] }>(m(orgId, '/assets'));
+    expect(list.body.assets.find((a) => a.assetId === one.body.assetId)).toMatchObject({ width: 1, height: 1 });
+  });
+});
+
+describe('media library — opt-in keyset paging (#5928)', () => {
+  it('without limit/cursor the list is the whole org list (unchanged shape); with them, pages + nextCursor + total', async () => {
+    const { owner, orgId } = await ownerWithViewer();
+    // Distinct bytes per upload (same bytes in one collection context would dedup).
+    const png = (i: number): string => Buffer.concat([Buffer.from(PNG_1x1, 'base64'), Buffer.from([i])]).toString('base64');
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      const up = await owner.post<AssetView>(m(orgId, '/assets'), { contentBase64: png(i), contentType: 'image/png', name: `p${i}.png` });
+      expect(up.status, JSON.stringify(up.body)).toBe(201);
+      ids.push(up.body.assetId);
+    }
+    const whole = await owner.get<AssetsBody & { nextCursor?: string }>(m(orgId, '/assets'));
+    expect(whole.body.assets.map((a) => a.assetId).sort()).toEqual([...ids].sort());
+    expect(Object.keys(whole.body)).toEqual(['assets']);
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await owner.get<AssetsBody & { nextCursor?: string; total?: number }>(m(orgId, `/assets?limit=2${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`));
+      expect(page.status).toBe(200);
+      expect(page.body.total).toBe(5);
+      expect(page.body.assets.length).toBeLessThanOrEqual(2);
+      expect(page.body.assets[0]?.serveUrl).toBeTruthy();
+      seen.push(...page.body.assets.map((a) => a.assetId));
+      cursor = page.body.nextCursor;
+    } while (cursor);
+    expect(seen.sort()).toEqual([...ids].sort());
+    expect((await owner.get(m(orgId, '/assets?limit=lots'))).status).toBe(400);
+    const cols = await owner.get<CollectionsBody & { nextCursor?: string }>(m(orgId, '/collections?limit=10'));
+    expect(cols.status).toBe(200);
+    expect(cols.body.collections).toEqual([]);
+  });
+});

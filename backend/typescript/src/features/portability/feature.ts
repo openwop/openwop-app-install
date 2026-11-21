@@ -10,10 +10,14 @@
 
 import type { BackendFeature } from '../types.js';
 import { registerPortabilityRoutes } from './routes.js';
+import { registerSubjectEraser } from '../../host/subjectErasure.js';
+import { erasePortabilitySubject } from './portabilityService.js';
 
 export const portabilityFeature: BackendFeature = {
   id: 'portability',
   registerRoutes: (deps) => {
     registerPortabilityRoutes(deps);
+    // CHAN-F19 #6 (ADR 0464 §9) — a DSAR deletes the person's private-prompt import claims.
+    registerSubjectEraser(erasePortabilitySubject);
   },
 };

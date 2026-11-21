@@ -1,6 +1,6 @@
 {
   "name": "feature.campaign-ops.nodes",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "kind": "node",
   "description": "Campaign operations node pack (ADR 0923). The change planner: `interpret` turns an operator's change request into structured intents or asks about missing facts (never both), and `propose` turns those intents into constrained before/after edits on the request's assets, minting a hashed change set. Both validate through ctx.features['campaign-ops'], make one error-fed repair, and otherwise fail with a typed reason. `execute` carries out an approved change set and verifies it by read-back. ADR 0957 adds the client-report steps: `compute-snapshot` freezes a report's figures from the app's own sources, `report-snapshot-read` reads a frozen report back, and `publish-report` publishes a reviewed report only if its numbers are the approved ones. Client memory adds client-notes-list and client-note-propose; only a person may approve a proposed fact into memory. Report publication uses a snapshot-bound approval from the same run under the client policy; P1 records publication internally.",
   "author": "OpenWOP App",
@@ -147,6 +147,17 @@
       "version": "1.0.1",
       "label": "Campaign ops: request a change (external agent)",
       "description": "ADR 0962 P2 request tool. Records an outside agent's change request for one client and starts the change-request workflow; the change waits for a person at the client to approve it. Inputs: { clientId, text, assetIds?, campaignId? }. Output: { text }.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ]
+    },
+    {
+      "typeId": "feature.campaign-ops.nodes.mcp-propose-budget-change",
+      "version": "1.0.0",
+      "label": "Campaign ops: propose a budget change (external agent)",
+      "description": "ADR 0962 P2 request tool. Proposes one budget reallocation plan for one client (the agent's requested daily budgets, or the app's own recommendation) and opens one approval that names its approvers; the person behind the agent cannot approve it, and nothing is applied until a person at the client approves and applies it in the app. Inputs: { clientId, changes?, campaignId?, note? }. Output: { text }.",
       "category": "integration",
       "role": "side-effect",
       "capabilities": [

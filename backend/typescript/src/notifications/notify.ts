@@ -27,6 +27,7 @@ import { deliverApprovalEmail } from '../host/emailApprovalDelivery.js';
 import { gateRequiresSession } from '../host/approvalGateDecide.js';
 import { gateApproverRefs, resolveNotificationRecipients } from '../host/approverResolution.js';
 import { splitRunReaders } from '../host/runClientAccess.js';
+import { runProject } from '../host/runProjectBinding.js';
 import { resolveTenantWorkflow } from '../host/resolveLaunchDefinition.js';
 
 /**
@@ -127,17 +128,22 @@ async function workflowLabelOf(run: RunRecord): Promise<string> {
 }
 
 /**
- * ADR 1109 D4 — what the request is about, from HOST-written run metadata only.
- * Today that is a project schedule's owner (`scheduleDaemon.ts` stamps
- * `schedule.ownerScope` from the job's subject). No name is stored: the SPA
- * resolves it through the projects the reader can see.
+ * ADR 1109 D4 — what the request is about, from HOST-written run attribution only:
+ * the ONE project resolver (`runProject`, ADR 1133), so a card run on a project
+ * board and a campaign run name their project, as a project schedule's run already
+ * did. `PPR-1`: before this, only the schedule branch was read here, a partial copy
+ * of that resolver. No name is stored: the SPA resolves it through the projects the
+ * reader can see, so a reader outside a private project learns nothing but an
+ * opaque id. A client-shaped hint (`metadata.projectId`) is not a source.
  */
-export function runSubjectOf(run: Pick<RunRecord, 'metadata'>): { kind: 'project'; id: string } | undefined {
-  const schedule = run.metadata?.schedule as { ownerScope?: unknown } | undefined;
-  const scope = nonBlank(schedule?.ownerScope);
-  if (!scope?.startsWith('project:')) return undefined;
-  const id = scope.slice('project:'.length);
-  return id ? { kind: 'project', id } : undefined;
+export async function runSubjectOf(run: Pick<RunRecord, 'tenantId' | 'metadata'>): Promise<{ kind: 'project'; id: string } | undefined> {
+  try {
+    const id = await runProject(run.tenantId, (run.metadata ?? {}) as Record<string, unknown>);
+    return id ? { kind: 'project', id } : undefined;
+  } catch {
+    // A display hint, never a gate: a failed board read leaves the notification unnamed.
+    return undefined;
+  }
 }
 
 export async function emitInterruptNotification(
@@ -162,7 +168,7 @@ export async function emitInterruptNotification(
     const message = text
       ? (asker ? `${asker} — ${text}` : text)
       : `From ${asker ?? 'an automation'}`;
-    const subject = runSubjectOf(run);
+    const subject = await runSubjectOf(run);
     const base = {
       tenantId: run.tenantId,
       type: KIND_TYPE[interrupt.kind] ?? 'openwop-app.workflow.approval-needed',

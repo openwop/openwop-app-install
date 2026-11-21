@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext } from '@playwright/test';
+import { test, expect, type APIRequestContext, type Locator } from '@playwright/test';
 import { API } from './support/session.js';
 
 /**
@@ -208,31 +208,35 @@ test.describe('narrow viewport — no horizontal overflow', () => {
 test.describe('narrow viewport — public header with a long CTA', () => {
   test.describe.configure({ timeout: 90_000 });
 
-  test(`/ public header CTA @${NARROW.width}px`, async ({ page }) => {
-    await page.setViewportSize(NARROW);
-    await page.goto('/');
-    const actions = page.locator('.public-shell:not(.site-shell) .public-shell-actions').first();
-    await expect(actions).toBeVisible({ timeout: 60_000 });
+  // 360px is the narrowest widely-supported phone; 375px is the width the white-label
+  // (CasaVoga) measured the overflow at (PHONE-2).
+  for (const width of [NARROW.width, 375]) {
+    test(`/ public header CTA @${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: NARROW.height });
+      await page.goto('/');
+      const actions = page.locator('.public-shell:not(.site-shell) .public-shell-actions').first();
+      await expect(actions).toBeVisible({ timeout: 60_000 });
 
-    const m = await page.evaluate((label) => {
-      const host = document.querySelector('.public-shell:not(.site-shell) .public-shell-actions');
-      if (!host) return null;
-      const a = document.createElement('a');
-      a.className = 'btn public-shell-cta';
-      a.href = '#';
-      a.textContent = label;
-      host.append(a);
-      const r = a.getBoundingClientRect();
-      const doc = document.documentElement;
-      return { scrollWidth: doc.scrollWidth, clientWidth: doc.clientWidth, ctaWidth: r.width, ctaRight: r.right, ctaVisible: r.width > 0 && r.height > 0 };
-    }, 'Book a free consultation with our team');
+      const m = await page.evaluate((label) => {
+        const host = document.querySelector('.public-shell:not(.site-shell) .public-shell-actions');
+        if (!host) return null;
+        const a = document.createElement('a');
+        a.className = 'btn public-shell-cta';
+        a.href = '#';
+        a.textContent = label;
+        host.append(a);
+        const r = a.getBoundingClientRect();
+        const doc = document.documentElement;
+        return { scrollWidth: doc.scrollWidth, clientWidth: doc.clientWidth, ctaWidth: r.width, ctaRight: r.right, ctaVisible: r.width > 0 && r.height > 0 };
+      }, 'Book a free consultation with our team');
 
-    if (!m) throw new Error('no public-shell header actions on / — the page under test did not render');
-    expect(m.ctaVisible, 'the injected CTA must render (positive control)').toBe(true);
-    expect(m.ctaWidth, 'the CTA must take real width, not collapse').toBeGreaterThan(60);
-    expect(m.ctaRight, 'the CTA must end inside the viewport').toBeLessThanOrEqual(m.clientWidth);
-    expect(m.scrollWidth, `the page scrolls sideways (scrollWidth ${m.scrollWidth} > clientWidth ${m.clientWidth})`).toBeLessThanOrEqual(m.clientWidth);
-  });
+      if (!m) throw new Error('no public-shell header actions on / — the page under test did not render');
+      expect(m.ctaVisible, 'the injected CTA must render (positive control)').toBe(true);
+      expect(m.ctaWidth, 'the CTA must take real width, not collapse').toBeGreaterThan(60);
+      expect(m.ctaRight, 'the CTA must end inside the viewport').toBeLessThanOrEqual(m.clientWidth);
+      expect(m.scrollWidth, `the page scrolls sideways (scrollWidth ${m.scrollWidth} > clientWidth ${m.clientWidth})`).toBeLessThanOrEqual(m.clientWidth);
+    });
+  }
 });
 
 /**
@@ -511,4 +515,226 @@ test.describe('mobile admin — compact disclosure, not a link cloud', () => {
     await nav.locator('a').first().click();
     await expect(nav).toBeHidden();
   });
+});
+
+
+/** CHAT-POCKET-VIEWPORT-2: viewport containment is insufficient when another
+ * production surface wins the composer's hit target. This uses the real App,
+ * Sidebar, FunnelArchitectPocket, EmbeddedConversation and ChatInput. The only
+ * chat boundary replacement is a GET config response: no stored key/default,
+ * provider call or artificial textarea/navigation geometry. */
+test('pocket composer and non-modal navigation remain reachable above the mobile bar', async ({ page }) => {
+  const tenantId = await loginPersonal(page.request, 'pocket-clearance@e2e.test');
+  const restoreToggle = await pinTenantToggle(page.request, 'funnels', tenantId);
+  const orgResponse = await page.request.post(`${API}/orgs`, { data: { name: 'Pocket clearance private fixture' } });
+  expect(orgResponse.status(), await orgResponse.text()).toBe(201);
+  const { orgId } = (await orgResponse.json()) as { orgId: string };
+  expect(orgId).toBeTruthy();
+  let dispatches = 0;
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && /\/(?:runs(?:\/|$)|chat\/send(?:$)|chat\/sessions\/[^/]+\/messages(?:$))/.test(new URL(request.url()).pathname)) dispatches += 1;
+  });
+  await page.route('**/host/openwop-app/byok/active-config', async (route) => {
+    expect(route.request().method()).toBe('GET');
+    await route.fulfill({ json: {
+      config: { provider: 'google', model: 'gemini-3.5-flash-lite', credentialRef: 'google:e2e-no-dispatch' },
+      valid: true, anonymous: false, stored: true,
+    } });
+  });
+  const panel = page.getByRole('dialog', { name: 'Funnel Architect', exact: true });
+  const message = panel.getByRole('combobox', { name: 'Message', exact: true });
+  const launcher = page.locator('.chat-pocket-launcher');
+  const hit = async (control: Locator): Promise<void> => {
+    await expect(control).toBeVisible();
+    expect(await control.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      const target = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      return rect.width > 0 && rect.height > 0 && rect.left >= 0 && rect.top >= 0
+        && rect.right <= innerWidth && rect.bottom <= innerHeight
+        && target !== null && element.contains(target);
+    }), 'real center point must hit this control or its descendant').toBe(true);
+  };
+  const ready = async (): Promise<void> => {
+    await expect(panel).toBeVisible();
+    await panel.evaluate(async (element) => {
+      await Promise.all(element.getAnimations().map((animation) => animation.finished));
+    });
+  };
+  try {
+    // 639 is still full-width; 640 and 860 retain the desktop-shaped pocket
+    // while sharing mobile navigation. 861 proves the breakpoint's other side.
+    for (const viewport of [
+      { width: 390, height: 844 }, { width: 390, height: 568 },
+      { width: 639, height: 640 }, { width: 640, height: 640 },
+      { width: 860, height: 640 }, { width: 861, height: 720 },
+      { width: 1280, height: 720 },
+    ]) {
+      await page.setViewportSize(viewport);
+      await page.goto(`/funnels?org=${encodeURIComponent(orgId)}`);
+      await ready();
+      await expect(panel).toHaveAttribute('aria-modal', 'false');
+      await message.fill('QA unsent pocket clearance draft');
+      // The production voice control is either a recording button, a live
+      // conversation button, or their menu, depending on capability readiness.
+      // Require exactly one named control; never skip a missing voice surface.
+      const voice = panel.locator('button.chatinput-mic-btn');
+      await expect(voice).toHaveCount(1);
+      await expect(voice).toHaveAccessibleName(/\S/);
+      for (const control of [message,
+        panel.getByRole('button', { name: 'More: attach, workflow, agent', exact: true }),
+        voice,
+        panel.getByRole('button', { name: 'Send', exact: true }),
+      ]) await hit(control);
+      await panel.getByRole('button', { name: 'More: attach, workflow, agent', exact: true }).click();
+      const attach = panel.getByRole('menuitem', { name: 'Attach a file', exact: true });
+      await hit(attach);
+      // Toggle this menu normally: Escape is intentionally reserved for the
+      // later composer-to-pocket close/focus-return control.
+      await panel.getByRole('button', { name: 'More: attach, workflow, agent', exact: true }).click();
+      await expect(attach).toBeHidden();
+      await expect(panel).toBeVisible();
+      const bounds = await panel.boundingBox();
+      expect(bounds).not.toBeNull();
+      if (!bounds) throw new Error('visible pocket has no browser bounds');
+      expect(bounds.y).toBeGreaterThanOrEqual(0);
+      expect(bounds.y + bounds.height).toBeLessThanOrEqual(viewport.height);
+      if (viewport.width <= 860) {
+        const nav = page.locator('nav.app-mobile-nav');
+        await expect(nav).toBeVisible();
+        const bar = await nav.boundingBox();
+        if (!bar) throw new Error('visible production mobile bar has no bounds');
+        expect(bounds.y + bounds.height).toBeLessThanOrEqual(bar.y);
+        // The pocket is non-modal; geometry must not steal the real bar's slot.
+        await hit(nav.getByRole('button', { name: 'More', exact: true }));
+      } else {
+        await expect(page.locator('nav.app-mobile-nav')).toBeHidden();
+      }
+      if (viewport.width <= 639) expect(bounds.width).toBe(viewport.width);
+      else expect(bounds.width).toBe(420);
+      await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+      await hit(message);
+      await hit(panel.getByRole('button', { name: 'Send', exact: true }));
+      await panel.getByRole('button', { name: 'Close Funnel Architect', exact: true }).click();
+      await expect(panel).toBeHidden();
+      await expect(launcher).toBeFocused();
+      await hit(launcher);
+      await launcher.click();
+      await ready();
+      await expect(message).toHaveValue('QA unsent pocket clearance draft');
+      await hit(message);
+      await message.press('Escape');
+      await expect(launcher).toBeFocused();
+      await hit(launcher);
+    }
+    expect(dispatches, 'no Send, starter-prompt, recording or workflow dispatch').toBe(0);
+  } finally {
+    await restoreToggle();
+  }
+});
+
+
+/** Independent71 control: keep the real guidance offered, rather than dismissing
+ * it to make a pocket hit target pass. Source70's mobile-bar case is separate. */
+test('tutorial offer and pocket composer retain their own real hit targets at 861px', async ({ page }) => {
+  const tenantId = await loginPersonal(page.request, 'tutorial-pocket-clearance@e2e.test');
+  const restoreToggle = await pinTenantToggle(page.request, 'funnels', tenantId);
+  const org = await page.request.post(`${API}/orgs`, { data: { name: 'Tutorial pocket private fixture' } });
+  expect(org.status(), await org.text()).toBe(201);
+  const { orgId } = (await org.json()) as { orgId: string };
+  expect(orgId).toBeTruthy();
+  await page.route('**/host/openwop-app/byok/active-config', async (route) => {
+    expect(route.request().method()).toBe('GET');
+    await route.fulfill({ json: {
+      config: { provider: 'google', model: 'gemini-3.5-flash-lite', credentialRef: 'google:e2e-no-dispatch' },
+      valid: true, anonymous: false, stored: true,
+    } });
+  });
+  let dispatches = 0;
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && /\/(?:runs(?:\/|$)|chat\/send(?:$)|chat\/sessions\/[^/]+\/messages(?:$))/.test(new URL(request.url()).pathname)) dispatches += 1;
+  });
+  const panel = page.getByRole('dialog', { name: 'Funnel Architect', exact: true });
+  const hint = page.getByRole('complementary', { name: 'Tutorial suggestion', exact: true });
+  const message = panel.getByRole('combobox', { name: 'Message', exact: true });
+  const launcher = page.locator('.chat-pocket-launcher');
+  const hit = async (control: Locator): Promise<void> => {
+    await expect(control).toBeVisible();
+    expect(await control.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      const target = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      return rect.width > 0 && rect.height > 0 && rect.left >= 0 && rect.top >= 0
+        && rect.right <= innerWidth && rect.bottom <= innerHeight
+        && target !== null && element.contains(target);
+    }), 'guidance and pocket must retain independent real hit targets').toBe(true);
+  };
+  const ready = async (): Promise<void> => {
+    await expect(panel).toBeVisible();
+    await panel.evaluate(async (element) => {
+      await Promise.all(element.getAnimations().map((animation) => animation.finished));
+    });
+  };
+  const hintControls = async (): Promise<void> => {
+    await expect(hint).toContainText('Build Your First Sales Funnel');
+    const learn = hint.getByRole('link', { name: 'Teach me this', exact: true });
+    await expect(learn).toHaveAttribute('href', '/tutorials/build-your-first-funnel');
+    await hit(learn);
+    await hit(hint.getByRole('button', { name: 'Dismiss', exact: true }));
+  };
+  try {
+    // First861 viewport is the independent causal witness; later iterations
+    // retain desktop and short-height controls. No tutorial action is activated.
+    for (const viewport of [
+      { width: 861, height: 720 }, { width: 1280, height: 720 }, { width: 861, height: 568 },
+      // Combined70+71 boundaries: both the live hint and mobile bar remain usable.
+      { width: 720, height: 720 }, { width: 860, height: 720 },
+    ]) {
+      await page.setViewportSize(viewport);
+      const progress = page.waitForResponse((response) => response.request().method() === 'GET'
+        && new URL(response.url()).pathname.endsWith('/tutorials/progress'));
+      await page.goto(`/funnels?org=${encodeURIComponent(orgId)}`);
+      expect((await progress).status()).toBe(200);
+      await ready();
+      await expect(hint).toBeVisible();
+      await message.fill('QA unsent tutorial and pocket coexistence');
+      await hit(message);
+      const voice = panel.locator('button.chatinput-mic-btn');
+      await expect(voice).toHaveCount(1);
+      await expect(voice).toHaveAccessibleName(/\S/);
+      await hit(voice);
+      await hit(panel.getByRole('button', { name: 'Send', exact: true }));
+      const more = panel.getByRole('button', { name: 'More: attach, workflow, agent', exact: true });
+      await hit(more);
+      await more.click();
+      await hit(panel.getByRole('menuitem', { name: 'Attach a file', exact: true }));
+      await more.click();
+      await hintControls();
+      const pocketBounds = await panel.boundingBox();
+      const hintBounds = await hint.boundingBox();
+      if (!pocketBounds || !hintBounds) throw new Error('offered surfaces have no real browser bounds');
+      expect(pocketBounds.y).toBeGreaterThanOrEqual(0);
+      expect(pocketBounds.y + pocketBounds.height).toBeLessThanOrEqual(hintBounds.y);
+      if (viewport.width <= 860) {
+        const nav = page.locator('nav.app-mobile-nav');
+        await expect(nav).toBeVisible();
+        const bar = await nav.boundingBox();
+        if (!bar) throw new Error('visible production mobile bar has no bounds');
+        expect(hintBounds.y + hintBounds.height).toBeLessThanOrEqual(bar.y);
+        await hit(nav.getByRole('button', { name: 'More', exact: true }));
+      } else {
+        await expect(page.locator('nav.app-mobile-nav')).toBeHidden();
+      }
+      await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+      await hit(message); await hintControls();
+      await panel.getByRole('button', { name: 'Close Funnel Architect', exact: true }).click();
+      await expect(launcher).toBeFocused();
+      await hit(launcher); await hintControls();
+      await launcher.click(); await ready();
+      await expect(message).toHaveValue('QA unsent tutorial and pocket coexistence');
+      await hit(message); await hintControls();
+      await message.press('Escape');
+      await expect(launcher).toBeFocused();
+      await hit(launcher); await hintControls();
+    }
+    expect(dispatches).toBe(0);
+  } finally { await restoreToggle(); }
 });

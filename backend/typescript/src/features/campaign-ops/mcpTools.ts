@@ -20,6 +20,10 @@ export const CAMPAIGN_MCP_READ_TOOLS = [
   // `never`. An MRTR confirmation would be the agent confirming itself (X1); the
   // change's effect waits on the ADR 0924 human approval instead.
   { chainId: 'campaign-studio.mcp.request-change', tool: 'campaign_request_change', tier: 'write' },
+  // ADR 0962 P2 — a budget PROPOSAL: write tier (a plan row + one approval),
+  // approval `never` for the same X1 reason. The spend waits on the plan's own
+  // approval, which names its approvers and refuses the person behind the key.
+  { chainId: 'campaign-studio.mcp.propose-budget-change', tool: 'campaign_propose_budget_change', tier: 'write' },
 ] as const satisfies ReadonlyArray<{ chainId: string; tool: string; tier?: 'write' }>;
 
 export function registerCampaignMcpReadTools(featureId: string): void {

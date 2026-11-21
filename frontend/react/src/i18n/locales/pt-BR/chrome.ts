@@ -5,6 +5,8 @@
 export const messages = {
   copyFailedManual: 'Não foi possível copiar — selecione o texto e copie manualmente.',
   adminSections: 'Seções de administração',
+  adminAccessReadFailedTitle: "Não foi possível verificar o acesso",
+  adminAccessReadFailedBody: "Não foi possível consultar seu acesso ao espaço de trabalho. Tente novamente; isso não significa que sua função de administrador foi removida.",
   adminAccessRequiredTitle: 'Acesso de administrador necessário',
   adminNavDegraded: 'Não foi possível carregar as preferências do menu. Exibindo a navegação padrão segura.',
   adminNavEmptyTitle: 'Nenhum destino administrativo disponível',

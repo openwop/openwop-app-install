@@ -23,7 +23,7 @@ import { buildAdMap } from './adMap.js';
 import { buildPacing } from './pacing.js';
 import { listCaps, getCap, createCap, setCapLimit, deleteCap, getCapState, pauseMarketingCampaign } from './spendCaps.js';
 import { deleteAlias, getUtmPolicy, lintUrls, listAliases, parseUtmPolicy, setAlias, setUtmPolicy } from './utmGovernance.js';
-import { listPlans, applyReallocation, recordRouteApply, proposeReallocation } from './reallocation.js';
+import { listPlans, applyReallocation, recordRouteApply, proposeReallocation, reallocationApprovers } from './reallocation.js';
 
 const TOGGLE_ID = 'campaign-intel';
 const LABEL = 'Campaign Intelligence';
@@ -254,7 +254,12 @@ export function registerCampaignIntelRoutes(deps: RouteDeps): void {
       const { randomUUID } = await import('node:crypto');
       const runId = `hostext:realloc-propose:${randomUUID()}`;
       const adapter = makeAdsAdapter({ storage: hostExtStorage(), tenantId: tenantOf(req), runId, actingUserId: actor, orgId });
-      const out = await proposeReallocation(adapter, tenantOf(req), orgId, { runId, actor });
+      // ADR 1022 CP71WF-23 — name the client's approvers so the proposer cannot
+      // approve it. No run carries a policy here (a host lane), so the client
+      // org's owner or admin decides.
+      const out = await proposeReallocation(adapter, tenantOf(req), orgId, {
+        runId, actor, bindApproval: reallocationApprovers({ tenantId: tenantOf(req), orgId, requester: actor }),
+      });
       res.json(out.outcome === 'no_change' ? out : { outcome: 'proposed', plan: out.plan });
     } catch (err) { next(err); }
   });

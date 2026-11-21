@@ -16,10 +16,16 @@
  * `buildAssistantSurface` over the in-memory store + a controllable
  * `ctx.suspend` standing in for the executor's `makeSuspendFn`.
  *
- * Sabotage-witnessed (/grade-tests w11): a changed resumeKey or an added eventId
- * field reds case 1; dropping the existing patch fields on merge reds case 2;
- * clarifying without an eventId reds case 3; clarifying a patch that already has
- * a start reds case 4; dropping `requireAfter` reds case 5.
+ * ADR 1013 D3/D4: the surface rides under `data.form` with one `questions[]` entry
+ * per field, the resume value is `{ answers: [{ id, answer }] }`, and case 1 runs the
+ * suspend payload through the host's own interrupt-form gate (`interruptFormDefect`:
+ * `schemas/v2/interrupt-form.schema.json` + the field↔question binding).
+ *
+ * Sabotage-witnessed (/grade-tests w11, re-probed w120): a changed resumeKey, an
+ * added eventId field or a field bound to no question reds case 1; dropping the
+ * existing patch fields on merge or reading the answers off the wrong shape reds
+ * case 2; clarifying without an eventId reds case 3; clarifying a patch that already
+ * has a start reds case 4; dropping `requireAfter` reds case 5.
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -29,6 +35,7 @@ import { join } from 'node:path';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
+import { interruptFormDefect } from '../src/host/interruptFormRules.js';
 import { buildAssistantSurface } from '../src/features/assistant/surface.js';
 import { __resetAssistantStore, listPendingActions } from '../src/features/assistant/assistantService.js';
 
@@ -83,9 +90,10 @@ describe('Assistant calendar.reschedule A2UI clarification (ADR 0051 §3/§5)', 
     expect(captured!.reason).toBe('clarification');
     expect(captured!.resumeKey).toBe('calendar-reschedule-clarify');
     assertCatalogValid(captured!);
+    expect(interruptFormDefect(captured)).toBeNull();
     const components = ((captured!.form as Record<string, unknown>).surface as { components: Array<Record<string, unknown>> }).components;
     const ids = components.map((c) => c.id).filter((id): id is string => typeof id === 'string');
-    expect(ids).toEqual(expect.arrayContaining(['date', 'time', 'durationMinutes']));
+    expect(ids).toEqual(['date', 'time', 'durationMinutes', 'confirm']);
     // No event picker in the catalog — the surface never asks for an eventId.
     expect(ids).not.toContain('eventId');
   });
@@ -110,6 +118,8 @@ describe('Assistant calendar.reschedule A2UI clarification (ADR 0051 §3/§5)', 
     expect(pa.payload.patch?.end).toEqual({ dateTime: '2026-07-01T15:00:00', timeZone: 'UTC' });
     // A pre-existing patch field survives the merge.
     expect(pa.payload.patch?.summary).toBe('Sync');
+    // Positive control for case 5's "nothing enqueued": this reader sees the write.
+    expect((await listPendingActions('t-resched2')).map((a) => a.kind)).toEqual(['calendar.reschedule']);
   });
 
   it('a missing eventId is NOT clarified (no event picker) — enqueues as-is', async () => {
@@ -124,8 +134,10 @@ describe('Assistant calendar.reschedule A2UI clarification (ADR 0051 §3/§5)', 
     };
     const r = await enqueueAction(ctx);
     expect(suspendCalled).toBe(false);
-    const pa = field(r, 'pendingAction') as { status: string };
+    const pa = field(r, 'pendingAction') as { status: string; payload: unknown };
     expect(pa.status).toBe('pending');
+    // "As-is": the drafted payload is enqueued unchanged.
+    expect(pa.payload).toEqual({ patch: {} });
   });
 
   it('a reschedule that already names a new time does not clarify', async () => {
@@ -154,7 +166,10 @@ describe('Assistant calendar.reschedule A2UI clarification (ADR 0051 §3/§5)', 
       inputs: { kind: 'calendar.reschedule', draft: 'x', payload: { eventId: 'evt5', patch: {} } },
       suspend: async () => answers({ date: 'not-a-date', time: '14:00', durationMinutes: '60' }),
     };
-    await expect(enqueueAction(ctx)).rejects.toThrow(/new time/);
+    await expect(enqueueAction(ctx)).rejects.toMatchObject({
+      code: 'validation_error',
+      message: 'enqueue-action: calendar.reschedule still needs a new time after clarification',
+    });
     expect((await listPendingActions('t-resched5')).length).toBe(0);
   });
 });

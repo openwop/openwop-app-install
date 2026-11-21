@@ -1,12 +1,22 @@
 /**
- * ADR 0116 Phase 1 — prompt-library catalog service.
- * Dangling-ref rejection (the catalog must point at a real template), CRUD,
- * tenant/org isolation. RBAC + toggle gating are enforced at the route via the
- * shared `authorizeOrgScope` (tested in the feature-route suites).
+ * ADR 0116 Phase 1 / ADR 0993 — prompt-library catalog service.
+ * Dangling-ref rejection (the catalog must point at a real template, resolved for
+ * the entry's own tenant, ADR 0993 D5), CRUD, tenant/org isolation, and the owner
+ * lane: a private entry is its owner's on EVERY lane, read and write (ADR 0993 D2).
+ * RBAC + toggle gating are enforced at the route via the shared `authorizeOrgScope`
+ * (tested in the feature-route suites).
  *
- * Breaks if: dangling-ref validation, the `private` default, the PLC-1 read filter,
- * the tenant/org list filter, `{{var}}` substitution, the PLC-2 `@version` pin or the
- * surface's caller canonicalization regresses (probes w24g1-pl-*, /grade-tests wave 24).
+ * Tenant/org isolation is a DOUBLE guard: the row key carries tenant + org AND each
+ * read re-checks the row's fields. A probe on either half alone stays green, so each
+ * read is witnessed by one edit that drops both (`w118g2-pl-get-both`,
+ * `w118g2-pl-list-both`). The trailing-`@` rule is doubled too (`parsePromptRef`
+ * strips it, and `resolveRef` treats an empty version as unpinned).
+ *
+ * Breaks if: dangling-ref validation (create, update), the name check, the `private`
+ * default, the PLC-1 read predicate, the write lane's readable check, delete, the
+ * tenant/org get and list filters, `{{var}}` substitution (bound and missing), the
+ * PLC-2 `@version` pin, the surface's caller canonicalization or its tenant closure
+ * regresses (probes w24g1-pl-*, re-probed at ADR 0993 as `w118g2-pl-*`).
  */
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -23,7 +33,7 @@ import { buildPromptSurface } from '../src/features/prompts/promptSurface.js';
 const T = 'pl-tenant';
 
 let orgN = 0;
-let ORG = 'org-a'; // reassigned per test (the entries collection persists across tests)
+let ORG = 'org-a'; // reassigned per test (a fresh org per case, beside the fresh store)
 
 // ADR 0993 D5 — a user template belongs to ONE tenant (the entries' tenant).
 async function seedTemplate(id: string): Promise<void> {
@@ -41,20 +51,24 @@ describe('prompt-library service', () => {
   it('creates an entry referencing a real template', async () => {
     await seedTemplate('tpl-greet');
     const e = await createEntry(T, ORG, 'u1', { name: 'Greeting', promptRef: 'tpl-greet', tags: ['intro', 'demo'], visibility: 'org' });
-    expect(e.entryId).toBeTruthy();
+    expect(e.entryId).toMatch(/^[0-9a-f-]{36}$/);
     expect(e.promptRef).toBe('tpl-greet');
     expect(e.visibility).toBe('org');
     expect(e.tags).toEqual(['intro', 'demo']);
+    expect([e.createdBy, e.updatedBy]).toEqual(['u1', 'u1']);
+    // Persisted, not only returned: a fresh read gives the same entry back.
+    const read = await getEntry(T, ORG, e.entryId, 'u1');
+    expect([read?.name, read?.promptRef, read?.available]).toEqual(['Greeting', 'tpl-greet', true]);
   });
 
   it('rejects a dangling promptRef', async () => {
     await expect(createEntry(T, ORG, 'u1', { name: 'Bad', promptRef: 'does-not-exist' }))
-      .rejects.toMatchObject({ code: 'validation_error' });
+      .rejects.toMatchObject({ code: 'validation_error', message: expect.stringContaining('does not resolve') });
   });
 
   it('requires a name', async () => {
     await seedTemplate('tpl-x');
-    await expect(createEntry(T, ORG, 'u1', { promptRef: 'tpl-x' })).rejects.toMatchObject({ code: 'validation_error' });
+    await expect(createEntry(T, ORG, 'u1', { promptRef: 'tpl-x' })).rejects.toMatchObject({ code: 'validation_error', message: 'Field `name` is required.' });
   });
 
   it('defaults visibility to private', async () => {
@@ -96,7 +110,8 @@ describe('prompt-library service', () => {
   it('rejects updating to a dangling promptRef', async () => {
     await seedTemplate('tpl-u');
     const e = await createEntry(T, ORG, 'u1', { name: 'U', promptRef: 'tpl-u' });
-    await expect(updateEntry(T, ORG, e.entryId, 'u1', { promptRef: 'gone' })).rejects.toMatchObject({ code: 'validation_error' });
+    await expect(updateEntry(T, ORG, e.entryId, 'u1', { promptRef: 'gone' })).rejects.toMatchObject({ code: 'validation_error', message: expect.stringContaining('does not resolve') });
+    expect((await getEntry(T, ORG, e.entryId, 'u1'))?.promptRef, 'the refused update left the binding').toBe('tpl-u');
   });
 });
 
@@ -118,14 +133,21 @@ describe('prompt-library renderEntry + ctx.prompts surface (ADR 0116 Phase 4)', 
     // the RAW principal. The surface canonicalizes it so the owner's run matches.
     const owner = userIdFor(T, 'principal-s');
     const e = await createEntry(T, ORG, owner, { name: 'S', promptRef: 'tpl-s' });
+    // An ORG-visible entry for the tenant half: a private one would be hidden from a
+    // userless scope by visibility alone, so the tenant closure would never be reached.
+    const orgWide = await createEntry(T, ORG, owner, { name: 'S2', promptRef: 'tpl-s', visibility: 'org' });
     const surface = buildPromptSurface({ tenantId: T, actingUserId: 'principal-s' }); // owner's run (raw principal)
     const listed = await surface.listLibrary!({ orgId: ORG });
-    expect((listed.entries as Array<{ entryId: string }>).map((x) => x.entryId)).toEqual([e.entryId]);
+    expect((listed.entries as Array<{ entryId: string }>).map((x) => x.entryId).sort()).toEqual([e.entryId, orgWide.entryId].sort());
     const rendered = await surface.renderEntry!({ orgId: ORG, entryId: e.entryId, variables: { name: 'Surface' } });
     expect(rendered.composed).toBe('Hello Surface');
-    // A different tenant's scope can't see this org's entry (CTI-1).
+    // Positive control: a userless scope in the SAME tenant does see the org entry …
+    expect((await buildPromptSurface({ tenantId: T }).getEntry!({ orgId: ORG, entryId: orgWide.entryId })).entry).not.toBeNull();
+    // … and a different tenant's scope cannot see either entry (CTI-1).
     const otherTenant = buildPromptSurface({ tenantId: 'other-tenant' });
+    expect((await otherTenant.getEntry!({ orgId: ORG, entryId: orgWide.entryId })).entry).toBeNull();
     expect((await otherTenant.getEntry!({ orgId: ORG, entryId: e.entryId })).entry).toBeNull();
+    expect((await otherTenant.listLibrary!({ orgId: ORG })).entries).toEqual([]);
   });
 
   /**
@@ -141,7 +163,7 @@ describe('prompt-library renderEntry + ctx.prompts surface (ADR 0116 Phase 4)', 
     // The SAME human's workflow run (raw actingUserId) sees it — canonicalized match.
     const own = buildPromptSurface({ tenantId: T, actingUserId: 'oidc:sub-1' });
     expect((await own.getEntry!({ orgId: ORG, entryId: e.entryId })).entry).not.toBeNull();
-    expect((await own.renderEntry!({ orgId: ORG, entryId: e.entryId, variables: {} })).composed).toBeTruthy();
+    expect((await own.renderEntry!({ orgId: ORG, entryId: e.entryId, variables: {} })).composed).toBe('Hello {{name}}');
     // A DIFFERENT principal's run does not.
     const other = buildPromptSurface({ tenantId: T, actingUserId: 'oidc:sub-2' });
     expect((await other.getEntry!({ orgId: ORG, entryId: e.entryId })).entry).toBeNull();
@@ -168,7 +190,7 @@ describe('PLC-1 — private visibility is enforced on read', () => {
     expect(await getEntry(T, ORG, org.entryId, 'bob')).not.toBeNull();       // org visible (NOT over-restricted)
     // Render of a private entry by a non-owner 404s; the owner renders it fine.
     await expect(renderEntry(T, ORG, priv.entryId, {}, 'bob')).rejects.toMatchObject({ code: 'not_found' });
-    expect((await renderEntry(T, ORG, priv.entryId, { name: 'x' }, 'alice')).composed).toBeTruthy();
+    expect((await renderEntry(T, ORG, priv.entryId, { name: 'x' }, 'alice')).composed).toBe('Hello x');
   });
 });
 

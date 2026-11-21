@@ -396,7 +396,10 @@ export function sectionHtml(section: Section, opts: SectionHtmlOptions): string 
     case 'cta': {
       const sub = str(d.subheading);
       const ctaNote = str(d.note) ? `<p><small>${escapeHtml(str(d.note))}</small></p>\n` : ''; // ADR 1062 D4
-      return `<section>\n${head()}${sub ? `<p>${escapeHtml(sub)}</p>\n` : ''}<p>${anchorHtml(str(d.label), str(d.url))}</p>\n${ctaNote}</section>`;
+      // #6150 — the queue card beside the copy (the hero's figure list) and the photo behind it.
+      const ctaQueue = heroQueueHtml(d.queue, escapeHtml);
+      const ctaImg = str(d.imageToken) ? `<img src="${escapeHtml(assetUrl(opts.assetBase, str(d.imageToken)))}" alt="${escapeHtml(str(d.alt))}" loading="lazy">\n` : '';
+      return `<section>\n${head()}${sub ? `<p>${escapeHtml(sub)}</p>\n` : ''}<p>${anchorHtml(str(d.label), str(d.url))}</p>\n${ctaNote}${ctaQueue ? `${ctaQueue}\n` : ''}${ctaImg}</section>`;
     }
 
     case 'columns': {

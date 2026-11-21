@@ -352,9 +352,9 @@
       "digest": "d50eaba9c36c6958bf903e4a2232e0908a7bc6c475beee0042a6e2ee9c275059"
     },
     "feature.campaign-ops.nodes": {
-      "version": "1.4.0",
+      "version": "1.5.0",
       "files": 2,
-      "digest": "6ea8a1217335b4adb294b83ad033d58ffb14f18a3a4852a3047235acfa68b600"
+      "digest": "28f9a46ba32d091ff93fa1e22a671f75d40e4725b3bc4d7d2979f70f66fed64d"
     },
     "feature.campaign-orchestration.nodes": {
       "version": "1.8.0",
@@ -407,9 +407,9 @@
       "digest": "7021af2022f9f832c66c48800eeed0be43aea736f39713a031f5bb356b78c8ab"
     },
     "feature.computer-use.nodes": {
-      "version": "1.1.2",
+      "version": "1.2.0",
       "files": 2,
-      "digest": "da0c2927fe75f31ef711c10da0ded5133e3b804e76943e39c8b487e253c9aa36"
+      "digest": "e0aa27465fdd84a5877ebb3429b3d19953bbdf86dc991c42a6d9ea7c237ab379"
     },
     "feature.consent.nodes": {
       "version": "1.2.1",
@@ -557,9 +557,9 @@
       "digest": "88e45fe5032c23b93d01b0cd303fc1803028b944eee9dd078d4a70579c3065aa"
     },
     "feature.production.nodes": {
-      "version": "1.2.0",
+      "version": "1.2.1",
       "files": 2,
-      "digest": "541776acedfdae9a52e6ebc7110bc87a9b62981c02bf870934ae4a3f76ef1b78"
+      "digest": "6b3dccd67e38ec27ab9df99973ef18c7b3f083ee9924791fb130581f7a0f321b"
     },
     "feature.profiles.nodes": {
       "version": "1.2.0",

@@ -397,6 +397,29 @@ const EXPECTED_COVERED = new Set([
   'profiles:profile',
   'insights:config', // ADR 1102 D8 — `eraseInsightsSuiteSubject`; was RECORDED_DEBT (COS-1)
   'settings:user-prefs', // CHAN-F19 #4 — `eraseSettingsSubject`; was RECORDED_DEBT ("no eraser yet")
+  // CHAN-F19 #8 — a summary of the subject's OWN KB document goes with it (kb's eraser,
+  // the lifecycle seam, then the strict `eraseNotebookSourceStateSubject` backstop). A
+  // summary of someone else's document that only mentions the subject is kept, as kb
+  // keeps the document: the "KNOWN RESIDUAL" in the `eraseSubjectKb` docblock
+  // (kb/kbService.ts). "Covered" means exactly kb's scope, no more.
+  'notebook-source-summary',
+  // CHAN-F19 #10 — a USER-scoped connection's pairing goes before its parent: the
+  // connections eraser purges the child pointers strictly (`purgeConnectionChildren`,
+  // a failure keeps the parent for the retry), beside the best-effort revoke consumer.
+  // Org/workspace connections are out of scope, as for `connections:connection`.
+  'connections:pairing',
+  // CHAN-F19 #10 — a connection lane's settings: its bot handle can be a person's own
+  // account. `eraseChannelIngressSubject` deletes the row when the lane's connection is
+  // the subject's or already gone; an org/workspace connection's account is the
+  // workspace's (ADR 0780 D4 scope). Relay rows hold no handle (the route refuses one).
+  'channel-ingress:settings',
+  // CHAN-F19 #11 — a room index row lists suggestion keys that embed the requester's id.
+  // `eraseBuilderPairSubject` unlists the subject's live keys (every key form), then strips
+  // every key whose suggestion is gone (aged out).
+  'builder-pair:room',
+  // CHAN-F19 #12 — pending copies of written toggle rows (cohort principal ids, saver).
+  // `eraseReplayToggleWriteSubject` strips the subject from every pending copy.
+  'analytics:replay-toggle-writes',
   // SCC-1 — moved out of ACTOR_ATTRIBUTED_DEBT: `eraseScheduledChatsSubject`
   // disables the schedule + tombstones `createdBy` (ordinal 207, ADR 0125).
   'schedchat:config',
@@ -1848,8 +1871,26 @@ const SIGNAL_FREE_BASELINE: readonly string[] =
  *  signal), and `eraseSettingsSubject` deletes the subject's day counters → 107.
  *  CHAN-F19 #5 (2026-11-15): commerce:affiliate declares its `name` PII and the
  *  operator redact route clears it (an affiliate is not a workspace principal);
- *  commerce:payout holds only the affiliate id and money fields, reviewed → 105. */
-const SIGNAL_FREE_BASELINE_CEILING = 105;
+ *  commerce:payout holds only the affiliate id and money fields, reviewed → 105.
+ *  CHAN-F19 #6 (2026-11-18): portability:import-claims records `ownerUserId` on a
+ *  private-prompt claim (a census signal), and `erasePortabilitySubject` deletes the
+ *  subject's claims, new and legacy → 104.
+ *  CHAN-F19 #7 (2026-11-18): crm:lead-rr declares `poolId` PII (an owner's capacity
+ *  pool id is a tenant-salted hash of their subject), and crm's member eraser deletes
+ *  the owner's pools → 103.
+ *  CHAN-F19 #8 (2026-11-18): notebook-source-summary declares `summary` PII, and the
+ *  strict notebooks backstop deletes summaries whose source is gone → 102.
+ *  CHAN-F19 #9 (2026-11-18): crm:dealkeyclaim and crm:companykeyclaim hold opaque ids,
+ *  a business domain or a given company name, never the person, reviewed → 100.
+ *  CHAN-F19 #10 (2026-11-19): connections:pairing and channel-ingress:settings are
+ *  erased with the subject's connection; service-desk:legacy-none is never written,
+ *  reviewed → 97.
+ *  CHAN-F19 #11 (2026-11-19): builder-pair:room declares `keys` PII and builder-pair's
+ *  eraser strips the subject's room keys; the two chat-widget session counters hold a
+ *  hash of a random browser session id and a count, reviewed → 94.
+ *  CHAN-F19 #12 (2026-11-19): analytics:replay-toggle-writes declares `rows` PII and
+ *  the replay eraser strips the subject from pending copies → 93. */
+const SIGNAL_FREE_BASELINE_CEILING = 93;
 
 /** Reviewed signal-free feature stores: each holds no subject data, and says why.
  *  Each was read at its declaration: the row type with its nested types, AND the
@@ -1916,6 +1957,8 @@ const SIGNAL_FREE_REVIEWED = new Map<string, string>([
   ['cdp:retention-watermark', 'one row per tenant: the purge cutoff timestamp'],
   ['cdp:visitor-index-built', 'a per-tenant marker that the visitor index backfill ran: tenant, time, format'],
   ['cdp:warehouse-load-approval', 'approval index: tenant and approval id, keyed by a hash of the load target'],
+  ['chatwidget:session', 'CHAN-F19 #11: a public-widget turn counter keyed widgetId:<session hash>. It holds a hash of the visitor\'s random browser session id (122 bits in sessionStorage; the raw id is never stored, CW68C-2) and an integer count, plus tenantId and updatedAt; 2-day default-on age-out. No person identifier, so no DSAR can match it. Rows from before A5 carry no updatedAt, so the age-out skips them, and may hold the raw session id: a pseudonymous online identifier, not a person identifier, that no DSAR can match either. Deleting those rows would be a data migration, left to the user'],
+  ['chatwidget:anonautowrite:session', 'CHAN-F19 #11: a public-widget auto-write counter keyed widgetId:<session hash>:day. Same shape as chatwidget:session: it holds a hash of the visitor\'s random browser session id (122 bits in sessionStorage; the raw id is never stored, CW68C-2) and an integer count, plus tenantId and updatedAt; 2-day default-on age-out. No person identifier, so no DSAR can match it. Rows from before A5 carry no updatedAt, so the age-out skips them, and may hold the raw session id: a pseudonymous online identifier, not a person identifier, that no DSAR can match either. Deleting those rows would be a data migration, left to the user'],
   ['chatwidget:anonwrite:day', 'a per-widget daily held-write counter, keyed widgetId:day'],
   ['chatwidget:tokenidx', 'index row: a random widget embed token to the widget config key'],
   ['cms:redirect', 'an operator-authored slug-to-slug redirect'],
@@ -1933,6 +1976,9 @@ const SIGNAL_FREE_REVIEWED = new Map<string, string>([
   ['commerce:catalog-index-day', 'ADR 1110: the UTC day the catalog-index drift repair last ran'],
   ['commerce:coupon', 'an operator-defined coupon: code, type, value, currency and active flag'],
   ['commerce:order-idem', 'a checkout dedup claim: a client idempotency key to an order id'],
+  ['crm:dealkeyclaim', 'CHAN-F19 #9: a convert dedup claim keyed tenant::org::companyId::contactId, holding a dealId. Opaque ids only; the contact it names is anonymized by crm\'s eraser and keeps its id, so the claim says nothing the anonymized contact does not'],
+  ['crm:companykeyclaim', 'CHAN-F19 #9: a convert dedup claim keyed tenant::org::domain:<business email domain> or name:<the given company name>, holding a companyId. It never holds the contact\'s name: with no company name and a free-mail address no claim is written (convertService getOrCreateCompanyForConvert)'],
+  ['service-desk:legacy-none', 'CHAN-F19 #10: the kernel adapter\'s legacy seam for tickets. Tickets were born on the entity kernel, so nothing writes it; makeKernelAdapter only lists it in migrate() and clears it. The tickets themselves are kernel entity records'],
   ['commerce:payout', 'CHAN-F19 #5: an affiliate payout: affiliate id, amount, currency and status. A money record keyed by the affiliate id; the name lives only on commerce:affiliate, which the operator redact clears'],
   ['commerce:product-fielddef', 'an operator-defined custom product field (key, label, type, options)'],
   ['commerce:reservation-due', 'a stock reservation expiry index: order id, tenant, org and due time'],
@@ -1985,6 +2031,7 @@ const SIGNAL_FREE_REVIEWED = new Map<string, string>([
   ['kb:reindex', 're-embedding job state per collection: spec, cursor, counters and status'],
   ['kb:vertexrerankusage', 'per-tenant daily rerank query count, keyed tenant:date'],
   ['knowledge-sync:filestate', 'a sync cursor: source id, provider file id, KB document id and revision'],
+  ['media:index-hour', '#5928: the UTC hour the media-index drift check last ran'],
   ['media:token-idx', 'index row keyed by a sha256 of the share token: tenant and asset id'],
   ['media:usage', 'a used-by link: asset id and the referencing page, campaign or brief id and title'],
   ['notebook-source-level', 'a context-level setting (full, summary, excluded) per notebook source'],

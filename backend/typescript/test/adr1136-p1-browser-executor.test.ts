@@ -131,11 +131,14 @@ describe('ADR 1136 D1 — the host-run loop through the session service', () => 
     expect(stored?.steps.map((s) => [s.action.kind, s.decidedBy])).toEqual([['type', 'auto'], ['click', 'auto'], ['submit', 'human']]);
   });
 
-  it('a password field is never filled: the session ends and the executor never types', async () => {
+  it('a password field is never filled: the step goes to the person and the executor never types', async () => {
+    // ADR 1136 P3a — in the host-run loop (the person's own window) a credential step
+    // is handed to the person (`awaiting_takeover`) instead of ending the session; a
+    // hosted provider still fails it (computer-use.test.ts, adr0894 G-D).
     const { executor, adapter } = setup([{ kind: 'op', op: { op: 'type', ref: 'e4', text: 'hunter2' } }]);
     const v = await startTask(adapter, input('password'));
-    expect(v.status).toBe('failed');
-    expect(v.error).toBe('credential_entry_unsupported');
+    expect(v.status).toBe('awaiting_takeover');
+    expect(v.takeover?.reason).toBe('credential');
     expect(executor.calls.some((c) => c.op === 'type')).toBe(false);
   });
 

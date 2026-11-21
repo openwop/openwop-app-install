@@ -21,6 +21,15 @@
  *    approval says (budgets have moved since).
  *  - The existing one-click route writes the same record (source `route`), which
  *    closes ADR 0357's "applied/skipped outcomes stamp back" promise (finding P3).
+ *  - ADR 0962 P2 — an outside agent's proposal (`campaign_propose_budget_change`)
+ *    writes the same record with an `approvalBinding`: named approvers on the
+ *    client org and the MCP run as the approval's source, so the person behind
+ *    the key can never decide it (ADR 0942 D10.2 eligibility, MCP-origin floor).
+ *    It is all-or-nothing: a requested change that cannot be planned refuses the
+ *    whole proposal before any plan or approval exists.
+ *  - ADR 1022 CP71WF-23 (corrected 2026-11-20) — the route, chat and chain lanes
+ *    bind approvers the same way, through `reallocationApprovers`, so the person
+ *    who proposed a plan can never approve it (the sole-admin self-approval exception aside).
  *
  * @see docs/adr/0952-paid-media-operations-and-spend-control.md
  */
@@ -29,7 +38,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
 import { createLogger } from '../../observability/logger.js';
-import { createCampaignSpendApproval, getApproval } from '../../host/approvalService.js';
+import { createCampaignSpendApproval, getApproval, type ApprovalPolicy } from '../../host/approvalService.js';
 import { authorizeBudgetOps, dispatchBelongsToOrg, listTenantDispatchRecords, type AdPlatform, type AdsAdapter, type UpdateBudgetResult } from '../../host/adsAdapter.js';
 import { listRecords } from '../campaign-connectors/performanceService.js';
 import { listCampaigns } from '../campaign-orchestration/campaignService.js';
@@ -55,6 +64,20 @@ export interface ReallocationOp {
   toDailyMinor: number;
 }
 export interface DroppedOp { platform: AdPlatform; adAccountId: string; campaignId: string; toDailyMinor?: number; reason: string }
+/** ADR 0962 P2 — who decides a plan (persisted, so a re-entrant
+ *  `ensureApproval` mints the same approval shape). Every lane sets it through
+ *  `reallocationApprovers` (ADR 1022 CP71WF-23, corrected 2026-11-20). */
+export interface ApprovalBinding {
+  /** Named approvers (never empty: an unnamed policy would skip D10.2 eligibility). */
+  policy: ApprovalPolicy;
+  /** The client org the approver roles resolve on; equals the plan's org. */
+  orgId: string;
+  /** The run's requesters, who may not decide. */
+  submitters: string[];
+  submitterCauses?: string[];
+  /** The requesting run (MCP origin travels with it to the decide-time check). */
+  autonomySourceRunId?: string;
+}
 export type PlanStatus = 'proposed' | 'approved' | 'applying' | 'applied' | 'partial' | 'rejected' | 'expired';
 export interface OpResult { opIx: number; outcome: 'updated' | 'already_applied' | 'failed' | 'skipped'; error?: string; at: string }
 
@@ -75,6 +98,12 @@ export interface ReallocationPlan {
   results: OpResult[];
   /** The principal who proposed it (tombstoned on erasure). */
   createdBy?: string;
+  /** ADR 0962 P2 / ADR 1022 CP71WF-23 — who decides; set by every production lane. */
+  approvalBinding?: ApprovalBinding;
+  /** ADR 0962 P2 — `{ protocol: 'mcp', runId }` when an outside agent proposed it (claimed attribution, D6). */
+  requestedVia?: { protocol: 'mcp'; runId?: string };
+  /** ADR 0962 D5 — the agent's note, ALREADY fenced as untrusted (never instruction). */
+  externalNote?: string;
   createdAt: string;
   expiresAt: string;
   claimedAt?: string;
@@ -119,10 +148,19 @@ export interface ProposeInput {
   campaignId?: string;
   runId: string;
   actor?: string;
+  /** ADR 0962 P2 — refuse (no plan, no approval) when any requested op is dropped. */
+  allOrNothing?: boolean;
+  /** ADR 0962 P2 — decides who approves; called once, only when a NEW plan is minted.
+   *  A throw refuses the proposal before any plan or approval exists. */
+  bindApproval?: (ops: readonly ReallocationOp[]) => Promise<ApprovalBinding>;
+  requestedVia?: { protocol: 'mcp'; runId?: string };
+  /** Already fenced by the caller. */
+  externalNote?: string;
 }
 export type ProposeOutcome =
   | { outcome: 'proposed'; plan: ReallocationPlan }
-  | { outcome: 'no_change'; dropped: DroppedOp[] };
+  /** `refused` — an `allOrNothing` proposal dropped an op; nothing was written. */
+  | { outcome: 'no_change'; dropped: DroppedOp[]; refused?: true };
 
 interface Target { platform: AdPlatform; adAccountId: string; campaignId: string; campaignName?: string }
 
@@ -203,6 +241,7 @@ export async function proposeReallocation(adapter: AdsAdapter, tenantId: string,
     }
     ops.push({ ...target, ...(w.campaignName ? { campaignName: w.campaignName } : {}), fromDailyMinor: from, toDailyMinor: to });
   }
+  if (input.allOrNothing && dropped.length > 0) return { outcome: 'no_change', dropped, refused: true };
   if (ops.length === 0) return { outcome: 'no_change', dropped };
   // Decreases first, then increases; stable within each.
   ops.sort((a, b) => Number(isIncrease(a)) - Number(isIncrease(b)) || a.platform.localeCompare(b.platform) || a.campaignId.localeCompare(b.campaignId));
@@ -218,10 +257,19 @@ export async function proposeReallocation(adapter: AdsAdapter, tenantId: string,
     if (existing.status === 'proposed' || existing.status === 'approved' || existing.status === 'applying') return { outcome: 'proposed', plan: await ensureApproval(existing) };
     planId = `rp_${sha([tenantId, orgId, input.runId, planHash, existing.planId]).slice(0, 24)}`;
   }
+  const approvalBinding = input.bindApproval ? await input.bindApproval(ops) : undefined;
+  if (approvalBinding && (approvalBinding.orgId !== orgId || !hasNamedApprovers(approvalBinding.policy))) {
+    // A binding for another org, or one naming nobody, would skip the eligibility
+    // check it exists for. Fail closed before anything is written.
+    throw new OpenwopError('forbidden_scope', 'The approval for this budget change could not be bound to the client.', 403, { reason: 'approval_binding_invalid' });
+  }
   const plan: ReallocationPlan = {
     key: planKey(tenantId, orgId, planId), planId, tenantId, orgId, ...(input.campaignId ? { campaignId: input.campaignId } : {}),
     source: { kind: sourceKind, recommendationHash }, ops, dropped, planHash, status: 'proposed', results: [],
     ...(input.actor ? { createdBy: input.actor } : {}),
+    ...(approvalBinding ? { approvalBinding } : {}),
+    ...(input.requestedVia ? { requestedVia: input.requestedVia } : {}),
+    ...(input.externalNote ? { externalNote: input.externalNote } : {}),
     createdAt: now.toISOString(), expiresAt: new Date(now.getTime() + PLAN_TTL_MS).toISOString(), version: 1,
   };
   await trimPlans(tenantId, orgId).catch(() => undefined);
@@ -230,6 +278,65 @@ export async function proposeReallocation(adapter: AdsAdapter, tenantId: string,
     if (won) return { outcome: 'proposed', plan: await ensureApproval(won) };
   }
   return { outcome: 'proposed', plan: await ensureApproval(plan) };
+}
+
+const hasNamedApprovers = (p: ApprovalPolicy): boolean => (p.approverRoleRefs?.length ?? 0) > 0 || (p.approverGroupRefs?.length ?? 0) > 0;
+
+/**
+ * The ONE approver binding for every lane that proposes a plan: the Campaign
+ * Intelligence route, the Analyst's chat tool, the reallocate chain's node and
+ * the MCP tool (ADR 0962 P2). Pass the result as `ProposeInput.bindApproval`.
+ *
+ * ADR 1022 (CP71WF-23, corrected 2026-11-20): an approval that names no
+ * approvers skips the decide-time eligibility check (`spendEligibility.ts`), so a
+ * `submitters` list alone never stopped the proposer approving their own plan.
+ * Every plan now names approvers:
+ *  - `policyRunId` set: the ADR 0942 chokepoint decides (`blocked` refuses before
+ *    anything is written; `approve` uses the policy's approvers and requesters);
+ *  - otherwise, or when the run carries no policy (`unbound`, `proceed`): the
+ *    client org's owner or admin (`DEFAULT_APPROVER`).
+ * The requester is always a submitter. `autonomySourceRunId` is set only for a
+ * run the caller names (`sourceRunId`) or the chokepoint just read; a run id that
+ * names no stored run (a voice turn, a host lane) would make every vote
+ * `autonomy_requester_unreadable`. With no source run, the sole-admin
+ * self-approval exception still applies to a requester voting in their own session.
+ */
+export function reallocationApprovers(args: {
+  tenantId: string;
+  orgId: string;
+  /** The person proposing (the plan's `createdBy`). */
+  requester: string;
+  /** The run whose ADR 0942 policy governs this proposal. */
+  policyRunId?: string;
+  /** The requesting run, when the caller knows it exists (the MCP run). */
+  sourceRunId?: string;
+}): (ops: readonly ReallocationOp[]) => Promise<ApprovalBinding> {
+  return async (ops) => {
+    const { DEFAULT_APPROVER, compileApproverSpec, enforceCampaignAction } = await import('../../host/autonomyPolicy/index.js');
+    const { hostExtStorage } = await import('../../host/hostExtPersistence.js');
+    const increase = ops.reduce((s, o) => s + Math.max(0, o.toDailyMinor - (o.fromDailyMinor ?? 0)), 0);
+    // The chokepoint records its decision on the audit chain. Nothing here
+    // applies a budget, so every verdict short of `blocked` asks a person.
+    const verdict = args.policyRunId
+      ? await enforceCampaignAction({ storage: hostExtStorage(), tenantId: args.tenantId, runId: args.policyRunId }, { actionClass: 'ads.budget', facts: { spendMinor: increase }, ceiling: 'approve' })
+      : { kind: 'unbound' as const };
+    if (verdict.kind === 'blocked') {
+      throw new OpenwopError('forbidden_scope', 'This client\'s review policy does not allow this budget change.', 403, { reason: 'autonomy_blocked', ruleId: verdict.ruleId });
+    }
+    if (verdict.kind === 'approve' && verdict.orgId !== undefined && verdict.orgId !== args.orgId) {
+      throw new OpenwopError('forbidden_scope', 'The approval for this budget change could not be bound to the client.', 403, { reason: 'approval_binding_invalid' });
+    }
+    const approver = verdict.kind === 'approve' ? verdict.approver : DEFAULT_APPROVER;
+    const compiled = compileApproverSpec({ ...approver }, { actionClass: 'ads.budget', lane: 'approval' });
+    const sourceRunId = args.sourceRunId ?? (verdict.kind === 'approve' ? verdict.runId : undefined);
+    return {
+      policy: compiled.approvalPolicy,
+      orgId: args.orgId,
+      submitters: [...new Set([args.requester, ...(verdict.kind === 'approve' ? verdict.requesters : [])])],
+      ...(verdict.kind === 'approve' && verdict.requesterCauses.length ? { submitterCauses: verdict.requesterCauses } : {}),
+      ...(sourceRunId ? { autonomySourceRunId: sourceRunId } : {}),
+    };
+  };
 }
 
 function planTable(plan: ReallocationPlan): string {
@@ -243,6 +350,8 @@ function planTable(plan: ReallocationPlan): string {
     `Net daily change: +${fmt(up)} / -${fmt(down)}.`,
     ...(plan.dropped.length ? [`Left out: ${plan.dropped.map((d) => `${d.platform} ${d.campaignId} (${d.reason})`).join('; ')}.`] : []),
     `Plan ${plan.planId}, hash ${plan.planHash.slice(0, 12)}. Expires ${plan.expiresAt}.`,
+    ...(plan.requestedVia ? ['Proposed by an outside agent (MCP) for the person named on the request. The person behind the agent cannot approve it.'] : []),
+    ...(plan.externalNote ? [`The agent's note: ${plan.externalNote}`] : []),
   ].join('\n');
 }
 
@@ -262,8 +371,22 @@ async function ensureApproval(plan: ReallocationPlan): Promise<ReallocationPlan>
     proposal: planTable(plan),
     // ADR 1022 (CP71WF-23) — approvers come from the client org, and the person
     // who proposed the plan (a chat user, or a schedule's owner) cannot approve it.
+    // CORRECTED 2026-11-20: `submitters` alone never enforced that. Only a row that
+    // NAMES approvers reaches the decide-time check, so every lane now binds them
+    // (`reallocationApprovers`); the bare-submitters branch below is left for a plan
+    // proposed without a binding (a direct call; no production lane does).
     orgId: plan.orgId,
-    ...(plan.createdBy ? { submitters: [plan.createdBy] } : {}),
+    ...(plan.approvalBinding
+      // The plan names its approvers, so the decide-time eligibility check
+      // (spendEligibility.ts) refuses the requesters (the sole-admin self-approval
+      // exception aside), and for an MCP run its own principal with no sole-admin escape.
+      ? {
+          policy: plan.approvalBinding.policy,
+          submitters: [...new Set([...plan.approvalBinding.submitters, ...(plan.createdBy ? [plan.createdBy] : [])])],
+          ...(plan.approvalBinding.submitterCauses?.length ? { submitterCauses: plan.approvalBinding.submitterCauses } : {}),
+          ...(plan.approvalBinding.autonomySourceRunId ? { autonomySourceRunId: plan.approvalBinding.autonomySourceRunId } : {}),
+        }
+      : plan.createdBy ? { submitters: [plan.createdBy] } : {}),
   });
   const next: ReallocationPlan = { ...plan, approvalId: approval.approvalId, version: plan.version + 1 };
   if (await plans.compareAndSwap(plan, next)) return next;
@@ -387,19 +510,36 @@ export async function recordRouteApply(
   }
 }
 
+/** Does the plan name the subject: its proposer, or (ADR 0962 P2) a requester on its approval binding. */
+function namesSubject(p: ReallocationPlan, forms: ReadonlySet<string>): boolean {
+  if (p.createdBy && forms.has(p.createdBy)) return true;
+  const b = p.approvalBinding;
+  return !!b && (b.submitters.some((s) => forms.has(s)) || (b.submitterCauses ?? []).some((s) => forms.has(s)));
+}
+
+function tombstonePlan(p: ReallocationPlan, forms: ReadonlySet<string>, tombstone: string): ReallocationPlan {
+  const swap = (s: string): string => (forms.has(s) ? tombstone : s);
+  const b = p.approvalBinding;
+  return {
+    ...p,
+    ...(p.createdBy ? { createdBy: swap(p.createdBy) } : {}),
+    ...(b ? { approvalBinding: { ...b, submitters: b.submitters.map(swap), ...(b.submitterCauses ? { submitterCauses: b.submitterCauses.map(swap) } : {}) } } : {}),
+  };
+}
+
 /** Tombstone the proposer on this tenant's plans (the plans are the client's spend record and are kept). */
 export async function erasePlanCreators(tenantId: string, forms: ReadonlySet<string>, tombstone: string): Promise<number> {
   let touched = 0;
   for (const p of await plans.listByPrefix(`${tenantId}::`)) {
-    if (p.tenantId !== tenantId || !p.createdBy || !forms.has(p.createdBy)) continue;
+    if (p.tenantId !== tenantId || !namesSubject(p, forms)) continue;
     // ADR 1022 (CP71WF-28) — retry a lost CAS (a concurrent apply moves the
     // plan); a skipped row would keep the erased person's id. The caps loop.
     const key = `${p.tenantId}::${p.orgId}::${p.planId}`;
     let done = false;
     for (let attempt = 0; attempt < 5; attempt++) {
       const current = await plans.get(key);
-      if (!current || current.tenantId !== tenantId || !current.createdBy || !forms.has(current.createdBy)) { done = true; break; }
-      if (await plans.compareAndSwap(current, { ...current, createdBy: tombstone })) { touched += 1; done = true; break; }
+      if (!current || current.tenantId !== tenantId || !namesSubject(current, forms)) { done = true; break; }
+      if (await plans.compareAndSwap(current, tombstonePlan(current, forms, tombstone))) { touched += 1; done = true; break; }
     }
     if (!done) throw new OpenwopError('conflict', 'Reallocation-plan creator erasure lost concurrent updates; retry.', 409);
   }

@@ -45,6 +45,15 @@ export async function put(
   return { storageRef: stored.token, serveToken: stored.token, sizeBytes: stored.bytes };
 }
 
+/** #5928 ask 4 — the first `maxBytes` of a stored asset's bytes (an image header), or
+ *  null when the ref is absent or another tenant's. Only that prefix of the stored
+ *  base64 is decoded. A bucket-backed adapter would issue a ranged read here. */
+export async function readHead(tenantId: string, storageRef: string, maxBytes: number): Promise<Buffer | null> {
+  const entry = await resolveMediaAsset(storageRef);
+  if (!entry || entry.tenantId !== tenantId) return null;
+  return Buffer.from(entry.contentBase64.slice(0, Math.ceil(maxBytes / 3) * 4), 'base64');
+}
+
 /** ADR 0579 — tenant-scoped ref enumeration for the orphan sweep. */
 export async function listRefs(tenantId: string): Promise<Array<{ storageRef: string; bytes: number; storedAtMs: number | null }>> {
   return (await listMediaAssetTokens(tenantId)).map((e) => ({ storageRef: e.token, bytes: e.bytes, storedAtMs: e.storedAtMs }));

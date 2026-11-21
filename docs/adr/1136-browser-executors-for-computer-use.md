@@ -335,7 +335,7 @@ P2 attaches a real browser, so these hold before it merges:
    which 0894 already allows; the case 0894 refuses is the public share link, `/shared/:token`, which
    is served from the host's own origin.
 4. **The everyday-browser extension.** Out of scope here; record it if a customer asks for it.
-5. [ ] **Browser pairing behind `computer-use` (before P6).** Pairing routes live under the
+5. [x] **Browser pairing behind `computer-use` (before P6).** **Decided 2026-11-18 (user):** yes. Browser pairing moves behind `computer-use`, so it works with Claude Code off. Pairing routes live under the
    Claude Code feature and its operator gate, so with Claude Code off nobody can pair a
    browser, and the default-on flip (D7) would reach no one. P6 moves browser pairing
    behind `computer-use` (P2a-2 notes).
@@ -404,4 +404,46 @@ P2 splits in two:
   browser pairing behind `computer-use`, or the default-on flip reaches no one.
 - **Consent text is English**, like the terminal consent. Localizing consent is the
   same decision ADR 1125 left open for stored request text.
+
+## P3 — take-over, the trajectory viewer, the desktop pane (2026-11-18)
+
+P3 lands in three PRs:
+- **P3a:** take-over, backend plus its card;
+- **P3b:** the SPA trajectory viewer and a Connect-a-browser card;
+- **P3c:** the desktop shell pane over `webContents.debugger`.
+
+`resolveAdapter` stays untouched until P3 is whole.
+
+### P3a — take-over (D5), and the release-manager conditions
+
+In the **host-loop lane only** (the person's own window), a credential field no
+longer fails the session. The session pauses as `awaiting_takeover`, and the person
+does the step themselves. A hosted-provider adapter has no take-over
+(`handOver` absent), so it keeps today's `credential_entry_unsupported` refusal.
+
+1. **The card shows the real origin.** The take-over card shows the host of the page
+   the browser itself reported (the executor's snapshot URL, never model text) and
+   the reason, in host strings. The executor's step label is shown only as a fenced,
+   labelled note. An agent that navigated to a look-alike login page cannot get the
+   person to type their password there without the card naming that look-alike host.
+2. **It is bounded.**
+   - `awaiting_takeover` expires after 15 minutes. The sweep then ends the session
+     `takeover_expired`, which releases the browser.
+   - A session raises at most 3 take-overs. Past that it fails
+     `takeover_limit_reached`.
+   - Only the opener resumes it. The clarification declares `approverRefs: [opener]`,
+     so the host hands its token and its resolution to the opener alone (ADR 0932).
+     The surface then verifies the recorded answer the way it verifies an approval:
+     a decide node in this run's definition, the resume key, and the recorded
+     take-over fields equal to the session's. The approver list must be exactly the
+     opener, and the answer must carry no body-declared `voter`.
+   - A non-opener answer is refused (tested). Resuming is driving, so it is
+     opening-run-only (condition 4). Stopping is allowed from any authorised run.
+3. **No secret in what follows.** After a take-over the next step is a fresh
+   snapshot, because the person changed the page. Field VALUES never reach the model
+   or the record. The element report has no `value` field, and the protocol validator
+   drops any field it does not know, so an executor that sent one cannot smuggle it
+   in. The page text is the visible text, which does not include what was typed into
+   an input. A test types a known secret and shows it is absent from the model input,
+   the session projection and the run's event log.
 

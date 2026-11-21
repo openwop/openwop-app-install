@@ -5,11 +5,13 @@
  * ctx.callAI, and the provider crashed with "req.messages is not iterable"
  * (prod: lighthouse.lead-triage `draft` node fed the triage node's object output).
  *
- * Tracker TST-CQC-1 (w68). Sabotage-witnessed: red when the structured-payload
- * rung is skipped, when an explicit messages[] is ignored, when empty inputs
- * return undefined, and (since w68 r2) when the recognized-port list is
- * narrowed — the text-port case puts an UNRECOGNIZED string key first, so only
- * the precedence list (not the generic first-string fallback) picks `text`.
+ * Tracker TST-CQC-1 (w68, re-probed wave 121 as w121g1-cai-*). Sabotage-witnessed:
+ * red when the structured-payload rung is skipped, when an explicit messages[] is
+ * ignored, when the recognized-port list is narrowed — the text-port case puts an
+ * UNRECOGNIZED string key first, so only the precedence list picks `text` (since
+ * CC-SEO-3 two defined fields are serialized whole, never sent as one bare
+ * string) — and (CC-CHAIN-6) when empty inputs with no systemPrompt reach the
+ * provider or fail with any code but `invalid_inputs`.
  */
 import { describe, expect, it, beforeAll } from 'vitest';
 
@@ -59,8 +61,11 @@ describe('core.ai.chatCompletion — messages coercion (req.messages-not-iterabl
   // with no provider round-trip (no crash, no undefined — the original intent).
   it('genuinely empty inputs and no systemPrompt → typed failure, no provider call', async () => {
     const { ctx, calls } = captureCtx({});
-    const out = await chatCompletion(ctx) as { status: string; error?: { code: string } };
+    const out = await chatCompletion(ctx);
     expect(calls).toEqual([]);
-    expect(out).toMatchObject({ status: 'failed', error: { code: 'invalid_inputs' } });
+    expect(out).toEqual({
+      status: 'failed',
+      error: { code: 'invalid_inputs', message: 'chatCompletion needs a message or a systemPrompt; this node received neither.' },
+    });
   });
 });

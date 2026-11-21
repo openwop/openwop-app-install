@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { isValidElement } from 'react';
+import { Navigate } from 'react-router-dom';
 import { FEATURES } from '../features.js';
 import { visibleHubRoutes, tabIdOf } from '../hubProjection.js';
 
@@ -10,9 +12,11 @@ import { visibleHubRoutes, tabIdOf } from '../hubProjection.js';
  * reachable, and the anchor id is `campaigns` (NOT `campaign-studio`, which is the
  * unrelated ADR 0153 in-chat canvas). Pure manifest derivations.
  *
- * Sabotage-witnessed (/grade-tests w30): reordering a tab, dropping a
- * `hiddenWhenFeature`, sharing a tab's toggle, renaming the anchor toggle to
- * `campaign-studio`, and dropping a route element each turn a case red.
+ * Sabotage-witnessed (/grade-tests w30, re-probed wave 119 `w119g4-ch-*`):
+ * reordering a tab, dropping a `hiddenWhenFeature`, sharing a tab's toggle,
+ * renaming the anchor toggle to `campaign-studio`, moving the container off the
+ * workspace tier, and dropping a route element or replacing it with a redirect
+ * each turn a case red.
  * (A former "does not collide" case was cut: its anchor half is case 2, and its
  * cross-console half could not fail — `inHub` puts a route in exactly one hub.)
  */
@@ -43,7 +47,12 @@ describe('ADR 0200 — Campaign Studio console', () => {
 
   it('keeps the legacy routes reachable for deep links (no redirect)', () => {
     for (const p of CAMPAIGN_PATHS) {
-      expect(byPath(p)?.element, p).toBeTruthy();
+      // Exactly one claimant (a second, site-tier one would pre-empt it, ADR 0718)…
+      expect(FEATURES.filter((r) => r.path === p).length, p).toBe(1);
+      // …whose element is a page, not a `<Navigate>` shim (the /channels shape).
+      const el = byPath(p)?.element;
+      if (!isValidElement(el)) throw new Error(`${p}: no route element`);
+      expect(el.type, p).not.toBe(Navigate);
     }
   });
 

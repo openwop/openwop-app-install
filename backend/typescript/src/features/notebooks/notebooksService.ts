@@ -37,6 +37,7 @@ import {
 import { getSubjectKnowledge, setSubjectKnowledge, clearSubjectKnowledge } from '../../host/subjectKnowledge.js';
 import { addSubjectNote, listSubjectNotes, type SubjectNote } from '../../host/subjectMemory.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { declarePiiFields } from '../../host/dataClassification.js';
 // Cross-feature read: the transformation OUTPUT lives in Documents (the single
 // owner of stored artifacts, ADR 0053) — there is no notebooks transformation
 // store. Listing a notebook's transformations is a `listDocuments(by ownerSubject)`
@@ -94,6 +95,9 @@ const sourceSummaries = new DurableCollection<StoredSourceSummary>(
   'notebook-source-summary',
   (r) => `${r.tenantId}:${r.notebookId}:${r.sourceId}`,
 );
+// CHAN-F19 #8 (ADR 0464 §9) — a summary is model text derived from a source and can
+// quote the people in it. Not masked by field name: `summary` is a common field.
+declarePiiFields('notebook-source-summary', ['summary'], { maskGloballyByFieldName: false });
 
 /** All stored levels for one notebook (a bounded prefix scan). */
 async function notebookLevels(tenantId: string, notebookId: string): Promise<StoredSourceLevel[]> {
@@ -816,6 +820,54 @@ export async function onNotebookSourceChanged(e: { tenantId: string; collectionI
     }
     if (changed) await recomputeBindingProjection(e.tenantId, nb);
   }
+}
+
+/**
+ * CHAN-F19 #8 (ADR 0464 §9) — the strict erasure backstop for source summaries.
+ *
+ * A summary is LLM text derived from one KB source and can quote the people in it.
+ * kb's eraser (`eraseSubjectKb`) deletes the subject's own documents through
+ * `deleteDocument`, which fires the KB lifecycle seam, and `onNotebookSourceChanged`
+ * above drops that source's summary and level. But the seam is best-effort: a handler
+ * failure is logged and swallowed, so on its own a failed drop leaves the summary in
+ * place while the DSAR fan-out reports success.
+ *
+ * This runs on the same fan-out, after kb's eraser (kb registers at module load, this
+ * at feature boot; the fan-out is sequential in registration order), and deletes
+ * every summary and level in the tenant whose source document no longer exists. It is
+ * not keyed by the subject: it cannot tell whose document a vanished source was, and
+ * a summary of a deleted source has no reader either way. Strict: a failure throws, so
+ * the fan-out counts it.
+ *
+ * Scope, matching kb's: a summary of a document the subject does NOT own, which merely
+ * mentions them, is kept, as the document is (the "KNOWN RESIDUAL" in the
+ * `eraseSubjectKb` docblock, `kb/kbService.ts`; tenant teardown is the backstop).
+ */
+export async function eraseNotebookSourceStateSubject(tenantId: string, subjectKey: string): Promise<{ rowsTouched: number }> {
+  if (!tenantId || !subjectKey) return { rowsTouched: 0 }; // never an unscoped sweep
+  const [levels, summaries] = await Promise.all([
+    sourceLevels.listByPrefix(`${tenantId}:`),
+    sourceSummaries.listByPrefix(`${tenantId}:`),
+  ]);
+  const byNotebook = new Map<string, Set<string>>();
+  for (const r of [...levels, ...summaries]) {
+    if (r.tenantId !== tenantId) continue;
+    byNotebook.set(r.notebookId, (byNotebook.get(r.notebookId) ?? new Set()).add(r.sourceId));
+  }
+  let rowsTouched = 0;
+  for (const [notebookId, sourceIds] of byNotebook) {
+    const nb = await getNotebook(tenantId, notebookId);
+    let changed = false;
+    for (const sourceId of sourceIds) {
+      const live = nb ? await getDocument(tenantId, nb.orgId, nb.collectionId, sourceId, PREAUTHORIZED_CALLER) : null;
+      if (live) continue;
+      const key = `${tenantId}:${notebookId}:${sourceId}`;
+      if (await sourceSummaries.delete(key)) { rowsTouched++; changed = true; }
+      if (await sourceLevels.delete(key)) { rowsTouched++; changed = true; }
+    }
+    if (nb && changed) await recomputeBindingProjection(tenantId, nb);
+  }
+  return { rowsTouched };
 }
 
 /** Resolve a notebook or throw the uniform 404 (the existence-leak guard). */

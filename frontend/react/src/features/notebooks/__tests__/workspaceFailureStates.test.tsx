@@ -24,6 +24,9 @@
  * failure in the card and not a toast, the composer cleared only on success, the hit lane leaving
  * the composer alone + saving third-party, per-panel failure + retry busy/finally, the write
  * toast, Ask not clearing another panel's failure).
+ *
+ * ADR 1103 D9 (`NBK92-12`): a failure body is the localized sentence, never the
+ * server's English. Red when the Ask card or a list panel echoes `err.message`.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
@@ -180,13 +183,18 @@ describe('NBU-4 — "Save to notes" does not destroy the note being composed', (
   });
 
   it('CONTROL — a FAILED composer submit KEEPS the text (nothing was saved to lose it to)', async () => {
+    const { toast } = await import('../../../ui/toast.js');
     addNote.mockRejectedValueOnce(new Error('write failed'));
     await renderWorkspace();
     const composer = screen.getByLabelText('New note') as HTMLTextAreaElement;
     fireEvent.change(composer, { target: { value: 'Precious unsaved note' } });
     fireEvent.click(screen.getByRole('button', { name: /^add note$/i }));
 
-    await waitFor(() => expect(addNote).toHaveBeenCalled());
+    // Settle on the failure being HANDLED (its toast), not on the call: `addNote` is
+    // called synchronously by the click, so a check right after it ran before the
+    // rejection was handled and could not see a clear that follows the failure.
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
+    expect(addNote.mock.calls).toEqual([['nb1', 'Precious unsaved note', 'authored']]);
     expect(composer.value).toBe('Precious unsaved note');
   });
 });
@@ -202,7 +210,8 @@ describe('NBU-2 — a failed list read resolves to a stated failure, never a per
     expect(screen.getByText(/couldn't load your notes/i)).toBeTruthy();
     // ADR 1103 D9 (`NBK92-12`) — each body is the localized sentence, never the
     // server's English.
-    expect(screen.getAllByText('Failed to load.').length).toBeGreaterThanOrEqual(2);
+    // Exactly the two failed panels' bodies (the third panel read fine).
+    expect(screen.getAllByText('Failed to load.')).toHaveLength(2);
     expect(screen.queryByText('sources read 500')).toBeNull();
     expect(screen.queryByText('notes read 500')).toBeNull();
 

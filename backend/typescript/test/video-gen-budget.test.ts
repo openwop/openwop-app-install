@@ -12,7 +12,11 @@
  * Determinism: the counter is keyed on the UTC day, so `Date` is faked to a fixed
  * instant per case (a run straddling midnight would otherwise split one tenant's
  * count across two days). Sabotage: 8fw4g1-vb-env / -vb-default / -vb-cas /
- * -vb-override (round 1), 8fw4g1-vb-uncapped-r2 and 8fw4g1-vb-failclosed-r2.
+ * -vb-override (round 1), 8fw4g1-vb-uncapped-r2 and 8fw4g1-vb-failclosed-r2;
+ * re-probed at w119 after ADR 1051 D3 (w119g3-vb-*): the shipped default, the
+ * `0` = disabled refusal, the env and override `unlimited` words, the record
+ * skip for BOTH a disabled and an unlimited cap, the cap comparison, the
+ * remaining head-room, the CAS and the CV-4 fail-closed read.
  */
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import { initHostExtPersistence, DurableCollection } from '../src/host/hostExtPersistence.js';
@@ -55,20 +59,24 @@ describe('video unit on the media budget (ADR 0411 P1)', () => {
     await recordMediaUsage(t, 'video', 1);
     expect(await checkMediaBudget(t, 'video', 1)).toMatchObject({ exceeded: false, used: 1, remaining: 1 });
     await recordMediaUsage(t, 'video', 1);
-    expect((await checkMediaBudget(t, 'video', 1)).exceeded).toBe(true); // 2/2 → callVideoGenerator throws provider_rate_limited
+    expect(await checkMediaBudget(t, 'video', 1)).toMatchObject({ exceeded: true, used: 2, remaining: 0 }); // 2/2 → callVideoGenerator throws provider_rate_limited
   });
 
   it('ADR 1051 D3 — cap 0 DISABLES paid video; only `unlimited` is uncapped, and neither records', async () => {
     process.env.OPENWOP_MEDIA_DAILY_VIDEO_JOBS = '0';
     const t = tenant('zero');
-    expect(await checkMediaBudget(t, 'video', 1)).toMatchObject({ exceeded: true, disabled: true, cap: 0 });
+    expect(await checkMediaBudget(t, 'video', 1)).toMatchObject({ exceeded: true, disabled: true, cap: 0, remaining: 0 });
+    // "records nothing": a disabled or uncapped check returns before reading any
+    // count, so the proof is to turn a cap ON afterwards and read what was stored,
+    // once after each half (so each half's skip is witnessed on its own).
+    await recordMediaUsage(t, 'video', 25);
+    process.env.OPENWOP_MEDIA_DAILY_VIDEO_JOBS = '30';
+    expect(await checkMediaBudget(t, 'video', 1), 'a disabled cap recorded nothing').toMatchObject({ used: 0, cap: 30 });
     process.env.OPENWOP_MEDIA_DAILY_VIDEO_JOBS = 'unlimited';
     await recordMediaUsage(t, 'video', 25);
     expect(await checkMediaBudget(t, 'video', 1)).toMatchObject({ exceeded: false, remaining: Infinity });
-    // "records nothing": an uncapped check returns before reading any count, so the
-    // proof is to turn a cap ON afterwards and read what was stored.
     process.env.OPENWOP_MEDIA_DAILY_VIDEO_JOBS = '30';
-    expect(await checkMediaBudget(t, 'video', 1)).toMatchObject({ used: 0, cap: 30 });
+    expect(await checkMediaBudget(t, 'video', 1), 'an unlimited cap recorded nothing').toMatchObject({ used: 0, cap: 30 });
   });
 
   it('the per-org governance override wins over env, field by field (explicit 0 = off, ADR 1051)', async () => {
@@ -80,7 +88,7 @@ describe('video unit on the media budget (ADR 0411 P1)', () => {
     configureMediaBudget({ storage, resolveOverride: async () => ({ videoJobs: 0 }) });
     expect(await checkMediaBudget(t, 'video', 1)).toMatchObject({ exceeded: true, disabled: true }); // 0 = paid video off for this org
     configureMediaBudget({ storage, resolveOverride: async () => ({ videoJobs: 'unlimited' }) });
-    expect((await checkMediaBudget(t, 'video', 1)).exceeded).toBe(false);
+    expect(await checkMediaBudget(t, 'video', 1)).toMatchObject({ exceeded: false, remaining: Infinity });
   });
 
   it('parallel records never lose increments (the CAS contract)', async () => {

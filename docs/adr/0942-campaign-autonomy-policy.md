@@ -431,6 +431,18 @@ These are floors (D3 layer 1); no preset or policy can relax them.
    (`host/approvalSelfCheck.ts:32`) on both lanes. **The sole-approver escape is
    disabled for autonomy gates**: if no one else is eligible, the gate escalates
    (D7) and then expires as rejected. It is never self-approved.
+
+   > **CORRECTION (2026-11-15, ADR 1131, Proposed; user decision):** a narrow
+   > **sole-admin** escape is planned. When nobody other than the decider and the
+   > run's requesters could decide the gate, a human decider who holds an admin
+   > management scope may approve. The approval is recorded and audited as
+   > `sole_admin`. The escape is re-evaluated at decide time, so a second admin
+   > restores the two-person rule. It never applies to API keys or agents, quorum
+   > gates, MCP-origin runs or votes (D10.3), or attended branch forks (D10.4),
+   > and no policy or preset can enable or widen it. The original rationale above
+   > is kept: it still holds for every workspace with a second eligible approver.
+   > Reason: a one-admin workspace (the default state, ADR 0905 D3) otherwise
+   > dead-ends at its first autonomy gate (CasaVoga, Campaign Studio ledger CC-GATE-2).
 3. **Runs started over MCP never cause an external effect unattended.** A run
    carrying the host-written MCP origin (`source:'mcp-server-mount'`,
    `trustBoundary:'untrusted'`, `host/mcpSemantics.ts:404`) gets `approve` as a
@@ -796,6 +808,15 @@ before building it; its findings are folded in below.
 > - **There is no sole-approver escape.** With the toggle on, a one-admin client
 >   cannot approve its own campaign's kernel. That is D10.2 by design; P4's
 >   escalation and P5's explainer must say so.
+>
+> > **CORRECTED 2026-11-19:** superseded in part by the sole-admin self-approval
+> > ADR (D1), which shipped in v0.15.0 (#6022). A requester may APPROVE their own
+> > gate when they are a person in their own session, hold the admin scope, and no
+> > one else could decide it. It never applies to a quorum gate, an MCP-origin run
+> > or an attended fork. It is checked at decide time and audited as
+> > `autonomy.self_approval.sole_admin` (`host/autonomyPolicy/selfApproval.ts`,
+> > `routes/interrupts.ts`, `host/autonomyPolicy/spendEligibility.ts`). Rejecting
+> > is unchanged.
 
 > **D6, as built:** the table covers 22 typeIds, including the three
 > `vendor.myndhyve.ads-publish-*` nodes (`ads.publish.{meta,google,tiktok}`),

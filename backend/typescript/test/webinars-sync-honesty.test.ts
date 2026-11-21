@@ -9,6 +9,18 @@
  *  - WB-SP-8: attendees count DISTINCT people, not per-join-session rows.
  *  - WB-SP-2: the pending registrant-push queue round-trips per (event,email).
  *  - WB-SP-4: the pack sync node maps a surface error to a node FAILURE.
+ *  - ADR 1054 D5 / WEB-7: the sync walks registrants first; a partial or first-page
+ *    registrant failure defers no-shows, and a queued (never-pushed) registrant is
+ *    never a no-show. The pending-push subject eraser matches case-insensitively.
+ *
+ * Red if a partial attendance or registrant walk feeds the no-show pass, if either
+ * first-page error keeps the cooldown claim, if a 400/404 registrant answer becomes
+ * an error, if attendees stop being deduped by lowercased email, if registrants
+ * are not ingested, if the push queue stops being skipped, if the queue key loses
+ * its dedup or lowercasing, if per-event counts drift, if the eraser matches by
+ * spelling, or if the node maps a surface error to success. The node check
+ * `success === false || outcome === 'error'` is a double guard the fixture hits on
+ * both halves; its probe breaks both in one edit.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { WebinarAdapter } from '../src/features/webinars/host/webinarAdapter.js';
@@ -68,10 +80,8 @@ describe('R2 WB-SP-1/5/8 — sync truth', () => {
       .mockResolvedValueOnce({ ok: false, error: 'zoom_500' });
 
     const out = await syncEvent(deps(), T, ORG, EVENT);
-    expect(out.outcome).toBe('synced');
-    if (out.outcome !== 'synced') return;
-    expect(out.attendees).toBe(1); // the partial ingest is kept
-    expect(out.noShows).toBe(0); // the accusation is DEFERRED
+    // attendees 1: the partial ingest is kept; noShows 0: the accusation is DEFERRED.
+    expect(out).toMatchObject({ outcome: 'synced', attendees: 1, noShows: 0 });
     // Bob carries no durable false no-show.
     const counts = await computeEventCounts(T, ORG, '900');
     expect(counts.noShowCount).toBe(0);
@@ -85,6 +95,8 @@ describe('R2 WB-SP-1/5/8 — sync truth', () => {
     listAttendance.mockResolvedValueOnce({ ok: true, value: { rows: [{ email: 'alice@x.test' }] } });
     const retry = await syncEvent(deps(), T, ORG, EVENT);
     expect(retry.outcome).toBe('synced');
+    // Positive control: the cooldown is live, so a sync straight after a SUCCESS is refused.
+    expect((await syncEvent(deps(), T, ORG, EVENT)).outcome).toBe('cooldown');
   });
 
   it('attendees count DISTINCT people — a drop-and-rejoin is one attendee, not two', async () => {
@@ -93,8 +105,7 @@ describe('R2 WB-SP-1/5/8 — sync truth', () => {
       { email: 'ALICE@x.test', joinTime: '2026-08-01T10:20:00Z' }, // rejoin, case-shifted
     ] } });
     const out = await syncEvent(deps(), T, ORG, EVENT);
-    expect(out.outcome).toBe('synced');
-    if (out.outcome === 'synced') expect(out.attendees).toBe(1);
+    expect(out).toMatchObject({ outcome: 'synced', attendees: 1 });
   });
 });
 
@@ -158,7 +169,7 @@ describe('R2 WB-SP-4 — the pack sync node maps errors', () => {
     };
     const out = await webinarNodes['feature.webinars.nodes.sync'](ctx);
     expect(out.status).toBe('failed');
-    expect(out.error?.code).toBe('sync_failed');
+    expect(out.error).toEqual({ code: 'sync_failed', message: 'Webinar sync failed: no_connection' });
   });
 
   it('polarity: a successful sync stays a node success', async () => {
@@ -167,7 +178,7 @@ describe('R2 WB-SP-4 — the pack sync node maps errors', () => {
       inputs: { orgId: ORG, eventId: EVENT.eventId },
     };
     const out = await webinarNodes['feature.webinars.nodes.sync'](ctx);
-    expect(out.status).toBe('success');
+    expect(out).toEqual({ status: 'success', outputs: { success: true, outcome: 'synced', attendees: 3, noShows: 1 } });
   });
 });
 
@@ -189,7 +200,6 @@ describe('R2 review fold-in — the pending-push lifecycle (a raw-email store mu
       .mockResolvedValueOnce({ ok: true, value: { rows: [{ email: 'alice@x.test' }], nextCursor: 'p2' } })
       .mockResolvedValueOnce({ ok: false, error: 'zoom_500' });
     const out = await syncEvent(deps(), T, ORG, EVENT);
-    expect(out.outcome).toBe('synced');
-    if (out.outcome === 'synced') expect(out.partial).toBe(true);
+    expect(out).toMatchObject({ outcome: 'synced', partial: true, noShows: 0 });
   });
 });

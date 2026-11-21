@@ -20,7 +20,8 @@
  * screen, and findable by someone who does not.
  */
 import { Button } from '../../ui/Button.js';
-import { useEffect, useMemo, useState } from 'react';
+import { useTutorialHintClearance } from '../../ui/useTutorialHintClearance.js';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { TUTORIALS } from './registry.js';
@@ -86,6 +87,9 @@ export function TutorialHint(): JSX.Element | null {
       && !completed.has(tut.id)) ?? null;
   }, [pathname, dismissed, completed]);
 
+  const hintRef = useRef<HTMLElement>(null);
+  useTutorialHintClearance(hintRef, match !== null);
+
   if (!match) return null;
 
   const dismiss = (): void => {
@@ -95,7 +99,7 @@ export function TutorialHint(): JSX.Element | null {
   };
 
   return (
-    <aside className="tutorial-hint" role="complementary" aria-label={t('hintRegionLabel')}>
+    <aside ref={hintRef} className="tutorial-hint" role="complementary" aria-label={t('hintRegionLabel')}>
       <span className="tutorial-hint__text">{t('hintLede', { title: match.title })}</span>
       <Link className="btn-link" to={`/tutorials/${encodeURIComponent(match.id)}`}>{t('hintCta')}</Link>
       <Button variant="quiet" size="sm" onClick={dismiss}>{t('hintDismiss')}</Button>

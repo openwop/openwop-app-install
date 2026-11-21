@@ -72,7 +72,10 @@ const DEF = {
   workflowId: 'wf.copy.orch', name: 'Campaign orchestration', edges: [],
   nodes: [
     { nodeId: 'validate', typeId: 'feature.campaign-brief.nodes.validate@1.0.0' },
-    { nodeId: 'plan', typeId: 'feature.production.nodes.plan-generate@1.0.0' },
+    // context-build, not plan-generate: plan-generate skips when Production is off
+    // (`ownOptional`, test/production-plan-skip-when-off.test.ts), so it no longer
+    // makes Production required; context-build still does.
+    { nodeId: 'plan', typeId: 'feature.production.nodes.context-build@1.0.0' },
     { nodeId: 'channels', typeId: 'core.subWorkflow', config: { workflowId: 'wf.child.channels' } },
     { nodeId: 'gone', typeId: 'core.subWorkflow', config: { workflowId: 'wf.child.unresolvable' } },
   ],

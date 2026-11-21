@@ -149,6 +149,19 @@ export function hostLoopAdapter(opts: HostLoopOptions): ComputerUseAdapter {
       return { ok: true, value: { accepted: true } };
     },
 
+    async handOver(id, actionId): Promise<CuResult<{ accepted: boolean }>> {
+      const s = sessions.get(id);
+      if (!s) return { ok: false, error: 'unknown_session' };
+      const p = s.pending;
+      if (!p || p.action.actionId !== actionId) return { ok: false, error: 'stale_action' };
+      // Never performed: the person does this step in their own window. Their
+      // typing changes the page, so the next poll reads it afresh.
+      s.pending = undefined;
+      s.snapshot = null;
+      s.history.push({ label: p.action.description, outcome: 'handed_over' });
+      return { ok: true, value: { accepted: true } };
+    },
+
     async abortSession(id) {
       const s = sessions.get(id);
       if (s) { s.pending = undefined; s.failed = s.failed ?? 'aborted'; }

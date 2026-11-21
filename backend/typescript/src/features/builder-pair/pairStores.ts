@@ -27,6 +27,8 @@
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { registerKvAgeOut } from '../../host/kvAgeOut.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
+import { subjectKeyForms } from '../../host/subjectErasureRedaction.js';
+import { declarePiiFields } from '../../host/dataClassification.js';
 import type { SuggestedOp } from './editOps.js';
 
 export const PAIR_ROW_TTL_MS = 24 * 60 * 60 * 1000;
@@ -115,6 +117,8 @@ const roomIndex = new DurableCollection<RoomIndexRow>(
 // the collection, so markers do not strand (WF-ORGINV-1).
 registerKvAgeOut({ id: 'builder-pair:context', prefix: 'hostext:builder-pair:context:', ttlDays: 1, timestampField: 'updatedAt', acceptIndexed: true });
 registerKvAgeOut({ id: 'builder-pair:suggestion', prefix: 'hostext:builder-pair:suggestion:', ttlDays: 1, timestampField: 'updatedAt', acceptIndexed: true });
+// CHAN-F19 #11 — the room's suggestion keys embed the requester's user id.
+declarePiiFields('builder-pair:room', ['keys'], { maskGloballyByFieldName: false });
 registerKvAgeOut({ id: 'builder-pair:room', prefix: 'hostext:builder-pair:room:', ttlDays: 1, timestampField: 'updatedAt', acceptIndexed: true });
 
 const fresh = <T extends { updatedAt: string }>(row: T | null, now = Date.now()): T | null =>
@@ -218,14 +222,31 @@ async function eraseBuilderPairSubject(tenantId: string, subjectKey: string): Pr
 registerSubjectEraser(eraseBuilderPairSubject);
 
 async function eraseRows(tenantId: string, userId: string): Promise<number> {
+  // CHAN-F19 #11 — every spelling of the subject (`user:<id>`, the bare id, …), as the
+  // other erasers match; an exact `===` missed a `user:`-spelled key.
+  const forms = subjectKeyForms(userId).forms;
   let n = 0;
   for (const c of await contexts.listForTenantIndexed(tenantId)) {
-    if (c.userId === userId && (await contexts.delete(contextKey(c.tenantId, c.userId, c.conversationId)))) n++;
+    if (forms.has(c.userId) && (await contexts.delete(contextKey(c.tenantId, c.userId, c.conversationId)))) n++;
   }
   for (const s of await suggestions.listForTenantIndexed(tenantId)) {
-    if (s.requestedBy !== userId) continue;
+    if (!forms.has(s.requestedBy)) continue;
     if (s.visibility === 'room') await removeFromRoom(s.tenantId, s.workflowId, suggestionKey(s.tenantId, s.requestedBy, s.conversationId));
     if (await suggestions.delete(suggestionKey(s.tenantId, s.requestedBy, s.conversationId))) n++;
+  }
+  // CHAN-F19 #11 — a room index row lists suggestion keys `tenant:<userId>:<conversationId>`,
+  // so it carries the requester's id. The loop above unlists a key only while its
+  // suggestion exists; once a suggestion aged out (1 day), a room other members keep fresh
+  // kept the key, and the id with it. So, after that loop, strip every key whose
+  // suggestion is gone: the subject's live keys are already unlisted, and a dangling key
+  // lists nothing (`listRoomSuggestions` skips it). Never decided by parsing the key: ids
+  // can hold `:`. Another member's dangling key goes too: housekeeping, not counted.
+  for (const r of await roomIndex.listForTenantIndexed(tenantId)) {
+    const keep: string[] = [];
+    for (const key of r.keys) if (await suggestions.get(key)) keep.push(key);
+    if (keep.length === r.keys.length) continue;
+    if (keep.length === 0) await roomIndex.delete(roomKey(r.tenantId, r.workflowId));
+    else await roomIndex.put({ ...r, keys: keep, updatedAt: new Date().toISOString() });
   }
   return n;
 }

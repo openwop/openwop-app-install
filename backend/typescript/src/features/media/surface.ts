@@ -124,6 +124,7 @@ export function buildMediaSurface(scope: BundleScope): FeatureSurface {
         name: view.name,
         contentType: view.contentType,
         sizeBytes: view.sizeBytes,
+        ...(view.width !== undefined && view.height !== undefined ? { width: view.width, height: view.height } : {}), // #5928 ask 4
         // MED2-R2 — NO `serveToken`, and no `serveUrl` (which is just the token
         // in a path: `/v1/host/openwop-app/assets/<serveToken>`). This verb is
         // `role:'action'` like `select`, so its output is RECORDED in the run
@@ -171,6 +172,7 @@ export function buildMediaSurface(scope: BundleScope): FeatureSurface {
           ...(entry.aiOrigin ? { lineage: { ...cleanLineage(args.lineage), generatedBy: 'ai' } } : args.lineage !== undefined ? { lineage: args.lineage } : {}),
           ...(grounding ? { grounding } : {}),
           contentHash,
+          bytes: Buffer.from(entry.contentBase64, 'base64'), // #5928 ask 4 — width/height from the header
         });
       });
       return project(viewAsset(asset), false);

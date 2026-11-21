@@ -19,6 +19,9 @@
  * treat 403 as a load failure → the 403 case red; skip the generator-owned split or its
  * notice → the legacy-override case red; ignore the stored motion, save a different one, or keep it
  * when "Calm (default)" is chosen → the motion case red.
+ *
+ * Issue #5913: the footer text is a field. Red when the stored value is not loaded
+ * into it, an edit is not saved, or clearing it sends anything but `''`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';

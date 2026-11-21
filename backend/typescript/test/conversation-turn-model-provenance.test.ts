@@ -4,8 +4,11 @@
  * can call → this turn's route (ADR 1016) → per-exchange override; non-secret;
  * `undefined` when unresolved.
  *
- * TST-CKC-9. Red when the 'unknown' model sentinel is stamped as a model (case 4)
- * or the per-exchange override stops taking precedence (case 3).
+ * TST-CKC-9. Sabotage (grade-tests w119): ignoring the legacy stamp, dropping the
+ * stamp's callability check or judging a ref-less (managed) run's stamp as callable,
+ * dropping this turn's route (in the resolver or in the provenance call), letting a
+ * stamp or a route outrank the override or the route, or stamping the 'unknown'
+ * sentinel each red a case below.
  */
 import { describe, it, expect } from 'vitest';
 import { resolveModelProvenance } from '../src/host/conversationExchange.js';
@@ -37,11 +40,19 @@ describe('resolveModelProvenance (ADR 0124 Phase 2d / RFC 0109)', () => {
   it('ADR 1016 D3 — this turn\'s ROUTE is the provenance (it is what dispatched)', () => {
     expect(resolveModelProvenance(run({ provider: 'anthropic', model: 'claude-haiku-4-5', credentialRef: 'anthropic' }), undefined, undefined, { provider: 'anthropic', model: 'claude-opus-5-5' }))
       .toEqual({ provider: 'anthropic', model: 'claude-opus-5-5' });
+    // D4b — the route outranks a legacy stamp the conversation CAN call.
+    expect(resolveModelProvenance(run({ provider: 'anthropic', model: 'claude-haiku-4-5', credentialRef: 'anthropic' }, { modelRoute: { provider: 'anthropic', model: 'claude-opus-4-8' } }), undefined, undefined, { provider: 'anthropic', model: 'claude-opus-5-5' }))
+      .toEqual({ provider: 'anthropic', model: 'claude-opus-5-5' });
   });
 
   it('a per-exchange override is HIGHEST precedence (the in-chat selector)', () => {
     expect(resolveModelProvenance(run({ provider: 'anthropic', model: 'claude-opus-4-8' }), { provider: 'google', model: 'gemini-x' }))
       .toEqual({ provider: 'google', model: 'gemini-x' });
+    // HIGHEST: it beats a callable legacy stamp AND this turn's route.
+    expect(resolveModelProvenance(
+      run({ provider: 'anthropic', model: 'claude-haiku-4-5', credentialRef: 'anthropic' }, { modelRoute: { provider: 'anthropic', model: 'claude-opus-4-8' } }),
+      { provider: 'google', model: 'gemini-x' }, undefined, { provider: 'anthropic', model: 'claude-opus-5-5' },
+    )).toEqual({ provider: 'google', model: 'gemini-x' });
   });
 
   it('returns undefined when the model is unresolved (no meaningless stamp)', () => {

@@ -302,6 +302,10 @@ campaign). ADR 0945 owns how creative uses `imageAssetTokens`.
 
 ### D5 — Routes and labels
 
+> **ADDED 2026-11-20 (ADR 1154 D9).** The guided workspace uses
+> `/campaign-studio/campaigns/:campaignId/:step`, inside this rule. Its "Plan"
+> step keeps the D8 meaning: it centres on the plan canvas.
+
 - `/campaign-studio` stays the hub. **No new one-segment child** of
   `/campaign-studio`. New surfaces are two segments or more:
   `/campaign-studio/campaigns/:campaignId/*` (campaign detail; the 0960 cockpit

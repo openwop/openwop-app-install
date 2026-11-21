@@ -12,6 +12,8 @@
 
 import { EXPORT_KINDS, type ExportBundle, type ExportItem, type ExportKind, type ImportItemResult, type ImportPlan, type ImportResult } from './types.js';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
+import type { SubjectEraseReport } from '../../host/subjectErasure.js';
+import { subjectKeyForms } from '../../host/subjectErasureRedaction.js';
 
 /** Cross-instance import dedup (ADR 0039 overlap residual — closed with the
  *  PR #1181 CAS pattern): each item's dedup key is CLAIMED atomically
@@ -20,10 +22,46 @@ import { DurableCollection } from '../../host/hostExtPersistence.js';
  *  design — import is idempotent-by-content, so a claim never needs release
  *  (a failed create just means the next import re-skips; the find-existing
  *  fast path above each claim keeps the human message precise). */
-interface ImportClaim { key: string; tenantId: string; createdAt: string }
+interface ImportClaim {
+  key: string;
+  tenantId: string;
+  createdAt: string;
+  /** CHAN-F19 #6 (ADR 0464 §9): the importer of a PRIVATE prompt, whose
+   *  `User.userId` is also in the key. Absent on roster, schedule and
+   *  public-prompt claims, which name no person. */
+  ownerUserId?: string;
+}
 const importClaims = new DurableCollection<ImportClaim>('portability:import-claims', (c) => c.key);
-async function claimImport(tenantId: string, kind: string, dedupKey: string): Promise<boolean> {
-  return importClaims.compareAndSwap(null, { key: `${tenantId}:${kind}:${dedupKey}`, tenantId, createdAt: new Date().toISOString() });
+async function claimImport(tenantId: string, kind: string, dedupKey: string, ownerUserId?: string): Promise<boolean> {
+  return importClaims.compareAndSwap(null, {
+    key: `${tenantId}:${kind}:${dedupKey}`,
+    tenantId,
+    createdAt: new Date().toISOString(),
+    ...(ownerUserId ? { ownerUserId } : {}),
+  });
+}
+
+/**
+ * CHAN-F19 #6 (ADR 0464 §9) — a DSAR deletes the subject's private-prompt
+ * import claims. Each key is `${tenantId}:prompt:${orgId}:${owner}:${name}`,
+ * so it holds the person's id and the name of a prompt they imported, and it
+ * was permanent. Rows written since this change carry `ownerUserId`; older ones
+ * match on the `:${owner}:` key segment. Deleting a claim only lets the same
+ * bundle be imported again, which the find-existing check still dedupes.
+ */
+export async function erasePortabilitySubject(tenantId: string, subjectKey: string): Promise<SubjectEraseReport> {
+  if (!tenantId || !subjectKey) return { rowsTouched: 0 }; // never an unscoped sweep
+  const { forms } = subjectKeyForms(subjectKey);
+  const prefix = `${tenantId}:prompt:`;
+  let rowsTouched = 0;
+  for (const c of await importClaims.listByPrefix(prefix)) {
+    if (c.tenantId !== tenantId) continue;
+    const rest = c.key.slice(prefix.length);
+    const mine = (c.ownerUserId !== undefined && forms.has(c.ownerUserId))
+      || [...forms].some((f) => f.startsWith('user:') && rest.includes(`:${f}:`));
+    if (mine && await importClaims.delete(c.key)) rowsTouched++;
+  }
+  return { rowsTouched };
 }
 // Owning services per kind (static — portability is a LEAF feature; build-time
 // cycle checking beats lazy import()). Host services + the email→crm-precedent
@@ -338,7 +376,7 @@ const KIND_HANDLERS: Record<ExportKind, KindHandler> = {
       // private prompt of that name, and blocked B's import of it for good.
       const importedVisibility = VALID_PROMPT_VISIBILITY.has(str(item.payload.visibility)) ? str(item.payload.visibility) : 'private';
       const claimKey = importedVisibility === 'private' ? `${orgId}:${owner}:${name}` : `${orgId}:${name}`;
-      if (!(await claimImport(tenantId, 'prompt', claimKey))) {
+      if (!(await claimImport(tenantId, 'prompt', claimKey, importedVisibility === 'private' ? owner : undefined))) {
         return { status: 'skipped', message: `prompt '${name}' was already imported` };
       }
       // PLC-7 (ADR 0694 D3a/D3c) — `actor` here is the RAW request subject

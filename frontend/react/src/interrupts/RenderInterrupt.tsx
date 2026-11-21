@@ -16,6 +16,7 @@ import { ConnectionRequiredDialog } from './ConnectionRequiredDialog.js';
 import { RefinementForm } from './RefinementForm.js';
 import { CancellationBanner } from './CancellationBanner.js';
 import { CredentialRequestCard } from './CredentialRequestCard.js';
+import { TakeoverCard, takeoverOf } from './TakeoverCard.js';
 import { requestWords } from './requestWords.js';
 
 /** CC-UI-2 — when a `timer` interrupt resumes, mirroring the backend's
@@ -57,6 +58,9 @@ export function RenderInterrupt({ runId, active, onResolved }: Props) {
     case 'approval':
       return <ApprovalCard {...props} />;
     case 'clarification':
+      // ADR 1136 P3a — the browser agent handed a step to the person (a sign-in in
+      // their own window). Continue / Stop, never a free-text answer.
+      if (takeoverOf(active.data)) return <TakeoverCard runId={runId} nodeId={active.nodeId} data={active.data} onResolved={onResolved} />;
       // ADR 0189 — a connection prompt rides the clarification kind but carries
       // the `openwop-connection` profile; render the connect-to-continue dialog
       // (Connect/Skip) instead of the free-text answer field. Mirrors the chat

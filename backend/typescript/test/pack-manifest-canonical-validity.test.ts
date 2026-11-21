@@ -23,6 +23,13 @@
  * packs.openwop.dev. A kind whose canonical schema is absent cannot be checked
  * locally at all — which is how `engines: { "openwop-app" }` (the host name
  * rather than the PROTOCOL name) once reached a publish attempt.
+ *
+ * #5993: form-content packs validate against the v2 schema the host LOADS them
+ * under (a `FormField.when` condition, RFC 0177 §E.4, is legal there and absent
+ * from the frozen v1). The `when` case pins the v1 refusal to that one key, and the
+ * undefined-key case pins both schemas' refusal to that one key, so neither can
+ * pass on an unrelated error. Dropping `when` from v2, or opening either schema's
+ * FormField to unknown keys, reds them.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
@@ -112,7 +119,10 @@ describe('form-content packs validate against the schema the host loads them und
     fields[1]!.when = { type: 'truthy', left: String(fields[0]!.id) };
     const v2 = compile(ENFORCED['form-content']!);
     expect(v2(manifest), JSON.stringify(v2.errors?.slice(0, 3))).toBe(true);
-    expect(compile('form-content-pack-manifest.schema.json')(manifest), 'v1 should not define `when`').toBe(false);
+    const v1 = compile('form-content-pack-manifest.schema.json');
+    expect(v1(manifest), 'v1 should not define `when`').toBe(false);
+    // Refused for `when` and nothing else: the unmodified starter is v1-valid.
+    expect(v1.errors?.map((e) => [e.instancePath, e.keyword, e.params.additionalProperty])).toEqual([['/templates/0/fields/1', 'additionalProperties', 'when']]);
   });
 
   it('a field neither schema defines is still refused (sabotage witness)', () => {
@@ -121,7 +131,8 @@ describe('form-content packs validate against the schema the host loads them und
     for (const file of [ENFORCED['form-content']!, 'form-content-pack-manifest.schema.json']) {
       const validate = compile(file);
       expect(validate(manifest), `${file} accepted an undefined FormField key`).toBe(false);
-      expect(validate.errors?.some((e) => e.keyword === 'additionalProperties')).toBe(true);
+      // Exactly that key, on that field: not some other error the starter happens to carry.
+      expect(validate.errors?.map((e) => [e.instancePath, e.keyword, e.params.additionalProperty]), file).toEqual([['/templates/0/fields/0', 'additionalProperties', 'notAFormFieldKey']]);
     }
   });
 });

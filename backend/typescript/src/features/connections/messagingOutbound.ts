@@ -10,6 +10,7 @@
  */
 import { createHash } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { declarePiiFields } from '../../host/dataClassification.js';
 import { egressLedgerKey, priorSend, recordSend, releaseSend, reserveSend } from '../../host/egressSentLedger.js';
 import { createLogger } from '../../observability/logger.js';
 
@@ -32,6 +33,9 @@ export function setMessagingTransport(t: OutboundTransport | null): void { trans
 /** The connection↔channel pairing `/pair` establishes, so async results route back. */
 export interface Pairing { connectionId: string; provider: OutboundProvider; channelId: string; linkedAt: string }
 const pairings = new DurableCollection<Pairing>('connections:pairing', (p) => p.connectionId);
+// CHAN-F19 #10 — a DM pairing's `channelId` is a person's chat id or phone number. The
+// subject's own connections lose it on erasure (`purgeConnectionChildren`).
+declarePiiFields('connections:pairing', ['channelId'], { maskGloballyByFieldName: false });
 
 export async function pairConnection(connectionId: string, provider: OutboundProvider, channelId: string): Promise<Pairing> {
   const pairing: Pairing = { connectionId, provider, channelId, linkedAt: new Date().toISOString() };

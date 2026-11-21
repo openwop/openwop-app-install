@@ -25,7 +25,14 @@
 import { nodeFeatureSurfaceMap } from './nodeCatalogBuilder.js';
 import type { NodeFeatureDecl } from './runPreflight.js';
 
-export interface NodeFeatureEntry { required?: readonly string[]; optional?: readonly string[] }
+/**
+ * `ownOptional`: the node SKIPS cleanly when its OWN feature (`feature.<own>.nodes.*`)
+ * is off, so the preflight must not require it. Honoured only on an exact typeId
+ * entry here, never on a pack-wide `<pack>.*` entry or a manifest: it is a reviewed,
+ * per-node claim, and it must be witnessed by a test that runs the node with the
+ * feature off.
+ */
+export interface NodeFeatureEntry { required?: readonly string[]; optional?: readonly string[]; ownOptional?: boolean }
 
 export const NODE_FEATURE_REQUIREMENTS: Readonly<Record<string, NodeFeatureEntry>> = {
   // ── feature.campaign-channels.nodes, reviewed per node (packs/feature.campaign-channels.nodes/index.mjs)
@@ -53,6 +60,10 @@ export const NODE_FEATURE_REQUIREMENTS: Readonly<Record<string, NodeFeatureEntry
   'feature.notebooks.nodes.*': { optional: ['documents'] },
   'feature.podcasts.nodes.*': { optional: ['documents', 'notebooks'] },
   'feature.production.nodes.*': { optional: ['campaign-brief'] },
+  // plan-generate skips with `skipped: true` when Production is off (catches
+  // host_capability_disabled; test/production-plan-skip-when-off.test.ts), so the
+  // campaign spine runs without Production.
+  'feature.production.nodes.plan-generate': { ownOptional: true },
   'feature.strategy.nodes.*': { optional: ['documents'] },
 };
 
@@ -77,5 +88,6 @@ export function nodeFeatureDecl(typeId: string): NodeFeatureDecl | undefined {
     for (const id of s.optional ?? []) optional.add(id);
   }
   for (const id of required) optional.delete(id);
-  return { required: [...required], optional: [...optional] };
+  const ownOptional = NODE_FEATURE_REQUIREMENTS[typeId]?.ownOptional === true;
+  return { required: [...required], optional: [...optional], ...(ownOptional ? { ownOptional: true } : {}) };
 }

@@ -21,6 +21,13 @@
  * the objective-count / goal-length overflow terms, the goal `maxLength`, and the
  * objectives split in `onSave` each turn their case below red.
  *
+ * Issue 5921 (w118, `w118g4-faa-*`): creating opens a dialog from the header — no
+ * name field before it opens (forcing it open reds), the empty state offers the same
+ * button (dropping it reds), the create trims the name and writes to the CHOSEN org
+ * (two orgs; sending the first org reds), closes and refreshes (dropping the refresh
+ * reds on the card count), and a failed create shows the localized reason, never the
+ * client message (re-throwing the raw error reds on the dialog text).
+ *
  * No live fetch (ADR 0661): every read the rendered tree makes is mocked here,
  * including `getDeletePreview` (the delete path's first read) and the Overview
  * tab's strategy chips (another feature's read).
@@ -28,16 +35,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, act, fireEvent } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import type { Project, ProjectCharter } from '../projectsClient.js';
+import type { DeleteProjectReceipt, Org, Project, ProjectCharter } from '../projectsClient.js';
+import type { WorkflowSummaryDTO } from '../../../workflows/workflowsClient.js';
+import type { EffectiveAccess } from '../../../client/accessClient.js';
 
-const listWorkflowSummaries = vi.fn();
-const listProjects = vi.fn();
-const listOrgs = vi.fn();
-const getEffectiveAccess = vi.fn();
-const getProject = vi.fn();
-const deleteProject = vi.fn();
-const updateCharter = vi.fn();
-const createProject = vi.fn();
+// Typed against the real client signatures, so every fixture below is production-shaped.
+const listWorkflowSummaries = vi.fn<() => Promise<WorkflowSummaryDTO[]>>();
+const listProjects = vi.fn<() => Promise<Project[]>>();
+const listOrgs = vi.fn<() => Promise<Org[]>>();
+const getEffectiveAccess = vi.fn<() => Promise<EffectiveAccess>>();
+const getProject = vi.fn<(id: string) => Promise<Project>>();
+const deleteProject = vi.fn<(id: string) => Promise<DeleteProjectReceipt>>();
+const updateCharter = vi.fn<(id: string, c: ProjectCharter | null) => Promise<Project>>();
+const createProject = vi.fn<(orgId: string, name: string) => Promise<Project>>();
 
 vi.mock('../../../workflows/workflowsClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
@@ -50,7 +60,7 @@ vi.mock('../projectsClient.js', async (orig) => ({
   listOrgs: () => listOrgs(),
   getProject: (id: string) => getProject(id),
   deleteProject: (id: string) => deleteProject(id),
-  updateCharter: (id: string, c: unknown) => updateCharter(id, c),
+  updateCharter: (id: string, c: ProjectCharter | null) => updateCharter(id, c),
   createProject: (orgId: string, name: string) => createProject(orgId, name),
   updateWorkflows: vi.fn(async () => ({})),
   getDeletePreview: vi.fn(async () => ({ canvases: 0, documents: 0, entities: 0, priorityLists: 0, teamLedger: 0 })),
@@ -80,7 +90,7 @@ const settle = async (): Promise<void> => { await act(async () => { await new Pr
 beforeEach(() => {
   for (const m of [listWorkflowSummaries, listProjects, listOrgs, getEffectiveAccess, getProject, deleteProject, updateCharter, createProject]) m.mockReset();
   createProject.mockResolvedValue(PROJECT);
-  listWorkflowSummaries.mockResolvedValue([{ workflowId: 'wf-mine', name: 'My real workflow' }]);
+  listWorkflowSummaries.mockResolvedValue([{ workflowId: 'wf-mine', kind: 'workflow', name: 'My real workflow', nodeCount: 3, createdAt: '2026-06-01T00:00:00.000Z', updatedAt: '2026-06-02T00:00:00.000Z' }]);
   listProjects.mockResolvedValue([]);
   listOrgs.mockResolvedValue([{ orgId: 'org-1', name: 'Acme' }]);
   getEffectiveAccess.mockResolvedValue({ roles: [], scopes: ['workspace:write'], basis: 'member' });
@@ -114,14 +124,20 @@ describe('issue 5921 — creating a project opens a dialog from the header', () 
   });
 
   it('creates in the chosen org, closes, and refreshes the list', async () => {
+    // Two orgs, the SECOND chosen: a write to the default first org is a different value.
+    listOrgs.mockResolvedValue([{ orgId: 'org-1', name: 'Acme' }, { orgId: 'org-2', name: 'Beta' }]);
     await view();
     await openDialog();
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'org-2' } });
     fireEvent.change(screen.getByLabelText(/new project name/i), { target: { value: '  Launch Q3 ' } });
     listProjects.mockResolvedValue([PROJECT]);
+    expect(screen.queryAllByText('Atlas')).toHaveLength(0); // the list is empty before the create
     fireEvent.click(screen.getByRole('button', { name: /create project/i }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    expect(createProject).toHaveBeenCalledWith('org-1', 'Launch Q3');
-    expect(await screen.findByText('Atlas')).toBeTruthy();
+    expect(createProject).toHaveBeenCalledTimes(1);
+    expect(createProject).toHaveBeenCalledWith('org-2', 'Launch Q3');
+    await settle();
+    expect(screen.queryAllByText('Atlas')).toHaveLength(1); // the refreshed list, read after it settled
   });
 
   it('a failed create keeps the dialog open with the localized reason inside, never the client message', async () => {
@@ -131,7 +147,9 @@ describe('issue 5921 — creating a project opens a dialog from the header', () 
     fireEvent.change(screen.getByLabelText(/new project name/i), { target: { value: 'Atlas' } });
     fireEvent.click(screen.getByRole('button', { name: /create project/i }));
     const dialog = screen.getByRole('dialog', { name: /new project/i });
-    await waitFor(() => expect(dialog.textContent).toContain('Failed to create the project.'));
+    await waitFor(() => expect(createProject).toHaveBeenCalledTimes(1));
+    await settle(); // the rejection has been handled; the dialog text is final
+    expect(dialog.textContent).toContain('Failed to create the project.');
     expect(dialog.textContent).toContain("You don't have permission to do that here.");
     expect(dialog.textContent).not.toContain('createProject failed');
   });
@@ -146,8 +164,11 @@ describe('PRJ2-M2 — the assign picker stopped claiming to be complete', () => 
   it('discloses that the list is missing the user’s own workflows when the read failed', async () => {
     listWorkflowSummaries.mockRejectedValue(new Error('boom'));
     await view();
-    // Not "no workflows" — the honest claim is that THIS LIST is short.
-    expect(await screen.findByText(/only the built-in templates/i)).toBeTruthy();
+    await waitFor(() => expect(listWorkflowSummaries).toHaveBeenCalled());
+    await settle();
+    // Not "no workflows" — the honest claim is that THIS LIST is short. Read after the
+    // failure settled, so a missing disclosure reds on the count, not on a timeout.
+    expect(screen.queryAllByText(/only the built-in templates/i)).toHaveLength(1);
   });
 
   it('says nothing when the read succeeded (the negative control)', async () => {
@@ -254,8 +275,8 @@ describe('PRJ2-M5 — the charter editor refuses a save the server would silentl
       target: { value: Array.from({ length: 23 }, (_, i) => `objective ${i}`).join('\n') },
     });
     await settle();
-    expect(await screen.findByText(/3 objective\(s\) over the limit of 20/i)).toBeTruthy();
     expect(saveButton().disabled).toBe(true);
+    expect(screen.getByText(/objective\(s\) over the limit of 20/i).textContent).toMatch(/^3 objective\(s\) over the limit of 20/);
     fireEvent.click(saveButton());
     await settle();
     // The defect: the old editor sent all 23, got a 200 back, and reported
@@ -274,8 +295,8 @@ describe('PRJ2-M5 — the charter editor refuses a save the server would silentl
     // with Save enabled and was silently trimmed on write — the very defect
     // the caps exist to close, surviving inside the fix for it.
     await edit({ goal: 'g'.repeat(240) });
-    expect(await screen.findByText(/goal is longer than 200 characters/i)).toBeTruthy();
     expect(saveButton().disabled).toBe(true);
+    expect(screen.getByText(/goal is longer than 200 characters/i)).toBeTruthy();
   });
 
   it('saves normally when everything is within the caps (the negative control)', async () => {

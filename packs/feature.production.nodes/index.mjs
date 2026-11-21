@@ -126,6 +126,15 @@ export async function planGenerate(ctx) {
         outputs: { skipped: true, reason: 'a production plan needs an acting user with access to this organization; this run has neither' },
       };
     }
+    // ADR 0356 P1 — the "SKIP honestly" promise above, made true. The host always
+    // builds `ctx.features.production` and its gate throws `host_capability_disabled`
+    // per call when the feature is off (or outside the plan), so the
+    // `typeof … !== 'function'` check above never fires on this host and the
+    // campaign spine failed here instead of skipping. Same pattern as
+    // feature.knowledge-sync.nodes and feature.campaign-channels.nodes.
+    if (err && err.code === 'host_capability_disabled') {
+      return { status: 'success', outputs: { skipped: true, reason: 'production feature is not enabled for this tenant' } };
+    }
     throw err;
   }
 

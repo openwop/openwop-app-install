@@ -16,7 +16,9 @@
  * quote negator, the sentence negator, the one-turn rule, the shared-word count, the 4-letter
  * prefix floor, `shared > 0`, the newest-first budget walk, the untrusted fence, the evidence
  * filter, the one repair and its error text, the invalid-output failure, a provider error read
- * as `[]`, and both deadline checks.
+ * as `[]`, and both deadline checks. Re-probed at wave 121 (w121g1-me-*), adding the #5774
+ * negators ("cannot", "dont", "cant"), the anti-rot that a word merely ending in "nt" is not one,
+ * the sentence split, and the repair never echoing the model's previous reply.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ChatMessage } from '../src/providers/dispatch.js';
@@ -124,9 +126,11 @@ describe('evidenceSupports — the fact must quote the person', () => {
     expect(evidenceSupports('Keeps bees on roof', 'keep bees on my roof', ['I keep bees', 'on my roof daily'])).toBe(false);
     // Only the SENTENCE negator rule refuses this: the quote itself omits the negation.
     expect(evidenceSupports('Lives in Paris', 'live in Paris', ["I don't live in Paris anymore"])).toBe(false);
-    // (The QUOTE negator rule has no case of its own: the quote sits inside its sentence, so
-    // the sentence rule always sees the same negator. Its old witness here, "not swim well" out
-    // of "I cannot swim well", only isolated it because "cannot" was missed, #5774.)
+    // Only the QUOTE negator rule refuses this: the quote starts mid-word, so its "no" is a
+    // whole word only inside the quote ("pia|no lessons"), and the sentence has no negator.
+    // (Its old witness, "not swim well" out of "I cannot swim well", stopped isolating it once
+    // "cannot" became a sentence negator, #5774.)
+    expect(evidenceSupports('Takes lessons weekly', 'no lessons weekly', ['I take piano lessons weekly'])).toBe(false);
     // Only `shared > 0` refuses this: a fact with no content word at all.
     expect(evidenceSupports('Is so', 'I keep bees', ['I keep bees'])).toBe(false);
     // …while the same quote from an affirmative sentence passes (anti-rot).

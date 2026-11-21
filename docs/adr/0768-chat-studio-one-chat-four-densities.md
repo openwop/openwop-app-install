@@ -389,3 +389,63 @@ separate browser qualification, including default-open, reopened/scrolled and
 mobile cases; jsdom is not geometry evidence. The original live offscreen
 observation is preserved and is not classified as a provider or close-handler
 failure.
+
+
+### Correction — pocket clearance above mobile shell navigation (2026-11-08)
+
+Viewport-relative placement alone does not establish usable controls. The real
+390×844 Funnels pocket was inside the viewport while the shell bottom navigation
+covered Message, More, Voice and Send. Preserve the non-modal navigation and its
+stacking order; raising the pocket above it would obscure another usable surface.
+
+The existing shell mobile bar size is now a geometry token. At the shell's
+existing ≤860px breakpoint, a body-inherited reserve includes that size, the
+safe-area inset and a small spacing gap, only when the production bar exists.
+Both body-portaled pocket pieces consume it, including tablet widths 640–860.
+The ≤639px sheet remains full-width, with its height capped by available viewport
+space; desktop positioning and public pages without the bar retain zero reserve.
+There is no duplicated JavaScript breakpoint or new chat implementation.
+
+The existing viewport browser spec gains a real App/Sidebar/Funnels pocket and
+actual composer hit-test control. Only the active-config GET is a synthetic
+backend boundary to expose the composer without storing a key or dispatching AI.
+The test fills an unsent draft, measures real elementFromPoint containment for
+composer controls and the launcher, and checks that non-modal navigation remains
+reachable. It never clicks Send or Voice. These controls are authored, NOT RUN;
+real Chromium/backend setup, original-versus-fixed causal verification, full
+canonical qualification and deployed retesting remain separate obligations.
+
+Source-review correction (R1, 2026-11-08): the browser fixture follows the actual
+Message combobox role, requires exactly one nonempty-accessible-name production
+voice control across its capability-dependent button/menu branches, and dismisses
+the attachment menu by toggling More. Escape remains the separate composer-to-
+pocket close/focus-return control: the native panel listener can precede the
+menu's document listener. No production keyboard behavior or geometry assertion
+changes; these fixture corrections remain unexecuted.
+
+
+### Correction — measured contextual guidance clearance (2026-11-08)
+
+The body portal fixes containing-block ownership but does not compose independent
+fixed controls. A real-App isolated861px diagnostic found TutorialHint layer40
+covering the actual pocket composer at layer30. Preserve both layers and both
+surfaces: the tutorial owner measures occupied bottom distance (actual height +
+resolved bottom), and pocket/launcher use MAX(navigation reserve, tutorial reserve)
+with their existing gap and an available-viewport height cap. A shared default0
+nav token enables exact later composition with source70; this source-only change
+does not qualify that separate mobile-bar branch. The tutorial consumes nav only,
+so its geometry never depends on its own registration or pocket height.
+
+The original tutorial eligibility/progress/dismiss/never-launch and pocket
+retention/non-modal/focus semantics stay. Independent71 actual-App geometry/hit
+controls are authored with real TutorialHint, Sidebar and composer; no test
+dismissal/storage bypass or fake browser rectangles. Unit lifecycle rectangles
+are explicitly synthetic and not physical overlap evidence. All new checks,
+future exact70+71 composition/full gate/deployment/live co-usability are NOT_RUN.
+
+
+Source-composition note (2026-11-08): the isolated70+71 candidate retains both
+corrections above, one shared navigation token and all fourteen source70 viewport
+cases plus the independent tutorial case (fifteen total absent other changes).
+The tutorial case additionally authors720/860 navigation-and-hint controls; these
+combined checks and719/720/860/861 physical runtime proof remain NOT_RUN.

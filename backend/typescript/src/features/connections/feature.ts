@@ -17,10 +17,10 @@ import { registerConnectionsRoutes } from './routes.js';
 import { onConnectionRevoked } from '../../host/connectionLifecycle.js';
 import { disableInboundForRevokedConnection, purgeInboundSession } from './inboundWebhooks.js';
 import { unpair } from './messagingOutbound.js';
-import { purgeTenantConnectionChildren } from './tenantTeardown.js';
+import { purgeConnectionChildren, purgeTenantConnectionChildren } from './tenantTeardown.js';
 import { registerTenantPurgeHook } from '../../host/hostExtPersistence.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
-import { eraseSubjectConnections } from './connectionsService.js';
+import { eraseSubjectConnections, setConnectionChildPurge } from './connectionsService.js';
 
 // Connections graduated off its feature toggle on 2026-06-11 (ADR 0024
 // § Correction): it is a permanent admin surface, always-on, so it registers
@@ -64,6 +64,9 @@ export const connectionsFeature: BackendFeature = {
     // ADR 0780 D4 — a DSAR revokes the subject's USER-scoped connections (and
     // their in-flight grants) in the tenant it names; see the eraser for why
     // org/workspace rows are out of scope and what it does not reach.
+    // CHAN-F19 #10 — the eraser deletes each connection's child pointers strictly,
+    // before the revoke (the revoke consumer above is best-effort).
+    setConnectionChildPurge(purgeConnectionChildren);
     registerSubjectEraser(eraseSubjectConnections);
   },
 };

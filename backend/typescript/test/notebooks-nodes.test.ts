@@ -8,14 +8,18 @@
  * ctx whose `ctx.features.notebooks` returns canned data — fencing + context-level
  * filtering are the HOST surface's job (covered by notebooks-surface.test.ts), so
  * this test asserts only the pack's own contract (merge/dedupe/shape/backstop), plus
- * the write-transformation ownerSubject hardening (ADR 0084 review) and the MCP
- * write node's decision gate (ADR 0087 OQ-1).
+ * write-transformation's target (ADR 1103 D5: the Document goes to the notebook's
+ * own org + project owner from `transformTarget`, and a copied `orgId` /
+ * `ownerSubject` input that disagrees fails `target_mismatch`) and the MCP write
+ * node's decision gate (ADR 0087 OQ-1).
  *
  * What reds it (sabotage-witnessed, /grade-tests wave 20): citation dedupe; the
  * multi-query fan-out; context concatenation; the search hits passthrough; the
  * `ctx.features.notebooks` backstop; the read-source systemPrompt branch (both
- * arms); the `kind === 'project'` owner check (both arms); the `decision !==
- * 'accept'` guard in `mcpCreateNote`.
+ * arms); the `decision !== 'accept'` guard in `mcpCreateNote`. Re-graded at
+ * grade-tests w117: the prompt blocks' `\n\n` join and the forwarded `notebookId`
+ * are asserted exactly, and the mismatch rows include a same-id owner of another
+ * KIND, so the kind and the id comparison each have a row only they refuse.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -26,7 +30,7 @@ import * as pack from '../../../packs/feature.notebooks.nodes/index.mjs';
  *  query, and `searchNotebook` returns canned hits. Records the calls so the test
  *  can assert the multi-query fan-out. */
 function mockNotebooks(map: Record<string, { augmentedPrompt: string; citations: Array<{ documentId: string; title: string }>; contexts: Array<{ documentId: string }> }>) {
-  const calls: Array<{ method: string; query: string }> = [];
+  const calls: Array<{ method: string; query: string; notebookId?: string }> = [];
   return {
     calls,
     surface: {
@@ -34,8 +38,8 @@ function mockNotebooks(map: Record<string, { augmentedPrompt: string; citations:
         calls.push({ method: 'ask', query: args.query });
         return map[args.query] ?? { augmentedPrompt: '', citations: [], contexts: [] };
       },
-      searchNotebook: async (args: { query: string }) => {
-        calls.push({ method: 'searchNotebook', query: args.query });
+      searchNotebook: async (args: { notebookId: string; query: string }) => {
+        calls.push({ method: 'searchNotebook', notebookId: args.notebookId, query: args.query });
         return { hits: [{ documentId: 'd1', title: 'Doc 1' }], citations: [{ documentId: 'd1', title: 'Doc 1' }] };
       },
     },
@@ -55,7 +59,7 @@ describe('feature.notebooks.nodes', () => {
     });
     const out = await pack.ask(ctxFor(mock.surface, { notebookId: 'nb-1', query: 'what do whales eat' }));
     expect(out.status).toBe('success');
-    expect(out.outputs.augmentedPrompt).toContain('whales eat krill');
+    expect(out.outputs.augmentedPrompt).toBe('Knowledge: whales eat krill.\n\nQuestion: what do whales eat');
     // citations deduped by documentId even within one surface call's payload
     expect(out.outputs.citations).toHaveLength(1);
     expect(out.outputs.citations[0].documentId).toBe('d1');
@@ -69,13 +73,12 @@ describe('feature.notebooks.nodes', () => {
     });
     const out = await pack.ask(ctxFor(mock.surface, { notebookId: 'nb-1', queries: ['q1', 'q2'] }));
     expect(out.status).toBe('success');
-    // both prompt blocks concatenated
-    expect(out.outputs.augmentedPrompt).toContain('block-1');
-    expect(out.outputs.augmentedPrompt).toContain('block-2');
+    // both prompt blocks concatenated, in query order, as separate paragraphs
+    expect(out.outputs.augmentedPrompt).toBe('block-1\n\nblock-2');
     // d1 (seen in both queries) appears once; d2 once → 2 total
     expect(out.outputs.citations.map((c: { documentId: string }) => c.documentId).sort()).toEqual(['d1', 'd2']);
     // contexts concatenated across queries (no dedup — they are raw hits)
-    expect(out.outputs.contexts).toHaveLength(2);
+    expect(out.outputs.contexts).toEqual([{ documentId: 'd1' }, { documentId: 'd2' }]);
     // one surface ask per query
     expect(mock.calls.filter((c) => c.method === 'ask').map((c) => c.query)).toEqual(['q1', 'q2']);
   });
@@ -86,7 +89,7 @@ describe('feature.notebooks.nodes', () => {
     expect(out.status).toBe('success');
     expect(out.outputs.hits).toHaveLength(1);
     expect(out.outputs.hits[0].documentId).toBe('d1');
-    expect(mock.calls).toEqual([{ method: 'searchNotebook', query: 'whales' }]);
+    expect(mock.calls).toEqual([{ method: 'searchNotebook', notebookId: 'nb-1', query: 'whales' }]);
   });
 
   it('ask throws host_capability_missing when ctx.features.notebooks is absent', async () => {
@@ -145,6 +148,7 @@ describe('feature.notebooks.nodes — review fixes', () => {
     // A copied input aimed elsewhere is refused, never chosen and never silently dropped.
     await expect(write({ ownerSubject: { kind: 'user', id: 'someone-else' } })).rejects.toMatchObject({ code: 'target_mismatch' });
     await expect(write({ ownerSubject: { kind: 'project', id: 'nb-OTHER' } })).rejects.toMatchObject({ code: 'target_mismatch' });
+    await expect(write({ ownerSubject: { kind: 'user', id: 'nb-1' } })).rejects.toMatchObject({ code: 'target_mismatch' });
     await expect(write({ orgId: 'o2' })).rejects.toMatchObject({ code: 'target_mismatch' });
     expect(created).toHaveLength(2);
   });

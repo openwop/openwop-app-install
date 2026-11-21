@@ -74,3 +74,68 @@ Each phase: **`/architect` before** · **`/code-review` after**; `/ux-review` on
 | 3 | ✅ Done | `/campaign-performance` FE — CSV paste-import + KPI cards + per-platform table on shared `ui/`; central i18n `format` helpers; en/es/fr/pt-BR. **`npm run build` green**. |
 
 **Verification:** 6/6 `campaign-connectors.test.ts` (+ connection-packs 8/8); tsc clean; 3 ad connection packs load at boot; FE build green. `/architect` + `/code-review` (0) + `/ux-review` passed. Rides Accepted RFC 0095 — no new RFC.
+
+
+> **Correction proposal (2026-11-08, PERF-REVENUE-AVAILABILITY-1 — Revenue availability).**
+> The compatible numeric KPI revenue sentinel remains 0 when no rows report
+> revenue. The Campaign Performance **Revenue** card must render the existing
+> localized “Not reported” when `totals.reportedRevenueRecordCount === 0`, as the
+> existing ROAS presentation already does. A positive count with measured revenue
+> 0 remains a numeric currency amount; an omitted count from an older server
+> preserves legacy numeric rendering. Mixed reported/unreported records retain
+> the reported subtotal and existing missing-row disclosure. Currency formatting,
+> empty/loading/error states, ratio math and raw/imported records are unchanged.
+> This is a host UI correction using an existing optional DTO field and existing
+> translations; it introduces no wire contract or RFC. Report snapshots, dashboard
+> ROAS and agent performance text have separate availability limitations and are
+> not qualified by this page-only change. Existing immutable reports are untouched.
+> Mounted-page regression controls are authored **NOT RUN** pending independent
+> review and isolated qualification; no gate, deployment or live acceptance is
+> claimed by this source proposal.
+
+
+> **Accepted source direction (2026-11-08, issue 72 expansion; qualification pending).**
+> The Revenue-only proposal above is superseded in scope by actual missing
+> conversion-column evidence on the same page. Overall Revenue, overall
+> Conversions and each platform Conversions cell must distinguish an explicit
+> zero reporting count from measured numeric zero. The existing optional revenue
+> count remains; add optional `reportedConversionRecordCount` to host KPI totals
+> and each platform, always emitted by the new server and incremented only for
+> `conversions !== null`, including measured zero and zero-spend rows. Undefined
+> legacy fields keep numeric rendering. Do not infer a platform's availability
+> from organization-wide missing counts, revenue, spend or conversion truthiness:
+> those alternatives cannot distinguish missing data from a reported zero.
+> Existing numeric accumulators, reporting-only ratio denominators, raw record
+> and CSV schemas, natural keys, scopes and provider behavior remain unchanged.
+> This is additive metadata on an existing nonnormative host-extension DTO, not
+> a public OpenWOP wire/capability change; no new RFC or global helper is needed.
+> ADR 0957's all-totals parity requires preserving the new count in freshly
+> computed reports with a human-readable label, not silently dropping it or
+> exposing a camelCase field. Existing immutable snapshots are never rewritten.
+> This propagation does not make report amounts, dashboard ROAS or agent context
+> availability-aware; those limitations remain separately unqualified.
+> Preserve the thirteen Revenue R1 page cases and original five case bodies;
+> three independent page-face witnesses prevent the first Revenue failure from
+> masking either Conversions defect. Service, projection and label controls are
+> authored **NOT RUN** pending root and independent review and isolated checks.
+
+
+> **Accepted correction (2026-11-09, PERF4/72 client-report availability follow-up).**
+> The amount limitation recorded above is addressed for **new KPI report snapshots**
+> by the existing ADR0957 section adapter, not by changing `kpiSummary`'s numeric
+> contract. Explicit revenue count0 projects report Revenue/ROAS to null; explicit
+> conversion count0 projects report Conversions/CVR/CPA to null. Existing platform
+> revenue/ROAS/conversions cells use each platform's corresponding count. Positive
+> counts retain exact source values including measured0, partial reporting and
+> zero-spend ratio sentinels; absent counts keep legacy numbers. New empty snapshots
+> with explicit count0 use null only for these availability-dependent fields.
+> Raw records, source math/denominators, tenant/campaign scope, metadata, units,
+> currency and lineage remain unchanged. The existing nullable report contract/UI
+> is reused with no new wire/RFC, locale key, route or ownership seam. Old stored
+> snapshots, IDs, hashes and numeric presentation are never rewritten or inferred
+> from sibling counts; a manual recomputation creates a distinct report. No
+> dashboard/agent/attribution fix or general availability claim follows. The narrow
+> projection-oracle correction preserves other numeric/count/RBAC/hash assertions;
+> real HTTP and row-scoped component controls are authored **NOT RUN** until
+> independently reviewed and qualified. Separate issue72 source/focused evidence
+> does not qualify this report follow-up.

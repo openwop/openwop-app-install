@@ -223,19 +223,28 @@ export function undeclaredRewriteMode(): 'report' | 'apply' | null {
   return v === 'report' || v === 'apply' ? v : null;
 }
 
-export async function rewriteUndeclaredKeys(mode: 'report' | 'apply'): Promise<{ mode: 'report' | 'apply'; scanned: number; undeclared: number; rewritten: number; byTenant: Record<string, number> }> {
+/**
+ * #6053 step 1. `undeclared` and `byTenant` count LIVE keys only: the keys an
+ * empty declaration actually puts at risk. A revoked or expired undeclared key
+ * cannot authenticate, so it is counted apart (`inactive`) and never rewritten:
+ * `apply` must not widen a dead key to `['*']` (measured in prod 2026-11-18, 2
+ * of the 20 undeclared keys were dead).
+ */
+export async function rewriteUndeclaredKeys(mode: 'report' | 'apply', now: number = Date.now()): Promise<{ mode: 'report' | 'apply'; scanned: number; undeclared: number; inactive: number; rewritten: number; byTenant: Record<string, number> }> {
   let scanned = 0;
   let undeclared = 0;
+  let inactive = 0;
   let rewritten = 0;
   const byTenant: Record<string, number> = {};
   for (const rec of await keys.list()) {
     scanned += 1;
     if (rec.scopes.length !== 0) continue;
+    if (rec.revokedAt || isExpired(rec.expiresAt, now)) { inactive += 1; continue; }
     undeclared += 1;
     byTenant[rec.tenantId] = (byTenant[rec.tenantId] ?? 0) + 1;
     if (mode === 'apply' && (await keys.compareAndSwap(rec, { ...rec, scopes: ['*'] }))) rewritten += 1;
   }
-  return { mode, scanned, undeclared, rewritten, byTenant };
+  return { mode, scanned, undeclared, inactive, rewritten, byTenant };
 }
 
 /** Test seam: a key with the LEGACY undeclared (`[]`) declaration, the shape ADR 0795

@@ -23,7 +23,8 @@ import { registerNotebooksAgentTools } from './agentTools.js';
 import { buildNotebooksSurface } from './surface.js';
 import { registerSubjectDependent } from '../../host/subjectDependents.js';
 import { onKnowledgeDocumentChanged } from '../../host/knowledgeLifecycle.js';
-import { countNotebookSourceState, purgeNotebookSourceState, onNotebookSourceChanged } from './notebooksService.js';
+import { countNotebookSourceState, purgeNotebookSourceState, onNotebookSourceChanged, eraseNotebookSourceStateSubject } from './notebooksService.js';
+import { registerSubjectEraser } from '../../host/subjectErasure.js';
 
 export const notebooksFeature: BackendFeature = {
   id: 'notebooks',
@@ -46,6 +47,9 @@ export const notebooksFeature: BackendFeature = {
     // ADR 1103 D7 — a deleted or revised source takes its derived state with it, so a
     // stale summary never keeps grounding the chat.
     onKnowledgeDocumentChanged('notebooks', onNotebookSourceChanged);
+    // CHAN-F19 #8 (ADR 0464 §9) — the strict backstop: the seam above is best-effort,
+    // so a DSAR also drops every summary whose source document is gone.
+    registerSubjectEraser(eraseNotebookSourceStateSubject);
   },
   // ctx.features.notebooks (ADR 0084 / ADR 0014) — list/get sources, list notes,
   // grounded search, per-source context levels (reads) + the narrow writes the

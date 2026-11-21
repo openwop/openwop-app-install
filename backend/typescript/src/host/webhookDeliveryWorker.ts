@@ -182,6 +182,8 @@ function createGate(slots: number): <T>(fn: () => Promise<T>) => Promise<T> {
 const CLAIM_LEASE_MS = 120_000;
 /** Poll cadence for the running worker. */
 const POLL_INTERVAL_MS = 1_000;
+/** Slack on the dispatcher's retry wake (see `wakeAt`). */
+const WAKE_MARGIN_MS = 15;
 /** Per-delivery HTTP timeout. */
 const DELIVERY_TIMEOUT_MS = 10_000;
 
@@ -400,7 +402,7 @@ async function attemptDelivery(
   rec: WebhookDeliveryRecord,
   clock: () => number,
   writeGate: <T>(fn: () => Promise<T>) => Promise<T>,
-): Promise<void> {
+): Promise<number | null> {
   const startedAt = clock();
   // ADR 0747 — the secrets are read from the subscription at send time (see
   // `signingHeaders`), through the SAME DB gate as the outcome write: the
@@ -413,7 +415,7 @@ async function attemptDelivery(
   const sub = await writeGate(() => storage.getWebhook(rec.subscriptionId));
   if (sub === null) {
     await writeGate(() => storage.rescheduleWebhookDelivery(rec.deliveryId, clock(), clock(), true, 'subscription_deleted'));
-    return;
+    return null;
   }
   const result = await sendDelivery(rec, sub);
   // WHOPS-2 — the FIRST attempt only (`attempts === 0` on the claimed row), so
@@ -436,7 +438,7 @@ async function attemptDelivery(
       attempt: rec.attempts + 1,
       maxAttempts: rec.maxAttempts,
     });
-    return;
+    return null;
   }
   const attempts = rec.attempts + 1;
   const dead = attempts >= rec.maxAttempts;
@@ -453,6 +455,7 @@ async function attemptDelivery(
     dead,
     detail: result.detail,
   });
+  return dead ? null : nextAttemptAt;
 }
 
 /**
@@ -509,8 +512,29 @@ export function createWebhookDispatcher(
   let again = false;
   let stopped = false;
 
+  /** Pending one-shot wakes, so `stop()` can clear them. */
+  const wakes = new Set<NodeJS.Timeout>();
+  /**
+   * Pump again exactly when a rescheduled retry falls due, instead of on the next
+   * poll tick after it. Measured on openwop-dev (2.49.7 cut, 2026-11-19): with
+   * only the tick, the 2 s / 4 s schedule arrived as gaps of 4054 / 5016 ms,
+   * because the tick's sweeps held it for whole seconds. The second gap was then
+   * under 1.25x the first, and RFC 0173's exponential-backoff leg failed on a
+   * correct schedule. Another instance may claim the row first; this wake then
+   * finds nothing due and costs one empty claim.
+   */
+  const wakeAt = (at: number): void => {
+    if (stopped) return;
+    // +WAKE_MARGIN_MS: a Node timer can fire a millisecond before `Date.now()`
+    // reaches its target, and a claim that runs then finds the row not yet due.
+    const t = setTimeout(() => { wakes.delete(t); void pump(); }, Math.max(0, at - clock()) + WAKE_MARGIN_MS);
+    t.unref?.();
+    wakes.add(t);
+  };
+
   const launch = (rec: WebhookDeliveryRecord): void => {
     const done = attemptDelivery(storage, rec, clock, writeGate)
+      .then((nextAttemptAt) => { if (nextAttemptAt !== null) wakeAt(nextAttemptAt); })
       .catch((err: unknown) => {
         // The row keeps its lease and is re-claimed when it expires
         // (at-least-once); nothing here may take the dispatcher down.
@@ -577,6 +601,8 @@ export function createWebhookDispatcher(
     },
     stop: () => {
       stopped = true;
+      for (const t of wakes) clearTimeout(t);
+      wakes.clear();
     },
   };
 }
@@ -596,10 +622,15 @@ export function startWebhookDeliveryWorker(storage: Storage, workerId: string): 
   const dispatcher = createWebhookDispatcher(storage, workerId);
   let running = false;
   const tick = async (): Promise<void> => {
+    // Delivery pumps on EVERY tick, outside the sweep guard. The docstring above
+    // said delivery no longer rode `running`, but the early return came first, so
+    // a tick still running its sweeps skipped the pump and delayed every due
+    // retry by whole poll intervals (the 2.49.7 backoff measurement, see
+    // `wakeAt`). `pump()` coalesces concurrent calls itself.
+    void dispatcher.pump();
     if (running) return;
     running = true;
     try {
-      await dispatcher.pump();
       // RFC 0093 §D — piggyback the approval-gate timeout sweep on this
       // worker's cadence so a timed-out gate auto-rejects (fail closed)
       // even when no caller ever touches its interrupt again. The lazy

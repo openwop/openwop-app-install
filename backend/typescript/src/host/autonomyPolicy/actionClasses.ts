@@ -56,6 +56,7 @@ export const NODE_ACTION_CLASSES: Readonly<Record<string, ActionClassEntry>> = O
   'feature.campaign-ops.nodes.mcp-run-status': { class: 'none', why: 'ADR 0962 read tool for an outside agent; reads one client\'s data, writes only the run\'s client stamp.' },
   'feature.campaign-ops.nodes.mcp-explain': { class: 'none', why: 'ADR 0962 read tool for an outside agent; reads one client\'s data, writes only the run\'s client stamp.' },
   'feature.campaign-ops.nodes.mcp-request-change': { class: 'none', why: 'ADR 0962 request tool: writes a change request and starts the change-request chain; the change itself is campaign.change-set.apply, behind its approval.' },
+  'feature.campaign-ops.nodes.mcp-propose-budget-change': { class: 'none', why: 'ADR 0962 P2 request tool: stores one reallocation plan and opens ONE campaign-spend approval naming its approvers (the person behind the key cannot decide it); it reads live budgets and changes none. Applying is apply-reallocation / the apply route, ads.budget, after a person approves.' },
   'feature.campaign-connectors.nodes.sync': { class: 'none', why: 'Reads platform metrics into the host.' },
   'feature.campaign-connectors.nodes.dispatch-conversions': { class: 'none', why: 'Uploads consented server-side conversions to ad platforms (ADR 0907); no campaign action class — gated by its own sub-toggle and per-row consent.' },
   'feature.campaign-intel.nodes.pacing-check': { class: 'none', why: 'Reads spend pacing; writes a memo.' },

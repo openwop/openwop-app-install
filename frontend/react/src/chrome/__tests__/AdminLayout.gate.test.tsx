@@ -23,6 +23,7 @@ vi.mock('../../client/useEffectiveAccess.js', async (importOriginal) => {
   return { ...real, useEffectiveAccessState: () => state };
 });
 vi.mock('../navConfig/NavConfigProvider.js', () => ({
+  useNavConfig: () => ({ reload: () => {}, loading: false }),
   useResolvedNav: () => ({ admin: [], workspace: [], site: [], degraded: false }),
 }));
 vi.mock('../../featureToggles/FeatureAccessContext.js', () => ({

@@ -38,6 +38,8 @@ ARG VITE_BRAND_DEFAULT_THEME=
 ARG VITE_BRAND_APP_GATE_MODE=
 ARG VITE_BRAND_APP_GATE_PASSWORD=
 ARG VITE_BRAND_PRIVACY_URL=
+ARG VITE_BRAND_CONSENT_CLEARANCE=
+ARG VITE_BRAND_CONSENT_FOOTER=
 
 # `npm ci`, NOT `npm install` — npm >= 11.5 prunes the transitive deps of an
 # optionalDependency during `npm install`, and `npm ci` installs exactly the
@@ -80,6 +82,8 @@ RUN printf '%s\n' \
       "VITE_BRAND_APP_GATE_MODE=${VITE_BRAND_APP_GATE_MODE}" \
       "VITE_BRAND_APP_GATE_PASSWORD=${VITE_BRAND_APP_GATE_PASSWORD}" \
       "VITE_BRAND_PRIVACY_URL=${VITE_BRAND_PRIVACY_URL}" \
+      "VITE_BRAND_CONSENT_CLEARANCE=${VITE_BRAND_CONSENT_CLEARANCE}" \
+      "VITE_BRAND_CONSENT_FOOTER=${VITE_BRAND_CONSENT_FOOTER}" \
       > .env.production \
   && npm run build
 

@@ -30,7 +30,7 @@
  * An index failure never fails the kernel write: it is logged and the intent stays.
  */
 import { createHash, randomUUID } from 'node:crypto';
-import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { DurableCollection, hostExtStorage } from '../../host/hostExtPersistence.js';
 import { createLogger } from '../../observability/logger.js';
 import type { EntityRecord } from './entitiesService.js';
 
@@ -53,6 +53,11 @@ export interface SystemIndexDecl<R = EntityRecord> {
   /** A family EVERY row has exactly one marker in (its size is the row count): the
    *  build check compares it with the store's own count. Defaults to `countedFamily`. */
   everyRowFamily?: string;
+  /** #5928 — OPTIONAL per-row weight the per-org counter also SUMS (media's bytes), kept
+   *  in step by the same intent lease as the count. The counted marker carries it, so an
+   *  exact recount sums the family slice; a weight change on an update moves the sum. A
+   *  finite number ≥ 0; anything else counts as 0. */
+  weightOf?(rec: R): number;
 }
 
 /**
@@ -72,10 +77,11 @@ export interface StoreIndexDecl<R> extends SystemIndexDecl<R> {
   count(tenantId: string): Promise<number>;
 }
 
-interface MarkerRow { k: string; tenantId: string; orgId?: string; type: string; id: string; p: Record<string, unknown> }
-interface ManifestRow { k: string; tenantId: string; orgId?: string; type: string; id: string; keys: string[]; hash: string; counted: boolean }
+// `w` (#5928): the row's weight, on the counted marker and the manifest of a weighted type only.
+interface MarkerRow { k: string; tenantId: string; orgId?: string; type: string; id: string; p: Record<string, unknown>; w?: number }
+interface ManifestRow { k: string; tenantId: string; orgId?: string; type: string; id: string; keys: string[]; hash: string; counted: boolean; w?: number }
 interface PendRow { k: string; tenantId: string; type: string; id: string; dirty: boolean; lease?: string; until?: number; at: string; markedAt?: number }
-interface CountRow { k: string; tenantId: string; orgId: string; type: string; count: number }
+interface CountRow { k: string; tenantId: string; orgId: string; type: string; count: number; sum?: number }
 interface BuiltRow { k: string; tenantId: string; type: string; builtAt: string }
 
 // Every index row's id starts with its tenant (teardown deletes one key range), and an
@@ -100,6 +106,7 @@ interface Decl {
   tenantOf(row: unknown): string;
   countedFamily: string;
   everyRowFamily: string;
+  weightOf: ((row: unknown) => number) | null;
   read: ((tenantId: string, typeName: string, id: string) => Promise<unknown>) | null;
   scan: ((tenantId: string, typeName: string) => AsyncGenerator<unknown>) | null;
   count: ((tenantId: string, typeName: string) => Promise<number>) | null;
@@ -133,6 +140,7 @@ export function registerSystemIndex(typeName: string, decl: SystemIndexDecl): vo
     tenantOf: (row) => (isEntityRecord(row) ? row.tenantId : ''),
     countedFamily: decl.countedFamily,
     everyRowFamily: decl.everyRowFamily ?? decl.countedFamily,
+    weightOf: decl.weightOf ? (row) => (isEntityRecord(row) ? weightOfRow(decl.weightOf!(row)) : 0) : null,
     read: null,
     scan: null,
     count: null,
@@ -148,11 +156,15 @@ export function registerStoreIndex<R>(typeName: string, decl: StoreIndexDecl<R>)
     tenantOf: (row) => (decl.isRow(row) ? decl.tenantOf(row) : ''),
     countedFamily: decl.countedFamily,
     everyRowFamily: decl.everyRowFamily ?? decl.countedFamily,
+    weightOf: decl.weightOf ? (row) => (decl.isRow(row) ? weightOfRow(decl.weightOf!(row)) : 0) : null,
     read: (tenantId, _type, id) => decl.read(tenantId, id),
     scan: (tenantId) => decl.scan(tenantId),
     count: (tenantId) => decl.count(tenantId),
   });
 }
+
+/** A weight is a finite whole number ≥ 0; anything else counts as 0 (never NaN in a sum). */
+const weightOfRow = (w: number): number => (Number.isFinite(w) && w > 0 ? Math.floor(w) : 0);
 
 const readFor = (decl: Decl): ((tenantId: string, typeName: string, id: string) => Promise<unknown>) | null => decl.read ?? readRow;
 const scanFor = (decl: Decl): ((tenantId: string, typeName: string) => AsyncGenerator<unknown>) | null => decl.scan ?? scanRows;
@@ -172,24 +184,32 @@ export function familyPrefix(tenantId: string, typeName: string, family: string,
   return openLast && segments.length > 0 ? joined : `${joined}:`;
 }
 
-function desiredOf(typeName: string, decl: Decl, rec: unknown): { rows: Map<string, MarkerRow>; hash: string; counted: boolean; org: string } {
+function desiredOf(typeName: string, decl: Decl, rec: unknown): { rows: Map<string, MarkerRow>; hash: string; counted: boolean; org: string; w: number } {
   const rows = new Map<string, MarkerRow>();
-  if (rec === null || rec === undefined) return { rows, hash: hashOf(rows), counted: false, org: NO_ORG };
+  if (rec === null || rec === undefined) return { rows, hash: hashOf(rows), counted: false, org: NO_ORG, w: 0 };
   const org = orgSeg(decl.orgOf(rec));
   const tenantId = decl.tenantOf(rec);
   const id = decl.idOf(rec);
+  const w = decl.weightOf ? decl.weightOf(rec) : 0;
   let counted = false;
   for (const m of decl.markers(rec)) {
     const k = `${familyPrefix(tenantId, typeName, m.family, org, m.segments)}${enc(id)}`;
-    if (m.family === decl.countedFamily) counted = true;
-    rows.set(k, { k, tenantId, ...(org !== NO_ORG ? { orgId: org } : {}), type: typeName, id, p: m.p });
+    const isCounted = m.family === decl.countedFamily;
+    if (isCounted) counted = true;
+    rows.set(k, { k, tenantId, ...(org !== NO_ORG ? { orgId: org } : {}), type: typeName, id, p: m.p, ...(isCounted && decl.weightOf ? { w } : {}) });
   }
-  return { rows, hash: hashOf(rows), counted, org };
+  return { rows, hash: hashOf(rows), counted, org, w };
 }
 
 function hashOf(rows: Map<string, MarkerRow>): string {
   const h = createHash('sha256');
-  for (const [k, row] of [...rows.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) h.update(k).update('\u0000').update(JSON.stringify(row.p)).update('\u0001');
+  for (const [k, row] of [...rows.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+    h.update(k).update('\u0000').update(JSON.stringify(row.p));
+    // #5928 — only a weighted marker hashes its weight, so every unweighted type's
+    // stored manifest hash is unchanged (no rebuild on deploy).
+    if (row.w !== undefined) h.update('\u0002').update(String(row.w));
+    h.update('\u0001');
+  }
   return h.digest('base64url');
 }
 
@@ -307,12 +327,15 @@ async function applyRow(tenantId: string, typeName: string, entityId: string, de
     if (changed || !old.has(key)) await markers.put(row);
   }
   for (const key of old) if (!want.rows.has(key)) await markers.delete(key);
-  // The per-org counter follows membership of the counted family.
-  const before = manifest?.counted ? manifest.orgId ?? NO_ORG : null;
-  const after = want.counted ? want.org : null;
-  if (before !== after) {
-    if (before !== null) await bumpCounter(tenantId, typeName, before, -1);
-    if (after !== null) await bumpCounter(tenantId, typeName, after, 1);
+  // The per-org counter follows membership of the counted family; a weighted type's sum
+  // follows the weight the manifest recorded (#5928), so a weight change moves it too.
+  const before = manifest?.counted ? { org: manifest.orgId ?? NO_ORG, w: manifest.w ?? 0 } : null;
+  const after = want.counted ? { org: want.org, w: want.w } : null;
+  if (before?.org !== after?.org) {
+    if (before) await bumpCounter(tenantId, typeName, before.org, -1, -before.w);
+    if (after) await bumpCounter(tenantId, typeName, after.org, 1, after.w);
+  } else if (before && after && before.w !== after.w) {
+    await bumpCounter(tenantId, typeName, after.org, 0, after.w - before.w);
   }
   // The manifest moves by compare-and-swap from the one this pass read: a holder that
   // lost its lease mid-pass cannot overwrite the newer holder's manifest.
@@ -323,20 +346,24 @@ async function applyRow(tenantId: string, typeName: string, entityId: string, de
   }
   const nextManifest: ManifestRow = {
     k: mk, tenantId, ...(want.org !== NO_ORG ? { orgId: want.org } : {}), type: typeName, id: entityId,
-    keys: [...want.rows.keys()], hash: want.hash, counted: want.counted,
+    keys: [...want.rows.keys()], hash: want.hash, counted: want.counted, ...(want.counted && decl.weightOf ? { w: want.w } : {}),
   };
   if (!(await manifests.compareAndSwap(manifest, nextManifest))) throw new LeaseLost('manifest moved');
 }
 
-async function bumpCounter(tenantId: string, typeName: string, org: string, delta: number): Promise<void> {
+async function bumpCounter(tenantId: string, typeName: string, org: string, delta: number, dSum = 0): Promise<void> {
   const k = counterKey(tenantId, typeName, org);
+  const weighted = decls.get(typeName)?.weightOf != null;
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const cur = await counters.get(k);
     const count = Math.max(0, (cur?.count ?? 0) + delta);
     // A counter at zero is deleted, not kept: an absent row reads as 0 and leaves nothing
     // behind for an emptied org.
     if (count === 0) { if (!cur || (await counters.compareAndDelete(cur))) return; continue; }
-    const next: CountRow = { k, tenantId, orgId: org, type: typeName, count };
+    // A weighted counter with no sum yet (absent row, or one written before the weight)
+    // is not guessed at: it is left without one, and the next read recounts (#5928).
+    const sum = weighted && (cur === null || cur.sum !== undefined) ? Math.max(0, (cur?.sum ?? 0) + dSum) : undefined;
+    const next: CountRow = { k, tenantId, orgId: org, type: typeName, count, ...(sum !== undefined ? { sum } : {}) };
     if (await counters.compareAndSwap(cur, next)) return;
   }
   // Drift, not loss: `indexedCount` recounts at the cap and the gauge resets it.
@@ -346,16 +373,77 @@ async function bumpCounter(tenantId: string, typeName: string, org: string, delt
 /** How many rows of the type the org has, from the maintained counter. With `exact`,
  *  recounted from the counted family (one indexed count) and the counter corrected. */
 export async function indexedCount(tenantId: string, typeName: string, org: string, opts: { exact?: boolean } = {}): Promise<number> {
+  return (await indexedTotals(tenantId, typeName, org, opts)).count;
+}
+
+/** #5928 — the org's counter as `{ count, sum }` (`sum` is the summed weight of a
+ *  weighted type, else 0). From the maintained row; recounted from the counted family
+ *  when `exact`, when the row is absent, or when a weighted row has no sum yet, and the
+ *  row corrected. An unweighted recount is one indexed count; a weighted one pages the
+ *  org's counted slice (only at a cap boundary or in the hourly check). */
+export async function indexedTotals(tenantId: string, typeName: string, org: string, opts: { exact?: boolean } = {}): Promise<{ count: number; sum: number }> {
   const decl = decls.get(typeName);
   if (!decl) throw new Error(`systemIndex: ${typeName} declares no index`);
   const k = counterKey(tenantId, typeName, orgSeg(org));
   const cur = await counters.get(k);
-  if (cur && !opts.exact) return cur.count;
-  const n = await markers.countByPrefix(familyPrefix(tenantId, typeName, decl.countedFamily, org));
+  if (cur && !opts.exact && (!decl.weightOf || cur.sum !== undefined)) return { count: cur.count, sum: cur.sum ?? 0 };
+  const prefix = familyPrefix(tenantId, typeName, decl.countedFamily, org);
+  let n = 0;
+  let sum = 0;
+  if (!decl.weightOf) n = await markers.countByPrefix(prefix);
+  else {
+    let afterId: string | undefined;
+    for (;;) {
+      const page = await markers.listByPrefixPage(prefix, { ...(afterId !== undefined ? { afterId } : {}), limit: 500 });
+      for (const m of page.items) { n += 1; sum += weightOfRow(m.w ?? 0); }
+      if (!page.lastId) break;
+      afterId = page.lastId;
+    }
+  }
   // Correct the counter; a zero is no row at all (never written on a read).
   if (n === 0) { if (cur) await counters.delete(k); }
-  else if (cur?.count !== n) await counters.put({ k, tenantId, orgId: orgSeg(org), type: typeName, count: n });
-  return n;
+  else if (cur?.count !== n || (decl.weightOf && cur?.sum !== sum)) {
+    await counters.put({ k, tenantId, orgId: orgSeg(org), type: typeName, count: n, ...(decl.weightOf ? { sum } : {}) });
+  }
+  return { count: n, sum };
+}
+
+/** #5928 — the tenant's totals across its orgs. Not `exact`: the sum of the tenant's
+ *  org counter rows (one row per org, never per entity). `exact`: the tenant's counted
+ *  family paged once, every org counter corrected and a counter for an org with no rows
+ *  removed; for the workspace cap's boundary and the hourly check. */
+export async function indexedTenantTotals(tenantId: string, typeName: string, opts: { exact?: boolean } = {}): Promise<{ count: number; sum: number }> {
+  const decl = decls.get(typeName);
+  if (!decl) throw new Error(`systemIndex: ${typeName} declares no index`);
+  const cprefix = `${tenantId}:${enc(typeName)}:`;
+  const rows: CountRow[] = [];
+  let afterId: string | undefined;
+  for (;;) {
+    const page = await counters.listByPrefixPage(cprefix, { ...(afterId !== undefined ? { afterId } : {}), limit: 200 });
+    // The tenant and type re-check: a raw tenant id that is a `:`-prefix of another must not leak.
+    rows.push(...page.items.filter((c) => c.tenantId === tenantId && c.type === typeName));
+    if (!page.lastId) break;
+    afterId = page.lastId;
+  }
+  if (!opts.exact && (!decl.weightOf || rows.every((c) => c.sum !== undefined))) {
+    return rows.reduce((t, c) => ({ count: t.count + c.count, sum: t.sum + (c.sum ?? 0) }), { count: 0, sum: 0 });
+  }
+  const orgs = new Set(rows.map((c) => c.orgId));
+  const mprefix = `${[tenantId, enc(typeName), decl.countedFamily].join(':')}:`;
+  afterId = undefined;
+  for (;;) {
+    const page = await markers.listByPrefixPage(mprefix, { ...(afterId !== undefined ? { afterId } : {}), limit: 500 });
+    for (const m of page.items) if (m.tenantId === tenantId) orgs.add(m.orgId ?? NO_ORG);
+    if (!page.lastId) break;
+    afterId = page.lastId;
+  }
+  const total = { count: 0, sum: 0 };
+  for (const org of orgs) {
+    const t = await indexedTotals(tenantId, typeName, org, { exact: true });
+    total.count += t.count;
+    total.sum += t.sum;
+  }
+  return total;
 }
 
 /** One page of a family slice, in key (byte) order. `cursor` is opaque: the id of the
@@ -450,8 +538,22 @@ interface BuildRow { k: string; tenantId: string; type: string; at: string }
 const buildQueue = new DurableCollection<BuildRow>('entity:sysidx-build', (r) => r.k, undefined, undefined, undefined, undefined, INDEX_SHAPE);
 /** In-process single flight: concurrent callers for one tenant share one build. */
 const inflight = new Map<string, Promise<void>>();
-/** Tenants (per type) this process has verified as built. */
-const verified = new Set<string>();
+/** Tenants (per type) this process has verified as built, per storage: a process that
+ *  re-points host persistence (a test, a re-init) must not trust a check it ran against
+ *  another store. */
+const verifiedBy = new WeakMap<object, Set<string>>();
+const verified = {
+  set(): Set<string> {
+    const s = hostExtStorage();
+    let v = verifiedBy.get(s);
+    if (!v) { v = new Set(); verifiedBy.set(s, v); }
+    return v;
+  },
+  has(k: string): boolean { return this.set().has(k); },
+  add(k: string): void { this.set().add(k); },
+  delete(k: string): void { this.set().delete(k); },
+  clear(): void { this.set().clear(); },
+};
 /** Test-only. */
 export function __forgetVerifiedIndexes(): void { verified.clear(); }
 
@@ -563,13 +665,23 @@ export async function indexedTenantCount(tenantId: string, typeName: string): Pr
 }
 
 /** One family slice's size for an org, counted in the database (one indexed count). */
-export async function indexedFamilyCount(tenantId: string, typeName: string, family: string, org: string): Promise<number> {
-  return markers.countByPrefix(familyPrefix(tenantId, typeName, family, org));
+export async function indexedFamilyCount(tenantId: string, typeName: string, family: string, org: string, segments: string[] = []): Promise<number> {
+  return markers.countByPrefix(familyPrefix(tenantId, typeName, family, org, segments));
 }
 
 /** How many intents are waiting (the gauge's backlog figure). */
 export async function pendingIntentCount(): Promise<number> {
   return pending.countByPrefix('');
+}
+
+/** Test-only: drop one type's index rows (every collection) and its verified marks, so a
+ *  feature's own test reset leaves no counter or marker of rows it cleared. */
+export async function __clearSystemIndexType(typeName: string): Promise<void> {
+  for (const k of [...verified.set()]) if (k.includes(`:${enc(typeName)}:`)) verified.delete(k);
+  const drop = async <R extends { k: string; type: string }>(c: DurableCollection<R>): Promise<void> => {
+    for (const r of await c.list()) if (r.type === typeName) await c.delete(r.k);
+  };
+  await Promise.all([drop(markers), drop(manifests), drop(pending), drop(counters), drop(built), drop(buildQueue)]);
 }
 
 /** Test-only. */

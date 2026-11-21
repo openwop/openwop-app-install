@@ -118,8 +118,9 @@ export function requiredParamFindings(
 /** A feature need: required unless `optional` (the step skips cleanly when it is off). */
 export interface FeatureNeed { id: string; optional?: boolean }
 
-/** A node type's declared feature reads beyond its own (`nodeFeatureDecl`). */
-export interface NodeFeatureDecl { required: readonly string[]; optional: readonly string[] }
+/** A node type's declared feature reads beyond its own (`nodeFeatureDecl`).
+ *  `ownOptional`: the node skips cleanly when its own feature is off. */
+export interface NodeFeatureDecl { required: readonly string[]; optional: readonly string[]; ownOptional?: boolean }
 
 const OWN_FEATURE_NODE = /^feature\.([^.@]+)\.nodes\./;
 
@@ -157,7 +158,8 @@ export function childWorkflowIds(definition: WorkflowDefinition): string[] {
 /**
  * D3 — the feature ids a run requires: the union over the run's definition AND
  * every child definition the caller resolved, of
- *  1. each `feature.<id>.nodes.*` node's own feature;
+ *  1. each `feature.<id>.nodes.*` node's own feature, unless the node declares
+ *     it `ownOptional` (it skips cleanly when that feature is off);
  *  2. each node type's declared required reads (`nodeDecl`);
  *  3. each chain's required `x-requiresFeatures` (`chainDecl`, by
  *     `metadata.expandedFrom.chainId`).
@@ -175,8 +177,9 @@ export function requiredFeatureIds(
       if (typeof n.typeId !== 'string') continue;
       const t = bareTypeId(n.typeId);
       const own = OWN_FEATURE_NODE.exec(t)?.[1];
-      if (own) required.add(own);
-      for (const id of nodeDecl(t)?.required ?? []) required.add(id);
+      const decl = nodeDecl(t);
+      if (own && decl?.ownOptional !== true) required.add(own);
+      for (const id of decl?.required ?? []) required.add(id);
     }
     const from = ((def.metadata ?? {}) as Record<string, unknown>).expandedFrom as { chainId?: unknown } | undefined;
     if (from && typeof from.chainId === 'string' && from.chainId) {

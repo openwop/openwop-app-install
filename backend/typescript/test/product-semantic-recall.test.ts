@@ -9,15 +9,24 @@
  * not model-quality semantics.
  *
  * The fusion fixture is built so the lexical and semantic orders DISAGREE: three
- * products tie lexically (each matches "jacket" only in its description, so the
- * name tiebreak gives Alpha, Bravo, Charlie), while the embedder ranks Charlie
+ * products tie lexically (since ADR 1110 P2 the lexical leg reads names and tags,
+ * and each carries the one tag "jacket", so the name tiebreak gives Alpha, Bravo,
+ * Charlie), while the embedder, which still reads descriptions, ranks Charlie
  * ("jacket jacket"), then Alpha, then Bravo (diluted by extra words). RRF (k = 60)
  * by hand: Alpha 1/60+1/61, Charlie 1/62+1/60, Bravo 1/61+1/62 → Alpha, Charlie,
  * Bravo — an order neither leg produces alone. Round 1 of /grade-tests 8f w1 probed
  * the old `> 0` + determinism assertions vacuous (lexical alone satisfied both).
  *
+ * DOUBLE GUARD on the TENANT half of the isolation case: the namespace carries the
+ * tenant (`productEmbeddingIndex.ts` `namespaceOf`) AND the in-memory vector
+ * surface keeps one bucket per tenant (`inMemorySurfaces.ts` `createVector`).
+ * Either alone keeps the case green; the witness is one edit to the query that
+ * drops the caller's tenant from both (wave 120 `w120g2-psr-tenant-both`).
+ *
  * Sabotages each case is red against (probed): the namespace losing its org, the
- * blank-query guard dropping `.trim()`, the fusion skipped.
+ * query reading another tenant's bucket and namespace, the blank-query guard
+ * dropping `.trim()`, the fusion skipped, RRF dropping the semantic term, and the
+ * semantic-only products (ADR 1110 P2) never joining the result.
  */
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import { mkdtempSync } from 'node:fs';
@@ -45,19 +54,26 @@ describe('MERCH-C semantic recall', () => {
     const aJacket = await mk('orgA', 'Alpine coat', 'an insulated warm jacket for hiking');
     await mk('orgA', 'Sun hat', 'a light summer cap');
     const rain = await mk('orgB', 'Rain jacket', 'a waterproof jacket shell');
-    invalidateProductEmbeddings(T, 'orgA'); invalidateProductEmbeddings(T, 'orgB');
+    // The SAME org id in ANOTHER tenant — the tenant half of the namespace.
+    const X = 'tenant-prodvec-x';
+    const xShell = await createProduct({ tenantId: X, orgId: 'orgA', createdBy: 'u', type: 'digital', name: 'Storm shell', description: 'a waterproof jacket shell', price: 50, currency: 'USD', categories: ['outerwear'], tags: ['gear'] });
+    invalidateProductEmbeddings(T, 'orgA'); invalidateProductEmbeddings(T, 'orgB'); invalidateProductEmbeddings(X, 'orgA');
     await rebuildProductEmbeddings(T, 'orgA');
     await rebuildProductEmbeddings(T, 'orgB');
+    await rebuildProductEmbeddings(X, 'orgA');
     const aIds = await queryProductEmbeddings(T, 'orgA', 'jacket', 10);
-    // orgA recall contains only orgA products (never orgB's Rain jacket).
-    const orgAProductIds = new Set([aJacket.productId]);
-    expect(aIds.some((id) => orgAProductIds.has(id))).toBe(true);
+    // orgA recall contains orgA's product (positive control) and only orgA's.
+    expect(aIds).toContain(aJacket.productId);
     const bIds = await queryProductEmbeddings(T, 'orgB', 'jacket', 10);
     expect(bIds).not.toContain(aJacket.productId); // orgB never sees orgA's product
     expect(bIds).toContain(rain.productId); // positive control: orgB's own recall works
     // and orgA never surfaces orgB's product id — not even for orgB's own words
     expect(aIds).not.toContain(rain.productId);
     expect(await queryProductEmbeddings(T, 'orgA', 'waterproof shell', 10)).not.toContain(rain.productId);
+    // Cross-tenant: tenant X's orgA sees its own product and never tenant T's orgA.
+    const xIds = await queryProductEmbeddings(X, 'orgA', 'jacket', 10);
+    expect(xIds).toEqual([xShell.productId]);
+    expect(aIds).not.toContain(xShell.productId);
   });
 
   it('searchProducts fuses lexical+semantic (lazy rebuild) and is deterministic', async () => {
@@ -81,9 +97,12 @@ describe('MERCH-C semantic recall', () => {
   it('ADR 1110 P2 — a product found only by its description comes back through semantic recall', async () => {
     const coat = await createProduct({ tenantId: T, orgId: 'orgE', createdBy: 'u', type: 'digital', name: 'Alpine', description: 'an insulated warm jacket for hiking', price: 50, currency: 'USD', categories: [], tags: [] });
     await createProduct({ tenantId: T, orgId: 'orgE', createdBy: 'u', type: 'digital', name: 'Sun hat', description: 'a light summer cap', price: 5, currency: 'USD', categories: [], tags: [] });
+    // Premise: the lexical leg alone finds nothing (no name or tag says "jacket").
+    expect((await listProductsPage(T, 'orgE', { q: 'jacket' })).products).toEqual([]);
     await rebuildProductEmbeddings(T, 'orgE');
     const r = await searchProducts({ tenantId: T, orgId: 'orgE', q: 'jacket' });
-    expect(r.products.map((p) => p.productId)).toContain(coat.productId);
+    // It joins the result, and ranks first: it is the only description that matches.
+    expect(r.products[0]?.productId).toBe(coat.productId);
   });
 
   it('empty query returns no semantic ids (lexical/facet path unchanged)', async () => {

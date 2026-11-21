@@ -1,12 +1,20 @@
 /**
  * Merchandising node + agent packs (ADR 0273/0274/0275 + ADR 0058 chat-drivability, PR 1):
- *   - node manifests declare the expected typeIds, all role:'action' (recorded → replay-safe
- *     over the mutable recs cache / catalog, per the /architect review);
+ *   - node manifests declare the expected typeIds; the four WRITES are role:'side-effect'
+ *     and `side-effectful` (a :fork serves the recorded output instead of writing again),
+ *     the reads role:'action' (ADR 1025 D2 — the old "all role:'action'" pinned a defect);
  *   - each node handler delegates to the ctx.features.<id> surface (pass-through), validates
  *     its inputs, and fails with host_capability_missing when the surface is absent;
  *   - the /architect finding-1 invariant: an AGENT-authored promotion lands PROPOSED
  *     (active:false) — money-moving, so never auto-live;
- *   - the three agent packs load with tool-allowlists scoped to their own feature nodes.
+ *   - the three agent packs load with tool-allowlists scoped to their own feature's
+ *     chat tools (every entry is `openwop:<feature>.*`).
+ *
+ * Red when: a write node is declared role:'action' or drops `side-effectful`, or a read
+ * is declared a side-effect; a declared typeId has no handler; a handler stops passing
+ * its merged inputs through, validating them, or refusing an absent surface; the
+ * promotions surface stops forcing `active:false`; an agent allowlist gains another
+ * feature's tool.
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -104,5 +112,9 @@ describe('merchandising agent packs — tool-allowlisted to their own feature', 
     const cur = loadAgentsFromManifest(packDir('vendor.openwop-app.discovery.agents'));
     expect(cur[0]?.agentId).toBe('vendor.openwop-app.discovery.agents.curator');
     expect(cur[0]?.toolAllowlist).toContain('openwop:discovery.create-collection');
+    // "Scoped to their own feature": no entry may name another feature's tool.
+    for (const [feature, agents] of [['recommendations', merch], ['promotions', pm], ['discovery', cur]] as const) {
+      expect((agents[0]?.toolAllowlist ?? []).filter((t) => !t.startsWith(`openwop:${feature}.`)), feature).toEqual([]);
+    }
   });
 });

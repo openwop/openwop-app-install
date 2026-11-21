@@ -13,7 +13,7 @@
  * emitted verbatim (the CMS stores plain text/markdown-subset — no HTML to
  * escape), never wrapped in invented formatting.
  */
-import { designSectionMarkdown } from '../cms/designSections.js';
+import { designSectionMarkdown, heroQueueMarkdown } from '../cms/designSections.js';
 import { pricingPlans } from '../cms/pricingPlans.js';
 import { isFragmentHref, isInternalHref } from '../../host/internalHref.js';
 import type { Section } from '../cms/cmsService.js';
@@ -152,7 +152,8 @@ export function sectionMarkdown(section: Section, baseUrl: string): string | nul
       const raw = str(d.url).trim();
       const url = isInternalHref(raw) || isFragmentHref(raw) || /^(https?:|mailto:)/i.test(raw) ? raw : '';
       const note = str(d.note) ? `\n\n${str(d.note)}` : ''; // ADR 1062 D4
-      return `${head()}${str(d.subheading) ? `${str(d.subheading)}\n\n` : ''}${label && url ? `[${label}](${url})` : ''}${note}`.trim();
+      const queue = heroQueueMarkdown(d.queue); // #6150 — the queue card beside the copy
+      return `${head()}${str(d.subheading) ? `${str(d.subheading)}\n\n` : ''}${label && url ? `[${label}](${url})` : ''}${note}${queue ? `\n\n${queue}` : ''}`.trim();
     }
     case 'columns': {
       const cols = Array.isArray(d.columns) ? d.columns : [];

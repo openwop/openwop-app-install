@@ -1157,6 +1157,18 @@ export async function reviveConnection(tenantId: string, connectionId: string): 
 }
 
 /**
+ * CHAN-F19 #10 — how the DSAR eraser deletes a connection's child pointers
+ * (`connections:pairing`, `connections:inbound-session`). Set by `feature.ts`
+ * from the `tenantTeardown` leaf: importing those stores here would create the
+ * `connectionsService → inboundWebhooks` cycle. Returns the rows removed and
+ * THROWS on a failed delete.
+ */
+let connectionChildPurge: ((connectionId: string) => Promise<number>) | null = null;
+export function setConnectionChildPurge(fn: ((connectionId: string) => Promise<number>) | null): void {
+  connectionChildPurge = fn;
+}
+
+/**
  * ADR 0780 D4 — the DSAR eraser. Revokes (through `revokeConnection`, so a failed
  * secret removal THROWS and the fan-out counts it in `failed`) every connection in
  * `tenantId` owned by `subjectKey` or by its User row's legacy principal, and drops
@@ -1184,6 +1196,16 @@ export async function eraseSubjectConnections(tenantId: string, subjectKey: stri
   // rows or their pending grants on this pass: finish, then fail loudly.
   for (const c of await store.list()) {
     if (c.tenantId !== tenantId || c.userId === undefined || !ids.has(c.userId)) continue;
+    // CHAN-F19 #10 — the child pointers go FIRST and strictly. The revoke consumer
+    // also deletes them, but the lifecycle seam swallows its failures, and once the
+    // parent row is gone a retry can no longer find the child. A failed child purge
+    // keeps the parent, so the DSAR retry finds it again.
+    if (connectionChildPurge) {
+      try { rowsTouched += await connectionChildPurge(c.connectionId); } catch (err) {
+        failures.push(err instanceof Error ? err.message : String(err));
+        continue;
+      }
+    }
     try {
       if (await revokeConnection(tenantId, c.connectionId, { cause: 'subject-erased' })) rowsTouched++;
     } catch (err) {
@@ -1196,7 +1218,7 @@ export async function eraseSubjectConnections(tenantId: string, subjectKey: stri
   // otherwise it would report success over a token that is still stored.
   const { pending } = await sweepSecretTombstones(tenantId, ids);
   if (failures.length > 0 || pending > 0) {
-    throw new Error(`connection secret removal failed (${pending} still pending): ${failures.join('; ')}`);
+    throw new Error(`connection erasure failed (${pending} secret removals still pending): ${failures.join('; ')}`);
   }
   return { rowsTouched };
 }

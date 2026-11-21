@@ -6,11 +6,15 @@
  * exposing a distinct degraded state; coercing failure to an empty bundle here
  * would erase the difference between "no overrides" and "unknown".
  */
-import { authedHeaders, config, fetchOpts } from '../../client/config.js';
+import { authedHeaders, config, fetchOpts, onAuthChange } from '../../client/config.js';
 import type { MenuConfig, MenuConfigBundle } from './types.js';
 
 const BASE = '/host/openwop-app/menu-config';
 let tenantVersion: string | null = null;
+let versionOwner = 0;
+// The validator belongs to this auth/workspace and latest read, not whichever
+// obsolete request happens to finish last.
+onAuthChange(() => { versionOwner += 1; tenantVersion = null; });
 
 async function httpResponse<T>(path: string, init: RequestInit = {}): Promise<{ body: T; response: Response }> {
   const res = await fetch(`${config.baseUrl}${path}`, {
@@ -33,20 +37,22 @@ async function http<T>(path: string, init: RequestInit = {}): Promise<T> {
 export async function getMenuConfig(): Promise<MenuConfigBundle> {
   // A failed reload may follow an identity/tenant change. Never retain a
   // validator from the previous successful context in that unknown state.
+  const owner = ++versionOwner;
   tenantVersion = null;
   const result = await httpResponse<MenuConfigBundle>(BASE);
-  tenantVersion = result.response.headers.get('etag');
+  if (owner === versionOwner) tenantVersion = result.response.headers.get('etag');
   return result.body;
 }
 
 /** Save the shared workspace default (superadmin). Throws on failure. */
 export async function putTenantMenuConfig(cfg: MenuConfig): Promise<MenuConfig> {
+  const owner = versionOwner;
   const result = await httpResponse<{ config: MenuConfig }>(`${BASE}/tenant`, {
     method: 'PUT',
     body: JSON.stringify({ config: cfg }),
     ...(tenantVersion ? { headers: { 'if-match': tenantVersion } } : {}),
   });
-  tenantVersion = result.response.headers.get('etag');
+  if (owner === versionOwner) tenantVersion = result.response.headers.get('etag');
   return result.body.config;
 }
 

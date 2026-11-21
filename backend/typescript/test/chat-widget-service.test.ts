@@ -1,7 +1,17 @@
 /**
- * ADR 0127 Phase 1 — chat-widget config service (default-deny + token). Breaks if a
- * widget can be provisioned without a real domain allowlist or an agent, if a rotated
- * token keeps resolving, or if a widget reads or lists across tenants.
+ * ADR 0127 Phase 1 + ADR 1018 D5 — chat-widget config service (default-deny + token).
+ * Breaks if a widget can be provisioned without a real domain allowlist or an agent,
+ * if an allowlist entry that is not a host (a bare TLD, a wildcard) is accepted, if a
+ * turn cap above the ceiling is stored, if the embed token is guessable or a rotated
+ * token keeps resolving, or if a widget reads or lists across tenants or orgs.
+ *
+ * Double guards, each witnessed by ONE break-both edit (grade-tests w119):
+ *  - default-deny: `v.length === 0` and the post-normalisation `out.length === 0`;
+ *  - rotation: `rotateWidgetToken` deletes the old token-index entry AND
+ *    `resolveWidgetByToken` ignores an entry whose widget no longer carries the token.
+ * Sabotage: drop the dedup, the single-label refusal, the host reduction, the entry
+ * name, the turn ceiling (on create or PATCH), the agent check, the token length, the
+ * tenant/org filters or the delete — each reds a case below.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -17,17 +27,18 @@ describe('chat-widget config service', () => {
   it('provisions a widget with a token + allowlist', async () => {
     const w = await provisionWidget(T, ORG, 'u1', { agentId: 'support', allowedDomains: ['acme.com', 'WWW.Acme.com'], caps: { maxTurnsPerSession: 10 } });
     expect(w.widgetId).toBeTruthy();
-    expect(w.token).toMatch(/^wgt_/);
+    // Unguessable: 24 random bytes, hex (a short token is a brute-forceable embed credential).
+    expect(w.token).toMatch(/^wgt_[0-9a-f]{48}$/);
     expect(w.allowedDomains).toEqual(['acme.com', 'www.acme.com']); // normalized lowercase
     expect(w.caps.maxTurnsPerSession).toBe(10);
     expect(w.enabled).toBe(true);
   });
 
   it('DEFAULT-DENY: rejects an empty/missing allowedDomains', async () => {
-    await expect(provisionWidget(T, ORG, 'u1', { agentId: 'support', allowedDomains: [] })).rejects.toMatchObject({ code: 'validation_error' });
-    await expect(provisionWidget(T, ORG, 'u1', { agentId: 'support' })).rejects.toMatchObject({ code: 'validation_error' });
+    await expect(provisionWidget(T, ORG, 'u1', { agentId: 'support', allowedDomains: [] })).rejects.toMatchObject({ code: 'validation_error', details: { field: 'allowedDomains' } });
+    await expect(provisionWidget(T, ORG, 'u1', { agentId: 'support' })).rejects.toMatchObject({ code: 'validation_error', details: { field: 'allowedDomains' } });
     // A list of only blank entries is still empty after normalization.
-    await expect(provisionWidget(T, ORG, 'u1', { agentId: 'support', allowedDomains: ['  ', ''] })).rejects.toMatchObject({ code: 'validation_error' });
+    await expect(provisionWidget(T, ORG, 'u1', { agentId: 'support', allowedDomains: ['  ', ''] })).rejects.toMatchObject({ code: 'validation_error', details: { field: 'allowedDomains' } });
   });
 
   // ADR 1018 D5 — a bare label would admit every site under that TLD through the
@@ -53,7 +64,8 @@ describe('chat-widget config service', () => {
   });
 
   it('requires an agentId', async () => {
-    await expect(provisionWidget(T, ORG, 'u1', { allowedDomains: ['x.com'] })).rejects.toMatchObject({ code: 'validation_error' });
+    await expect(provisionWidget(T, ORG, 'u1', { allowedDomains: ['x.com'] })).rejects.toMatchObject({ code: 'validation_error', details: { field: 'agentId' } });
+    await expect(provisionWidget(T, ORG, 'u1', { agentId: '   ', allowedDomains: ['x.com'] })).rejects.toMatchObject({ code: 'validation_error', details: { field: 'agentId' } });
   });
 
   it('rotate-token replaces the token (invalidating embeds)', async () => {
@@ -72,9 +84,11 @@ describe('chat-widget config service', () => {
     expect((await getWidget(T, ORG, w.widgetId))!.enabled).toBe(false);
     expect((await getWidget(T, ORG, w.widgetId))!.caps.maxSessionsPerDay).toBe(5);
     expect(await getWidget('other', ORG, w.widgetId)).toBeNull(); // tenant isolation
+    expect(await getWidget(T, 'org-other', w.widgetId)).toBeNull(); // org isolation
     // Filter by id: other cases share T/ORG.
     expect((await listWidgets(T, ORG)).some((x) => x.widgetId === w.widgetId)).toBe(true);
     expect((await listWidgets('other', ORG)).some((x) => x.widgetId === w.widgetId)).toBe(false);
+    expect((await listWidgets(T, 'org-other')).some((x) => x.widgetId === w.widgetId)).toBe(false);
     await deleteWidget(T, ORG, w.widgetId);
     expect(await getWidget(T, ORG, w.widgetId)).toBeNull();
     expect((await listWidgets(T, ORG)).some((x) => x.widgetId === w.widgetId)).toBe(false);

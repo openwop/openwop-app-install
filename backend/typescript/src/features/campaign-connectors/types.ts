@@ -62,12 +62,12 @@ export interface ImportResult {
 }
 
 /** Aggregate KPI projection over a set of records.
- * PERF-4 / ADR 0907: counts mean revenue was reported, including measured zero
+ * PERF-4 / ADR 0907: counts mean the respective revenue/conversions metric was reported, including measured zero
  * and zero-spend rows. New servers always emit counts; absent older-server
  * fields retain legacy numeric rendering, not inferred availability. */
 export interface KpiSummary {
-  totals: { spend: number; impressions: number; clicks: number; conversions: number; revenue: number; ctr: number; cpc: number; cvr: number; cpa: number; roas: number; reportedRevenueRecordCount?: number };
-  byPlatform: Array<{ platform: AdPlatform; spend: number; impressions: number; clicks: number; conversions: number; revenue: number; roas: number; reportedRevenueRecordCount?: number }>;
+  totals: { spend: number; impressions: number; clicks: number; conversions: number; revenue: number; ctr: number; cpc: number; cvr: number; cpa: number; roas: number; reportedRevenueRecordCount?: number; reportedConversionRecordCount?: number };
+  byPlatform: Array<{ platform: AdPlatform; spend: number; impressions: number; clicks: number; conversions: number; revenue: number; roas: number; reportedRevenueRecordCount?: number; reportedConversionRecordCount?: number }>;
   recordCount: number;
   dateRange: { start: string; end: string } | null;
   /** CMPUX-15: display currency for the monetary figures (spend/revenue/derived).

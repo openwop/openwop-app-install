@@ -7,6 +7,14 @@
  * card's answer field is label-associated (`Comment (optional)`, `Draft`, `Your
  * answer`), plus the two branches no case reached — the cancellation route and the
  * ADR 0755 D3 token-less interrupt (readable, never answerable).
+ *
+ * ADR 1109 D1/D7 + ADR 1125 D1 (#5843): an unknown kind says what the step asks
+ * with no kind name and no buttons; an approval is headed by the gate's own title;
+ * a `credential` request opens the HOST connect route — the exact URL, built from the
+ * run and node ids, in a `noopener,noreferrer` window — never the `connectUrl` in its
+ * data. Sabotage (`w118g4-ri-*`): following `data.connectUrl`, an outside base, an
+ * unencoded run id, dropping `noopener`, routing a kind to the wrong card, dropping the
+ * token check, or showing the kind each turns its case red.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
@@ -18,6 +26,7 @@ const { beginOAuth, listProviders } = vi.hoisted(() => ({ beginOAuth: vi.fn(), l
 vi.mock('../../features/connections/connectionsClient.js', () => ({ beginOAuth, listProviders }));
 
 import { RenderInterrupt } from '../RenderInterrupt.js';
+import { config } from '../../client/config.js';
 import type { OpenInterrupt } from '../../client/interruptsClient.js';
 
 afterEach(() => { resolveByRun.mockReset(); cleanup(); });
@@ -99,20 +108,26 @@ describe('RenderInterrupt dispatcher', () => {
 
   it('a credential request offers Connect to the HOST route, never the URL in its data (ADR 1125 D1)', () => {
     const open = vi.spyOn(window, 'open').mockImplementation(() => null);
-    render(<RenderInterrupt runId="run 1" active={mk('credential', { provider: 'Google', connectUrl: 'https://evil.example/login', reason: 'missing' })} onResolved={() => {}} />);
-    expect(screen.getByText(/needs access to Google/)).toBeTruthy();
-    expect(screen.queryByText(/evil\.example/)).toBeNull();
-    screen.getByRole('button', { name: 'Connect' }).click();
-    expect(open).toHaveBeenCalledTimes(1);
-    const url = String(open.mock.calls[0]![0]);
-    expect(url).toMatch(/\/host\/openwop-app\/connections\/connect\/run%201\/n1$/);
-    expect(url).not.toContain('evil.example');
-    open.mockRestore();
+    try {
+      render(<RenderInterrupt runId="run 1" active={mk('credential', { provider: 'Google', connectUrl: 'https://evil.example/login', reason: 'missing' })} onResolved={() => {}} />);
+      expect(screen.getByText(/needs access to/).textContent).toBe('This needs access to Google before it can continue.');
+      expect(screen.queryByText(/evil\.example/)).toBeNull();
+      screen.getByRole('button', { name: 'Connect' }).click();
+      expect(open).toHaveBeenCalledTimes(1);
+      const url = String(open.mock.calls[0]![0]);
+      // The WHOLE URL: the configured API base (whatever this env sets) + the host route.
+      // A suffix match would pass any origin in front of the path.
+      expect(url).toBe(`${config.baseUrl.replace(/\/+$/, '')}/host/openwop-app/connections/connect/run%201/n1`);
+      expect(url).not.toContain('evil.example');
+      expect(open).toHaveBeenCalledWith(url, '_blank', 'noopener,noreferrer');
+    } finally {
+      open.mockRestore();
+    }
   });
 
   it('a credential request without a provider still reads as a sentence', () => {
     render(<RenderInterrupt runId="r" active={mk('credential', { connectUrl: 'https://evil.example/' })} onResolved={() => {}} />);
-    expect(screen.getByText(/needs access to an account/)).toBeTruthy();
+    expect(screen.getByText(/needs access to/).textContent).toBe('This needs access to an account before it can continue.');
   });
 
   it('an approval card is headed by the gate\'s own title (ADR 1109 D1)', () => {

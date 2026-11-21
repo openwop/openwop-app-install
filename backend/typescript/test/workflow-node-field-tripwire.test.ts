@@ -148,7 +148,7 @@ describe('ADR 0440 — no shipped pack node carries a field the validator drops'
     expect(
       allNodes.length,
       'no workflow NODES found — the assertion below would iterate an empty set while this file reports green',
-    ).toBeGreaterThanOrEqual(764); // MEASURED 764 at 19d13e682 (/grade-tests 8f W5; 551 at 2026-08-03, floor was 500)
+    ).toBeGreaterThanOrEqual(886); // MEASURED 886 at 0ca7f76944 (1,544 files; owner decision TST-NZU-1, 2026-11-18). Was 764 at 19d13e682, 551 at 2026-08-03. Deleting nodes on purpose? Lower this in the same PR.
   });
 
   it('no node declares a validator-dropped field', () => {

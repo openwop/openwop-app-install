@@ -4,7 +4,10 @@
  * `ctx.kanban.materializeWorkItems` boundary with a DETERMINISTIC delivery key
  * (per run/node/board/source), and never a tenantId (the host fills tenant from
  * the run scope). Red if the key gains entropy or the command carries a tenant
- * (probes w37g1-pack-key-deterministic, w37g1-pack-no-tenant).
+ * (probes w37g1-pack-key-deterministic, w37g1-pack-no-tenant), or stops varying
+ * with the run or the source revision (wave 120). ADR 1137 D3/P3: `refresh` is
+ * forwarded only when configured, and an item's assignee and labels pass
+ * through; red if either is dropped or `refresh` is sent unconditionally.
  *
  * The review-policy gate (`requireApproval`) is owned by
  * `adr0835-approvals-and-repo.test.ts` (S6: approve/accept pass; reject, missing
@@ -46,6 +49,18 @@ describe('core.openwop.kanban-work-items', () => {
     expect(received[0]?.idempotencyKey).toMatch(/^kanban-work-[0-9a-f]{32}$/);
     expect(received[0]?.idempotencyKey).toEqual(received[1]?.idempotencyKey);
     expect(received[0]).not.toHaveProperty('tenantId');
+    // …and the key is PER run/node/board/source: change any one and it changes
+    // (a constant key would fold distinct deliveries into one).
+    const variants = [
+      { ...ctx, runId: 'run-2' },
+      { ...ctx, nodeId: 'node-2' },
+      { ...ctx, inputs: { boardId: 'board-2', proposal } },
+      { ...ctx, inputs: { boardId: 'board-1', proposal: { ...proposal, source: { ...proposal.source, revision: '3' } } } },
+    ];
+    for (const v of variants) await materializeWorkItems(v);
+    const keys = received.map((c) => c.idempotencyKey);
+    expect(keys).toHaveLength(6);
+    expect(new Set(keys).size).toBe(5); // the two identical deliveries share one key; each variant has its own
   });
   it('ADR 1137: forwards refresh only when configured, and passes a proposal item\'s assignee through untouched', async () => {
     const { materializeWorkItems } = await pack();

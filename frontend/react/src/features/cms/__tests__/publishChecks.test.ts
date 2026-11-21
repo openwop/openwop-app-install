@@ -8,6 +8,12 @@
  * a warn), flipping the author/description/social warns to ok, dropping the
  * null-search-record guard, the withheld-locale skip, the per-locale count, or
  * the title trim each turn a case red.
+ *
+ * ADR 1100 D3: the accessibility check reads the RESOLVED sections (a shared
+ * reference carries `data: {}`), points a picture ref `<id>#<n>` at its section,
+ * and a shared section that could not be read makes the check incomplete, never
+ * "passed". Re-probed wave 119 (`w119g4-pc-*`): ignoring `resolvedSections`, the
+ * `#<n>` split, either `sharedUnread` branch and the a11y ok line each red a case.
  */
 import { describe, it, expect } from 'vitest';
 import { publishChecks } from '../publishChecks.js';
@@ -51,9 +57,13 @@ describe('publishChecks', () => {
   });
 
   it('counts untranslated sections per locale, and skips a withheld locale', () => {
-    const p = page({ localePublishState: { fr: 'draft' } });
+    // sec:a is translated to es and sec:b is not, so `count` (1) and `total` (2)
+    // differ: with both untranslated, counting every section read the same.
+    const base = page();
+    const sections = base.sections.map((s) => (s.sectionId === 'sec:a' ? { ...s, localizations: { es: { text: 'Hola' } } } : s));
+    const p = page({ sections, localePublishState: { fr: 'draft' } });
     const checks = publishChecks(p, null, { baseLocale: 'en', locales: ['en', 'es', 'fr'] });
-    expect(byId(checks, 'locale:es')).toMatchObject({ level: 'warn', values: { locale: 'es', count: 2, total: 2 } });
+    expect(byId(checks, 'locale:es')).toMatchObject({ level: 'warn', values: { locale: 'es', count: 1, total: 2 } });
     expect(byId(checks, 'locale:fr')).toBeUndefined();
   });
 
@@ -73,7 +83,8 @@ describe('publishChecks', () => {
 
   it('a picture ref inside a section (`<id>#<n>`) points the fix at the section', () => {
     const p = page({ sections: [{ sectionId: 'c1', type: 'columns', data: { columns: [{ imageToken: 't1', alt: 'ok' }, { imageToken: 't2', alt: '' }] } }] });
-    expect(byId(publishChecks(p, null, opts), 'a11y')).toMatchObject({ level: 'warn', sectionId: 'c1' });
+    // One finding, for the second picture only (`c1#2`); the first has its alt.
+    expect(byId(publishChecks(p, null, opts), 'a11y')).toMatchObject({ level: 'warn', sectionId: 'c1', values: { count: 1 } });
   });
 
   it('an unread shared section makes the check incomplete, never passed', () => {

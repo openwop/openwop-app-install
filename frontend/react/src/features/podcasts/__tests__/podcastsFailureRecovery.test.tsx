@@ -28,11 +28,17 @@
  * observation, a "something finished" clear predicate, and the notebooks-off card
  * conditioned away — each reds the case that claims it.
  *
- * DOUBLE GUARD (honest ceiling, w21): the gave-up card is cleared by TWO independent
- * sites that evaluate the same id predicate — `recheckPoll` and the `M3a` effect
- * (which re-runs whenever `episodes` changes, and `recheckPoll` sets them). Sabotaging
- * either alone leaves the card cleared, so the "clears" assertions witness the pair, not
- * one site. The FALSE-clear direction is single-site and is probed (`M2` second case).
+ * DOUBLE GUARD (w21): the gave-up card is cleared by TWO independent sites that
+ * evaluate the same id predicate — `recheckPoll` and the `M3a` effect (which re-runs
+ * whenever `episodes` changes, and `recheckPoll` sets them). Sabotaging either alone
+ * leaves the card cleared, so the "clears" assertions witness the pair, not one site.
+ * Both read `pendingIdsOf`, so one edit there (a `done` episode counted as pending)
+ * breaks both at once (w121 break-both probe). The FALSE-clear direction is
+ * single-site and is probed (`M2` second case).
+ *
+ * ADR 1115 D10 (`PODUX93R-3`): a cohort episode that landed is announced BY NAME by
+ * the transition effect, and the generic "Finished" line is said only when the cohort
+ * settled by vanishing (deleted), never both for one event.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { PodcastEpisode, PodcastShow } from '../podcastsClient.js';
@@ -222,10 +228,15 @@ describe('PODU-3/-4 — the generation poll gives up HONESTLY and offers a way o
 
   it('"Check again" whose cohort VANISHED (deleted) still says "Finished"', async () => {
     await mountStudioAndExhaustPoll();
+    expect(screen.getByText(/we stopped checking after about/i)).toBeTruthy();
+    // ADR 1115 D10 (`PODUX93R-3`) — no episode of the cohort is left to be announced
+    // by name, so the generic line is the ONLY thing that says the wait is over.
     listEpisodes.mockResolvedValue([]);
     fireEvent.click(screen.getByRole('button', { name: /check again/i }));
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.queryByText(/we stopped checking after about/i)).toBeNull();
     expect(announceSpy).toHaveBeenCalledWith(expect.stringMatching(/finished/i));
+    expect(announceSpy).not.toHaveBeenCalledWith(expect.stringMatching(/is ready/i));
   });
 
   it('"Check again" that finds it STILL RUNNING is observable (a changing count)', async () => {

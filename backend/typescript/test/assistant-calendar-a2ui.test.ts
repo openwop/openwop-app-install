@@ -16,13 +16,21 @@
  * the first call suspends (throws, as the SuspendSignal does), and the resume
  * re-invocation returns the recorded value inline.
  *
- * Sabotage-witnessed (/grade-tests w11): in `packs/feature.assistant.nodes/index.mjs`,
- * dropping the `summary` field or turning the `time` select into free text reds
- * case 1; always asking for `start` reds case 2; ignoring the resumed summary,
- * fixing the duration at 30 min, or dropping attendees reds case 3; removing the
- * 09:00 fallback reds case 4; removing the NaN-date guard reds case 5; clarifying a
- * complete invite reds case 6. (The email.send no-clarify case lives in
- * assistant-email-a2ui.test.ts.)
+ * ADR 1013 D3/D4: the surface rides under `data.form` beside one `questions[]`
+ * entry per field, and the resume value is `{ answers: [{ id, answer }] }`. Each
+ * suspend payload is also put through the host's own interrupt-form gate
+ * (`interruptFormDefect`, the check the executor runs before raising the
+ * interrupt), which validates the form against `schemas/v2/interrupt-form.schema.json`
+ * (the closed catalog SSoT) and the field↔question binding.
+ *
+ * Sabotage-witnessed (/grade-tests w11, re-probed w120): in
+ * `packs/feature.assistant.nodes/index.mjs`, dropping the `summary` field, turning the
+ * `time` select into free text, moving the form off `data.form`, or binding a field to
+ * no question reds case 1; always asking for `start` reds case 2; ignoring the resumed
+ * summary, fixing the duration at 30 min, dropping attendees or reading the answers
+ * off the wrong shape reds case 3; removing the 09:00 fallback reds case 4; removing
+ * the NaN-date guard reds case 5; clarifying a complete invite reds case 6. (The
+ * email.send no-clarify case lives in assistant-email-a2ui.test.ts.)
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -32,6 +40,7 @@ import { join } from 'node:path';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
+import { interruptFormDefect } from '../src/host/interruptFormRules.js';
 import { buildAssistantSurface } from '../src/features/assistant/surface.js';
 import { __resetAssistantStore } from '../src/features/assistant/assistantService.js';
 
@@ -100,17 +109,21 @@ describe('Assistant calendar.invite A2UI clarification (ADR 0051 §3/§5)', () =
     expect(captured!.reason).toBe('clarification');
     expect(captured!.resumeKey).toBe('calendar-invite-clarify');
     assertCatalogValid(captured!);
+    // The host's own gate: schema-valid form, every field bound to a question.
+    expect(interruptFormDefect(captured)).toBeNull();
 
     const components = ((captured!.form as Record<string, unknown>).surface as { components: Array<Record<string, unknown>> }).components;
     const ids = components.map((c) => c.id).filter((id): id is string => typeof id === 'string');
-    // All three essentials were missing → the surface asks for each.
-    expect(ids).toEqual(expect.arrayContaining(['summary', 'date', 'time', 'durationMinutes', 'attendees']));
+    // All three essentials were missing → the surface asks for each, and nothing else.
+    expect(ids).toEqual(['summary', 'date', 'time', 'durationMinutes', 'attendees', 'confirm']);
     expect(components.some((c) => c.component === 'action.button')).toBe(true);
     // `time` is a constrained slot picker (no wire change — `field.select` is in
     // the day-1 catalog), not a free-text field, so the user can't mistype it.
     const time = components.find((c) => c.id === 'time');
     expect(time?.component).toBe('field.select');
-    expect(Array.isArray(time?.options) && (time?.options as unknown[]).length).toBeGreaterThan(0);
+    const slots = (time?.options ?? []) as Array<{ value: string }>;
+    expect(slots.length).toBeGreaterThan(0);
+    expect(slots.filter((o) => !/^\d{2}:\d{2}$/.test(o.value))).toEqual([]);
   });
 
   it('asks for ONLY the missing field when the rest of the event is present', async () => {
@@ -129,16 +142,15 @@ describe('Assistant calendar.invite A2UI clarification (ADR 0051 §3/§5)', () =
       },
     };
     await expect(enqueueAction(ctx)).rejects.toThrow('__suspended__');
+    expect(interruptFormDefect(captured)).toBeNull();
     const components = ((captured!.form as Record<string, unknown>).surface as { components: Array<Record<string, unknown>> }).components;
     const ids = components.map((c) => c.id).filter((id): id is string => typeof id === 'string');
-    expect(ids).toContain('attendees');
-    expect(ids).not.toContain('summary');
-    expect(ids).not.toContain('date');
+    expect(ids).toEqual(['attendees', 'confirm']);
   });
 
   it('resumed values merge into payload.event and enqueue a complete invite', async () => {
+    // One answer per FIELD (the form card never sends the button as an answer).
     const resume = {
-      action: 'confirm',
       summary: 'Kickoff with Acme',
       date: '2026-07-01',
       time: '14:00',
@@ -173,7 +185,8 @@ describe('Assistant calendar.invite A2UI clarification (ADR 0051 §3/§5)', () =
     const ctx = {
       features: { assistant: buildAssistantSurface({ tenantId: 't-cal-badtime' }) },
       inputs: { kind: 'calendar.invite', draft: 'Kickoff', payload: { event: {} } },
-      // `time` is a free-text field — "99:99" must not leak into the dateTime.
+      // The UI offers only slots, but the resume value is untrusted: a non-conforming
+      // client's "99:99" must not leak into the dateTime.
       suspend: async () => answers({ summary: 'K', date: '2026-07-01', time: '99:99', durationMinutes: '30', attendees: 'a@b.com' }),
     };
     const r = await enqueueAction(ctx);

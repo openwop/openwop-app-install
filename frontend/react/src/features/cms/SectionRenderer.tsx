@@ -32,6 +32,7 @@ import { Button } from '../../ui/Button.js';
 import { useFormat } from '../../i18n/useFormat.js';
 import { useDemoMode } from '../../client/useDemoMode.js';
 import { brand } from '../../brand/brand.js';
+import { prefersReducedMotion } from '../../ui/motion.js';
 import { isStockOpenwopBrand } from '../../brand/defaults.js';
 // ADR 0331 §D2 — the ONE public fill renderer, lazy so public pages without a
 // form section never load it (and cms/→forms/ stays a soft edge).
@@ -43,7 +44,7 @@ const LazyPublicFormRenderer = lazy(() => import('../forms/render/PublicFormRend
 import type { IconCmp } from '../../chrome/featureTypes.js';
 import {
   MessageSquareIcon, MessageCircleIcon, BotIcon, WorkflowIcon, FolderIcon,
-  InboxIcon, ColumnsIcon, ClockIcon, MonitorIcon, PlayIcon, BoxesIcon,
+  InboxIcon, ColumnsIcon, ClockIcon, MonitorIcon, PlayIcon, PauseIcon, BoxesIcon,
   PackageIcon, BriefcaseIcon, ShieldIcon, DatabaseIcon, StarIcon, ActivityIcon,
   BookOpenIcon, FileTextIcon, PencilIcon, MicIcon, SparklesIcon, ImageIcon,
   LayoutGridIcon, GlobeIcon, ClipboardIcon, ScaleIcon, FlagIcon, LifeBuoyIcon,
@@ -1068,6 +1069,44 @@ function FeatureCards({ cols, legend, stg }: { cols: FeatureItem[]; legend: Reco
 }
 
 /** Render one section's PUBLIC (front-page) markup. */
+/** ADR 1150 D2 — a gallery tile's link, or '' when it is not a safe target. */
+function tileHref(href: string): string {
+  const h = href.trim();
+  return h && (isSafeHref(h) || isInternal(h) || isFragment(h)) ? h : '';
+}
+
+/**
+ * ADR 1150 D3 — the `video` hero's background film. Decorative (`aria-hidden`),
+ * muted and looping, so WCAG 2.2.2 needs a way to stop it: a visible Pause /
+ * Play button. Under reduced motion (the OS setting or the in-app override) it
+ * does not start on its own; the poster shows until the visitor presses Play.
+ */
+function HeroVideo({ src, poster }: { src: string; poster?: string | undefined }): JSX.Element {
+  const { t } = useTranslation(SITE_NS);
+  const ref = useRef<HTMLVideoElement>(null);
+  const [playing, setPlaying] = useState(false);
+  // `play()` rejects when a browser refuses autoplay, and is a no-op in some
+  // embedders; either way the button then offers Play, never a false Pause.
+  const start = (): void => {
+    const v = ref.current;
+    if (!v) return;
+    try { void Promise.resolve(v.play()).then(() => setPlaying(true), () => setPlaying(false)); } catch { setPlaying(false); }
+  };
+  useEffect(() => { if (!prefersReducedMotion()) start(); }, [src]);
+  const toggle = (): void => {
+    if (playing) { ref.current?.pause(); setPlaying(false); } else start();
+  };
+  return (
+    <div className="fp-hero__video-frame">
+      <video ref={ref} className="fp-hero__photo fp-hero__video" src={src} poster={poster} muted loop playsInline preload="metadata" aria-hidden="true" />
+      <button type="button" className="fp-hero__video-toggle" onClick={toggle}>
+        <span aria-hidden="true">{playing ? <PauseIcon size={16} /> : <PlayIcon size={16} />}</span>
+        <span className="sr-only">{t(playing ? 'site:heroVideoPause' : 'site:heroVideoPlay')}</span>
+      </button>
+    </div>
+  );
+}
+
 function PublicSection({ section }: { section: Section }): JSX.Element {
   const { t } = useTranslation('cms');
   const d = section.data;
@@ -1133,6 +1172,19 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
       // ADR 1080 D6 — a photo hero's placement: `band` runs the photo the full
       // width above the copy, `card` sets it as a rounded card beside the copy,
       // and `panel` makes an inverse band with the photo filling one half.
+      // ADR 1150 D3 — a full-width background film above the hero copy: muted,
+      // looping, decorative. Always the band placement (a loop beside the copy
+      // competes with it). Without a src it falls through to the default art.
+      // Same-origin paths only, checked again here: a stored or mirrored section
+      // that bypassed the validator never loads another origin's film.
+      if (visual === 'video' && isInternal(str(d.videoSrc))) {
+        return (
+          <section className={`cms-public-section fp-hero fp-hero--band fp-hero--video${mx}`}>
+            <HeroVideo src={str(d.videoSrc)} poster={isInternal(str(d.posterSrc)) ? str(d.posterSrc) : undefined} />
+            <div className="fp-shell fp-hero__inner">{copy}</div>
+          </section>
+        );
+      }
       if (visual === 'image' && str(d.imageToken) && (d.placement === 'band' || d.placement === 'card' || d.placement === 'panel')) {
         const photo = <img className="fp-hero__photo" src={assetUrl(str(d.imageToken))} alt={str(d.alt)} />;
         if (d.placement === 'band') {
@@ -1316,12 +1368,17 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
       );
     }
 
-    case 'cta':
+    case 'cta': {
+      // #6150 — a photo behind the band (`imageToken`, alt required at save) and the
+      // hero's queue card beside the copy (`queue`). Unset, the markup is unchanged.
+      const ctaPhoto = str(d.imageToken);
+      const ctaQueue = typeof d.queue === 'object' && d.queue !== null;
       return (
         // ADR 1062 D4 — `split` puts the copy at the start and the button (with
         // its `note`) at the end on wide screens; `start` keeps the button under
         // left-aligned copy. A `note` ("No card needed") sits under the button.
-        <section className={`cms-public-section fp-section fp-cta${d.align === 'start' ? ' fp-cta--start' : d.align === 'split' ? ' fp-cta--split' : ''}${sx}${mx}`}>
+        <section className={`cms-public-section fp-section fp-cta${d.align === 'start' ? ' fp-cta--start' : d.align === 'split' ? ' fp-cta--split' : ''}${ctaPhoto ? ' fp-cta--photo' : ''}${ctaQueue ? ' fp-cta--queue' : ''}${sx}${mx}`}>
+          {ctaPhoto ? <img className="fp-cta__photo" src={assetUrl(ctaPhoto)} alt={str(d.alt)} loading="lazy" decoding="async" /> : null}
           <div className="fp-shell fp-cta__inner">
             <div className="fp-cta__copy">
               {eyebrow ? <p className="fp-eyebrow fp-eyebrow--accent">{eyebrow}</p> : null}
@@ -1332,9 +1389,11 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
               <CtaLink label={str(d.label)} url={str(d.url)} primary />
               {str(d.note) ? <p className="fp-cta__note">{inlineMarkdown(str(d.note), 'cta-note')}</p> : null}
             </div>
+            {ctaQueue ? <HeroQueue queue={d.queue} /> : null}
           </div>
         </section>
       );
+    }
 
     case 'columns': {
       const cols: {
@@ -1525,7 +1584,17 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
               <div className={`fp-gallery__grid${shots.length === 1 ? ' fp-gallery__grid--one' : ''}${d.galleryLayout === 'lead' && shots.length > 1 ? ' fp-gallery__grid--lead' : ''}${stg}`}>
                 {shots.map((c, i) => (
                   <figure key={i} className={`fp-gallery__item${c.highlight ? ' fp-gallery__item--proof' : ''}`}>
-                    <ColumnShot token={str(c.imageToken)} alt={str(c.alt)} frameUrl={str(c.frameUrl)} className="fp-gallery__shot" />
+                    {/* ADR 1150 D2 — a tile with an href is a link around its picture (`safeLink` server-side). */}
+                    {/* Checked again at render (http(s), mailto, an internal path or a
+                        fragment), so a section that bypassed the validator never
+                        renders a javascript:, data: or vbscript: link. */}
+                    {tileHref(str(c.href)) ? (
+                      <a className="fp-gallery__link" href={tileHref(str(c.href))}>
+                        <ColumnShot token={str(c.imageToken)} alt={str(c.alt)} frameUrl={str(c.frameUrl)} className="fp-gallery__shot" />
+                      </a>
+                    ) : (
+                      <ColumnShot token={str(c.imageToken)} alt={str(c.alt)} frameUrl={str(c.frameUrl)} className="fp-gallery__shot" />
+                    )}
                     {str(c.title) || str(c.text) || str(c.tag) ? (
                       <figcaption className="fp-gallery__cap">
                         {str(c.tag) ? <span className="fp-gallery__tag">{str(c.tag)}</span> : null}
@@ -1803,7 +1872,8 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
                 // screenshot, a name and a line.
                 <Marquee
                   items={cols.map((c) => str(c.title) || str(c.text)).filter(Boolean)}
-                  cards={cols.filter((c) => str(c.title) || str(c.text)).map((c, i) => (
+                  // #6150 — a picture-only card joins the strip too; its alt text is its name.
+                  cards={cols.filter((c) => str(c.title) || str(c.text) || (str(c.imageToken) && str(c.alt))).map((c, i) => (
                     <div className="fp-marquee__card">
                       <ColumnShot token={str(c.imageToken)} alt={str(c.alt)} frameUrl={str(c.frameUrl)} className="fp-marquee__shot" />
                       {str(c.title) ? <p className="fp-marquee__card-title">{str(c.title)}</p> : null}
@@ -1868,6 +1938,30 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
                   return <li key={i}>{card}</li>;
                 })}
               </ul>
+            </div>
+          </section>
+        );
+      }
+      if (layout === 'split') {
+        // ADR 1150 D1 — a photo beside its text, sides alternating down the
+        // section, each row with an optional link (the item's ctaLabel and ctaUrl).
+        return (
+          <section className={`cms-public-section fp-section fp-split${sx}${mx}`}>
+            <div className="fp-shell">
+              <SectionHead eyebrow={eyebrow} heading={heading} lede={str(d.lede) || undefined} />
+              <ol className={`fp-split__list${stg}`}>
+                {cols.map((c, i) => (
+                  <li key={i} className={`fp-split__row${i % 2 === 1 ? ' fp-split__row--flip' : ''}`}>
+                    {str(c.imageToken) ? <ColumnShot token={str(c.imageToken)} alt={str(c.alt)} frameUrl={str(c.frameUrl)} className="fp-split__media" /> : null}
+                    <div className="fp-split__text">
+                      {str(c.eyebrow) ? <p className="fp-split__eyebrow">{str(c.eyebrow)}</p> : null}
+                      {str(c.title) ? <h3 className="fp-split__title">{str(c.title)}</h3> : null}
+                      {str(c.text) ? <p className="fp-split__lede">{inlineMarkdown(str(c.text), `split-${i}`)}</p> : null}
+                      {str(c.ctaLabel) && str(c.ctaUrl) ? <CtaLink label={str(c.ctaLabel)} url={str(c.ctaUrl)} /> : null}
+                    </div>
+                  </li>
+                ))}
+              </ol>
             </div>
           </section>
         );

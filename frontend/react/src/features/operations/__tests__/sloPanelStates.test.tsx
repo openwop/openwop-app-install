@@ -21,9 +21,20 @@
  *
  * w52: every fixture is typed against the client's own interfaces (HEALTH, DLQ
  * and OUTBOX were untyped), and the mocks are typed.
+ *
+ * w117: each case waits for the outbox panel (read in the SAME `allSettled`
+ * batch, never a probe target) and then asserts exact counts inside the SLO
+ * section, so a sabotage reds on a value rather than on a lookup that times out.
+ * The queue-source case carries a second, non-queue row the label must skip.
+ * Sabotage that turns it red (w117 probes): the failed card, the 403 split (either
+ * direction), the collector-off card, the empty card, the stale and degraded and
+ * not-measurable state words, the stale-refresh Notice, keeping the last reading,
+ * the alert count, severity word, runbook path, per-instance chip, window chip,
+ * sample count, ratio formatting, overflow chip, queue-source label, and the
+ * why-not chip.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, cleanup, screen, waitFor, within } from '@testing-library/react';
+import { render, cleanup, screen, fireEvent, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { GlobalLiveRegion } from '../../../ui/announce.js';
 
@@ -98,6 +109,15 @@ function renderHub(): void {
 function page(): ReturnType<typeof within> {
   return within(screen.getByTestId('page'));
 }
+/** The SLO section alone, found by its heading, so a count cannot include a neighbour. */
+function sloPanel(): ReturnType<typeof within> {
+  return within(page().getByRole('heading', { name: en.sloHeading }).closest('section') as HTMLElement);
+}
+/** The hub's reads settle in ONE `allSettled` batch: once the outbox panel shows
+ *  its answer, the SLO panel shows its final state too. */
+async function settled(): Promise<void> {
+  await page().findByText(en.outboxHealthy);
+}
 
 // ADR 0987 D6 — the hub's sixth read. Answered here so this file's panels stay the
 // ones under test, and no live fetch leaves the test (ADR 0661).
@@ -120,22 +140,24 @@ describe('ADR 0556 P2 — SLO panel states', () => {
   it('ERROR: a failed read says so and never claims there are no alerts', async () => {
     api.getSloSummary.mockRejectedValue(new Error('boom'));
     renderHub();
-    expect(await page().findByText(en.sloUnavailableTitle)).toBeTruthy();
+    await settled();
+    expect(sloPanel().queryAllByText(en.sloUnavailableTitle)).toHaveLength(1);
     // The whole bug class in one assertion: an unread projection reported as a
     // clean one would read as "every objective is met".
-    expect(page().queryByText(en.sloNoAlerts)).toBeNull();
-    expect(page().queryByText(en.sloStateHealthy)).toBeNull();
+    expect(sloPanel().queryByText(en.sloNoAlerts)).toBeNull();
+    expect(sloPanel().queryByText(en.sloStateHealthy)).toBeNull();
   });
 
   it('FORBIDDEN: a 403 here claims operator-only for THIS panel alone', async () => {
     api.getSloSummary.mockRejectedValue(new OperationsRequestError('nope', 403));
     renderHub();
-    await waitFor(() => expect(page().queryAllByText(en.operatorOnlyTitle).length).toBeGreaterThan(0));
-    // The three panels beside it answered fine and must still render — the
+    await settled();
+    expect(sloPanel().queryAllByText(en.operatorOnlyTitle)).toHaveLength(1);
+    // The panels beside it answered fine and must still render — the
     // UX-OPS-1 lesson, applied to the fifth read.
-    expect(page().getByText(en.statusReady)).toBeTruthy();
-    expect(page().getByText(en.dlqEmpty)).toBeTruthy();
-    // Exactly one operator-only card: a global flag would produce four.
+    expect(page().queryAllByText(en.statusReady)).toHaveLength(1);
+    expect(page().queryAllByText(en.dlqEmpty)).toHaveLength(1);
+    // Exactly one operator-only card on the page: a global flag would produce more.
     expect(page().queryAllByText(en.operatorOnlyTitle)).toHaveLength(1);
   });
 
@@ -146,11 +168,12 @@ describe('ADR 0556 P2 — SLO panel states', () => {
       rows: [sloRow({ state: 'unknown', observed: null })],
     }));
     renderHub();
-    expect(await page().findByText(en.sloCollectorOffTitle)).toBeTruthy();
+    await settled();
+    expect(sloPanel().queryAllByText(en.sloCollectorOffTitle)).toHaveLength(1);
     // Distinguished from all three neighbours it could be mistaken for.
-    expect(page().queryByText(en.sloEmptyTitle)).toBeNull();
-    expect(page().queryByText(en.sloNoAlerts)).toBeNull();
-    expect(page().queryByText(en.sloStateHealthy)).toBeNull();
+    expect(sloPanel().queryByText(en.sloEmptyTitle)).toBeNull();
+    expect(sloPanel().queryByText(en.sloNoAlerts)).toBeNull();
+    expect(sloPanel().queryByText(en.sloStateHealthy)).toBeNull();
   });
 
   it('EMPTY: a live reader with nothing measured says so, not "met"', async () => {
@@ -158,11 +181,12 @@ describe('ADR 0556 P2 — SLO panel states', () => {
       rows: [sloRow({ id: 'W1', state: 'empty', observed: null, sampleCount: 0 })],
     }));
     renderHub();
-    expect(await page().findByText(en.sloEmptyTitle)).toBeTruthy();
-    expect(page().queryByText(en.sloStateHealthy)).toBeNull();
+    await settled();
+    expect(sloPanel().queryAllByText(en.sloEmptyTitle)).toHaveLength(1);
+    expect(sloPanel().queryByText(en.sloStateHealthy)).toBeNull();
     // And it is NOT the collector-off card — one is fixed with an env var, the
     // other by waiting for traffic.
-    expect(page().queryByText(en.sloCollectorOffTitle)).toBeNull();
+    expect(sloPanel().queryByText(en.sloCollectorOffTitle)).toBeNull();
   });
 
   it('STALE: a row whose series went quiet is warned, not shown as met', async () => {
@@ -174,25 +198,31 @@ describe('ADR 0556 P2 — SLO panel states', () => {
       alerts: [{ id: 'Q2', severity: 'ticket', kind: 'stale', summary: 'no sample within 60s', runbook: 'docs/runbooks/slo-alerts.md#q2-outbox-oldest-age' }],
     }));
     renderHub();
-    expect(await page().findByText(en.sloStateStale)).toBeTruthy();
+    await settled();
+    expect(sloPanel().queryAllByText(en.sloStateStale)).toHaveLength(1);
     // 3s is comfortably under the 120s target — the arithmetic says "fine" and
     // the freshness check is the only thing that does not.
-    expect(page().queryByText(en.sloStateHealthy)).toBeNull();
-    expect(page().getByText(en.sloAlertCount.replace('{{n}}', '1'))).toBeTruthy();
+    expect(sloPanel().queryByText(en.sloStateHealthy)).toBeNull();
+    expect(sloPanel().queryAllByText('1 alerts')).toHaveLength(1);
   });
 
   it('STALE REFRESH: a failed refresh keeps the last-known rows and labels them', async () => {
     api.getSloSummary.mockResolvedValueOnce(summary());
     renderHub();
-    await page().findByText(en.sloNoAlerts);
+    await settled();
+    expect(sloPanel().queryAllByText(en.sloNoAlerts)).toHaveLength(1);
+    expect(sloPanel().queryAllByText(en.sloStale)).toHaveLength(0);
     // A later refresh fails. The previous answer is still the most recent truth
     // available, so it is kept — and labelled, which is the §4.6 `stale` rule.
+    // The refresh's own settle signal is a NEW outbox count.
     api.getSloSummary.mockRejectedValue(new Error('later failure'));
-    screen.getByRole('button', { name: en.refresh }).click();
-    await waitFor(() => expect(page().queryAllByText(en.sloStale).length).toBeGreaterThan(0));
-    expect(page().getByText(en.sloNoAlerts)).toBeTruthy();
+    api.getOutboxSummary.mockResolvedValue({ ...OUTBOX, counts: { pending: 4, dead: 0 } });
+    fireEvent.click(screen.getByRole('button', { name: en.refresh }));
+    await page().findByText('4 waiting to start');
+    expect(sloPanel().queryAllByText(en.sloStale)).toHaveLength(1);
+    expect(sloPanel().queryAllByText(en.sloNoAlerts)).toHaveLength(1);
     // NOT the "could not be read" card — that is for having nothing at all.
-    expect(page().queryByText(en.sloUnavailableTitle)).toBeNull();
+    expect(sloPanel().queryByText(en.sloUnavailableTitle)).toBeNull();
   });
 
   it('BREACHING: renders the alert with its severity as a WORD and the runbook path', async () => {
@@ -201,11 +231,13 @@ describe('ADR 0556 P2 — SLO panel states', () => {
       alerts: [{ id: 'R1', severity: 'page', kind: 'breach', summary: 'blocked effects is 2 against a target of ≤ 0.', runbook: 'docs/runbooks/slo-alerts.md#r1-blocked-effect' }],
     }));
     renderHub();
-    expect(await page().findByText(en.sloStateBreaching)).toBeTruthy();
+    await settled();
+    expect(sloPanel().queryAllByText(en.sloStateBreaching)).toHaveLength(1);
     // WCAG 1.4.1 — severity is a word, never colour alone.
-    expect(page().getByText(en.sloSeverityPage)).toBeTruthy();
-    expect(page().getByText('docs/runbooks/slo-alerts.md#r1-blocked-effect')).toBeTruthy();
-    expect(page().queryByText(en.sloNoAlerts)).toBeNull();
+    expect(sloPanel().queryAllByText(en.sloSeverityPage)).toHaveLength(1);
+    expect(sloPanel().queryAllByText('docs/runbooks/slo-alerts.md#r1-blocked-effect')).toHaveLength(1);
+    expect(sloPanel().queryByText(en.sloNoAlerts)).toBeNull();
+    expect(sloPanel().queryAllByText('1 alerts')).toHaveLength(1);
   });
 
   it('HEALTHY: shows the window and always says the reading is per-instance', async () => {
@@ -213,15 +245,16 @@ describe('ADR 0556 P2 — SLO panel states', () => {
       rows: [sloRow({ id: 'W1', state: 'healthy', observed: 0.99, target: 0.97, comparison: 'at_least', unit: 'ratio', sampleCount: 100 })],
     }));
     renderHub();
-    expect(await page().findByText(en.sloNoAlerts)).toBeTruthy();
-    expect(page().getByText(en.sloStateHealthy)).toBeTruthy();
+    await settled();
+    expect(sloPanel().queryAllByText(en.sloNoAlerts)).toHaveLength(1);
+    expect(sloPanel().queryAllByText(en.sloStateHealthy)).toHaveLength(1);
     // The honesty the panel must never drop: `docs/SLO.md` declares 28 days
     // rolling and fleet-wide, and this is neither.
-    expect(page().getByText(en.sloPerInstance)).toBeTruthy();
-    expect(page().getByText(en.sloWindow.replace('{{n}}', '3600'))).toBeTruthy();
+    expect(sloPanel().queryAllByText(en.sloPerInstance)).toHaveLength(1);
+    expect(sloPanel().queryAllByText('Since this instance started · 3600s')).toHaveLength(1);
     // A ratio's sample count travels with it — 99% over 100 is evidence, over 3 is not.
-    expect(page().getByText(en.sloSamples.replace('{{n}}', '100'))).toBeTruthy();
-    expect(page().getByText(en.sloObserved.replace('{{value}}', '99.00%'))).toBeTruthy();
+    expect(sloPanel().queryAllByText('100 samples')).toHaveLength(1);
+    expect(sloPanel().queryAllByText('now 99.00%')).toHaveLength(1);
   });
 
   it('DEGRADED: an overflowed series is warned, never shown as a number', async () => {
@@ -234,25 +267,33 @@ describe('ADR 0556 P2 — SLO panel states', () => {
       alerts: [{ id: 'W1', severity: 'ticket', kind: 'degraded', summary: 'cardinality ceiling', runbook: 'docs/runbooks/slo-alerts.md#w1-run-success-rate' }],
     }));
     renderHub();
-    expect(await page().findByText(en.sloStateDegraded)).toBeTruthy();
+    await settled();
+    expect(sloPanel().queryAllByText(en.sloStateDegraded)).toHaveLength(1);
     // Distinguished from a breach: nothing is known to be failing.
-    expect(page().queryByText(en.sloStateBreaching)).toBeNull();
-    expect(page().queryByText(en.sloStateHealthy)).toBeNull();
+    expect(sloPanel().queryByText(en.sloStateBreaching)).toBeNull();
+    expect(sloPanel().queryByText(en.sloStateHealthy)).toBeNull();
     // And the ceiling itself is on screen, because it is what an operator fixes.
-    expect(page().getByText(/Series ceiling reached/)).toBeTruthy();
+    expect(sloPanel().queryAllByText(/^Series ceiling reached/)).toHaveLength(1);
   });
 
   it('QUEUE SOURCE: a dispatch row says it came from the queue table', async () => {
     // The same quantity is rendered by the outbox panel above. Labelling the
     // source is what stops an operator reading them as two disagreeing numbers.
+    // R1 reads the local scrape and must NOT carry the label.
     api.getSloSummary.mockResolvedValue(summary({
-      rows: [sloRow({
-        id: 'Q2', metric: 'openwop.dispatch.outbox.oldest_age', state: 'healthy',
-        source: 'dispatch-outbox-stats', observed: 3, target: 120, unit: 'seconds', sampleCount: 1,
-      })],
+      rows: [
+        sloRow({ id: 'R1' }),
+        sloRow({
+          id: 'Q2', metric: 'openwop.dispatch.outbox.oldest_age', state: 'healthy',
+          source: 'dispatch-outbox-stats', observed: 3, target: 120, unit: 'seconds', sampleCount: 1,
+        }),
+      ],
     }));
     renderHub();
-    expect(await page().findByText(en.sloFromQueueTable)).toBeTruthy();
+    await settled();
+    const labels = sloPanel().queryAllByText(en.sloFromQueueTable);
+    expect(labels).toHaveLength(1);
+    expect(labels[0]?.closest('li')?.querySelector('.chip')?.textContent).toBe('Q2');
   });
 
   it('NOT MEASURABLE: shows the row with its reason and raises no alert', async () => {
@@ -263,10 +304,13 @@ describe('ADR 0556 P2 — SLO panel states', () => {
       ],
     }));
     renderHub();
-    expect(await page().findByText(en.sloStateNotProjectable)).toBeTruthy();
-    expect(page().getByText(en.sloWhyNot)).toBeTruthy();
+    await settled();
+    expect(sloPanel().queryAllByText(en.sloStateNotProjectable)).toHaveLength(1);
+    const whyNot = sloPanel().queryAllByText(en.sloWhyNot);
+    expect(whyNot).toHaveLength(1);
+    expect(whyNot[0]?.getAttribute('title')).toBe('needs an obligation age no counter carries');
     // It is a published objective the panel deliberately does not judge — so it
     // is visible, and it does not page anyone.
-    expect(page().getByText(en.sloNoAlerts)).toBeTruthy();
+    expect(sloPanel().queryAllByText(en.sloNoAlerts)).toHaveLength(1);
   });
 });

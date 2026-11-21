@@ -259,6 +259,9 @@ export const messages = {
   heroVisualRun: 'Registro de execução (a execução como seu log de eventos)',
   heroVisualFilm: 'Filme de introdução (só no site de demonstração; nos demais, o registro da execução)',
   heroVisualImage: 'Imagem escolhida',
+  heroVisualVideo: 'Vídeo de fundo (sem som, em loop)',
+  heroVideoSrcLabel: 'Caminho do vídeo neste site',
+  heroVideoPosterLabel: 'Caminho da imagem de capa neste site',
   heroVisualNone: 'Sem visual',
   heroVisualPlan: 'Cartão de plano de exemplo',
 
@@ -275,6 +278,7 @@ export const messages = {
   ctaButtonLabelLabel: 'Rótulo do botão',
   ctaButtonUrlLabel: 'URL do botão',
   ctaButtonUrlPlaceholder: '/agents or https://…',
+  ctaPhotoLabel: 'Foto atrás da faixa',
 
   // ADR 1029 D5 — activity card, timeline, bento, marquee
   heroVisualActivity: 'Cartão de atividade (aprovações)',
@@ -410,6 +414,7 @@ export const messages = {
   layoutStats: 'Estatísticas (valor + rótulo)',
   layoutPrompts: 'Prompts (etiqueta + prompt de exemplo)',
   layoutDives: 'Em detalhe (afirmação + ilustração integrada)',
+  layoutSplit: 'Dividido (foto ao lado do texto, alternando)',
   layoutRuled: 'Colunas com linha (traço no topo)',
   layoutPanels: 'Painéis (preenchidos, pequeno desenho)',
   layoutProgress: 'Cartões de progresso (rótulo + barra)',

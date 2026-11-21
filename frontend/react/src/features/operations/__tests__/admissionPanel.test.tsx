@@ -23,9 +23,16 @@
  * The concurrency total is a SUM over `concurrencyRefusals`; the store emits one
  * reason today (`at_cap`, host/runInsert.ts), so sum and first-value are the same
  * on production-shaped data and that mutant is equivalent, not an untested claim.
+ *
+ * w117: this panel owns its read, so it settles on its own schedule, not with the
+ * hub's `allSettled` batch. A data render is awaited by its list; a failure or a
+ * refresh is awaited by the hub's outbox panel (or a refresh's NEW outbox count)
+ * plus one macrotask drain, which lets the panel's own rejected read commit. Then
+ * every assertion is an exact count, so a sabotage reds on a value rather than on
+ * a lookup that times out.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, cleanup, screen, waitFor, within, fireEvent } from '@testing-library/react';
+import { render, cleanup, screen, within, fireEvent, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { GlobalLiveRegion } from '../../../ui/announce.js';
 
@@ -99,6 +106,23 @@ const page = (): ReturnType<typeof within> => within(screen.getByTestId('page'))
 /** The admission section, found by its heading, so assertions cannot match a neighbour. */
 const panel = (): ReturnType<typeof within> => within(page().getByRole('heading', { name: en.admissionHeading }).closest('section') as HTMLElement);
 
+/** One macrotask, inside act: every already-resolved read has committed after it. */
+async function drain(): Promise<void> {
+  await act(async () => { await new Promise<void>((r) => { setTimeout(r, 0); }); });
+}
+/** The hub's own reads answered (the outbox panel) and this panel's read committed. */
+async function settled(): Promise<void> {
+  await page().findByText(en.outboxHealthy);
+  await drain();
+}
+/** Click the hub's Refresh and wait until THAT load landed (a new outbox count). */
+async function hubRefresh(pending: number): Promise<void> {
+  api.getOutboxSummary.mockResolvedValue({ ...OUTBOX, counts: { pending, dead: 0 } });
+  fireEvent.click(page().getByRole('button', { name: en.refresh }));
+  await page().findByText(`${pending} waiting to start`);
+  await drain();
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   api.getHealthSummary.mockResolvedValue(HEALTH);
@@ -113,35 +137,39 @@ describe('ADR 0987 D6 — run admission panel', () => {
   it('shows the profile, holding count, caps, postures and refusals it read', async () => {
     api.getAdmissionSummary.mockResolvedValue(admission());
     renderHub();
-    expect(await panel().findByText(en.admissionProfileStrict)).toBeTruthy();
-    expect(panel().getByText('Runs holding a slot: 7')).toBeTruthy();
-    expect(panel().getByText(en.admissionPerInstance)).toBeTruthy();
-    expect(panel().getByText('cap 10')).toBeTruthy();
-    expect(panel().getByText(en.admissionCapOff)).toBeTruthy();
-    expect(panel().getByText(en.admissionCapPerPlan)).toBeTruthy();
+    await panel().findByRole('list');
+    expect(panel().queryAllByText(en.admissionProfileStrict)).toHaveLength(1);
+    expect(panel().queryAllByText('Runs holding a slot: 7')).toHaveLength(1);
+    expect(panel().queryAllByText(en.admissionPerInstance)).toHaveLength(1);
+    expect(panel().queryAllByText('cap 10')).toHaveLength(1);
+    expect(panel().queryAllByText(en.admissionCapOff)).toHaveLength(1);
+    expect(panel().queryAllByText(en.admissionCapPerPlan)).toHaveLength(1);
     // The refusal chip carries the COUNT it read, beside its reason code.
     expect(panel().getByText('session_runs_per_min').closest('span')?.textContent).toBe('refused 3 · session_runs_per_min');
     // Every posture is a word: three window/plan families fail closed (strict), the
     // concurrency family is counted in the run insert.
-    expect(panel().getAllByText(en.admissionPostureClosed)).toHaveLength(3);
-    expect(panel().getAllByText(en.admissionPostureTransactional)).toHaveLength(1);
+    expect(panel().queryAllByText(en.admissionPostureClosed)).toHaveLength(3);
+    expect(panel().queryAllByText(en.admissionPostureTransactional)).toHaveLength(1);
     expect(panel().queryByText(en.admissionPostureOpen)).toBeNull();
-    expect(panel().getByText('Concurrency refusals (sessions and keys together): 2')).toBeTruthy();
+    expect(panel().queryAllByText('Concurrency refusals (sessions and keys together): 2')).toHaveLength(1);
     // The concurrency row shows no per-row refusal chip: only the two window/plan
     // rows with `{}` say "no refusals".
-    expect(panel().getAllByText(en.admissionNoRefusals)).toHaveLength(2);
+    expect(panel().queryAllByText(en.admissionNoRefusals)).toHaveLength(2);
   });
 
   it('says "at least" when the bounded holding count hit its limit', async () => {
     api.getAdmissionSummary.mockResolvedValue(admission({ holding: { count: 1000, atLeast: true, limit: 1000 } }));
     renderHub();
-    expect(await panel().findByText('Runs holding a slot: at least 1,000')).toBeTruthy();
+    await panel().findByRole('list');
+    expect(panel().queryAllByText('Runs holding a slot: at least 1,000')).toHaveLength(1);
+    expect(panel().queryAllByText('Runs holding a slot: 1,000')).toHaveLength(0);
   });
 
   it('a failed read says so and never reads as "no refusals"', async () => {
     api.getAdmissionSummary.mockRejectedValue(new Error('boom'));
     renderHub();
-    expect(await panel().findByText(en.admissionUnavailableTitle)).toBeTruthy();
+    await settled();
+    expect(panel().queryAllByText(en.admissionUnavailableTitle)).toHaveLength(1);
     expect(panel().queryByText(en.admissionNoRefusals)).toBeNull();
     // This panel's failure stays in this panel: the hub's page-level error is for
     // the reads the hub owns.
@@ -149,15 +177,18 @@ describe('ADR 0987 D6 — run admission panel', () => {
     // The card's own Refresh re-runs this read, and a success replaces the card.
     api.getAdmissionSummary.mockResolvedValue(admission());
     fireEvent.click(panel().getByRole('button', { name: en.refresh }));
-    expect(await panel().findByText(en.admissionProfileStrict)).toBeTruthy();
+    await drain();
+    expect(panel().queryAllByText(en.admissionProfileStrict)).toHaveLength(1);
     expect(panel().queryByText(en.admissionUnavailableTitle)).toBeNull();
   });
 
   it('a 403 here is operator-only for this panel alone, and raises no page error', async () => {
     api.getAdmissionSummary.mockRejectedValue(new OperationsRequestError('nope', 403));
     renderHub();
-    await waitFor(() => expect(panel().queryByText(en.operatorOnlyTitle)).toBeTruthy());
-    expect(page().getByText(en.statusReady)).toBeTruthy();
+    await settled();
+    expect(panel().queryAllByText(en.operatorOnlyTitle)).toHaveLength(1);
+    expect(panel().queryByText(en.admissionUnavailableTitle)).toBeNull();
+    expect(page().queryAllByText(en.statusReady)).toHaveLength(1);
     expect(page().queryAllByText(en.operatorOnlyTitle)).toHaveLength(1);
     expect(page().queryByText('nope')).toBeNull();
   });
@@ -165,19 +196,20 @@ describe('ADR 0987 D6 — run admission panel', () => {
   it("the hub's Refresh re-reads this panel", async () => {
     api.getAdmissionSummary.mockResolvedValue(admission());
     renderHub();
-    await panel().findByText(en.admissionProfileStrict);
+    await settled();
+    expect(panel().queryAllByText(en.admissionProfileStrict)).toHaveLength(1);
     expect(api.getAdmissionSummary).toHaveBeenCalledTimes(1);
     api.getAdmissionSummary.mockResolvedValue(admission({ profile: 'evaluation' }));
-    fireEvent.click(page().getByRole('button', { name: en.refresh }));
-    expect(await panel().findByText(en.admissionProfileEvaluation)).toBeTruthy();
+    await hubRefresh(4);
+    expect(panel().queryAllByText(en.admissionProfileEvaluation)).toHaveLength(1);
     expect(api.getAdmissionSummary).toHaveBeenCalledTimes(2);
     expect(panel().queryByText(en.admissionStale)).toBeNull();
     // A refresh that FAILS keeps the last reading and says it is stale.
     api.getAdmissionSummary.mockRejectedValue(new Error('flaky'));
-    fireEvent.click(page().getByRole('button', { name: en.refresh }));
-    expect(await panel().findByText(en.admissionStale)).toBeTruthy();
+    await hubRefresh(5);
+    expect(panel().queryAllByText(en.admissionStale)).toHaveLength(1);
     expect(api.getAdmissionSummary).toHaveBeenCalledTimes(3);
-    expect(panel().getByText(en.admissionProfileEvaluation)).toBeTruthy();
+    expect(panel().queryAllByText(en.admissionProfileEvaluation)).toHaveLength(1);
     expect(panel().queryByText(en.admissionUnavailableTitle)).toBeNull();
   });
 });

@@ -27,7 +27,7 @@ import { adapterFor } from './adapters/registry.js';
 import { listAgentBindings } from './agentBindingService.js';
 import { listClientNotes, proposeClientNote } from './clientMemory.js';
 import { clientContextForRun } from './clientContext.js';
-import { mcpCampaignPerformance, mcpExplain, mcpGetCampaign, mcpListCampaigns, mcpPendingGates, mcpRequestChange, mcpRunStatus } from './externalRead.js';
+import { mcpCampaignPerformance, mcpExplain, mcpGetCampaign, mcpListCampaigns, mcpPendingGates, mcpProposeBudgetChange, mcpRequestChange, mcpRunStatus } from './externalRead.js';
 
 /** The run-metadata key a campaign-ops run is stamped with (host-namespaced). */
 export const CAMPAIGN_OPS_RUN_STAMP = 'openwop-app.campaignOps';
@@ -329,6 +329,12 @@ export function buildCampaignOpsSurface(scope: BundleScope): FeatureSurface {
     // ADR 0962 P2 — a request: writes a request row and starts the governed chain.
     mcpRequestChange: async (args) => mcpRequestChange(scope, {
       clientId: str(args.clientId), text: args.text, assetIds: args.assetIds, ...(optStr(args.campaignId) ? { campaignId: optStr(args.campaignId)! } : {}),
+    }),
+    // ADR 0962 P2 — a budget-change PROPOSAL: one reallocation plan + one approval
+    // that names its approvers. Never applies; there is no apply method here.
+    mcpProposeBudgetChange: async (args) => mcpProposeBudgetChange(scope, {
+      clientId: str(args.clientId), changes: args.changes, note: args.note,
+      ...(optStr(args.campaignId) ? { campaignId: optStr(args.campaignId)! } : {}),
     }),
   };
 }

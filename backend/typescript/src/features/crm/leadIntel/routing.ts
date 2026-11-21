@@ -22,7 +22,9 @@ import { resolveLeadTerritory } from '../../../host/leadTerritoryRouting.js';
 import { getNotificationEmitter } from '../../../notifications/emitter.js';
 import { OpenwopError } from '../../../types.js';
 import { createLogger } from '../../../observability/logger.js';
-import { tombstoneId } from '../../consent/consentService.js';
+import { isErasureTombstoned, tombstoneId, tombstoneKeyForms } from '../../consent/consentService.js';
+import { declarePiiFields } from '../../../host/dataClassification.js';
+import { subjectKeyForms } from '../../../host/subjectErasureRedaction.js';
 import { getContact } from '../contactsService.js';
 import { commitLeadRoutingDecision, getLeadGrade, getLeadProfile, getLeadRoutingDecision, getPendingLeadRoute, listLeadRoutingCapacityProfiles, restorePendingGrade, type LeadSource } from './leadStore.js';
 import { V0_MODEL_ID, type Band } from './model.js';
@@ -55,6 +57,30 @@ interface RoutingPointer { tenantId: string; orgId: string; poolId: string; next
 const pointers = new DurableCollection<RoutingPointer>(
   'crm:lead-rr', (p) => `${p.tenantId}::${p.orgId}::${p.poolId}`, undefined, (p) => p.tenantId,
 );
+// CHAN-F19 #7 (ADR 0464 §9) — an owner's capacity pool id is a tenant-salted hash
+// of their member subject, a lookup key that re-identifies them. Declared so the
+// census governs the store; NOT masked by field name (a rule-pool `poolId` is a
+// rule id, and other stores use the name).
+declarePiiFields('crm:lead-rr', ['poolId'], { maskGloballyByFieldName: false });
+
+/**
+ * CHAN-F19 #7 (ADR 0464 §9) — a DSAR deletes the subject's capacity pools
+ * (`capacity:<tombstoneId(tenant, owner)>`, one per org). The pool holds the
+ * pending reservations counted against that owner's lead cap; an erased member
+ * owns no new leads, so nothing needs the count. Rule round-robin pointers
+ * (`poolId` = a rule id) name no person and are kept. Tenant-scoped.
+ */
+export async function eraseLeadRoutingOwnerSubject(tenantId: string, subjectKey: string): Promise<number> {
+  if (!tenantId || !subjectKey) return 0; // never an unscoped sweep
+  const forms = [...new Set([...subjectKeyForms(subjectKey).forms].flatMap(tombstoneKeyForms))];
+  const poolIds = new Set(forms.map((form) => `capacity:${tombstoneId(tenantId, form)}`));
+  let deleted = 0;
+  for (const row of await pointers.listByPrefix(`${tenantId}::`)) {
+    if (row.tenantId !== tenantId || !poolIds.has(row.poolId)) continue;
+    if (await pointers.delete(`${row.tenantId}::${row.orgId}::${row.poolId}`)) deleted++;
+  }
+  return deleted;
+}
 
 /** All strategies reserve their pending ownership in the existing routing
  * pointer store, so a concurrent capacity admission sees it BEFORE assignment.
@@ -107,6 +133,10 @@ async function takeTurn(tenantId: string, orgId: string, poolId: string): Promis
 
 async function eligible(tenantId: string, orgId: string, subject: string): Promise<boolean> {
   try {
+    // CHAN-F19 #7 — an erased subject is never an owner, whatever pool still names
+    // them (a territory's member list is outside this feature). Otherwise a later
+    // round would re-create the capacity pool the eraser deleted.
+    if (await isErasureTombstoned(tenantId, subject)) return false;
     return (await resolveEffectiveAccess(tenantId, { subject, orgId })).scopes.includes('workspace:write');
   } catch {
     return false;

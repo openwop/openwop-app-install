@@ -249,4 +249,4 @@ export async function purgeLane(tenantId: string, laneKey: string): Promise<void
 }
 
 /** ADR 1042 D8 — the erasure module's handle on the rows (deletes stay in one place per store). */
-export const channelIngressStores = { senders, pending, threads, replies, senderThreads, conversationMarkers } as const;
+export const channelIngressStores = { senders, pending, threads, replies, senderThreads, conversationMarkers, settings } as const;

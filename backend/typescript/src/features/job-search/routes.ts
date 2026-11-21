@@ -11,6 +11,7 @@
  * with their own ADRs (0540 applications, 0542 listings, …) under this same
  * prefix, so the ownership of `/job-search/*` is established once, here.
  */
+import { sendErrorBody } from '../../middleware/errorEnvelope.js';
 import type { Response } from 'express';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { requireFeatureEnabled, authorizeOrgScope } from '../featureRoute.js';
@@ -109,7 +110,7 @@ export function registerJobSearchRoutes(deps: RouteDeps): void {
         dealId?: unknown; digest?: Partial<JobDigest>; profile?: unknown; applicant?: unknown;
       };
       if (typeof body.dealId !== 'string' || !body.dealId.startsWith('deal:')) {
-        res.status(400).json({ error: 'validation_error', message: 'dealId must be a `deal:`-prefixed string.' });
+        sendErrorBody(res, 400, { error: 'validation_error', message: 'dealId must be a `deal:`-prefixed string.' });
         return;
       }
       // ADR 1036 D3 — the pipeline's per-person id shape belongs to the person it
@@ -117,7 +118,7 @@ export function registerJobSearchRoutes(deps: RouteDeps): void {
       // colleague could pre-create `deal:<their tag>:<listing>` and block that
       // person's application to the listing forever (grade-code row 81).
       if (isForeignApplicationId(body.dealId, user.userId)) {
-        res.status(409).json({ error: 'conflict', message: 'That application id belongs to someone else in this workspace.' });
+        sendErrorBody(res, 409, { error: 'conflict', message: 'That application id belongs to someone else in this workspace.' });
         return;
       }
       const result = await createApplication({
@@ -129,7 +130,7 @@ export function registerJobSearchRoutes(deps: RouteDeps): void {
       // ADR 1036 D3 — a deal id a colleague created is a conflict, not their
       // application echoed back.
       if (result.notYours) {
-        res.status(409).json({ error: 'conflict', message: 'That application belongs to someone else in this workspace.' });
+        sendErrorBody(res, 409, { error: 'conflict', message: 'That application belongs to someone else in this workspace.' });
         return;
       }
       // An ineligible application is NOT an error — it is a decision, and the
@@ -220,10 +221,10 @@ async function withDealTitles<T extends { dealId: string }>(
  */
 function sendRefusal(res: Response, reason: IssueRefusal): void {
   if (reason === 'not-the-subject') {
-    res.status(403).json({ error: 'forbidden', message: 'An attestation states a person’s own conduct; only they can issue it.' });
+    sendErrorBody(res, 403, { error: 'forbidden', message: 'An attestation states a person’s own conduct; only they can issue it.' });
     return;
   }
-  res.status(404).json({ error: 'not_found', message: 'This host has no record of sending that application.' });
+  sendErrorBody(res, 404, { error: 'not_found', message: 'This host has no record of sending that application.' });
 }
 
   // ── Attestations (ADR 0544) ───────────────────────────────────────────────
@@ -259,7 +260,7 @@ function sendRefusal(res: Response, reason: IssueRefusal): void {
       const { tenantId, user } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
       const b = (req.body ?? {}) as { dealId?: unknown };
       if (typeof b.dealId !== 'string' || !b.dealId) {
-        res.status(400).json({ error: 'validation_error', message: 'dealId is required.' });
+        sendErrorBody(res, 400, { error: 'validation_error', message: 'dealId is required.' });
         return;
       }
       // NO campaignId, and that is the fix: P2 accepted one here, which let any
@@ -279,7 +280,7 @@ function sendRefusal(res: Response, reason: IssueRefusal): void {
       const { tenantId, user } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
       const ok = await revokeAttestation(tenantId, req.params.attestationId ?? '', Date.now(), user.userId);
       if (!ok) {
-        res.status(404).json({ error: 'not_found', message: 'Attestation not found or already revoked.' });
+        sendErrorBody(res, 404, { error: 'not_found', message: 'Attestation not found or already revoked.' });
         return;
       }
       res.status(204).end();
@@ -336,7 +337,7 @@ function sendRefusal(res: Response, reason: IssueRefusal): void {
     try {
       const { tenantId, user } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
       const ok = await completeFollowUp(tenantId, user.userId, req.params.dealId ?? '', req.params.stage ?? '', Date.now());
-      if (!ok) { res.status(404).json({ error: 'not_found', message: 'No open follow-up there.' }); return; }
+      if (!ok) { sendErrorBody(res, 404, { error: 'not_found', message: 'No open follow-up there.' }); return; }
       res.status(204).end();
     } catch (err) { next(err); }
   });
@@ -357,11 +358,11 @@ function sendRefusal(res: Response, reason: IssueRefusal): void {
       const { tenantId, user } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
       const kind = req.params.kind as DraftKind;
       if (!['interview-reply', 'prep-sheet', 'warm-intro'].includes(kind)) {
-        res.status(400).json({ error: 'validation_error', message: 'Unknown draft kind.' });
+        sendErrorBody(res, 400, { error: 'validation_error', message: 'Unknown draft kind.' });
         return;
       }
       const out = await approveDraft(tenantId, user.userId, req.params.dealId ?? '', kind, user.userId, Date.now());
-      if (!out) { res.status(404).json({ error: 'not_found', message: 'Draft not found.' }); return; }
+      if (!out) { sendErrorBody(res, 404, { error: 'not_found', message: 'Draft not found.' }); return; }
       res.json({ draft: out });
     } catch (err) { next(err); }
   });
@@ -407,14 +408,14 @@ function sendRefusal(res: Response, reason: IssueRefusal): void {
       const { tenantId, user } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
       const wanted = (req.body as { public?: unknown } | undefined)?.public;
       if (typeof wanted !== 'boolean') {
-        res.status(400).json({ error: 'validation_error', message: '`public` must be a boolean.' });
+        sendErrorBody(res, 400, { error: 'validation_error', message: '`public` must be a boolean.' });
         return;
       }
       // ADR 0542 D4 — publishing is a DELIBERATE act, so it is an explicit PUT
       // rather than a side effect of any other write.
       const ok = await setListingsPublic(tenantId, wanted, user.userId);
       if (!ok) {
-        res.status(404).json({ error: 'not_found', message: 'No listings to publish yet.' });
+        sendErrorBody(res, 404, { error: 'not_found', message: 'No listings to publish yet.' });
         return;
       }
       res.json({ public: wanted });
@@ -459,7 +460,7 @@ function sendRefusal(res: Response, reason: IssueRefusal): void {
       // and nothing is stored: ADR 0541 OQ-3 (granting on another member's behalf)
       // is undecided, and until it is decided no one may consent for someone else.
       if (b.subjectId !== undefined && b.subjectId !== user.userId) {
-        res.status(403).json({ error: 'forbidden', message: 'An apply grant authorises your own applications only.' });
+        sendErrorBody(res, 403, { error: 'forbidden', message: 'An apply grant authorises your own applications only.' });
         return;
       }
       // `grantedBy` is the ACTING USER, never a body field: a grant records who
@@ -491,7 +492,7 @@ function sendRefusal(res: Response, reason: IssueRefusal): void {
       // ADR 1036 D5 — only the person the grant acts for, or who issued it.
       const ok = await revokeApplyGrant(tenantId, orgId, req.params.grantId ?? '', Date.now(), user.userId);
       if (!ok) {
-        res.status(404).json({ error: 'not_found', message: 'Grant not found or already revoked.' });
+        sendErrorBody(res, 404, { error: 'not_found', message: 'Grant not found or already revoked.' });
         return;
       }
       res.status(204).end();
@@ -505,14 +506,14 @@ function sendRefusal(res: Response, reason: IssueRefusal): void {
       const { tenantId, orgId, user } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
       const stage = (req.body as { stage?: unknown } | undefined)?.stage;
       if (typeof stage !== 'string' || stage.trim() === '') {
-        res.status(400).json({ error: 'validation_error', message: 'stage is required.' });
+        sendErrorBody(res, 400, { error: 'validation_error', message: 'stage is required.' });
         return;
       }
       const deal = await advanceApplication(tenantId, orgId, req.params.dealId ?? '', stage, user.userId);
       if (!deal) {
         // Unknown deal AND unknown stage both land here as 404 — a caller must
         // not be able to probe which dealIds exist in another org by the code.
-        res.status(404).json({ error: 'not_found', message: 'Application or stage not found.' });
+        sendErrorBody(res, 404, { error: 'not_found', message: 'Application or stage not found.' });
         return;
       }
       res.json({ deal });
@@ -603,7 +604,7 @@ export function registerPublicAttestationRoutes(deps: RouteDeps): void {
       // Payload cap BEFORE any lookup: a token is a bounded secret, and an
       // unbounded path segment on an anonymous route is free work for anyone.
       if (token.length > 200) {
-        res.status(404).json(UNIFORM_NOT_FOUND);
+        sendErrorBody(res, 404, UNIFORM_NOT_FOUND);
         return;
       }
       const view = await resolveAttestation(token);
@@ -612,7 +613,7 @@ export function registerPublicAttestationRoutes(deps: RouteDeps): void {
         // that could tell them apart would learn that an attestation once
         // existed and was withdrawn — a fact about the applicant they were never
         // given.
-        res.status(404).json(UNIFORM_NOT_FOUND);
+        sendErrorBody(res, 404, UNIFORM_NOT_FOUND);
         return;
       }
       res.json(view);

@@ -22,6 +22,8 @@ import { brand } from './brand/brand.js';
 import { Notice } from './ui/Notice.js';
 import { Skeleton } from './ui/Skeleton.js';
 import { useDemoModeStatus } from './client/useDemoMode.js';
+import { SYSTEM_SITE_ORG } from './features/cms/siteOrg.js';
+import { VisitorConsentChoices } from './features/site/VisitorConsentChoices.js';
 
 export function PrivacyPage() {
   const { t } = useTranslation('chrome');
@@ -61,6 +63,9 @@ export function PrivacyPage() {
 
           <h2>{t('privacyEntRetentionHeading')}</h2>
           <p>{t('privacyEntRetentionBody')}</p>
+
+          {/* ADR 1153 D6 — the visitor's analytics choice, seen and changed in place. */}
+          <VisitorConsentChoices orgId={SYSTEM_SITE_ORG} />
 
           <h2>{t('privacyContactHeading')}</h2>
           <p>
@@ -178,6 +183,9 @@ Flags:   HttpOnly; Secure; SameSite=Lax`}
 
         <h2>{t('privacySignedInHeading')}</h2>
         <p>{t('privacySignedInBody')}</p>
+
+        {/* ADR 1153 D6 — the visitor's analytics choice, seen and changed in place. */}
+        <VisitorConsentChoices orgId={SYSTEM_SITE_ORG} />
 
         <h2>{t('privacyContactHeading')}</h2>
         <p>

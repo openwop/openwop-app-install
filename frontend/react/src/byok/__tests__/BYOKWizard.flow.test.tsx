@@ -12,8 +12,9 @@
  * redesign of the layout touches.
  *
  * Sabotage that turns these red (BYOKWizard.tsx): no recommended pre-select, no
- * focus move, Back to the wrong step, a fresh ref instead of the stored one, the
- * managed / subscription short-circuits removed, the `managed:` sentinel dropped.
+ * focus move, Back to the wrong step (from the model step OR the key step), a
+ * fresh ref instead of the stored one, the managed / subscription short-circuits
+ * removed, the `managed:` sentinel dropped (re-probed wave 117).
  * 2026-11-09: the StrictMode mount case goes red when the step-focus effect skips
  * its first run with a flag instead of comparing with the last focused step.
  */
@@ -77,6 +78,13 @@ describe('BYOKWizard flow (pinned before the C1 refresh)', () => {
     fireEvent.click(screen.getByText('pick-openai'));
     fireEvent.click(screen.getByText('use-model'));
     expect(screen.getByText('target:byok:openai')).toBeTruthy();
+    expect(document.activeElement?.textContent).toBe('step:key'); // focus follows to the key step too
+    // Back from the key step lands on the MODEL step (not the provider grid),
+    // with the chosen model still selected.
+    fireEvent.click(screen.getByText('back'));
+    expect(screen.getByText('step:model')).toBeTruthy();
+    expect(screen.getByText('selected:gpt-b')).toBeTruthy();
+    fireEvent.click(screen.getByText('use-model'));
     fireEvent.click(screen.getByText('store'));
     await vi.waitFor(() => expect(onComplete).toHaveBeenCalledWith({ provider: 'openai', model: 'gpt-b', credentialRef: 'byok:openai' }));
   });
@@ -112,6 +120,9 @@ describe('BYOKWizard flow (pinned before the C1 refresh)', () => {
     const onComplete = vi.fn();
     render(<BYOKWizard onComplete={onComplete} />);
     fireEvent.click(screen.getByText('pick-managed'));
+    // Synchronous, on the value: the short-circuit never leaves the provider step.
+    expect(screen.getByText('step:provider')).toBeTruthy();
+    expect(screen.queryByText('step:model')).toBeNull();
     await vi.waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1));
     // The `managed:<id>` sentinel is what routes the backend to the server-held key;
     // a bare provider id would be looked up as a tenant BYOK secret and fail.
@@ -123,6 +134,9 @@ describe('BYOKWizard flow (pinned before the C1 refresh)', () => {
     const onComplete = vi.fn();
     render(<BYOKWizard onComplete={onComplete} />);
     fireEvent.click(screen.getByText('pick-copilot'));
+    // Synchronous, on the value: the short-circuit never leaves the provider step.
+    expect(screen.getByText('step:provider')).toBeTruthy();
+    expect(screen.queryByText('step:model')).toBeNull();
     await vi.waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1));
     // Literals, not the imported constants: the binding the host accepts is exactly this.
     expect(onComplete).toHaveBeenCalledWith({ provider: 'copilot', model: 'default', credentialRef: 'subscription:github.copilot' });

@@ -695,6 +695,24 @@ not need it.
 1. **(David)** Grant lifetime defaults: 30 days for vendors and 7 days for
    link-only reviewers (proposed). Should clients be able to set "never expire"?
    Proposed: no; 180 days maximum, renewable.
+   **Decided (2026-11-19, David): no never-expire. Each grant lasts at most 180
+   days, counted from its last renewal. A member holding the kind's grant scope
+   renews it as often as needed (`extendGrant`, `POST …/grants/:gid/extend`), and
+   there is no total-lifetime cap.** Research behind it: SharePoint and Entra
+   both put a fixed term on guest access and extend it on a person's
+   re-confirmation; neither ends a relationship by its total age. A total cap
+   adds no protection here (the same member can mint a fresh grant) and only
+   splits the audit trail across grant ids. The protections are the per-use
+   checks and the 7-day expiry notice that prompts each renewal.
+   - A renewal keeps the grant id, re-runs every mint check, refuses a revoked
+     or already-expired grant (`grant_revoked`, `grant_expired`; grant again
+     instead), must end later than now (`expiry_not_later`), re-arms the expiry
+     notice, and audits `grant.extend` with `by`.
+   - The renewer becomes the grant's `createdBy` (with `renewedAt`), so the
+     per-use granter check follows the member who last vouched for it, the ADR
+     0887 D5 link-adoption precedent.
+   - This retires the note under D7 that "grants are never extended, so the index
+     never moves": an expiry-day index, if one is built, must move on renewal.
 2. **(David)** Is a virus or malware scanner worth a vendor account (for
    example a Cloud Storage scanning service)? Until then the allowlist excludes
    archives and executables, and the scan port ships "not configured".

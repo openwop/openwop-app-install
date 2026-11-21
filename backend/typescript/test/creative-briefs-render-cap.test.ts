@@ -15,12 +15,20 @@
  * could out-sort it and evict a "kept" row. Only `Date` is faked, and each
  * pre-filled render gets its own second, so every kept row is strictly older
  * than every racer.
+ *
+ * #5928 (train 293): the recheck now evicts only the writer's OWN row, and on
+ * one instance the check, write and recheck are serialized per brief. The last
+ * describe turns that serialization off (the cross-instance shape) and asserts
+ * "success means survived": every render that returned is still stored, the
+ * cap never overshoots, and every refusal is typed. Red on the old prune, which
+ * could evict a writer that had already returned success.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { listAssetsForTenant } from '../src/features/media/mediaService.js';
 import { openStorage } from '../src/storage/index.js';
 import { createBrief, __clearCreativeBriefs } from '../src/features/creative-briefs/creativeBriefsService.js';
-import { renderForBrief, listRenders, __clearCreativeRenders, renderCapForTest, __setRenderCapForTest } from '../src/features/creative-briefs/render/renderService.js';
+import { renderForBrief, listRenders, __clearCreativeRenders, renderCapForTest, __setRenderCapForTest, __setRenderWriteSerialization, __setRenderWriteHooks } from '../src/features/creative-briefs/render/renderService.js';
 
 const TENANT = 'org:rcap';
 const ORG = 'org-1';
@@ -115,4 +123,76 @@ describe('render cap — convergent post-write recheck (R0399-2)', () => {
     expect(winners.length).toBe(1);
     expect(surviving.has(winners[0]!.value.renderId)).toBe(true);
   }, 30_000);
+});
+
+/** #5928 — no orphan: every render asset in the org is referenced by a stored render
+ *  (a writer that backs off removes the asset it created). */
+async function expectNoOrphanRenderAssets(briefId: string, label: string): Promise<void> {
+  const referenced = new Set((await listRenders(TENANT, ORG, briefId)).map((r) => r.mediaAssetId));
+  const orphans = (await listAssetsForTenant(TENANT)).filter((a) => a.orgId === ORG && a.lineage?.grounding?.composedFrom?.briefId === briefId && !referenced.has(a.assetId));
+  expect(orphans.map((a) => a.assetId), `${label}: orphan render asset`).toEqual([]);
+}
+
+describe('cross-instance shape: no per-instance serialization (#5928)', () => {
+  afterEach(() => { __setRenderWriteSerialization(true); __setRenderWriteHooks({}); });
+
+  it('the ordering that broke the old prune: the later-sorting racer finishes first, then the earlier one writes', async () => {
+    __setRenderWriteSerialization(false);
+    const cap = renderCapForTest();
+    const briefId = await seedBrief();
+    const at = stampClock();
+    for (let i = 0; i < cap - 1; i++) { at(i); await render(briefId, 700 + i); }
+    at(cap);
+    // Hold both racers after the pre-check until both arrive; then run the one whose
+    // row sorts LATER (higher renderId) to completion before the other writes.
+    const arrived: Array<{ id: string; go: () => void }> = [];
+    let firstDone: () => void = () => {};
+    const firstFinished = new Promise<void>((r) => { firstDone = r; });
+    let firstId = '';
+    __setRenderWriteHooks({
+      beforePut: (rec) => new Promise<void>((go) => {
+        arrived.push({ id: rec.renderId, go });
+        if (arrived.length === 2) {
+          const [later, earlier] = [...arrived].sort((a, b) => b.id.localeCompare(a.id));
+          firstId = later!.id;
+          later!.go();
+          void firstFinished.then(() => earlier!.go());
+        }
+      }),
+      afterWrite: (rec) => { if (rec.renderId === firstId) firstDone(); },
+    });
+    const results = await Promise.allSettled([render(briefId, 801), render(briefId, 802)]);
+    vi.useRealTimers();
+    const stored = new Set((await listRenders(TENANT, ORG, briefId)).map((r) => r.renderId));
+    const won = results.filter(isFulfilled);
+    expect(won.length).toBe(1);
+    expect(won[0]!.value.renderId, 'the racer that finished first keeps its success').toBe(firstId);
+    expect(stored.has(firstId), 'a success was evicted').toBe(true);
+    expect(stored.size).toBe(cap);
+    expect(results.filter(isRejected)).toHaveLength(1);
+    await expectNoOrphanRenderAssets(briefId, 'forced ordering');
+  }, 60_000);
+
+  it('success means survived: a returned render is never evicted, and the cap never overshoots', async () => {
+    __setRenderWriteSerialization(false);
+    const cap = renderCapForTest();
+    for (let round = 0; round < 3; round++) {
+      await __clearCreativeRenders();
+      const briefId = await seedBrief();
+      const at = stampClock();
+      for (let i = 0; i < cap - 1; i++) { at(i); await render(briefId, round * 100 + i); }
+      // Every racer stamped at the same instant: the ordering that broke the old prune.
+      at(cap);
+      const results = await Promise.allSettled([1, 2, 3].map((k) => render(briefId, round * 100 + 50 + k)));
+      vi.useRealTimers();
+      const stored = new Set((await listRenders(TENANT, ORG, briefId)).map((r) => r.renderId));
+      expect(stored.size, `round ${round}`).toBeLessThanOrEqual(cap);
+      for (const r of results.filter(isFulfilled)) expect(stored.has(r.value.renderId), `round ${round}: a success was evicted`).toBe(true);
+      for (const r of results.filter(isRejected)) {
+        expect(r.reason).toMatchObject({ message: `Render cap reached for this brief (${TEST_CAP}) — delete old renders first.` });
+      }
+      expect(results.filter(isFulfilled).length, `round ${round}`).toBeLessThanOrEqual(1);
+      await expectNoOrphanRenderAssets(briefId, `round ${round}`);
+    }
+  }, 60_000);
 });

@@ -117,6 +117,10 @@ const ERASED = new Map<string, string>([
   ['autonomy:digest-item', 'rows DELETED for the subject — a queued daily notice addressed to that person (recipientUserId) is theirs; deleted after delivery anyway (autonomyPolicy eraser, ADR 0942 D7)'],
   ['autonomy:veto', 'vetoedBy → [erased]; the veto decision and its window stay (they decided whether a campaign step ran, ADR 0942 P4b; autonomyPolicy eraser)'],
   ['site:brand', 'eraseSubjectSiteBrand (host/siteBrand.ts, ADR 1030 P2) — updatedBy → [erased]; which brand a workspace\'s site uses is org config and is kept (the workflow:budget precedent)'],
+  // CHAN-F19 #12 (2026-11-19, user decision) — moved out of REVIEWED_EXEMPT, whose
+  // "no-subject" reason was false: `betaCohort` holds principal ids (a SAML subject can be
+  // an email; host/featureToggles/audit.ts records cohorts as a size for that reason).
+  ['feature-toggle', 'eraseFeatureToggleSubject (host/featureToggles/erasure.ts, ADR 0464 §9 CHAN-F19 #12) — the subject\'s ids (key forms + home-tenant principal) leave EVERY beta cohort, host-global (a same-string principal from another IdP loses beta too: principal ids are not issuer-qualified); an emptied cohort keeps the `[erased]` sentinel so a closed beta stays closed; `updatedBy` → user:[erased]. Writes go through the toggle write path, so the replay fence sees them.'],
   ['workflow:budget', 'updatedBy → [erased] across the tenant\'s budget rows; the budget itself is tenant config (workflowBudgets eraser, ADR 0482 store — the workflow:revision createdBy precedent)'],
   ['auth:subjectLinkDeny', 'rows DELETED — the deny row IS the subject: its key is the opaque externalId (== persistent SAML NameID, RFC 0159). A lingering row is fail-safe (only ever denies, never grants) but is still a subject identifier, so it is removed. Matched via subjectKeyForms + a saml:/scim: prefix strip so a bare-externalId or principal-scoped DSAR key both reach it (subjectLinkService eraser, ADR 0613 store)'],
 ]);
@@ -294,7 +298,6 @@ const REVIEWED_EXEMPT = new Map<string, Exemption>([
   ['egress:sent', { reason: 'ADR 0619 — bounded-lifetime SMS/push dispatch dedup (egressSentLedger), the sibling of email:sent: TTL-swept within OPENWOP_EGRESS_LEDGER_TTL_DAYS (default 30d) by sweepExpiredEgressSent; stores no name/address/body — the recipient phone/device-token is HASHED into the caller idempotencyKey, never persisted. ADR 0783 D7 data-source writes record an HTTP status only, never a request or response body. ADR 0865 B4 A2A sends record the opaque task id the peer assigned as providerRef, never a message or a result. Early deletion would un-dedup a live send generation and risk double-delivery to the very subject requesting erasure, so the TTL is the right reclaim.' }],
   ['example:widget', { reason: 'no-subject: host/examples reference surface; demo widget rows' }],
   ['features-page-seed', { reason: 'no-subject: seed version marker' }],
-  ['feature-toggle', { reason: 'no-subject: feature-toggle config; updatedBy operator attribution' }],
   ['host:chatByokConfig', { reason: 'no-subject: per-tenant active chat binding (provider/model/credentialRef); deliberately carries NO actor field, unlike its headlessAiDefault sibling — the row is workspace config, so there is no subject to erase' }],
   ['host:headlessAiDefault', { reason: 'no-subject: per-tenant AI default config (provider/model/credentialRef)' }],
   ['migration', { reason: 'no-subject: migration journey config (workforceId/target/manifest)' }],

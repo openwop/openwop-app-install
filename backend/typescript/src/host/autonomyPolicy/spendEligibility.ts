@@ -7,8 +7,12 @@
  * decidable by any `approvals:respond` holder. When the row carries policy approver
  * refs (written only by the autonomy chokepoint), the decider must be eligible on
  * the row's client org (the one ADR 0075 authority, `isEligibleApprover`), and may
- * not be one of the run's requesters, in either direction, with no sole-approver
- * escape. A requester who wants to stop the spend cancels the run.
+ * not be one of the run's requesters, in either direction. A requester who wants to
+ * stop the spend cancels the run.
+ *
+ * > CORRECTED 2026-11-19: the one exception is the sole-admin self-approval ADR (D1,
+ * > v0.15.0): a requester who is the only admin able to decide may APPROVE, checked
+ * > below via `soleAdminSelfApproval`. A reject by a requester is still refused.
  *
  * Rows WITHOUT policy approver refs (the pre-0942 governance threshold, any
  * non-campaign spend) keep today's behaviour: no check here.

@@ -9,6 +9,7 @@
  * Non-normative host-extension namespace — no wire, no RFC. Gated by
  * `requireSuperadmin` like heartbeat / appearance / navigation settings.
  */
+import { sendErrorBody } from '../../middleware/errorEnvelope.js';
 import { createLogger } from '../../observability/logger.js';
 import { requireSuperadmin } from '../../host/superadmin.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
@@ -38,14 +39,14 @@ export function registerRuntimePostureRoutes(deps: RouteDeps, read: typeof readL
         wanted = validateChangeRequest(req.body);
       } catch (err) {
         if (err instanceof ChangeRequestInvalidError) {
-          res.status(400).json({ error: 'validation_error', message: err.message });
+          sendErrorBody(res, 400, { error: 'validation_error', message: err.message });
           return;
         }
         throw err;
       }
       const live = await read();
       if (!live.available) {
-        res.status(409).json({ error: 'posture_unreadable', message: `the live posture cannot be read, so no change request is issued: ${live.reason}` });
+        sendErrorBody(res, 409, { error: 'posture_unreadable', message: `the live posture cannot be read, so no change request is issued: ${live.reason}` });
         return;
       }
       const to = wanted.warm ? 'warm' : 'cold';

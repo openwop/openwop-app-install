@@ -9,11 +9,19 @@
  *
  * The write is asserted whole: org, funnel and the full `steps` array, so a save
  * that targets the wrong funnel or drops/rewrites the untouched step is red too.
+ * ADR 1023 D8 added the version guard to the same write: the save names the
+ * `updatedAt` it edited as `expectedUpdatedAt`, so a newer save refuses it. The
+ * fixture's `updatedAt` differs from its `createdAt` so the wrong stamp shows.
  *
- * Sabotage-witnessed (wave 52): dropping the renamed value from the edit state,
- * sending `name: ''` instead of removing the key, seeding an unnamed step with
- * `name: ''`, saving the ORIGINAL steps instead of the edited ones, and rendering
- * the kind label as the input's value each turn a case red.
+ * ADR 1023 also gates the editor on the effective-access answer, so each case
+ * waits for "Save steps" to be ENABLED before it edits or saves: a click on the
+ * still-disabled button would never reach the save.
+ *
+ * Sabotage-witnessed (wave 52, re-probed wave 120): dropping the renamed value
+ * from the edit state, sending `name: ''` instead of removing the key, seeding an
+ * unnamed step with `name: ''`, saving the ORIGINAL steps instead of the edited
+ * ones, rendering the kind label as the input's value, sending `createdAt` as the
+ * expected version, and saving to the wrong funnel id each turn a case red.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
@@ -69,7 +77,7 @@ const FUNNEL: Funnel = {
     { stepId: 's1', kind: 'landing', pageId: 'p1', name: 'Warm welcome' },
     { stepId: 's2', kind: 'thankyou', pageId: 'p1' },
   ],
-  createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+  createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-02T09:30:00.000Z',
 };
 const LANDING: Page = {
   pageId: 'p1', title: 'Landing', slug: 'landing', status: 'published', sections: [],
@@ -82,6 +90,13 @@ const view = (): void => {
       <Routes><Route path="/funnels/:funnelId" element={<FunnelDetailPage />} /></Routes>
     </MemoryRouter>,
   );
+};
+
+/** The step-1 name input, once the editor is writable (see header). */
+const editorReady = async (): Promise<HTMLElement> => {
+  const first = await screen.findByRole('textbox', { name: /name for step 1/i });
+  await waitFor(() => expect(screen.getByRole('button', { name: /save steps/i })).toHaveProperty('disabled', false));
+  return first;
 };
 
 beforeEach(() => {
@@ -97,7 +112,7 @@ afterEach(cleanup);
 describe('FN-B-8 — the step-rename edit surface', () => {
   it('renders each step\'s current name, and saves a rename through updateFunnel', async () => {
     view();
-    const first = await screen.findByRole('textbox', { name: /name for step 1/i });
+    const first = await editorReady();
     expect((first as HTMLInputElement).value).toBe('Warm welcome');
     // An unnamed step shows its kind as the PLACEHOLDER, never as a value —
     // saving untouched must not bake the fallback label into the model.
@@ -123,11 +138,12 @@ describe('FN-B-8 — the step-rename edit surface', () => {
 
   it('an emptied name is CLEARED from the payload, not sent as ""', async () => {
     view();
-    const first = await screen.findByRole('textbox', { name: /name for step 1/i });
+    const first = await editorReady();
     fireEvent.change(first, { target: { value: '' } });
     fireEvent.click(screen.getByRole('button', { name: /save steps/i }));
 
     await waitFor(() => expect(api.updateFunnel).toHaveBeenCalled());
+    expect(api.updateFunnel).toHaveBeenCalledTimes(1);
     // The explicit-clear pin: no `name` key at all ⇒ the server's
     // absent-clears sanitize fires; `name: ''` would instead persist an
     // empty-string label into every picker and the stats table.
@@ -137,7 +153,7 @@ describe('FN-B-8 — the step-rename edit surface', () => {
 
   it('the unnamed step stays unnamed through an unrelated save (negative control)', async () => {
     view();
-    await screen.findByRole('textbox', { name: /name for step 1/i });
+    await editorReady();
     fireEvent.click(screen.getByRole('button', { name: /save steps/i }));
     await waitFor(() => expect(api.updateFunnel).toHaveBeenCalled());
     expect(sentSteps()[1]).not.toHaveProperty('name');

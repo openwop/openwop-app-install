@@ -7,6 +7,7 @@
  * an identity/tenant change) must drop the previous context's validator.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { fireAuthChanged } from '../../../client/config.js';
 import { getMenuConfig, putTenantMenuConfig } from '../menuConfigClient.js';
 
 afterEach(() => vi.unstubAllGlobals());
@@ -60,5 +61,49 @@ describe('menu config client read honesty', () => {
     const init = fetchMock.mock.calls[2]?.[1];
     expect(init?.method).toBe('PUT');
     expect(init?.headers).not.toHaveProperty('if-match');
+  });
+});
+
+
+/** The ETag is scoped metadata too; rejecting the old body alone is insufficient. */
+function deferredResponse() {
+  let resolve: (r: Response) => void = () => { throw new Error('not initialized'); };
+  const promise = new Promise<Response>((yes) => { resolve = yes; });
+  return { promise, resolve };
+}
+describe('menu validator read ownership', () => {
+  it('keeps the newest read validator when an older GET settles last', async () => {
+    const old = deferredResponse(); const current = deferredResponse();
+    const fetchMock = vi.fn<typeof fetch>().mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise).mockResolvedValueOnce(res(200, { config: bundle().tenant }, '"saved"'));
+    vi.stubGlobal('fetch', fetchMock);
+    const a = getMenuConfig(); const b = getMenuConfig();
+    current.resolve(res(200, bundle(), '"current"')); await b;
+    old.resolve(res(200, bundle(), '"obsolete"')); await a;
+    await putTenantMenuConfig(bundle().tenant);
+    const [, init] = fetchMock.mock.calls[2] ?? [];
+    expect(init?.headers).toMatchObject({ 'if-match': '"current"' });
+  });
+
+  it('does not carry a pre-auth GET validator into a new owner write', async () => {
+    const old = deferredResponse();
+    const fetchMock = vi.fn<typeof fetch>().mockReturnValueOnce(old.promise).mockResolvedValueOnce(res(200, { config: bundle().tenant }, '"saved"'));
+    vi.stubGlobal('fetch', fetchMock);
+    const a = getMenuConfig(); fireAuthChanged();
+    old.resolve(res(200, bundle(), '"old-owner"')); await a;
+    await putTenantMenuConfig(bundle().tenant);
+    const [, init] = fetchMock.mock.calls[1] ?? [];
+    expect(init?.headers).not.toHaveProperty('if-match');
+  });
+
+  it('does not let an old PUT response replace the current owner read validator', async () => {
+    const oldSave = deferredResponse();
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(res(200, bundle(), '"old"')).mockReturnValueOnce(oldSave.promise).mockResolvedValueOnce(res(200, bundle(), '"new-owner"')).mockResolvedValueOnce(res(200, { config: bundle().tenant }, '"new-saved"'));
+    vi.stubGlobal('fetch', fetchMock);
+    await getMenuConfig(); const saved = putTenantMenuConfig(bundle().tenant);
+    fireAuthChanged(); await getMenuConfig();
+    oldSave.resolve(res(200, { config: bundle().tenant }, '"obsolete-save"')); await saved;
+    await putTenantMenuConfig(bundle().tenant);
+    const [, init] = fetchMock.mock.calls[3] ?? [];
+    expect(init?.headers).toMatchObject({ 'if-match': '"new-owner"' });
   });
 });

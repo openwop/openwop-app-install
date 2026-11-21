@@ -50,11 +50,23 @@ export interface CuPollResult {
 
 export type CuResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
+/** ADR 1136 P3a — `handOver`'s answer when this session's browser is not the
+ *  person's own window: the step is refused as before, not handed over. */
+export const TAKEOVER_UNSUPPORTED = 'takeover_unsupported';
+
 export interface ComputerUseAdapter {
   startSession(input: { task: string; startUrl: string }): Promise<CuResult<{ providerSessionId: string }>>;
   pollSession(providerSessionId: string): Promise<CuResult<CuPollResult>>;
   submitDecision(providerSessionId: string, actionId: string, approve: boolean): Promise<CuResult<{ accepted: boolean }>>;
   abortSession(providerSessionId: string): Promise<void>;
+  /**
+   * ADR 1136 P3a — hand the pending action to the PERSON instead of refusing it.
+   * Only an adapter whose browser the person can see and use offers this (the
+   * host-run loop over their own window). The action is dropped, never performed,
+   * and the next poll reads the page afresh. Absent ⇒ no take-over: a credential
+   * step fails the session as before.
+   */
+  handOver?(providerSessionId: string, actionId: string): Promise<CuResult<{ accepted: boolean }>>;
 }
 
 // ── the mock provider ───────────────────────────────────────────────────────
@@ -65,6 +77,10 @@ interface MockScript {
   /** Polls that report "still working" (no action yet) before the first
    *  action — what a real provider does while its model thinks. */
   thinkPolls?: number;
+  /** ADR 1136 P3a — this session's browser is the person's own window, so a
+   *  credential step is handed to them. Absent ⇒ the mock declines, as a hosted
+   *  provider does. */
+  takeover?: boolean;
 }
 
 /** Deterministic scripted adapter. The script rides the TASK string as JSON
@@ -109,6 +125,15 @@ export function makeMockAdapter(): ComputerUseAdapter & { calls: { start: number
     async abortSession(id) {
       const s = sessions.get(id);
       if (s) s.failed = 'aborted';
+    },
+    async handOver(id, actionId) {
+      const s = sessions.get(id);
+      if (!s) return { ok: false, error: 'unknown_session' };
+      if (!s.script.takeover) return { ok: false, error: TAKEOVER_UNSUPPORTED };
+      const next = s.script.actions[s.cursor];
+      if (!next || next.actionId !== actionId) return { ok: false, error: 'stale_action' };
+      s.cursor += 1; // the person does it; the agent never performs this action
+      return { ok: true, value: { accepted: true } };
     },
   };
 }

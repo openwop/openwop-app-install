@@ -6,6 +6,19 @@
  * rejects undeclared methods, and a stale `artifact.write` surfaces `artifact_conflict` +
  * `currentVersion` with NO persist. The isolation/egress/no-byok invariants are asserted
  * against the host's capability + sandbox primitives (single source: host/uiPluginRpc.ts).
+ *
+ * The allowlist is a DOUBLE guard in one line (`!allowlist.has(method) || !handlers[method]`):
+ * a method with no handler is refused by either half, so the narrowed-allowlist leg is what
+ * witnesses the allowlist alone, and a break-both probe witnesses the undeclared-method and
+ * BYOK cases. ADR 1021 D2/D4 tightened the sandbox to `allow-scripts` alone and named
+ * `form-action`/`base-uri`; ADR 0835 D7 gates `artifact.write` on workspace:write (the
+ * refusal is asserted by its own message, so the owner-write check cannot stand in for it).
+ *
+ * Re-probed wave 119 (`w119g2-up-*`): the allowlist half, both halves, the protocol tag
+ * check, a secret method in the host API, the isolation const, an extra sandbox token, each
+ * CSP directive, an import in uiPluginRpc.ts, the read's version token, the stale-token
+ * compare and its currentVersion, the write's version bump, the write-authority check, the
+ * absent-canvas refusal, and the tenant check in `getCanvasForTenant` each red their case.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import {
@@ -140,7 +153,8 @@ describe('frontend-plugin-artifact-concurrency (RFC 0117 §3)', () => {
   it('ADR 0835 D7 — a caller with no write authority is refused (unauthorized) and nothing persists', async () => {
     const id = await seedCanvas(app('v1'), 1);
     const res = await dispatcherForTenant(TENANT)(req(8, 'artifact.write', { artifactId: id, payload: app('v2'), version: '1' }));
-    expect(res).toMatchObject({ ok: false, error: { code: 'unauthorized' } });
+    // The message names the workspace:write gate, not the owner-write check that shares the code.
+    expect(res).toMatchObject({ ok: false, error: { code: 'unauthorized', message: 'writing an artifact requires workspace:write' } });
     expect(await getCanvasForTenant(TENANT, id)).toMatchObject({ version: 1, state: { name: 'v1' } });
   });
 

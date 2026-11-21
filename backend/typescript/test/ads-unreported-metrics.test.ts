@@ -13,7 +13,7 @@
  */
 import { beforeAll, describe, expect, it, afterEach } from 'vitest';
 import { createApp } from '../src/index.js';
-import { kpiSummary, persistRecords, listRecords } from '../src/features/campaign-connectors/performanceService.js';
+import { kpiSummary, persistRecords, listRecords, importCsv } from '../src/features/campaign-connectors/performanceService.js';
 import { computeDerived, type ParsedRow } from '../src/features/campaign-connectors/csvImport.js';
 import { planSync, recordAccountRows } from '../src/features/campaign-connectors/syncService.js';
 import { optimizeBudget } from '../src/features/campaign-intel/intelligence.js';
@@ -144,6 +144,60 @@ describe('PERF-4 — reporting availability is distinct from numeric ROAS', () =
     const result = await kpiSummary(tenant, ORG);
     expect(result.totals).toMatchObject({ spend: 0, revenue: 10, roas: 0, reportedRevenueRecordCount: 1 });
     expect(result.byPlatform).toEqual([expect.objectContaining({ platform: 'meta', spend: 0, revenue: 10, roas: 0, reportedRevenueRecordCount: 1 })]);
+    expect(result).not.toHaveProperty('unreported');
+  });
+});
+
+
+// PERF-REVENUE-AVAILABILITY-1: real import/persistence, not a copied count reducer.
+describe('conversion reporting availability keeps numeric math compatible', () => {
+  function conversionRow(platform: 'meta' | 'google', date: string, spend: number, conversions: number | null, revenue: number | null): ParsedRow {
+    const value = { ...row(platform, date, spend, revenue), conversions };
+    return { ...value, ...computeDerived(value) };
+  }
+  it('missing CSV metric columns persist null and emit explicit zero conversion counts', async () => {
+    const tenant = 'user:availability-missing-columns';
+    const imported = await importCsv(tenant, ORG, 'campaign,date,spend,impressions,clicks\nQA missing,2026-10-01,100,1000,50', { defaultPlatform: 'meta' });
+    expect(imported).toMatchObject({ imported: 1, deduped: 0, invalid: 0 });
+    expect(await listRecords(tenant, ORG)).toEqual([expect.objectContaining({ conversions: null, revenue: null })]);
+    const result = await kpiSummary(tenant, ORG);
+    expect(result.totals).toMatchObject({ conversions: 0, revenue: 0, reportedConversionRecordCount: 0, reportedRevenueRecordCount: 0, cvr: 0, cpa: 0, roas: 0 });
+    expect(result.byPlatform).toEqual([expect.objectContaining({ platform: 'meta', conversions: 0, reportedConversionRecordCount: 0 })]);
+    expect(result.unreported).toEqual({ conversions: 1, revenue: 1 });
+  });
+  it('measured zero conversions are a reported row rather than unavailable data', async () => {
+    const tenant = 'user:availability-conversion-zero';
+    await persistRecords(tenant, ORG, [conversionRow('meta', '2026-10-01', 100, 0, 0)], 'csv');
+    const result = await kpiSummary(tenant, ORG);
+    expect(result.totals).toMatchObject({ conversions: 0, reportedConversionRecordCount: 1, reportedRevenueRecordCount: 1, cvr: 0, cpa: 0, revenue: 0, roas: 0 });
+    expect(result.byPlatform).toEqual([expect.objectContaining({ platform: 'meta', conversions: 0, reportedConversionRecordCount: 1 })]);
+    expect(result).not.toHaveProperty('unreported');
+  });
+  it('partial platform conversion counts sum while preserving reporting-only ratios', async () => {
+    const tenant = 'user:availability-conversion-mixed';
+    await persistRecords(tenant, ORG, [conversionRow('meta', '2026-10-01', 100, null, null), conversionRow('meta', '2026-10-02', 100, 0, 0), conversionRow('meta', '2026-10-03', 50, 2, 20), conversionRow('google', '2026-10-01', 50, 3, 30)], 'csv');
+    const result = await kpiSummary(tenant, ORG);
+    expect(result.totals).toMatchObject({ spend: 300, conversions: 5, revenue: 50, reportedConversionRecordCount: 3, reportedRevenueRecordCount: 3, cvr: 0.0333, cpa: 40, roas: 0.25 });
+    expect(result.byPlatform.find(p => p.platform === 'meta')).toMatchObject({ conversions: 2, reportedConversionRecordCount: 2 });
+    expect(result.byPlatform.find(p => p.platform === 'google')).toMatchObject({ conversions: 3, reportedConversionRecordCount: 1 });
+    expect(result.totals.reportedConversionRecordCount).toBe(result.byPlatform.reduce((sum, platform) => {
+      if (platform.reportedConversionRecordCount === undefined) throw new Error('New server omitted conversion availability');
+      return sum + platform.reportedConversionRecordCount;
+    }, 0));
+    expect(result.unreported).toEqual({ conversions: 1, revenue: 1 });
+  });
+  it('zero spend does not hide an actually reported conversion row', async () => {
+    const tenant = 'user:availability-conversion-zero-spend';
+    await persistRecords(tenant, ORG, [conversionRow('meta', '2026-10-01', 0, 2, 10)], 'csv');
+    const result = await kpiSummary(tenant, ORG);
+    expect(result.totals).toMatchObject({ spend: 0, conversions: 2, reportedConversionRecordCount: 1, cvr: 0.04, cpa: 0, revenue: 10, roas: 0 });
+    expect(result.byPlatform).toEqual([expect.objectContaining({ conversions: 2, reportedConversionRecordCount: 1 })]);
+  });
+  it('an empty population still emits zero availability and no fabricated platform', async () => {
+    const result = await kpiSummary('user:availability-empty', ORG);
+    expect(result.recordCount).toBe(0);
+    expect(result.totals).toMatchObject({ conversions: 0, reportedConversionRecordCount: 0, reportedRevenueRecordCount: 0 });
+    expect(result.byPlatform).toEqual([]);
     expect(result).not.toHaveProperty('unreported');
   });
 });

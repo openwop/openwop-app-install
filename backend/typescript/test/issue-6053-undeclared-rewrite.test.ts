@@ -9,7 +9,7 @@
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
-import { __issueUndeclaredLegacyKeyForTest, issueApiKey, listApiKeys, rewriteUndeclaredKeys, undeclaredRewriteMode } from '../src/features/developer-keys/apiKeyService.js';
+import { __issueUndeclaredLegacyKeyForTest, issueApiKey, listApiKeys, revokeApiKey, rewriteUndeclaredKeys, undeclaredRewriteMode } from '../src/features/developer-keys/apiKeyService.js';
 import { keyDeclarationPermits } from '../src/host/delegatedSubject.js';
 
 beforeAll(async () => { initHostExtPersistence(await openStorage('memory://')); });
@@ -45,6 +45,25 @@ describe('#6053 step 1 — the undeclared-key rewrite', () => {
     const again = await rewriteUndeclaredKeys('apply');
     expect(again.byTenant[A] ?? 0).toBe(0);
     expect(again.rewritten).toBe(0);
+  });
+
+  it('a revoked or expired undeclared key is counted apart and never rewritten', async () => {
+    const C = `t6053-c-${Date.now()}`;
+    const live = await __issueUndeclaredLegacyKeyForTest({ tenantId: C, name: 'live', createdBy: 'user:x' });
+    const revoked = await __issueUndeclaredLegacyKeyForTest({ tenantId: C, name: 'revoked', createdBy: 'user:x' });
+    await revokeApiKey(C, revoked.key.keyId, { isAdmin: true, callerSubject: 'user:x' });
+    const expired = await __issueUndeclaredLegacyKeyForTest({ tenantId: C, name: 'expired', createdBy: 'user:x', expiresAt: new Date(Date.now() - 60_000).toISOString() });
+
+    const report = await rewriteUndeclaredKeys('report');
+    expect(report.byTenant[C], 'only the live key is at risk').toBe(1);
+    expect(report.inactive).toBeGreaterThanOrEqual(2);
+
+    await rewriteUndeclaredKeys('apply');
+    const byName = new Map((await listApiKeys(C, { callerSubject: 'user:x', isAdmin: true })).map((k) => [k.name, k.scopes]));
+    expect(byName.get('live')).toEqual(['*']);
+    expect(byName.get('revoked'), 'a dead key is not widened').toEqual([]);
+    expect(byName.get('expired'), 'a dead key is not widened').toEqual([]);
+    void live; void expired;
   });
 
   it('the rewrite keeps exactly the old authority', () => {

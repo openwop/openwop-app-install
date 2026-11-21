@@ -342,6 +342,34 @@ export async function mcpRequestChange(ctx) {
   }
 }
 
+/** ADR 0962 P2 — an outside agent's budget-change PROPOSAL. Writes one
+ *  reallocation plan and one approval that names its approvers; it never applies
+ *  a budget (no node in its chain does). A bad amount, a cap that blocks an
+ *  increase, or a foreign campaign is a typed failure with nothing written. */
+export async function mcpProposeBudgetChange(ctx) {
+  const ops = ensureOps(ctx);
+  if (typeof ops.mcpProposeBudgetChange !== 'function') {
+    throw Object.assign(new Error("ctx.features['campaign-ops'].mcpProposeBudgetChange missing"), { code: 'host_capability_missing', capability: 'features.campaign-ops' });
+  }
+  const i = ctx.inputs ?? {};
+  // An absent optional param arrives empty; anything else is passed through so the
+  // host's closed-world check refuses it with a typed reason.
+  const changes = i.changes === undefined || i.changes === null || i.changes === '' ? undefined : i.changes;
+  try {
+    const out = await ops.mcpProposeBudgetChange({
+      clientId: str(i.clientId),
+      ...(changes !== undefined ? { changes } : {}),
+      ...(str(i.campaignId) ? { campaignId: str(i.campaignId) } : {}),
+      ...(str(i.note) ? { note: str(i.note) } : {}),
+    });
+    return { status: 'success', outputs: { text: JSON.stringify(out) } };
+  } catch (err) {
+    const reason = err && err.details && typeof err.details.reason === 'string' ? err.details.reason : undefined;
+    const code = reason ?? (err && typeof err.code === 'string' ? err.code : 'campaign_budget_change_failed');
+    return { status: 'failure', retryable: false, error: { code, message: err instanceof Error ? err.message : 'The budget change could not be proposed.' } };
+  }
+}
+
 export const nodes = {
   'feature.campaign-ops.nodes.compute-snapshot': computeSnapshot,
   'feature.campaign-ops.nodes.report-snapshot-read': reportSnapshotRead,
@@ -359,5 +387,6 @@ export const nodes = {
   'feature.campaign-ops.nodes.mcp-run-status': mcpRunStatus,
   'feature.campaign-ops.nodes.mcp-explain': mcpExplain,
   'feature.campaign-ops.nodes.mcp-request-change': mcpRequestChange,
+  'feature.campaign-ops.nodes.mcp-propose-budget-change': mcpProposeBudgetChange,
 };
 export default nodes;

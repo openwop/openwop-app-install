@@ -10,12 +10,17 @@
  * rotation-evasion cap and its positive controls. The tenant-blind matchId
  * (`it.fails`, BLOCKED-ON-PRODUCT) is closed: the match id hashes the tenant.
  *
- * Sabotage witnesses: dropping the owner check, the prompt comparison, the
- * `row.runId` check, the same-model check, the cap's either-side count, or the
- * tenant in the match id each red a case below.
+ * Sabotage witnesses (re-probed grade-tests w119): swapping the attributed models;
+ * dropping the replay orientation, the unordered-pair sort, or BOTH halves of the
+ * count-once double guard (the prior-match read and the create-if-absent CAS — either
+ * alone is masked by the other); dropping the prompt comparison or the parts in it;
+ * the same-model, `row.runId`, mixed-model, tenant, owner or workflow check; the tenant
+ * in the match id; the cap's either-side count, its bound, its per-rater or per-model
+ * scope; the provider/model key lookup; the bound-verdict filter; or the erasure's
+ * subject match, loop or tombstone — each reds a case below.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
@@ -35,7 +40,8 @@ const openai = (model: string): ServedModel => ({ provider: 'openai', model });
 async function seedRun(tenantId: string, actor: string, prompts: unknown[], served: Array<ServedModel | null>, opts: { workflowId?: string; attributeAs?: string } = {}): Promise<string> {
   const runId = `run-${randomBytes(6).toString('hex')}`;
   const now = AT;
-  await storage.insertRun({ runId, workflowId: opts.workflowId ?? 'openwop-app.conversation', tenantId, status: 'completed', inputs: {}, configurable: {}, metadata: { actingUserId: actor }, createdAt: now, updatedAt: now } as RunRecord);
+  const record: RunRecord = { runId, workflowId: opts.workflowId ?? 'openwop-app.conversation', tenantId, status: 'completed', inputs: {}, configurable: {}, metadata: { actingUserId: actor }, createdAt: now, updatedAt: now };
+  await storage.insertRun(record);
   const conversationId = `${runId}:gate:0`;
   await storage.appendEvent({ eventId: `${runId}-o`, runId, type: 'conversation.opened', nodeId: 'gate', timestamp: now, payload: { conversationId, initialTurn: { messageId: `${conversationId}:0:system`, role: 'system', from: 'host', content: 'hi', ts: 0, turnIndex: 0 } } });
   let idx = 1;
@@ -116,12 +122,16 @@ describe('recordArenaMatch — a verdict is bound to two real runs', () => {
   it('another member\'s run, another tenant\'s run, or a non-conversation run reads as absent (404)', async () => {
     const T = 'arena-owner';
     const [ra] = await pair(T, 'alpha', 'x');
+    // Each refusal names the run it refused (the run-gate's own 404, not some other one).
     const theirs = await seedRun(T, 'someone-else', ['Write a haiku.'], [openai('beta')]);
-    await expect(vote(T, ra, theirs, 'A')).rejects.toMatchObject({ httpStatus: 404 });
+    await expect(vote(T, ra, theirs, 'A')).rejects.toMatchObject({ code: 'run_not_found', httpStatus: 404, details: { runId: theirs } });
     const elsewhere = await seedRun('arena-owner-other', 'r1', ['Write a haiku.'], [openai('beta')]);
-    await expect(vote(T, ra, elsewhere, 'A')).rejects.toMatchObject({ httpStatus: 404 });
+    await expect(vote(T, ra, elsewhere, 'A')).rejects.toMatchObject({ code: 'run_not_found', httpStatus: 404, details: { runId: elsewhere } });
     const notChat = await seedRun(T, 'r1', ['Write a haiku.'], [openai('beta')], { workflowId: 'wf.other' });
-    await expect(vote(T, ra, notChat, 'A')).rejects.toMatchObject({ httpStatus: 404 });
+    await expect(vote(T, ra, notChat, 'A')).rejects.toMatchObject({ code: 'run_not_found', httpStatus: 404, details: { runId: notChat } });
+    // Positive control: the same pair shape on the caller's own conversation runs records.
+    const mine = await seedRun(T, 'r1', ['Write a haiku.'], [openai('beta')]);
+    expect((await vote(T, ra, mine, 'A')).match).toMatchObject({ modelA: 'alpha', modelB: 'beta' });
   });
 
   it('the match id is one per unordered pair, and differs per tenant', () => {
@@ -130,30 +140,35 @@ describe('recordArenaMatch — a verdict is bound to two real runs', () => {
   });
 
   it('the same run pair in two tenants is two verdicts (the match id hashes the tenant)', async () => {
-    // Run ids are global, so seed the pair once per tenant with identical ids is
-    // impossible; instead prove the id differs for the same sorted pair per tenant.
+    // Run ids are global, so one pair cannot be seeded in two tenants. Instead plant a
+    // FOREIGN tenant's verdict under the id a tenant-blind hash gives T2's pair (the
+    // pre-0986 ledger shape, which replayed tenant X's verdict into tenant Y). With the
+    // tenant in the hash, T2's vote never reads it.
     const T1 = 'arena-mid-x'; const T2 = 'arena-mid-y';
-    const [a1, b1] = await pair(T1, 'alpha', 'beta');
     const [a2, b2] = await pair(T2, 'alpha', 'beta');
-    const r1 = await vote(T1, a1, b1, 'A');
+    const [lo, hi] = [a2, b2].sort();
+    const blindId = `am_${createHash('sha256').update(`${lo}\u0000${hi}`).digest('hex').slice(0, 32)}`;
+    const ledger = new DurableCollection<Record<string, unknown>>('evals:arena-match', (m) => String(m.matchId), undefined, (m) => String(m.tenantId));
+    await ledger.put({ matchId: blindId, tenantId: T1, modelA: 'alpha', modelB: 'beta', providerA: 'openai', providerB: 'openai', runIdA: a2, runIdB: b2, winner: 'B', raterSubject: 'user:r1', createdAt: AT });
     const r2 = await vote(T2, a2, b2, 'A');
     expect(r2.replayed).toBeUndefined();
-    expect(r2.match.tenantId).toBe(T2);
-    expect(r1.match.matchId).not.toBe(r2.match.matchId);
+    expect(r2.match).toMatchObject({ tenantId: T2, winner: 'A', runIdA: a2 });
+    expect(r2.match.matchId).not.toBe(blindId);
   });
 });
 
 describe('EVC-2 — the per-(rater, model) cap survives the rebuild', () => {
   it('opponent rotation does not evade it; either side counts; another rater and disjoint models are unaffected', async () => {
     const T = 'arena-cap';
+    // The prior verdicts put 'ca' on BOTH sides, so a one-sided count sees only half.
     for (let i = 0; i < MAX_RATER_MATCHES_PER_MODEL; i += 1) {
-      const [ra, rb] = await pair(T, 'ca', `opp-${i}`);
-      await vote(T, ra, rb, 'A', 'user:stuffer', ['r1']);
+      const [ra, rb] = i % 2 === 0 ? await pair(T, 'ca', `opp-${i}`) : await pair(T, `opp-${i}`, 'ca');
+      await vote(T, ra, rb, i % 2 === 0 ? 'A' : 'B', 'user:stuffer', ['r1']);
     }
     const [x1, x2] = await pair(T, 'ca', 'opp-fresh');
     await expect(vote(T, x1, x2, 'A', 'user:stuffer', ['r1'])).rejects.toMatchObject({ code: 'rate_limited', details: { reason: 'arena_rater_cap' } });
     const [y1, y2] = await pair(T, 'opp-fresh2', 'ca');
-    await expect(vote(T, y1, y2, 'B', 'user:stuffer', ['r1'])).rejects.toMatchObject({ code: 'rate_limited' });
+    await expect(vote(T, y1, y2, 'B', 'user:stuffer', ['r1'])).rejects.toMatchObject({ code: 'rate_limited', details: { reason: 'arena_rater_cap', model: 'openai/ca' } });
     const [h1, h2] = await pair(T, 'ca', 'opp-h', 'honest');
     expect((await vote(T, h1, h2, 'A', 'user:honest', ['honest'])).match.modelA).toBe('ca');
     const [d1, d2] = await pair(T, 'px', 'py');
@@ -184,13 +199,18 @@ describe('arenaStandings', () => {
 describe('eraseArenaRaterSubject (ADR 0986 D6)', () => {
   it('tombstones the rater on every verdict and keeps the verdict', async () => {
     const T = 'arena-erase';
+    // Two verdicts by the erased person, one by somebody else (who must keep theirs).
     const [ra, rb] = await pair(T, 'alpha', 'beta', 'erased-user');
     await vote(T, ra, rb, 'B', 'user:erased-user', ['erased-user']);
+    const [rc, rd] = await pair(T, 'gamma', 'delta', 'erased-user');
+    await vote(T, rc, rd, 'A', 'user:erased-user', ['erased-user']);
+    const [re, rf] = await pair(T, 'alpha', 'epsilon', 'keeper');
+    await vote(T, re, rf, 'A', 'user:keeper', ['keeper']);
     await eraseArenaRaterSubject(T, 'erased-user');
     const ledger = new DurableCollection<{ tenantId: string; raterSubject: string }>('evals:arena-match', (m) => JSON.stringify(m), undefined, (m) => m.tenantId);
     const rows = await ledger.listForTenantIndexed(T);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.raterSubject).toBe('erased');
+    expect(rows).toHaveLength(3);
+    expect(rows.map((r) => r.raterSubject).sort()).toEqual(['erased', 'erased', 'user:keeper']);
     expect((await arenaStandings(T)).find((s) => s.model === 'beta')).toMatchObject({ wins: 1 });
   });
 

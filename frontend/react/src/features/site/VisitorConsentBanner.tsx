@@ -41,12 +41,15 @@ import { announce } from '../../ui/announce.js';
 import { recordChoice, replayOfferedFor } from './visitorConsent.js';
 import { useVisitorConsent } from './useVisitorConsent.js';
 import { PRIVACY_HREF } from '../../brand/privacyHref.js';
+import { BUILTIN_PRIVACY_PATH, CONSENT_CLEARANCE, CONSENT_FOOTER, PRIVACY_CHOICES_ANCHOR, type ConsentClearance, type ConsentFooterMode } from '../../brand/consentOptions.js';
 
 
 /** `privacyHref` (ADR 1015): where "privacy policy" points. The SPA keeps the
  *  app's own page; the tenant site runtime passes the workspace's published
  *  privacy page, or `null` when it has none (no link rather than a dead one). */
-export function VisitorConsentBanner({ orgId, privacyHref = PRIVACY_HREF }: { orgId: string; privacyHref?: string | null }): JSX.Element | null {
+/** `clearance` / `footer` default to the brand options (`consentOptions.ts`, ADR 1153 D5 / D7);
+ *  props so tests and the site runtime can set them per mount. */
+export function VisitorConsentBanner({ orgId, privacyHref = PRIVACY_HREF, clearance = CONSENT_CLEARANCE, footer = CONSENT_FOOTER }: { orgId: string; privacyHref?: string | null; clearance?: ConsentClearance; footer?: ConsentFooterMode }): JSX.Element | null {
   const { t } = useTranslation('site');
   const { regime, choice } = useVisitorConsent(orgId);
   const [open, setOpen] = useState(false);
@@ -55,7 +58,7 @@ export function VisitorConsentBanner({ orgId, privacyHref = PRIVACY_HREF }: { or
   const [slot, setSlot] = useState<HTMLElement | null>(null);
   const regionRef = useRef<HTMLElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
-  const footerBtnRef = useRef<HTMLButtonElement>(null);
+  const footerBtnRef = useRef<HTMLButtonElement & HTMLAnchorElement>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const headingId = useId();
   const replayHintId = useId();
@@ -69,12 +72,17 @@ export function VisitorConsentBanner({ orgId, privacyHref = PRIVACY_HREF }: { or
   // footer, so the entry chunk (PublicShell) carries no slot of its own — the
   // banner and everything it needs stay in this lazy chunk. No footer (an embed,
   // a test) ⇒ the control renders inline below the page instead.
+  // #6155 — in the grouped footer (ADR 1049 / 1056) the control joins the bottom
+  // bar: an item of its utility links, else the bar itself when it has none, so
+  // it sits inside the bar's box in the links' style rather than on its own line.
   useLayoutEffect(() => {
-    const footer = document.querySelector('.public-shell .app-footer');
-    if (!footer) return;
-    const el = document.createElement('div');
+    const footerEl = document.querySelector('.public-shell .app-footer');
+    if (!footerEl) return;
+    const utility = footerEl.querySelector('.app-footer__bottom .app-footer__utility');
+    const bottom = footerEl.querySelector('.app-footer__bottom');
+    const el = document.createElement(utility ? 'li' : 'div');
     el.className = 'visitor-consent__slot';
-    footer.appendChild(el);
+    (utility ?? bottom ?? footerEl).appendChild(el);
     setSlot(el);
     return () => { el.remove(); };
   }, []);
@@ -91,9 +99,12 @@ export function VisitorConsentBanner({ orgId, privacyHref = PRIVACY_HREF }: { or
     const root = document.documentElement;
     const body = document.body;
     const prev = { scroll: root.style.scrollPaddingBottom, pad: body.style.paddingBottom };
+    // #6150 — `clearance: 'off'` (a brand option) leaves the document height
+    // unchanged: no body padding, the banner lies over the page's foot. The
+    // scroll padding stays, so a focused control is never hidden (SC 2.4.11).
     const apply = (): void => {
       root.style.scrollPaddingBottom = `${el.offsetHeight}px`;
-      body.style.paddingBottom = `${el.offsetHeight}px`;
+      if (clearance === 'pad') body.style.paddingBottom = `${el.offsetHeight}px`;
     };
     apply();
     const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(apply);
@@ -103,7 +114,7 @@ export function VisitorConsentBanner({ orgId, privacyHref = PRIVACY_HREF }: { or
       root.style.scrollPaddingBottom = prev.scroll;
       body.style.paddingBottom = prev.pad;
     };
-  }, [shown]);
+  }, [shown, clearance]);
 
   // Remember where focus came from the first time it enters the region, so a
   // choice can return it there. A document-level `focusin` listener, not a handler
@@ -232,7 +243,16 @@ export function VisitorConsentBanner({ orgId, privacyHref = PRIVACY_HREF }: { or
     </section>
   ) : null;
 
-  const footerControl = (
+  // #6155 — `footer: 'link'` (a brand option): the control is a plain link to the
+  // privacy page's choice section (`VisitorConsentChoices`) instead of reopening
+  // this region. Only where that page is known to render the section (the
+  // built-in one); anywhere else it stays the button, so withdrawing is never a
+  // link to a page that cannot change the choice (GDPR Art. 7(3)).
+  const footerControl = footer === 'link' && privacyHref === BUILTIN_PRIVACY_PATH ? (
+    <a ref={footerBtnRef} className="visitor-consent__footer-link" href={`${privacyHref}#${PRIVACY_CHOICES_ANCHOR}`}>
+      {t('consentFooterLink')}
+    </a>
+  ) : (
     <Button
       ref={footerBtnRef}
       variant="link"

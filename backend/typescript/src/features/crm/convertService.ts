@@ -56,6 +56,9 @@ const dealKeyClaims = new DurableCollection<DealKeyClaim>('crm:dealkeyclaim', (c
 
 /** Public-webmail domains never identify a company — fall through to the
  *  name-match path instead (ADR 0209 §3). */
+/** CHAN-F19 #9 — the name a convert gives a company when it has neither a company
+ *  name nor a business email domain. */
+export const UNNAMED_COMPANY = 'Unnamed company';
 const FREE_MAIL_DOMAINS = new Set(['gmail.com', 'outlook.com', 'yahoo.com', 'hotmail.com', 'icloud.com']);
 
 /** Stage advance is forward-only — only `lead → qualified` is defined; every
@@ -122,7 +125,11 @@ async function getOrCreateCompanyForConvert(input: {
   const created = await createCompany({
     tenantId,
     orgId,
-    name: input.companyName ?? contact.company ?? contact.name,
+    // CHAN-F19 #9 (user decision 2026-11-18) — never name a company after the person.
+    // With no company name, it takes the email domain when there is one, else a neutral
+    // label (the user can rename it; the old `?? contact.name` put the person's name in
+    // an org record that erasure then had to chase).
+    name: input.companyName ?? contact.company ?? matchDomain ?? UNNAMED_COMPANY,
     ...(matchDomain ? { domain: matchDomain } : {}),
     createdBy: actor,
     silent: true,

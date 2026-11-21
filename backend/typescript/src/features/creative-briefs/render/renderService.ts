@@ -22,7 +22,7 @@ import { OpenwopError } from '../../../types.js';
 import { cleanString, optionalCleanContent, optionalCleanString } from '../../../host/boundedStrings.js';
 import { createLogger } from '../../../observability/logger.js';
 import { resolveMediaAsset } from '../../../host/inMemorySurfaces.js';
-import { assertOrgCapacity, clearUsageForRef, createAsset, findAssetByContentHash, getAsset, mergeAssetMetadataOnDedup, stampGroundingIfAbsent, syncUsageRefs, type MediaAsset } from '../../media/mediaService.js';
+import { assertOrgCapacity, clearUsageForRef, createAsset, deleteAsset, findAssetByContentHash, getAsset, mergeAssetMetadataOnDedup, stampGroundingIfAbsent, syncUsageRefs, type MediaAsset } from '../../media/mediaService.js';
 import * as mediaStorage from '../../media/mediaStorage.js';
 import { listBrands, getBrand } from '../../brand/brandService.js';
 import { getBrandFont, BRAND_FONT_ROLES } from '../../brand/brandFonts.js';
@@ -338,25 +338,61 @@ const capReached = (): OpenwopError => new OpenwopError('validation_error', `Ren
 
 /** The per-brief render cap, checked before any work is done or paid for
  *  (ADR 1039 D3: the reel node asks this before its video call). Advisory under
- *  concurrency; {@link pruneOverflow} is the convergent recheck after the write. */
+ *  concurrency; {@link evictSelfIfOver} is the convergent recheck after the write. */
 export async function assertRenderCapacity(tenantId: string, orgId: string, briefId: string): Promise<void> {
   if ((await renders.listByPrefix(`${tenantId}:${orgId}:${briefId}:`)).length >= renderCap) throw capReached();
 }
 
-/** R0399-2 — the pre-flight count check is TOCTOU: parallel writers can each pass
- *  it and overshoot the cap. Every racing writer sorts the SAME way (createdAt,
- *  then renderId) and prunes the SAME newest-beyond-cap overflow, keeping the
- *  oldest MAX (matching the "delete old renders first" intent). If `record` is in
- *  the overflow it never persists: it is pruned and the write fails typed. The
- *  media asset stays (media owns its lifecycle), like every other render-delete.
- *  ADR 1039 (CB82WF-8) — shared by image and reel renders; reels had no recheck. */
-async function pruneOverflow(record: CreativeRender): Promise<void> {
-  const forBrief = (await renders.listByPrefix(`${record.tenantId}:${record.orgId}:${record.briefId}:`))
-    .sort((a, b) => (a.createdAt === b.createdAt ? a.renderId.localeCompare(b.renderId) : a.createdAt.localeCompare(b.createdAt)));
-  if (forBrief.length <= renderCap) return;
-  const overflow = forBrief.slice(renderCap); // newest beyond the cap
-  for (const o of overflow) await renders.delete(`${o.tenantId}:${o.orgId}:${o.briefId}:${o.renderId}`);
-  if (overflow.some((o) => o.renderId === record.renderId)) throw capReached();
+/** R0399-2, corrected for #5928 (train 293) — the pre-flight count check is TOCTOU:
+ *  parallel writers can each pass it. The post-write recheck used to prune the
+ *  newest-beyond-cap rows of ANY writer, which was not convergent: a writer whose
+ *  row was inside the cap returned success, then a later racer whose row sorted
+ *  earlier evicted it — two successes, one silently deleted render. Now a writer
+ *  only ever deletes ITS OWN row: if the brief is over the cap after its write, it
+ *  removes itself and fails typed. So a render that returned success is never
+ *  deleted by a racer (on this instance or another) and the cap never overshoots
+ *  (any row that persists was written by a writer that then saw ≤ cap, and every
+ *  later writer saw that row). Under a true cross-instance race both writers may
+ *  back off; that is the conservative failure, typed. The media asset stays
+ *  (media owns its lifecycle), like every other render-delete.
+ *  ADR 1039 (CB82WF-8) — shared by image and reel renders. */
+async function evictSelfIfOver(record: CreativeRender): Promise<void> {
+  const n = (await renders.listByPrefix(`${record.tenantId}:${record.orgId}:${record.briefId}:`)).length;
+  if (n <= renderCap) return;
+  await renders.delete(`${record.tenantId}:${record.orgId}:${record.briefId}:${record.renderId}`);
+  throw capReached();
+}
+
+/** Test seam: run the cross-instance path alone (no per-instance serialization),
+ *  so the convergent recheck is exercised on its own. */
+let serializeBriefWrites = true;
+export function __setRenderWriteSerialization(on: boolean): void { serializeBriefWrites = on; }
+/** Test seam: hooks around the write, so a test can force the cross-instance
+ *  interleaving (both racers past the pre-check, one finishing before the other
+ *  writes). Unset in production. */
+let writeHooks: { beforePut?(r: CreativeRender): Promise<void>; afterWrite?(r: CreativeRender): void } = {};
+export function __setRenderWriteHooks(h: typeof writeHooks): void { writeHooks = h; }
+
+/** On ONE instance the cap re-check, the write and the self-eviction run one at a
+ *  time per brief (the expensive render stays outside), so a racer at a full brief
+ *  is refused before it writes and two same-instance racers never both back off.
+ *  {@link evictSelfIfOver} is what makes it hold across instances. */
+const briefWriteChains = new Map<string, Promise<unknown>>();
+async function persistUnderCap(record: CreativeRender): Promise<void> {
+  const step = async (): Promise<void> => {
+    const n = (await renders.listByPrefix(`${record.tenantId}:${record.orgId}:${record.briefId}:`)).length;
+    if (n >= renderCap) throw capReached();
+    try {
+      await writeHooks.beforePut?.(record);
+      await renders.put(record);
+      await evictSelfIfOver(record);
+    } finally { writeHooks.afterWrite?.(record); }
+  };
+  if (!serializeBriefWrites) return step();
+  const key = `${record.tenantId}:${record.orgId}:${record.briefId}`;
+  const run = (briefWriteChains.get(key) ?? Promise.resolve()).catch(() => undefined).then(step);
+  briefWriteChains.set(key, run);
+  try { await run; } finally { if (briefWriteChains.get(key) === run) briefWriteChains.delete(key); }
 }
 
 export async function renderForBrief(tenantId: string, orgId: string, actor: string, args: RenderBriefArgs): Promise<CreativeRender> {
@@ -479,6 +515,7 @@ export async function renderForBrief(tenantId: string, orgId: string, actor: str
   };
   let mediaAssetId: string;
   const existing = await findAssetByContentHash(tenantId, orgId, contentHash);
+  const createdHere = !existing;
   if (existing) {
     const stamped = await stampGroundingIfAbsent(existing, grounding, { ai: anyAiLayer });
     const merged = await mergeAssetMetadataOnDedup(stamped, { marketing });
@@ -523,9 +560,25 @@ export async function renderForBrief(tenantId: string, orgId: string, actor: str
     createdBy: actor,
     createdAt: nowIso(),
   };
-  await renders.put(record);
-  // R0399-2 — convergent post-write recheck, BEFORE stamping usage refs.
-  await pruneOverflow(record);
+  // R0399-2 + #5928 — re-check, write and convergent recheck, serialized per brief,
+  // BEFORE stamping usage refs.
+  try {
+    await persistUnderCap(record);
+  } catch (err) {
+    // #5928 — a render that backs off must not leave the asset it just CREATED
+    // behind: nothing points at it and it counts against the org's media caps.
+    // Only an asset made by this call, and only if no other render (a racer that
+    // deduped onto the same pixels) references it. A deduped asset is untouched.
+    if (createdHere && err instanceof OpenwopError && err.message === capReached().message) {
+      try {
+        const users = (await renders.listByPrefix(`${tenantId}:${orgId}:`)).filter((r) => r.mediaAssetId === mediaAssetId);
+        if (users.length === 0) await deleteAsset(tenantId, orgId, mediaAssetId);
+      } catch (cleanupErr) {
+        log.warn('render_backoff_asset_cleanup_failed', { mediaAssetId, error: cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr) });
+      }
+    }
+    throw err;
+  }
 
   // R0399-1 — the layer assets a render CONSUMED join the "used in N" graph
   // under their OWN ref kind (the mood-board sync owns `creative-brief`; a
@@ -711,7 +764,6 @@ export async function storeReelRender(args: {
     createdBy: args.actor,
     createdAt: nowIso(),
   };
-  await renders.put(record);
-  await pruneOverflow(record);
+  await persistUnderCap(record);
   return record;
 }

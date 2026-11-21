@@ -808,6 +808,14 @@ export function heroQueueHtml(raw: unknown, escapeHtml: (s: string) => string): 
   return `<figure><figcaption>${escapeHtml(q.title)}</figcaption><ul>${rows}</ul>${q.note ? `<p>${escapeHtml(q.note)}</p>` : ''}</figure>`;
 }
 
+/** #6150 — a queue card (on a `cta`) as markdown: its title, then one line per row. */
+export function heroQueueMarkdown(raw: unknown): string {
+  const q = cleanHeroQueueForRender(raw);
+  if (!q) return '';
+  const rows = q.rows.map((r) => `- ${[r.id, r.title, r.meta, r.status].filter(Boolean).join(' · ')}`).join('\n');
+  return `**${q.title}**\n\n${rows}${q.note ? `\n\n${q.note}` : ''}`;
+}
+
 /** ADR 1080 D8 — the richText card as real text for crawlers. */
 export function richTextCardHtml(raw: unknown, escapeHtml: (s: string) => string, imageUrl: (token: string) => string): string {
   if (typeof raw !== 'object' || raw === null) return '';

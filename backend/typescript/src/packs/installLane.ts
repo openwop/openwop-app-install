@@ -24,6 +24,7 @@ import { isTombstoned } from '../host/packTombstones.js';
 import { isPackRevoked } from '../host/packRevocations.js';
 import { installPackFromRegistry, isSafePackName, resolveDefaultPackDir, type InstallTarget } from './registryInstaller.js';
 import { createLogger } from '../observability/logger.js';
+import { PackRestartRequiredError } from './nodePackImportLifetime.js';
 
 const log = createLogger('packs.installLane');
 
@@ -74,6 +75,9 @@ function scrub(msg: string): string {
  */
 export function translateInstallError(err: unknown, packName: string, version: string): OpenwopError {
   if (err instanceof OpenwopError) return err;
+  if (err instanceof PackRestartRequiredError) {
+    return new OpenwopError('conflict', `"${packName}" has executable code loaded in this host process. Configure the desired version for startup and restart this host; no replacement was installed.`, 409, { packName, version, reason: 'pack_restart_required' });
+  }
   const msg = err instanceof Error ? err.message : String(err);
   const details = { packName, version };
   if (/^manifest_fetch_failed \(404\)|^tarball_fetch_failed \(404\)/.test(msg)) {

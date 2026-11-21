@@ -620,6 +620,7 @@ function SectionFieldsBody({ section, assets, onChange, onPickMedia, baseData }:
               <option value="run">{t('heroVisualRun')}</option>
               <option value="film">{t('heroVisualFilm')}</option>
               <option value="image">{t('heroVisualImage')}</option>
+              <option value="video">{t('heroVisualVideo')}</option>
               <option value="plan">{t('heroVisualPlan')}</option>
               <option value="activity">{t('heroVisualActivity')}</option>
               <option value="hub">{t('heroVisualHub')}</option>
@@ -651,6 +652,13 @@ function SectionFieldsBody({ section, assets, onChange, onPickMedia, baseData }:
             <input aria-label={t('heroSecondaryLabelAria')} value={str(d.ctaLabel2)} onChange={(e) => set('ctaLabel2', e.target.value)} placeholder={t('heroSecondaryLabelPlaceholder')} />
             <input aria-label={t('heroSecondaryUrlAria')} value={str(d.ctaUrl2)} onChange={(e) => set('ctaUrl2', e.target.value)} placeholder={t('heroSecondaryUrlPlaceholder')} />
           </div>
+          {/* ADR 1150 D3 — the background film and its poster: paths on this site. */}
+          {str(d.visual) === 'video' ? (
+            <div className="u-grid u-gap-1 u-grid-2">
+              <label className="u-grid u-gap-1"><span className="u-label-sm">{t('heroVideoSrcLabel')}</span><input value={str(d.videoSrc)} onChange={(e) => set('videoSrc', e.target.value || undefined)} placeholder="/media/reel.mp4" /></label>
+              <label className="u-grid u-gap-1"><span className="u-label-sm">{t('heroVideoPosterLabel')}</span><input value={str(d.posterSrc)} onChange={(e) => set('posterSrc', e.target.value || undefined)} placeholder="/media/reel-poster.jpg" /></label>
+            </div>
+          ) : null}
           {str(d.visual) === 'activity' ? <ActivityFields value={d.activity} onChange={(v) => set('activity', v)} /> : null}
           {str(d.visual) === 'activity' && baseData === undefined ? <PlayField d={d} onChange={onChange} /> : null}
           {str(d.visual) === 'flow' ? <FlowFields value={d.flow} onChange={(v) => set('flow', v)} showState={baseData === undefined} /> : null}
@@ -697,6 +705,12 @@ function SectionFieldsBody({ section, assets, onChange, onPickMedia, baseData }:
           <label className="u-grid u-gap-1"><span className="u-label-sm">{t('ctaSubheadingLabel')}</span><input value={str(d.subheading)} onChange={(e) => set('subheading', e.target.value)} /></label>
           <label className="u-grid u-gap-1"><span className="u-label-sm">{t('ctaButtonLabelLabel')}</span><input value={str(d.label)} onChange={(e) => set('label', e.target.value)} /></label>
           <label className="u-grid u-gap-1"><span className="u-label-sm">{t('ctaButtonUrlLabel')}</span><input value={str(d.url)} onChange={(e) => set('url', e.target.value)} placeholder={t('ctaButtonUrlPlaceholder')} /></label>
+          {/* ADR 1153 D3 — a photo behind the band; alt text is required with it. The
+              `queue` card has no form here (as on the hero) and is kept by key. */}
+          <MediaTokenField value={str(d.imageToken)} assets={assets} onChange={(v) => set('imageToken', v || undefined)} label={t('ctaPhotoLabel')} onPickMedia={onPickMedia} />
+          {str(d.imageToken) ? (
+            <label className="u-grid u-gap-1"><span className="u-label-sm">{t('altTextLabel')}</span><input value={str(d.alt)} onChange={(e) => set('alt', e.target.value)} /></label>
+          ) : null}
         </div>
       );
     case 'columns': {
@@ -728,6 +742,8 @@ function SectionFieldsBody({ section, assets, onChange, onPickMedia, baseData }:
               <option value="incidents">{t('layoutIncidents')}</option>
               <option value="board">{t('layoutBoard')}</option>
               <option value="gallery">{t('layoutGallery')}</option>
+              {/* ADR 1150 D1 */}
+              <option value="split">{t('layoutSplit')}</option>
               <option value="bento">{t('layoutBento')}</option>
               <option value="marquee">{t('layoutMarquee')}</option>
               {/* ADR 1047 */}

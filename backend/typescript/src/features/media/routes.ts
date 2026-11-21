@@ -43,7 +43,9 @@ import {
   deleteCollection,
   getAsset,
   listAssets,
+  listAssetsPage,
   listCollections,
+  listCollectionsPage,
   findAssetByContentHash,
   mergeAssetMetadataOnDedup,
   parseFilenameTags,
@@ -102,6 +104,18 @@ function validateUpload(contentBase64: string, declaredType: string): { decodedB
 const authorize = (req: Request, scope: Scope): Promise<CmsScopeCtx> =>
   requireCmsScope(req, scope);
 
+/** #5928 — the opt-in page of a list route: present only when `limit` or `cursor` is. */
+function pagingOf(req: Request): { limit?: number; cursor?: string } | null {
+  const rawLimit = optString(req.query.limit);
+  const cursor = optString(req.query.cursor);
+  if (rawLimit === undefined && cursor === undefined) return null;
+  const limit = rawLimit === undefined ? undefined : Number(rawLimit);
+  if (limit !== undefined && !Number.isFinite(limit)) {
+    throw new OpenwopError('validation_error', 'Query `limit` MUST be a number (1–200).', 400, { limit: rawLimit });
+  }
+  return { ...(limit !== undefined ? { limit } : {}), ...(cursor ? { cursor } : {}) };
+}
+
 export function registerMediaRoutes(deps: RouteDeps): void {
   const { app } = deps;
   const BASE = '/host/openwop-app/media/orgs/:orgId';
@@ -120,7 +134,10 @@ export function registerMediaRoutes(deps: RouteDeps): void {
   app.get(`${BASE}/collections`, async (req, res, next) => {
     try {
       const { orgId, tenantId } = await authorize(req, 'workspace:read');
-      res.json({ collections: await listCollections(tenantId, orgId) });
+      // #5928 — `?limit=`/`?cursor=` opt into a keyset page (`nextCursor` when more);
+      // without them the response is the whole org list, as every client expects.
+      const paging = pagingOf(req);
+      res.json(paging ? await listCollectionsPage(tenantId, orgId, paging) : { collections: await listCollections(tenantId, orgId) });
     } catch (err) {
       next(err);
     }
@@ -174,6 +191,7 @@ export function registerMediaRoutes(deps: RouteDeps): void {
           tags: body.tags,
           uploadedBy: user.userId,
           contentHash,
+          bytes: Buffer.from(contentBase64, 'base64'), // #5928 ask 4 — width/height from the header
           // ADR 0229 — optional provenance (derivedFrom / generatedBy:'ai' /
           // prompt / model / rightsNote); sanitized + bounded in the service.
           ...(body.lineage !== undefined ? { lineage: body.lineage } : {}),
@@ -225,6 +243,7 @@ export function registerMediaRoutes(deps: RouteDeps): void {
               tags: [...givenTags, ...fileTags],
               uploadedBy: user.userId,
               contentHash,
+              bytes: Buffer.from(contentBase64, 'base64'), // #5928 ask 4 — width/height from the header
             });
           });
           results.push({ name, status: 'created', asset: viewAsset(asset) });
@@ -260,12 +279,22 @@ export function registerMediaRoutes(deps: RouteDeps): void {
   app.get(`${BASE}/assets`, async (req, res, next) => {
     try {
       const { orgId, tenantId } = await authorize(req, 'workspace:read');
-      const assets = await listAssets(tenantId, orgId, {
+      const filter = {
         ...(optString(req.query.collectionId) ? { collectionId: String(req.query.collectionId) } : {}),
         ...(optString(req.query.q) ? { q: String(req.query.q) } : {}),
         ...(optString(req.query.tag) ? { tag: String(req.query.tag) } : {}),
-      });
-      res.json({ assets: assets.map(viewAsset) });
+      };
+      // #5928 — `?limit=`/`?cursor=` opt into a keyset page of the org's (or the
+      // collection's) index slice: `{ assets, nextCursor?, total? }`. Without them the
+      // response is unchanged (`{ assets }`, the whole filtered list; every frontend
+      // caller relies on that), now read from the org's slice instead of the tenant's.
+      const paging = pagingOf(req);
+      if (paging) {
+        const page = await listAssetsPage(tenantId, orgId, { ...filter, ...paging });
+        res.json({ ...page, assets: page.assets.map(viewAsset) });
+        return;
+      }
+      res.json({ assets: (await listAssets(tenantId, orgId, filter)).map(viewAsset) });
     } catch (err) {
       next(err);
     }

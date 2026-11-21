@@ -16,7 +16,12 @@ import { resolveHeadlessAi } from '../../host/headlessAi.js';
 import { resolveMediaAsset } from '../../host/inMemorySurfaces.js';
 import { cleanString, cleanTagList, optionalCleanString } from '../../host/boundedStrings.js';
 import * as mediaStorage from './mediaStorage.js';
+import { IMAGE_HEADER_PREFIX_BYTES, imageDimensions, type ImageDimensions } from '../../host/imageDimensions.js';
 import { createLogger } from '../../observability/logger.js';
+import {
+  __clearSystemIndexType, afterSystemWrite, beforeSystemWrite, builtTenants, checkSystemIndex, drainSystemIndexBuilds, ensureSystemIndexBuilt,
+  indexedFamilyCount, indexedTenantTotals, indexedTotals, listIndexPage, registerStoreIndex, repairSystemIndex,
+} from '../entities/systemIndex.js';
 
 const log = createLogger('features.media');
 
@@ -163,6 +168,12 @@ export interface MediaAsset {
   /** ADR 0352 P2 — SHA-256 of the stored bytes (hex). Dedup key; absent on
    *  rows uploaded before the facet shipped. */
   contentHash?: string;
+  /** #5928 ask 4 — intrinsic pixel size, read from the stored bytes' HEADER at creation
+   *  (`host/imageDimensions.ts`; PNG, JPEG, GIF, WebP; a JPEG's EXIF 90° rotation is
+   *  applied, so these are the DISPLAYED size). Absent on non-images, SVG, a header the
+   *  parser could not read, and rows created before the field (no backfill). */
+  width?: number;
+  height?: number;
   /** ADR 0352 P5 — platform crop GEOMETRIES (normalized 0–1 boxes derived from
    *  the autotag subject box; the FE crops via CSS/canvas — no raster
    *  derivation, no native image dependency). */
@@ -222,12 +233,153 @@ interface MediaTokenIndexRow { key: string; tenantId: string; assetId: string }
 const tokenIndex = new DurableCollection<MediaTokenIndexRow>('media:token-idx', (r) => r.key, undefined, (r) => r.tenantId);
 const tokenKey = (tenantId: string, token: string): string => `${tenantId}::${createHash('sha256').update(token).digest('hex')}`;
 
-/** Bounded (tenant, org) asset slice via the tenant index (DEBT-2). The
- *  `tenantId` re-check is belt-and-braces: marker keys are `:`-joined, so a
- *  pathological tenant id that is a `:`-prefix of another must never leak. */
-async function assetsForOrg(tenantId: string, orgId: string): Promise<MediaAsset[]> {
-  return (await assets.listForTenantIndexed(tenantId)).filter((a) => a.tenantId === tenantId && a.orgId === orgId);
+// ── #5928 — the declared media indexes (ADR 1110 P5's store index, over media's own rows) ──
+// The capacity gate and the lists used to read EVERY asset of the tenant and filter in
+// memory: O(tenant) per upload and per list, at caps a deployment can now raise to 10,000+
+// per org. The rows stay where they are (no re-key, no migration: the legacy byte store
+// shares the `media:asset` prefix, see `isLibraryAsset`); the index lives in the shared
+// `entity:sysidx*` collections, keyed `<tenant>:<type>:<family>:<org>:…`, so it never
+// sits under `hostext:media:asset:` and the byte-row validator is untouched.
+//  asset  at  `<org>:<newestFirst>`                  every asset, newest first; the COUNTED
+//                                                    family, weighted by `sizeBytes`, so the
+//                                                    org counter holds count AND bytes
+//         col `<org>:<collectionId|~>:<newestFirst>` one collection (`~` = uncategorized)
+//         h   `<org>:<contentHash>`                  the dedup lookup (hashed rows only)
+//  coll   n   `<org>:<createdAt>`                    every collection, oldest first; counted
+// No projection: readers hydrate by id and decide on the full row, so a stale marker can
+// never list a row under the wrong org, collection or hash. Every write of either store
+// goes through `assetStore` / `collectionStore`, which wrap it with the index's hooks
+// (intent before, sync after; an index failure never fails the write). Counter drift is
+// healed by an exact recount at each cap boundary and by the hourly drift check
+// (`repairMediaIndex`); a tenant too large to build inline reads the old tenant slice
+// until the background build lands.
+export const MEDIA_ASSET_TYPE = 'media.asset';
+export const MEDIA_COLLECTION_TYPE = 'media.collection';
+const NO_COLLECTION_SEG = '~';
+/** Newest first in byte order: 13 digits of (max − createdAt ms), as the order index. */
+const newestFirst = (iso: string): string => String(9_999_999_999_999 - (Date.parse(iso) || 0)).padStart(13, '0');
+registerStoreIndex<MediaAsset>(MEDIA_ASSET_TYPE, {
+  isRow: (v): v is MediaAsset => isLibraryAsset(v) !== null,
+  idOf: (a) => a.assetId,
+  tenantOf: (a) => a.tenantId,
+  orgOf: (a) => a.orgId,
+  countedFamily: 'at',
+  weightOf: (a) => a.sizeBytes,
+  markers: (a) => [
+    { family: 'at', segments: [newestFirst(a.createdAt)], p: {} },
+    { family: 'col', segments: [a.collectionId ?? NO_COLLECTION_SEG, newestFirst(a.createdAt)], p: {} },
+    ...(a.contentHash ? [{ family: 'h', segments: [a.contentHash], p: {} }] : []),
+  ],
+  read: async (tenantId, id) => { const a = await assets.get(id); return a && a.tenantId === tenantId ? a : null; },
+  scan: async function* (tenantId) { for (const a of await assets.listForTenantIndexed(tenantId)) if (a.tenantId === tenantId) yield a; },
+  count: (tenantId) => assets.countForTenantIndexed(tenantId),
+});
+registerStoreIndex<MediaCollection>(MEDIA_COLLECTION_TYPE, {
+  isRow: (v): v is MediaCollection => !!v && typeof v === 'object' && typeof (v as MediaCollection).collectionId === 'string'
+    && typeof (v as MediaCollection).tenantId === 'string' && typeof (v as MediaCollection).orgId === 'string',
+  idOf: (c) => c.collectionId,
+  tenantOf: (c) => c.tenantId,
+  orgOf: (c) => c.orgId,
+  countedFamily: 'n',
+  markers: (c) => [{ family: 'n', segments: [c.createdAt], p: {} }],
+  read: async (tenantId, id) => { const c = await collections.get(id); return c && c.tenantId === tenantId ? c : null; },
+  scan: async function* (tenantId) { for (const c of await collections.listForTenantIndexed(tenantId)) if (c.tenantId === tenantId) yield c; },
+  count: (tenantId) => collections.countForTenantIndexed(tenantId),
+});
+/** The asset store with the index's hooks around every write (#5928). */
+const assetStore = {
+  async put(a: MediaAsset): Promise<void> {
+    await beforeSystemWrite(MEDIA_ASSET_TYPE, a.tenantId, a.assetId, a);
+    await assets.put(a);
+    await afterSystemWrite(MEDIA_ASSET_TYPE, a.tenantId, a.assetId, a);
+  },
+  async compareAndSwap(expected: MediaAsset, next: MediaAsset): Promise<boolean> {
+    await beforeSystemWrite(MEDIA_ASSET_TYPE, next.tenantId, next.assetId, next);
+    const ok = await assets.compareAndSwap(expected, next);
+    await afterSystemWrite(MEDIA_ASSET_TYPE, next.tenantId, next.assetId, ok ? next : await assets.get(next.assetId));
+    return ok;
+  },
+  async delete(a: MediaAsset): Promise<boolean> {
+    await beforeSystemWrite(MEDIA_ASSET_TYPE, a.tenantId, a.assetId, null);
+    const gone = await assets.delete(a.assetId);
+    await afterSystemWrite(MEDIA_ASSET_TYPE, a.tenantId, a.assetId, null);
+    return gone;
+  },
+};
+const collectionStore = {
+  async put(c: MediaCollection): Promise<void> {
+    await beforeSystemWrite(MEDIA_COLLECTION_TYPE, c.tenantId, c.collectionId, c);
+    await collections.put(c);
+    await afterSystemWrite(MEDIA_COLLECTION_TYPE, c.tenantId, c.collectionId, c);
+  },
+  async delete(c: MediaCollection): Promise<boolean> {
+    await beforeSystemWrite(MEDIA_COLLECTION_TYPE, c.tenantId, c.collectionId, null);
+    const gone = await collections.delete(c.collectionId);
+    await afterSystemWrite(MEDIA_COLLECTION_TYPE, c.tenantId, c.collectionId, null);
+    return gone;
+  },
+};
+
+/** Tenants (per type) this process has seen built, per storage (a re-init must re-check). */
+const mediaIndexReady = new WeakMap<object, Set<string>>();
+/** Is the tenant's media index usable? False while a large pre-index tenant is built in
+ *  the background (ADR 1110 round fix): the caller reads the old tenant slice meanwhile. */
+async function ensureMediaIndex(tenantId: string, typeName: string = MEDIA_ASSET_TYPE): Promise<boolean> {
+  const storage = hostExtStorage();
+  let ready = mediaIndexReady.get(storage);
+  if (!ready) { ready = new Set(); mediaIndexReady.set(storage, ready); }
+  const k = `${typeName}|${tenantId}`;
+  if (ready.has(k)) return true;
+  if ((await ensureSystemIndexBuilt(tenantId, typeName)) !== 'built') return false;
+  ready.add(k);
+  return true;
 }
+/** Test-only: forget which tenants were seen built. */
+export function __forgetMediaIndexReady(): void { mediaIndexReady.delete(hostExtStorage()); }
+
+/** Several assets by id, org-guarded, in the order asked (16 point reads at a time). */
+async function getAssetsById(tenantId: string, orgId: string, ids: readonly string[]): Promise<MediaAsset[]> {
+  const out: (MediaAsset | null)[] = new Array(ids.length).fill(null);
+  for (let i = 0; i < ids.length; i += 16) {
+    const got = await Promise.all(ids.slice(i, i + 16).map((id) => assets.get(id)));
+    got.forEach((a, j) => { if (a && a.tenantId === tenantId && a.orgId === orgId) out[i + j] = a; });
+  }
+  return out.filter((a): a is MediaAsset => a !== null);
+}
+
+/** One asset family slice of the org, hydrated, one index page at a time (#5928). */
+async function* iterateAssetSlice(tenantId: string, orgId: string, family: string, segments: string[] = []): AsyncGenerator<MediaAsset> {
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await listIndexPage(tenantId, MEDIA_ASSET_TYPE, family, orgId, { segments, ...(cursor ? { cursor } : {}), limit: MAX_PAGE });
+    for (const a of await getAssetsById(tenantId, orgId, page.rows.map((r) => r.id))) yield a;
+    if (!page.cursor) return;
+    cursor = page.cursor;
+  }
+}
+
+/** The (tenant, org) asset set, newest first. #5928: the org's own index slice, not the
+ *  tenant's; until a large pre-index tenant is built, the bounded tenant slice (DEBT-2,
+ *  whose `tenantId` re-check is belt-and-braces: marker keys are `:`-joined). */
+async function assetsForOrg(tenantId: string, orgId: string): Promise<MediaAsset[]> {
+  if (!(await ensureMediaIndex(tenantId))) {
+    return (await assets.listForTenantIndexed(tenantId)).filter((a) => a.tenantId === tenantId && a.orgId === orgId);
+  }
+  const out: MediaAsset[] = [];
+  for await (const a of iterateAssetSlice(tenantId, orgId, 'at')) out.push(a);
+  return out;
+}
+
+/** The org's assets with these exact bytes (#5928: the `h` slice, a point-sized read). */
+async function orgAssetsByHash(tenantId: string, orgId: string, contentHash: string): Promise<MediaAsset[]> {
+  if (!(await ensureMediaIndex(tenantId))) return (await assetsForOrg(tenantId, orgId)).filter((a) => a.contentHash === contentHash);
+  const out: MediaAsset[] = [];
+  for await (const a of iterateAssetSlice(tenantId, orgId, 'h', [contentHash])) if (a.contentHash === contentHash) out.push(a);
+  return out;
+}
+
+/** Largest page a list returns. */
+const MAX_PAGE = 200;
 
 const MAX = { name: 120, tag: 48, tags: 24, lineagePrompt: 2000, lineageRightsNote: 400, lineageModel: 120, lineageRef: 128 } as const;
 
@@ -252,23 +404,43 @@ export const UNCATEGORIZED = 'none';
  * over-cap upload never orphans bytes. 409 (the same status the count cap used).
  */
 export async function assertOrgCapacity(tenantId: string, orgId: string, addBytes: number): Promise<void> {
-  const tenantAssets = await listAssetsForTenant(tenantId); // DEBT-2 — bounded tenant read, not a cross-tenant scan
-  const orgAssets = tenantAssets.filter((a) => a.orgId === orgId);
   const maxAssets = orgMaxAssets();
-  if (orgAssets.length >= maxAssets) {
+  const maxBytes = orgMaxBytes();
+  const tenantMax = tenantMaxBytes();
+  let orgCount: number;
+  let orgBytes: number;
+  let tenantBytes: () => Promise<number>;
+  if (await ensureMediaIndex(tenantId)) {
+    // #5928 — the maintained counter rows (count + bytes per org; the workspace total is
+    // the sum of the tenant's org rows), never the asset rows. A counter is trusted below
+    // the cap and recounted EXACTLY at it, so an over-count never refuses an upload that
+    // fits, and the hourly drift check heals an under-count (ADR 1110's `indexedCount`).
+    let org = await indexedTotals(tenantId, MEDIA_ASSET_TYPE, orgId);
+    if (org.count >= maxAssets || org.sum + addBytes > maxBytes) org = await indexedTotals(tenantId, MEDIA_ASSET_TYPE, orgId, { exact: true });
+    orgCount = org.count;
+    orgBytes = org.sum;
+    tenantBytes = async () => {
+      const t = (await indexedTenantTotals(tenantId, MEDIA_ASSET_TYPE)).sum;
+      return t + addBytes > tenantMax ? (await indexedTenantTotals(tenantId, MEDIA_ASSET_TYPE, { exact: true })).sum : t;
+    };
+  } else {
+    // A large pre-index tenant whose index is still building: the old tenant slice.
+    const tenantAssets = await listAssetsForTenant(tenantId); // DEBT-2 — bounded tenant read, not a cross-tenant scan
+    const orgAssets = tenantAssets.filter((a) => a.orgId === orgId);
+    orgCount = orgAssets.length;
+    orgBytes = orgAssets.reduce((sum, a) => sum + a.sizeBytes, 0);
+    tenantBytes = async () => tenantAssets.reduce((sum, a) => sum + a.sizeBytes, 0);
+  }
+  if (orgCount >= maxAssets) {
     throw new OpenwopError('validation_error', `This org has the maximum ${maxAssets} assets.`, 409, { max: maxAssets });
   }
-  const totalBytes = orgAssets.reduce((sum, a) => sum + a.sizeBytes, 0);
-  const maxBytes = orgMaxBytes();
-  if (totalBytes + addBytes > maxBytes) {
+  if (orgBytes + addBytes > maxBytes) {
     throw new OpenwopError('validation_error', `This org has reached its media storage limit (${Math.round(maxBytes / (1024 * 1024))} MiB).`, 409, { maxBytes });
   }
   // ADR 0818 §3 — the per-org cap alone is not a quota: creating another org
   // reset it, so a workspace's storage was unbounded. The workspace total is
   // capped too (operator-tunable; read per call so tests and ops can move it).
-  const tenantMax = tenantMaxBytes();
-  const tenantBytes = tenantAssets.reduce((sum, a) => sum + a.sizeBytes, 0);
-  if (tenantBytes + addBytes > tenantMax) {
+  if ((await tenantBytes()) + addBytes > tenantMax) {
     throw new OpenwopError('validation_error', `This workspace has reached its media storage limit (${Math.round(tenantMax / (1024 * 1024))} MiB).`, 409, { maxBytes: tenantMax, scope: 'workspace' });
   }
 }
@@ -323,6 +495,9 @@ export async function withOrgCapacity<T>(tenantId: string, orgId: string, addByt
       if (timedOut) log.warn('media_capacity_wait_timeout', { tenantId, waitMs: capacityWaitMs });
     }
     markStarted();
+    // #5928 — the counters the check reads are bumped by the write's own index sync
+    // (`assetStore`), which completes before `write()` returns, so the writer behind
+    // this one reads them already moved: the serialization still holds.
     await assertOrgCapacity(tenantId, orgId, addBytes);
     return await write();
   } finally {
@@ -522,9 +697,16 @@ export function viewAsset(a: MediaAsset): MediaAssetView {
 // ── Collections ─────────────────────────────────────────────────────────────
 
 export async function createCollection(tenantId: string, orgId: string, name: string, createdBy: string): Promise<MediaCollection> {
-  const existing = (await collections.listForTenantIndexed(tenantId)).filter((c) => c.tenantId === tenantId && c.orgId === orgId);
   const maxCollections = orgMaxCollections();
-  if (existing.length >= maxCollections) {
+  // #5928 — the org's collection counter, recounted exactly at the cap (one indexed count).
+  let existing: number;
+  if (await ensureMediaIndex(tenantId, MEDIA_COLLECTION_TYPE)) {
+    existing = (await indexedTotals(tenantId, MEDIA_COLLECTION_TYPE, orgId)).count;
+    if (existing >= maxCollections) existing = (await indexedTotals(tenantId, MEDIA_COLLECTION_TYPE, orgId, { exact: true })).count;
+  } else {
+    existing = (await collections.listForTenantIndexed(tenantId)).filter((c) => c.tenantId === tenantId && c.orgId === orgId).length;
+  }
+  if (existing >= maxCollections) {
     throw new OpenwopError('validation_error', `This org has the maximum ${maxCollections} collections.`, 409, { max: maxCollections });
   }
   const c: MediaCollection = {
@@ -535,12 +717,51 @@ export async function createCollection(tenantId: string, orgId: string, name: st
     createdBy,
     createdAt: nowIso(),
   };
-  await collections.put(c);
+  await collectionStore.put(c);
   return c;
 }
 
 export async function listCollections(tenantId: string, orgId: string): Promise<MediaCollection[]> {
-  return (await collections.listForTenantIndexed(tenantId)).filter((c) => c.tenantId === tenantId && c.orgId === orgId);
+  const out: MediaCollection[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await listCollectionsPage(tenantId, orgId, { limit: MAX_PAGE, ...(cursor ? { cursor } : {}) });
+    out.push(...page.collections);
+    cursor = page.nextCursor;
+  } while (cursor);
+  return out;
+}
+
+export interface CollectionPage { collections: MediaCollection[]; nextCursor?: string }
+
+/** #5928 — one page of the org's collections, oldest first, keyset-paged on the `n`
+ *  slice (the cursor is the last key read, so an insert or delete between pages never
+ *  repeats or skips a row that stayed). */
+export async function listCollectionsPage(tenantId: string, orgId: string, query: { limit?: number; cursor?: string | undefined } = {}): Promise<CollectionPage> {
+  const limit = pageLimit(query.limit);
+  if (!(await ensureMediaIndex(tenantId, MEDIA_COLLECTION_TYPE))) {
+    const all = (await collections.listForTenantIndexed(tenantId)).filter((c) => c.tenantId === tenantId && c.orgId === orgId).sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.collectionId.localeCompare(b.collectionId));
+    return offsetPage(all, query.cursor, limit, (page, nextCursor) => ({ collections: page, ...(nextCursor ? { nextCursor } : {}) }));
+  }
+  const page = await listIndexPage(tenantId, MEDIA_COLLECTION_TYPE, 'n', orgId, { ...(keysetCursor(query.cursor) ? { cursor: keysetCursor(query.cursor)! } : {}), limit });
+  const got = await Promise.all(page.rows.map((r) => collections.get(r.id)));
+  return {
+    collections: got.filter((c): c is MediaCollection => !!c && c.tenantId === tenantId && c.orgId === orgId),
+    ...(page.cursor ? { nextCursor: CURSOR_KEYSET + page.cursor } : {}),
+  };
+}
+
+/** A page size: a whole number from 1 to {@link MAX_PAGE}, default 50. */
+const pageLimit = (raw: number | undefined): number => Math.min(Math.max(Math.trunc(Number.isFinite(raw) ? (raw as number) : 50), 1), MAX_PAGE);
+/** Cursors are tagged: `k.` a keyset cursor (the index), `f.` an offset (the fallback
+ *  read of a tenant whose index is still building). A cursor of the other kind starts
+ *  the walk over rather than being misread. */
+const CURSOR_KEYSET = 'k.';
+const CURSOR_FALLBACK = 'f.';
+const keysetCursor = (raw: string | undefined): string | undefined => (raw?.startsWith(CURSOR_KEYSET) ? raw.slice(CURSOR_KEYSET.length) : undefined);
+function offsetPage<R, P>(all: R[], cursor: string | undefined, limit: number, shape: (page: R[], nextCursor?: string) => P): P {
+  const from = cursor?.startsWith(CURSOR_FALLBACK) ? Math.max(0, Number(cursor.slice(CURSOR_FALLBACK.length)) || 0) : 0;
+  return shape(all.slice(from, from + limit), from + limit < all.length ? `${CURSOR_FALLBACK}${from + limit}` : undefined);
 }
 
 export async function getCollection(tenantId: string, orgId: string, collectionId: string): Promise<MediaCollection | null> {
@@ -568,11 +789,25 @@ export async function deleteCollection(tenantId: string, orgId: string, collecti
     });
     if (result?.updated) rehomed += 1;
   }
-  await collections.delete(collectionId);
+  await collectionStore.delete(c);
   return { rehomed };
 }
 
 // ── Assets ──────────────────────────────────────────────────────────────────
+
+/** #5928 ask 4 — a raster image's displayed pixel size, from `bytes` or the stored head.
+ *  Best-effort: a failed read records no dimensions and never fails the create. The
+ *  parser picks the format from the bytes' own signature; the type check only skips a
+ *  storage read for what can never have dimensions (SVG is excluded by name). */
+async function dimensionsOf(tenantId: string, contentType: string, storageRef: string, bytes?: Buffer): Promise<ImageDimensions | undefined> {
+  if (!contentType.startsWith('image/') || contentType === 'image/svg+xml') return undefined;
+  try {
+    return imageDimensions(bytes ?? await mediaStorage.readHead(tenantId, storageRef, IMAGE_HEADER_PREFIX_BYTES));
+  } catch (err) {
+    log.warn('media_dimensions_read_failed', { error: err instanceof Error ? err.message : String(err) });
+    return undefined;
+  }
+}
 
 export async function createAsset(input: {
   tenantId: string;
@@ -598,6 +833,10 @@ export async function createAsset(input: {
   suppliedBy?: MediaSupplier;
   /** ADR 1051 D5 — SERVER-ONLY: the avatar render's attestation pointer. */
   likenessConsent?: MediaLikenessConsent;
+  /** #5928 ask 4 — the bytes (or a leading slice) when the caller already holds them, so
+   *  the dimensions are read without a storage round trip. Absent: read from the stored
+   *  bytes' head (`mediaStorage.readHead`), so EVERY create lane gets them. */
+  bytes?: Buffer;
 }): Promise<MediaAsset> {
   // Capacity (count + bytes) is asserted in the route BEFORE bytes are stored —
   // see assertOrgCapacity — so no over-cap upload reaches here with orphaned bytes.
@@ -609,6 +848,7 @@ export async function createAsset(input: {
     collectionId = c.collectionId;
   }
   const ts = nowIso();
+  const dims = await dimensionsOf(input.tenantId, input.contentType, input.storageRef, input.bytes);
   const grounding = cleanGrounding(input.grounding);
   const cleaned = cleanLineage(input.lineage);
   // Grounding is provenance, not an AI claim: a deterministic composite of real
@@ -635,10 +875,11 @@ export async function createAsset(input: {
     ...(lineage ? { lineage } : {}),
     ...(marketing ? { marketing } : {}),
     ...(input.contentHash ? { contentHash: input.contentHash } : {}),
+    ...(dims ? { width: dims.width, height: dims.height } : {}),
     createdAt: ts,
     updatedAt: ts,
   };
-  await assets.put(a);
+  await assetStore.put(a);
   // The index is a cache: a failed write must not fail a create whose row
   // already landed (getAssetByServeToken heals the miss).
   await tokenIndex.put({ key: tokenKey(a.tenantId, a.serveToken), tenantId: a.tenantId, assetId: a.assetId })
@@ -716,7 +957,7 @@ export async function setGroundingFidelity(
     const g = a?.lineage?.grounding;
     if (!a || !g) return null;
     const next: MediaAsset = { ...a, lineage: { ...a.lineage, grounding: { ...g, fidelity } }, updatedAt: nowIso() };
-    if (await assets.compareAndSwap(a, next)) return next;
+    if (await assetStore.compareAndSwap(a, next)) return next;
   }
   throw new OpenwopError('internal_error', 'The asset changed while its fidelity verdict was being recorded — retry.', 409, { assetId });
 }
@@ -760,7 +1001,7 @@ export async function groundingForGenerated(
   const op = origin?.op ?? claimed?.op ?? 'generate';
   let source = opts.source;
   if (!source && origin?.inputSha256) {
-    const hit = (await assetsForOrg(tenantId, orgId)).find((a) => a.contentHash === origin.inputSha256);
+    const [hit] = await orgAssetsByHash(tenantId, orgId, origin.inputSha256);
     if (hit) source = { asset: hit, sha256: origin.inputSha256 };
   }
   // A caller's product hint binds only when the catalog confirms the source
@@ -863,7 +1104,7 @@ export function parseFilenameTags(filename: string): string[] {
  *  duplicate — swallowing them would silently discard the caller's intent
  *  (review finding). Bounded (tenant, org) slice via the tenant index (DEBT-2). */
 export async function findAssetByContentHash(tenantId: string, orgId: string, contentHash: string, collectionId?: string): Promise<MediaAsset | null> {
-  const orgAssets = await assetsForOrg(tenantId, orgId);
+  const orgAssets = await orgAssetsByHash(tenantId, orgId, contentHash); // #5928 — the `h` slice
   return orgAssets.find((a) => a.contentHash === contentHash && (a.collectionId ?? '') === (collectionId ?? '')) ?? null;
 }
 
@@ -911,11 +1152,9 @@ export async function listAssetsForTenant(tenantId: string): Promise<MediaAsset[
   return (await assets.listForTenantIndexed(tenantId)).filter((a) => a.tenantId === tenantId && typeof a.assetId === 'string' && typeof a.orgId === 'string');
 }
 
-export async function listAssets(
-  tenantId: string,
-  orgId: string,
-  filter: { collectionId?: string; q?: string; tag?: string } = {},
-): Promise<MediaAsset[]> {
+export interface AssetFilter { collectionId?: string; q?: string; tag?: string }
+
+function assetFilter(filter: AssetFilter): (a: MediaAsset) => boolean {
   const q = filter.q?.trim().toLowerCase();
   const tag = filter.tag?.trim().toLowerCase();
   const collectionMatch = (a: MediaAsset): boolean => {
@@ -923,12 +1162,87 @@ export async function listAssets(
     if (filter.collectionId === UNCATEGORIZED) return a.collectionId === undefined; // server-side uncategorized
     return a.collectionId === filter.collectionId;
   };
-  return (await assetsForOrg(tenantId, orgId)).filter(
-    (a) =>
-      collectionMatch(a) &&
-      (!q || a.name.toLowerCase().includes(q)) &&
-      (!tag || a.tags.includes(tag)),
-  );
+  return (a) => collectionMatch(a) && (!q || a.name.toLowerCase().includes(q)) && (!tag || a.tags.includes(tag));
+}
+
+/** The org slice a filter reads: one collection's (`col`), else every asset's (`at`). */
+const sliceOf = (filter: AssetFilter): [string, string[]] => (filter.collectionId === undefined
+  ? ['at', []]
+  : ['col', [filter.collectionId === UNCATEGORIZED ? NO_COLLECTION_SEG : filter.collectionId]]);
+
+/** Every matching asset of the org, newest first — the unpaged read existing callers
+ *  rely on. #5928: walks the org's (or collection's) index slice, not the tenant's. */
+export async function listAssets(tenantId: string, orgId: string, filter: AssetFilter = {}): Promise<MediaAsset[]> {
+  const keep = assetFilter(filter);
+  if (!(await ensureMediaIndex(tenantId))) return (await assetsForOrg(tenantId, orgId)).filter(keep);
+  const [family, segments] = sliceOf(filter);
+  const out: MediaAsset[] = [];
+  for await (const a of iterateAssetSlice(tenantId, orgId, family, segments)) if (keep(a)) out.push(a);
+  return out;
+}
+
+export interface AssetPage {
+  assets: MediaAsset[];
+  /** Absent when the slice is exhausted. Opaque. */
+  nextCursor?: string;
+  /** The slice's size (the org, or the collection), on a read without `q`/`tag`. */
+  total?: number;
+}
+
+/** A filtered page reads at most this many rows per requested row before it returns
+ *  what it has (with a cursor), so a rare `q` never walks a 10,000-asset org at once. */
+const SCAN_BUDGET_FACTOR = 8;
+
+/**
+ * #5928 — one page of the org's assets (or one collection's), newest first, KEYSET-paged
+ * on the index: the cursor is the key of the last row CONSUMED, so a page that stops
+ * part-way through a read skips nothing, and an insert or delete between pages never
+ * repeats or skips a row that stayed (a new upload sorts before every cursor). `q`/`tag`
+ * are decided on the full row within a scan budget; a page may then come back short,
+ * or empty, with a cursor to continue.
+ */
+export async function listAssetsPage(tenantId: string, orgId: string, query: AssetFilter & { limit?: number; cursor?: string | undefined } = {}): Promise<AssetPage> {
+  const limit = pageLimit(query.limit);
+  const keep = assetFilter(query);
+  const filtered = !!(query.q?.trim() || query.tag?.trim());
+  if (!(await ensureMediaIndex(tenantId))) {
+    const all = (await assetsForOrg(tenantId, orgId)).filter(keep).sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.assetId.localeCompare(b.assetId));
+    return offsetPage(all, query.cursor, limit, (page, nextCursor) => ({ assets: page, ...(nextCursor ? { nextCursor } : {}), ...(!filtered ? { total: all.length } : {}) }));
+  }
+  const [family, segments] = sliceOf(query);
+  const budget = filtered ? limit * SCAN_BUDGET_FACTOR : Number.POSITIVE_INFINITY;
+  const out: MediaAsset[] = [];
+  let cursor = keysetCursor(query.cursor);
+  let seen = 0;
+  let next: string | undefined;
+  for (;;) {
+    const want = filtered ? Math.min(MAX_PAGE, Math.max(limit - out.length, 50)) : limit - out.length;
+    const page = await listIndexPage(tenantId, MEDIA_ASSET_TYPE, family, orgId, { segments, ...(cursor ? { cursor } : {}), limit: want });
+    const byId = new Map((await getAssetsById(tenantId, orgId, page.rows.map((r) => r.id))).map((a) => [a.assetId, a]));
+    let stopped = false;
+    for (const [i, row] of page.rows.entries()) {
+      seen += 1;
+      cursor = row.cursor;
+      const a = byId.get(row.id); // a stale marker (row gone) is skipped, like a corrupt row
+      if (a && keep(a)) out.push(a);
+      if (out.length >= limit || seen >= budget) {
+        // The slice's very last row ends it: no cursor, so a caller never pages into nothing.
+        next = i === page.rows.length - 1 && !page.cursor ? undefined : cursor;
+        stopped = true;
+        break;
+      }
+    }
+    if (stopped) break;
+    if (!page.cursor) { next = undefined; break; } // slice exhausted
+    cursor = page.cursor;
+  }
+  let total: number | undefined;
+  if (!filtered) {
+    total = query.collectionId === undefined
+      ? (await indexedTotals(tenantId, MEDIA_ASSET_TYPE, orgId)).count
+      : await indexedFamilyCount(tenantId, MEDIA_ASSET_TYPE, 'col', orgId, segments);
+  }
+  return { assets: out, ...(next ? { nextCursor: CURSOR_KEYSET + next } : {}), ...(total !== undefined ? { total } : {}) };
 }
 
 export async function getAsset(tenantId: string, orgId: string, assetId: string): Promise<MediaAsset | null> {
@@ -948,7 +1262,7 @@ async function mutateAsset(
     if (!current) return null;
     const next = await change(current);
     if (!next) return { asset: current, updated: false };
-    if (await assets.compareAndSwap(current, next)) return { asset: next, updated: true };
+    if (await assetStore.compareAndSwap(current, next)) return { asset: next, updated: true };
   }
   throw new OpenwopError('conflict', 'The asset changed concurrently; retry the operation.', 409, { assetId });
 }
@@ -1078,7 +1392,7 @@ export async function deleteAsset(tenantId: string, orgId: string, assetId: stri
       { assetId, reason: 'bytes_not_removed' },
     );
   }
-  await assets.delete(assetId);
+  await assetStore.delete(a);
   await tokenIndex.delete(tokenKey(tenantId, a.serveToken)).catch(() => undefined); // ADR 0945 — a stale row reads null anyway
   // MEDIA-CODE-1 / CS-DATA-3 — the asset's usage rows die with it (no orphaned
   // "used by" edges pointing at a deleted asset).
@@ -1228,10 +1542,39 @@ export async function listUsageForAsset(tenantId: string, orgId: string, assetId
     .sort((x, y) => (x.lastSeenAt < y.lastSeenAt ? 1 : -1));
 }
 
+// ── #5928 — the media indexes' upkeep (run by `mediaIndexSweep.ts`) ─────────────────
+/** The commerce catalog sweep's shape: unfinished write intents every tick (bounded;
+ *  fresh ones are left to their writers), one queued background build per tick, and
+ *  once per UTC HOUR, fleet-wide, a drift check of every built media tenant: a count
+ *  mismatch queues a rebuild, and every org counter (count AND bytes) is recounted, so
+ *  an under-count the cap-boundary recount cannot see lasts at most an hour. The intent
+ *  and build queues are shared with commerce; both sweeps drain them safely (leases,
+ *  claim-by-delete). */
+const mediaIndexHour = new DurableCollection<{ k: string; hour: number }>('media:index-hour', (r) => r.k);
+export async function repairMediaIndex(now = Date.now()): Promise<{ repaired: number; built: number; drifted: number }> {
+  const { repaired } = await repairSystemIndex({ limit: 100, now });
+  const builtNow = await drainSystemIndexBuilds({ limit: 1 });
+  const hour = Math.floor(now / 3_600_000);
+  const cur = await mediaIndexHour.get('hour');
+  if (cur && cur.hour >= hour) return { repaired, built: builtNow, drifted: 0 };
+  if (!(await mediaIndexHour.compareAndSwap(cur, { k: 'hour', hour }))) return { repaired, built: builtNow, drifted: 0 };
+  let drifted = 0;
+  for (const type of [MEDIA_ASSET_TYPE, MEDIA_COLLECTION_TYPE]) {
+    for await (const tenantId of builtTenants(type)) if (!(await checkSystemIndex(tenantId, type))) drifted += 1;
+  }
+  if (drifted > 0) log.warn('media_index_drift_queued', { tenants: drifted });
+  return { repaired, built: builtNow, drifted };
+}
+
 // ── Test-only reset ─────────────────────────────────────────────────────────
 export async function __resetMedia(): Promise<void> {
   await collections.__clear();
   await assets.__clear();
+  // #5928 — the index rows of what was just cleared, so no counter outlives its rows.
+  await __clearSystemIndexType(MEDIA_ASSET_TYPE);
+  await __clearSystemIndexType(MEDIA_COLLECTION_TYPE);
+  await mediaIndexHour.__clear();
+  __forgetMediaIndexReady();
   await tokenIndex.__clear();
   await usageRefs.__clear();
 }

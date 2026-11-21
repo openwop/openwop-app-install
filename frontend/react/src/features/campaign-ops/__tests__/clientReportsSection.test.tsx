@@ -19,6 +19,7 @@ vi.mock('../reportsClient.js', async (orig) => ({ ...(await orig<Record<string, 
 
 import { ClientReportsSection } from '../ClientReportsSection.js';
 import { CampaignOpsError } from '../campaignOpsClient.js';
+import type { ClientReport, ReportMetric } from '../reportsClient.js';
 
 const DEF = { definitionId: 'rdef_1', orgId: 'o1', title: 'Monthly results', version: 1, campaignIds: 'all', sections: [], period: { kind: 'month', timezone: 'UTC' }, updatedAt: '2026-10-20T00:00:00Z' };
 const lineage = { source: 'campaign-connectors.kpiSummary', computedAt: '2026-10-20T10:00:00.000Z', rows: 2, notes: ['all-data-to-computedAt', 'unreported-conversions:1'] };
@@ -27,6 +28,23 @@ const REPORT = {
   snapshot: { metrics: { 'kpi.spend': { value: 200.5, unit: 'currency', currency: 'USD', previous: null, lineage }, 'kpi.cpa': { value: null, unit: 'currency', previous: null, lineage } }, tables: {} },
   snapshotHash: 'a'.repeat(64), status: 'draft', generatedAt: '2026-10-20T10:00:00.000Z',
 };
+
+// This is a stored-snapshot fixture, not a copy of the KPI reducer/adapter.
+// Amount and count are deliberately independent: old numeric snapshots with
+// count0 must not be reinterpreted by the UI after a new projection ships.
+function availabilityReport(value: number | null, title: string, hashCharacter: string, count: number | undefined): ClientReport {
+  const specs: Array<{ key: string; unit: ReportMetric['unit']; currency?: string }> = [
+    { key: 'revenue', unit: 'currency', currency: 'USD' }, { key: 'roas', unit: 'ratio' },
+    { key: 'conversions', unit: 'count' }, { key: 'cvr', unit: 'ratio' }, { key: 'cpa', unit: 'currency', currency: 'USD' },
+  ];
+  const metrics: Record<string, ReportMetric> = { 'kpi.spend': { value: 200.5, unit: 'currency', currency: 'USD', previous: null, lineage } };
+  for (const spec of specs) metrics[`kpi.${spec.key}`] = { value, unit: spec.unit, ...(spec.currency ? { currency: spec.currency } : {}), previous: null, lineage };
+  if (count !== undefined) {
+    metrics['kpi.reportedRevenueRecordCount'] = { value: count, unit: 'count', previous: null, lineage };
+    metrics['kpi.reportedConversionRecordCount'] = { value: count, unit: 'count', previous: null, lineage };
+  }
+  return { ...REPORT, reportId: `rpt_${hashCharacter}`, title, status: 'draft', snapshotHash: hashCharacter.repeat(64), snapshot: { metrics, tables: {} } };
+}
 
 beforeEach(() => { for (const f of Object.values(h)) f.mockReset(); });
 afterEach(cleanup);
@@ -145,4 +163,109 @@ describe('ClientReportsSection', () => {
     expect(table.textContent).toContain('not only this period');
     expect(table.textContent).toContain('Records without conversion data are left out: 1.');
   });
+
+  it.each([0, 2])('labels source conversion-reporting count %s without confusing measured zero or leaking its internal key', async (count) => {
+    h.listDefinitions.mockResolvedValue([DEF]);
+    h.listReports.mockResolvedValue([{ ...REPORT, snapshot: { ...REPORT.snapshot, metrics: {
+      ...REPORT.snapshot.metrics,
+      'kpi.reportedConversionRecordCount': { value: count, unit: 'count', previous: null, lineage },
+    } } }]);
+    render(<ClientReportsSection orgId="o1" />);
+    fireEvent.click(await screen.findByRole('button', { name: /^Computed/ }));
+    const table = await screen.findByRole('table', { name: 'Figures in Monthly results' });
+    const header = within(table).getByRole('rowheader', { name: `${label('reportsSource_kpi')}: ${label('reportsMetric_reportedConversionRecordCount')}` });
+    const row = header.closest('tr');
+    if (!row) throw new Error('conversion reporting count row missing');
+    expect(within(row).getByRole('cell', { name: String(count) })).toBeTruthy();
+    expect(row.textContent).not.toContain('reportedConversionRecordCount');
+    expect(row.textContent).not.toContain(label('reportsNotAvailable'));
+    expect(table.textContent).toContain('$200.50');
+    expect(h.computeReport).not.toHaveBeenCalled();
+    expect(h.sendReportForReview).not.toHaveBeenCalled();
+  });
+
+  it('a new stored unavailable snapshot renders each of the five null values in its own row', async () => {
+    h.listDefinitions.mockResolvedValue([DEF]);
+    h.listReports.mockResolvedValue([availabilityReport(null, 'Unavailable snapshot', 'b', 0)]);
+    render(<ClientReportsSection orgId="o1" />);
+    fireEvent.click(await screen.findByRole('button', { name: /^Computed/ }));
+    const table = await screen.findByRole('table', { name: 'Figures in Unavailable snapshot' });
+    for (const key of ['revenue', 'roas', 'conversions', 'cvr', 'cpa']) {
+      const header = within(table).getByRole('rowheader', { name: `${label('reportsSource_kpi')}: ${label(`reportsMetric_${key}`)}` });
+      const row = header.closest('tr');
+      if (!row) throw new Error('availability metric row missing');
+      expect(within(row).getByRole('cell', { name: label('reportsNotAvailable') })).toBeTruthy();
+      expect(within(row).queryByRole('cell', { name: /^(?:0|\$0\.00)$/ })).toBeNull();
+    }
+    const spend = within(table).getByRole('rowheader', { name: `${label('reportsSource_kpi')}: ${label('reportsMetric_spend')}` }).closest('tr');
+    if (!spend) throw new Error('spend row missing');
+    expect(within(spend).getByRole('cell', { name: '$200.50' })).toBeTruthy();
+    expect(h.computeReport).not.toHaveBeenCalled();
+    expect(h.sendReportForReview).not.toHaveBeenCalled();
+  });
+
+  it('a measured-zero snapshot retains numeric zero in every amount and ratio row', async () => {
+    h.listDefinitions.mockResolvedValue([DEF]);
+    h.listReports.mockResolvedValue([availabilityReport(0, 'Measured zero snapshot', 'c', 1)]);
+    render(<ClientReportsSection orgId="o1" />);
+    fireEvent.click(await screen.findByRole('button', { name: /^Computed/ }));
+    const table = await screen.findByRole('table', { name: 'Figures in Measured zero snapshot' });
+    for (const [key, value] of [['revenue', '$0.00'], ['roas', '0'], ['conversions', '0'], ['cvr', '0'], ['cpa', '$0.00']] as const) {
+      const header = within(table).getByRole('rowheader', { name: `${label('reportsSource_kpi')}: ${label(`reportsMetric_${key}`)}` });
+      const row = header.closest('tr');
+      if (!row) throw new Error('measured zero row missing');
+      expect(within(row).getByRole('cell', { name: value })).toBeTruthy();
+      expect(within(row).queryByText(label('reportsNotAvailable'))).toBeNull();
+    }
+    expect(h.computeReport).not.toHaveBeenCalled();
+    expect(h.sendReportForReview).not.toHaveBeenCalled();
+  });
+
+  it('a legacy snapshot with no optional counts keeps its stored numeric zeros', async () => {
+    h.listDefinitions.mockResolvedValue([DEF]);
+    h.listReports.mockResolvedValue([availabilityReport(0, 'Legacy numeric snapshot', 'd', undefined)]);
+    render(<ClientReportsSection orgId="o1" />);
+    fireEvent.click(await screen.findByRole('button', { name: /^Computed/ }));
+    const table = await screen.findByRole('table', { name: 'Figures in Legacy numeric snapshot' });
+    for (const [key, value] of [['revenue', '$0.00'], ['roas', '0'], ['conversions', '0'], ['cvr', '0'], ['cpa', '$0.00']] as const) {
+      const row = within(table).getByRole('rowheader', { name: `${label('reportsSource_kpi')}: ${label(`reportsMetric_${key}`)}` }).closest('tr');
+      if (!row) throw new Error('legacy metric row missing');
+      expect(within(row).getByRole('cell', { name: value })).toBeTruthy();
+    }
+    expect(within(table).queryByRole('rowheader', { name: `${label('reportsSource_kpi')}: ${label('reportsMetric_reportedRevenueRecordCount')}` })).toBeNull();
+    expect(within(table).queryByRole('rowheader', { name: `${label('reportsSource_kpi')}: ${label('reportsMetric_reportedConversionRecordCount')}` })).toBeNull();
+    expect(h.computeReport).not.toHaveBeenCalled();
+    expect(h.sendReportForReview).not.toHaveBeenCalled();
+  });
+
+  it('old zero-with-count0 history and a new unavailable snapshot retain separate stored values and fingerprints', async () => {
+    const old = availabilityReport(0, 'Historical zero snapshot', 'e', 0);
+    const current = availabilityReport(null, 'New unavailable snapshot', 'f', 0);
+    h.listDefinitions.mockResolvedValue([DEF]); h.listReports.mockResolvedValue([old, current]);
+    render(<ClientReportsSection orgId="o1" />);
+    const buttons = await screen.findAllByRole('button', { name: /^Computed/ });
+    const oldButton = buttons[0]; const newButton = buttons[1];
+    if (!oldButton || !newButton) throw new Error('both stored report controls are required');
+    fireEvent.click(oldButton);
+    const oldTable = await screen.findByRole('table', { name: 'Figures in Historical zero snapshot' });
+    const oldRevenue = within(oldTable).getByRole('rowheader', { name: `${label('reportsSource_kpi')}: ${label('reportsMetric_revenue')}` }).closest('tr');
+    if (!oldRevenue) throw new Error('historic revenue row missing');
+    expect(within(oldRevenue).getByRole('cell', { name: '$0.00' })).toBeTruthy();
+    expect(screen.getByTitle(old.snapshotHash).textContent).toBe(old.snapshotHash.slice(0, 10));
+    fireEvent.click(newButton);
+    const newTable = await screen.findByRole('table', { name: 'Figures in New unavailable snapshot' });
+    const newRevenue = within(newTable).getByRole('rowheader', { name: `${label('reportsSource_kpi')}: ${label('reportsMetric_revenue')}` }).closest('tr');
+    if (!newRevenue) throw new Error('new revenue row missing');
+    expect(within(newRevenue).getByRole('cell', { name: label('reportsNotAvailable') })).toBeTruthy();
+    expect(screen.getByTitle(current.snapshotHash).textContent).toBe(current.snapshotHash.slice(0, 10));
+    fireEvent.click(oldButton);
+    const history = await screen.findByRole('table', { name: 'Figures in Historical zero snapshot' });
+    const historyRevenue = within(history).getByRole('rowheader', { name: `${label('reportsSource_kpi')}: ${label('reportsMetric_revenue')}` }).closest('tr');
+    if (!historyRevenue) throw new Error('historical reread row missing');
+    expect(within(historyRevenue).getByRole('cell', { name: '$0.00' })).toBeTruthy();
+    expect(h.listReports).toHaveBeenCalledExactlyOnceWith('o1');
+    expect(h.computeReport).not.toHaveBeenCalled();
+    expect(h.sendReportForReview).not.toHaveBeenCalled();
+  });
+
 });

@@ -28,7 +28,14 @@
  *    host, not by a signed-in author).
  *  • `channel-ingress:reply`   — DELETED. An owed reply to an erased person must
  *    never be sent.
- *  • `channel-ingress:settings` — no subject (agent id, bot handle, model).
+ *  • `channel-ingress:settings` — for a CONNECTION lane the bot handle is the
+ *    connected account's handle, and a person may connect their own account.
+ *    DELETED when the lane's connection is the subject's (a USER-scoped
+ *    connection owned by them) or is already gone (CHAN-F19 #10). The revoke
+ *    consumer also deletes it, but the lifecycle seam swallows its failures.
+ *    Kept for org/workspace connections: their account is the workspace's, the
+ *    scope the connections eraser draws (ADR 0780 D4). A RELAY lane's row has no
+ *    handle (the route refuses one) — agent id and model only — so it stays.
  *
  * Runs (round 3): a deleted DM or owner thread also deletes every conversation run
  * it opened (`runIds`), which deletes their event logs. Residual, GROUPS only: an
@@ -42,6 +49,10 @@ import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { deleteConversationMeta } from '../../host/conversationStore.js';
 import { declarePiiFields } from '../../host/dataClassification.js';
 import { channelIngressStores, deleteChannelConversationMarker } from './stores.js';
+import { actingUserIds, getConnection } from '../connections/connectionsService.js';
+
+/** `laneKeyOf` for a connection lane: `conn:<connectionId>`. */
+const CONNECTION_LANE = 'conn:';
 
 /** The placeholder a redacted group message keeps (the row stays: other people's thread order). */
 export const ERASED_CHANNEL_MESSAGE = '[message removed: the sender\'s data was erased]';
@@ -124,6 +135,18 @@ export async function eraseChannelIngressSubject(tenantId: string, subjectKey: s
       rowsTouched += 1;
     }
   }
+  // CHAN-F19 #10 — a connection lane's settings (its bot handle can be a person's
+  // own account): deleted with the subject's connection, or when that connection is
+  // already gone and the best-effort revoke consumer left the row behind.
+  const subjectUsers = await actingUserIds(tenantId, subjectKey);
+  for (const row of await s.settings.listForTenantIndexed(tenantId)) {
+    if (!row.laneKey.startsWith(CONNECTION_LANE)) continue;
+    const conn = await getConnection(tenantId, row.laneKey.slice(CONNECTION_LANE.length));
+    const theirs = conn?.userId !== undefined && subjectUsers.has(conn.userId);
+    if (conn && !theirs) continue;
+    await s.settings.delete(row.laneKey);
+    if (theirs) rowsTouched += 1; // an orphan is housekeeping, not this subject's row
+  }
   return { rowsTouched };
 }
 
@@ -138,4 +161,6 @@ export function registerChannelIngressErasure(): void {
   declarePiiFields('channel-ingress:thread', ['ownerUserId', 'chatId'], local);
   declarePiiFields('channel-ingress:sender-thread', ['senderId'], local);
   declarePiiFields('channel-ingress:reply', ['ownerUserId', 'chatId', 'senderId'], local);
+  // CHAN-F19 #10 — a connection lane's bot handle can be a person's own account.
+  declarePiiFields('channel-ingress:settings', ['botHandle'], local);
 }

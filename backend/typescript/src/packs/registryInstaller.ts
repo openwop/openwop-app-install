@@ -49,6 +49,7 @@ import {
 } from './packContentDigest.js';
 import { invalidatePackTrustVerdict } from '../host/packTrust.js';
 import { checkPackManifestForMajor } from '../host/packManifestV2Gate.js';
+import { assertNodePackReplaceable } from './nodePackImportLifetime.js';
 
 const log = createLogger('packs.registryInstaller');
 
@@ -345,6 +346,10 @@ export async function installPackFromRegistry(
     if (stagedPackJsonSha !== createHash('sha256').update(packJsonBytes).digest('hex')) {
       throw new Error('pack_integrity_mismatch: the installed pack.json is not the bytes that were verified');
     }
+    // A loaded node-pack tree (including a pending/failed ESM import) belongs
+    // to this process until restart. Check BEFORE archive/removal/copy; the
+    // replacement below is synchronous, with no intervening await.
+    assertNodePackReplaceable(destDir);
     // ADR 1014 D1 — an agent pack's outgoing version is archived, not deleted, so
     // a deployment can keep running it until the new one is promoted. Best-effort:
     // a failed move falls back to today's replace, never fails the install.

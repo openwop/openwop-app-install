@@ -24,7 +24,7 @@ import { JOB_SEARCH_TOGGLE, JOB_SEARCH_LABEL } from '../service.js';
 import { recordAnswer, listAnswers } from './answerBank.js';
 import { listParked, clearParked } from './campaign.js';
 import { STANDARD_BANK, CORE_KEYS, coverageReport } from './standardBank.js';
-import { sendError } from '../../../middleware/errorEnvelope.js';
+import { sendError, sendErrorBody } from '../../../middleware/errorEnvelope.js';
 
 const FEATURE = { toggleId: JOB_SEARCH_TOGGLE, label: JOB_SEARCH_LABEL };
 const JOB_SEARCH_BASE = '/host/openwop-app/job-search';
@@ -61,7 +61,7 @@ export function registerAnswerBankRoutes(deps: RouteDeps): void {
       const user = await resolveCallerUser(req);
       const b = (req.body ?? {}) as { questionText?: unknown; value?: unknown; source?: unknown; confirmed?: unknown };
       if (typeof b.questionText !== 'string' || typeof b.value !== 'string') {
-        res.status(400).json({ error: 'validation_error', message: 'questionText and value are required.' });
+        sendErrorBody(res, 400, { error: 'validation_error', message: 'questionText and value are required.' });
         return;
       }
       const source = b.source === 'inferred' || b.source === 'profile' ? b.source : 'user';
@@ -128,7 +128,7 @@ export function registerAnswerBankRoutes(deps: RouteDeps): void {
       const user = await resolveCallerUser(req);
       const b = (req.body ?? {}) as { questionText?: unknown; value?: unknown };
       if (typeof b.questionText !== 'string' || typeof b.value !== 'string') {
-        res.status(400).json({ error: 'validation_error', message: 'questionText and value are required.' });
+        sendErrorBody(res, 400, { error: 'validation_error', message: 'questionText and value are required.' });
         return;
       }
       // ALWAYS confirmed: this endpoint exists because a human is answering.

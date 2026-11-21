@@ -230,3 +230,24 @@
   :root:not([data-reduce-motion="reduce"]) .fp-dtree__card { animation: fp-step-in 240ms ease-out; }
 }
 @keyframes fp-step-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+/* ── ADR 1150 — split rows, linked gallery tiles, the video hero ─────────── */
+/* D1 split: a photo beside its text, sides alternating; stacked on a phone. */
+.fp-split__list { list-style: none; margin: 0; padding: 0; display: grid; gap: calc(var(--space-6) * 2); }
+.fp-split__row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: calc(var(--space-6) * 2); align-items: center; }
+.fp-split__row--flip .fp-split__media { order: 2; }
+.fp-split__media .fp-shot__img { display: block; inline-size: 100%; block-size: auto; border-radius: var(--site-media-radius, var(--radius-lg)); }
+.fp-split__text { display: grid; gap: var(--space-4); align-content: center; }
+.fp-split__eyebrow { margin: 0; font-family: var(--mono); font-size: var(--text-eyebrow); letter-spacing: 0.08em; text-transform: uppercase; color: var(--fp-eyebrow-color); }
+.fp-split__title { margin: 0; font-family: var(--serif); font-weight: var(--weight-display); font-size: clamp(var(--text-title), 3vw, calc(var(--text-display) * 1.4)); line-height: 1.08; color: var(--ink); }
+.fp-split__lede { margin: 0; max-width: 56ch; font-size: var(--text-lg); line-height: var(--leading-prose); color: var(--ink-2); }
+@media (max-width: 859px) { .fp-split__row { grid-template-columns: minmax(0, 1fr); gap: var(--space-5); } .fp-split__row--flip .fp-split__media { order: 0; } }
+/* D2 a gallery tile that links: the whole picture is the target. */
+.fp-gallery__link { display: block; border-radius: var(--site-media-radius, var(--radius-lg)); color: inherit; }
+.fp-gallery__link:focus-visible { outline: 2px solid var(--clay-text); outline-offset: var(--space-1); }
+/* D3 the video hero: the band's frame, with its Pause / Play button in a corner. */
+.fp-hero__video-frame { position: relative; margin-bottom: calc(var(--space-6) * 2); }
+.fp-hero--band .fp-hero__video-frame .fp-hero__photo { margin-bottom: 0; }
+.fp-hero__video { block-size: clamp(280px, 42vw, 620px); background: var(--paper-2); }
+.fp-hero__video-toggle { position: absolute; inset-block-end: var(--space-4); inset-inline-end: var(--space-4); display: inline-grid; place-items: center; inline-size: 40px; block-size: 40px; padding: 0; border: 1px solid var(--rule); border-radius: var(--radius-pill); background: var(--paper); color: var(--ink); cursor: pointer; }
+.fp-hero__video-toggle:focus-visible { outline: 2px solid var(--clay-text); outline-offset: 2px; }

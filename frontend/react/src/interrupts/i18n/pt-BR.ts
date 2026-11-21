@@ -7,6 +7,13 @@ export const messages = {
   noRespondPermission: 'Você pode ver esta etapa, mas não tem permissão para respondê-la.',
   // RenderInterrupt fallback — neutral copy; never instructs users to edit source (DEMO-14)
   unknownKindBody: 'Esta solicitação não pode ser respondida aqui.',
+  // ADR 1136 P3a — the browser agent hands a step (a sign-in) to the person.
+  takeoverTitle: "Entre você mesmo em {{host}}",
+  takeoverBody: "O agente de navegador parou antes de um login. Faça-o você mesmo na janela do navegador que ele abriu e depois escolha Continuar. Nunca digite uma senha neste aplicativo.",
+  takeoverPageNote: "A página chamou o campo de:",
+  takeoverExpires: "Isto aguarda até {{time}}.",
+  takeoverContinue: "Continuar",
+  takeoverStop: "Parar a tarefa",
   unknownKindLog: 'Ver o registro de atividade',
   credentialTitle: 'Conectar {{provider}}',
   credentialAnAccount: 'uma conta',

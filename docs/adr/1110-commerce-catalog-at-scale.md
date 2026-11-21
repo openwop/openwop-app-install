@@ -247,6 +247,7 @@ Track A only (host storage and host-extension routes; no wire). Findings, all ap
 |---|---|---|
 | `listByPrefixPage`, `countByPrefix` on `DurableCollection` | `host/hostExtPersistence.ts` | via the suite below |
 | Declared indexes: markers, manifest, intent lease, repair, rebuild, counter | `features/entities/systemIndex.ts` | `test/adr1110-system-index.test.ts` |
+| *(added 2026-11-17, #5928)* an optional summed counter weight (`weightOf`; `indexedTotals`, `indexedTenantTotals`), used by media for bytes; unweighted types' manifest hashes are unchanged. `verified` is now per storage | same | `test/media-org-indexed-reads.test.ts` |
 | Kernel hooks in `putSystemEntity` / `casSystemEntity` / `deleteSystemEntity`; `rowCap`; `kvCount` boundary recount; `iterateSystemEntities`, `getSystemEntities`, `countSystemEntities` | `features/entities/entitiesService.ts` | same |
 | commerce.product's declaration | `features/commerce/productIndex.ts` | same |
 | `listProductsPage`, `getProducts`, `iterateCatalog`, the counted cap, `repairCatalogIndex`, `catalogIndexGauge` | `features/commerce/commerceService.ts`, `reservationSweep.ts`, `feature.ts` | same |

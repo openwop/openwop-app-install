@@ -17,6 +17,7 @@ import { registerImageGenRoutes } from './imageGenRoutes.js';
 import { registerMediaAgentTools } from './agentTools.js';
 import { registerMediaErasure } from './erasure.js';
 import { buildMediaSurface } from './surface.js';
+import { startMediaIndexSweep } from './mediaIndexSweep.js';
 
 export const mediaFeature: BackendFeature = {
   id: 'media',
@@ -33,6 +34,7 @@ export const mediaFeature: BackendFeature = {
     registerMediaRoutes(deps);
     registerImageGenRoutes(deps); // ADR 0401 — editor-facing image-gen reach
     registerMediaAgentTools(); // XCH-HOLE-7 (round 3) — openwop:media.list (ADR 0308 seam)
+    startMediaIndexSweep(); // #5928 — index repair, background builds, hourly counter drift check
   },
   requiredPacks: [
     'feature.media.nodes',

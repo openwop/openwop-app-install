@@ -258,3 +258,13 @@ More, Enter-open focus and reverse/forward wrapping, Escape/focus restoration
 with immediate closed Tab exclusion, and desktop visibility/keyboard controls.
 This is a real rendered browser oracle, not jsdom or a CSS string pin. Authored
 **NOT RUN** at source preparation; runtime qualification remains separate.
+
+
+### Correction — 2026-11-08: Menu read ownership and explicit recovery
+
+The existing NavConfigProvider clears old preference layers on reload/auth invalidation and admits only the latest live current-epoch read. An obsolete failure cannot overwrite a newer success, nor can a prior identity restore its preferences. Current failures retain safe declared navigation and an explicit Retry. Save aftermath only updates the still-current live owner. This is frontend lifecycle/presentation work; there is no new menu registry, route, API, role, rate-limit setting or wire contract.
+
+Actual deployed Media initially rendered, then access/menu reads produced six HTTP429s in a bounded server status window and the UI showed persistent admin denial/menu fallback. Correlation does not establish a sole trigger or rate-limit owner; it exposed the failed-read/stale-settle behavior addressed here. Deferred real-hook/provider and actual AdminLayout tests are authored; all checks remain NOT RUN during source preparation. Source-focused qualification, full canonical merge and deployed retry/negative/readback evidence are still owed. No backend auth change or RFC is required.
+
+
+Source-review correction (R1): the owning epoch/liveness is checked after the lazy client import **before** tenant or personal PUT dispatch, as well as after the response. A pending old action must not acquire the current auth context merely because its module finished loading later. Deferred-import auth-change/unmount negatives and a current-owner positive save control are authored; all remain NOT RUN at source freeze. Already-dispatched server writes are not canceled or claimed rolled back.

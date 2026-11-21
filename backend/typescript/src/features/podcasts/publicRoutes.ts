@@ -23,6 +23,7 @@
  * @see docs/adr/0390-podcast-public-distribution.md
  */
 
+import { sendErrorBody } from '../../middleware/errorEnvelope.js';
 import type { Request, Response } from 'express';
 import { assetServeHeaders } from '../../host/assetServeHeaders.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
@@ -65,7 +66,7 @@ async function resolvePublicOrg(orgId: string): Promise<{ tenantId: string } | n
 }
 
 function notFound(res: Response): void {
-  res.status(404).json({ error: 'not_found', message: 'Not found.' });
+  sendErrorBody(res, 404, { error: 'not_found', message: 'Not found.' });
 }
 
 /** Absolute audio enclosure URL for an episode (the Range-capable route). */
