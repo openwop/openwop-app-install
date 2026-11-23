@@ -95,4 +95,8 @@ export interface ClientReport {
   /** Set by `publish-report` (D2 step 5), CAS-bound to `snapshotHash`. */
   publishedAt?: string;
   publishedBy?: string;
+  /** ADR 0957 D5 — a published report taken back. Its client links go dark on
+   *  the next request; the row and its snapshot are kept. */
+  withdrawnAt?: string;
+  withdrawnBy?: string;
 }

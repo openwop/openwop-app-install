@@ -60,6 +60,7 @@ export const messages = {
   typeBookingManage: 'Réservation (créé par l’app)',
   typeSignRequest: 'Invitation de signature (créé par l’app)',
   typeCampaignApproval: 'Lien d’approbation client (créé par l’app)',
+  typeClientReport: 'Lien de rapport client (créé par l’app)',
   typeCollabInvite: 'Invitation de collaborateur (créée par l’app)',
   expiryInvalid: 'Saisissez un nombre entier de jours (1–3650), ou laissez vide pour aucune expiration.',
   linksFailedTitle: 'Impossible de charger les liens de cet espace',

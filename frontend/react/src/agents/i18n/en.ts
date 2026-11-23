@@ -111,6 +111,7 @@ export const messages = {
   recurringSkipActorInactive: 'the person it runs as has been deactivated',
   recurringSkipGoalClosed: 'its goal is finished or past a limit, so nothing more will run for it',
   recurringSkipClientInactive: "its client is paused or archived, or its report no longer exists; it resumes when the client is active again",
+  recurringSkipClientAccessLost: "the person it runs for can no longer edit this client; it resumes when their access returns or someone with access edits the report",
   recurringSkipTargetRefused: "its reply could not be posted to its conversation; it resumes when access returns",
   recurringSkipTooFrequent: "it runs more often than hourly; choose a coarser schedule",
   recurringSkipAgentPaused: 'the agent it runs as is paused — resume the agent to resume this',

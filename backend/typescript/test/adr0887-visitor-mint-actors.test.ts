@@ -46,6 +46,10 @@ describe('ADR 0887 — every share-link mint names its lane', () => {
       'features/crm/signService.ts': ['system:crm-sign'],
       // ADR 0924 D5 — the client approver link, minted on the visitor lane.
       'features/campaign-ops/portal.ts': ['system:campaign-ops-portal'],
+      // ADR 0957 D5 (P2) — the client report link. System-minted like the approver
+      // link: the sender (checked for workspace:write on the client) is recorded on
+      // the link record, and every view re-checks the grant (`checkGrantLink`).
+      'features/campaign-ops/reports/portalLinks.ts': ['system:campaign-ops-report-portal'],
       // ADR 0958 D2 — the collaborator invite. System-minted on purpose: accepting
       // binds an identity and grants nothing. Every grant is minted separately by a
       // member and re-checks that member on each use (`checkGrantUse` granter check).

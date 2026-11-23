@@ -19,11 +19,9 @@ const importedTrees = new Map<string, ImportedTree>();
 
 function roots(path: string): { path: string; real: string } {
   const absolute = resolve(path);
-  try {
-    return { path: absolute, real: existsSync(absolute) ? realpathSync(absolute) : absolute };
-  } catch {
-    throw new PackRestartRequiredError();
-  }
+  // An I/O failure (EACCES, ELOOP, a vanished tree) propagates as itself. It
+  // still refuses the caller, but it is not "code is bound, restart the host".
+  return { path: absolute, real: existsSync(absolute) ? realpathSync(absolute) : absolute };
 }
 
 /** Called immediately before the normal installer archives/removes/copies a head.
@@ -39,20 +37,17 @@ export function assertNodePackReplaceable(path: string): void {
  * Retain the binding on every outcome: native ESM also caches rejected imports.
  */
 export function claimNodePackImport(path: string, manifestBytes: Buffer): ImportClaim {
-  try {
-    const keys = roots(path);
-    if (!readFileSync(join(keys.path, 'pack.json')).equals(manifestBytes)) throw new PackRestartRequiredError();
-    const digest = packContentDigest(keys.path);
-    for (const key of [keys.path, keys.real]) {
-      const previous = importedTrees.get(key);
-      if (previous !== undefined && (previous.digest !== digest || previous.real !== keys.real)) throw new PackRestartRequiredError();
-    }
-    const binding = Object.freeze({ digest, real: keys.real });
-    for (const key of [keys.path, keys.real]) importedTrees.set(key, binding);
-    return Object.freeze({ ...keys, digest });
-  } catch {
-    throw new PackRestartRequiredError();
+  const keys = roots(path);
+  if (!readFileSync(join(keys.path, 'pack.json')).equals(manifestBytes)) throw new PackRestartRequiredError();
+  const digest = packContentDigest(keys.path);
+  for (const key of [keys.path, keys.real]) {
+    const previous = importedTrees.get(key);
+    if (previous !== undefined && (previous.digest !== digest || previous.real !== keys.real)) throw new PackRestartRequiredError();
   }
+  // Nothing above has bound the path, so an I/O error there leaves no claim and no import.
+  const binding = Object.freeze({ digest, real: keys.real });
+  for (const key of [keys.path, keys.real]) importedTrees.set(key, binding);
+  return Object.freeze({ ...keys, digest });
 }
 
 /** A normal in-process installer is excluded by the claim above. This also
@@ -60,10 +55,6 @@ export function claimNodePackImport(path: string, manifestBytes: Buffer): Import
  * It is not an atomic filesystem snapshot or a promise against external ABA.
  */
 export function assertNodePackImportUnchanged(claim: ImportClaim): void {
-  try {
-    const now = roots(claim.path);
-    if (now.real !== claim.real || packContentDigest(claim.path) !== claim.digest) throw new PackRestartRequiredError();
-  } catch {
-    throw new PackRestartRequiredError();
-  }
+  const now = roots(claim.path);
+  if (now.real !== claim.real || packContentDigest(claim.path) !== claim.digest) throw new PackRestartRequiredError();
 }

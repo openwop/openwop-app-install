@@ -634,6 +634,7 @@ async function evaluateSpendGate(
     ...(policyAsk?.requesters.length ? { submitters: policyAsk.requesters } : {}),
     ...(policyAsk?.requesterCauses.length ? { submitterCauses: policyAsk.requesterCauses } : {}),
     ...(policyAsk ? { autonomySourceRunId: policyAsk.runId } : {}),
+    ...(policyAsk?.campaignId ? { campaignId: policyAsk.campaignId } : {}),
     tenantId: deps.tenantId,
     spendKind: kind === 'ads.publish' ? 'publish' : kind === 'ads.launch' ? 'launch' : 'budget',
     platform: describe.platform,

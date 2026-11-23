@@ -140,6 +140,16 @@ restart-required refusal is not relabelled as that hot-success pass. Existing
 focused observations are scoped to their recorded source compositions. No pass,
 issue closure or production readiness follows from this source-only branch.
 
+> **CORRECTED 2026-11-20 (follow-up to #6157, issue #6156):** the guard used to
+> wrap each step in a bare `catch {}` that rethrew `PackRestartRequiredError`, so
+> an I/O failure (a missing or unreadable `pack.json`, EACCES, a `realpathSync`
+> error) told the operator to restart the host, which cannot fix it. Only the
+> guard's own refusals (changed manifest bytes, changed digest, a retargeted real
+> root, an already-bound path) are `pack_restart_required` now. Any other error
+> propagates as itself: the load or install is still refused (fail closed), no
+> path is bound, and the install lane maps it to a 502 rather than a 409. Pinned
+> by `backend/typescript/test/node-pack-import-lifetime-io-errors.test.ts`.
+
 ## Open decisions
 
 - [x] Review and accept this bounded restart-required host contract (2026-11-19).

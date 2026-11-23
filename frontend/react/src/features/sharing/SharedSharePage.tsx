@@ -31,6 +31,9 @@ const AppBuilderInteractiveViewer = lazy(() =>
 // chunk: it is a decision page, not a read-only view, so it takes no ShareFrame.
 const PublicApprovalView = lazy(() =>
   import('../campaign-ops/PublicApprovalView.js').then((m) => ({ default: m.PublicApprovalView })));
+// ADR 0957 D5 — a client's link-only report page (its own chunk, like the approval page).
+const PublicClientReportView = lazy(() =>
+  import('../campaign-ops/PublicClientReportView.js').then((m) => ({ default: m.PublicClientReportView })));
 // ADR 0328 P7 — the notes-free shared deck pager, same lazy posture.
 const SharedDeckViewer = lazy(() => import('../slides/SharedDeckViewer.js').then((m) => ({ default: m.SharedDeckViewer })));
 
@@ -259,6 +262,14 @@ export function SharedSharePage({ token }: { token: string }): JSX.Element {
     return (
       <Suspense fallback={<div className="u-p-4"><Skeleton /></div>}>
         <PublicApprovalView token={token} resource={shared.resource} />
+      </Suspense>
+    );
+  }
+
+  if (shared.resourceType === 'client_report') {
+    return (
+      <Suspense fallback={<div className="u-p-4"><Skeleton /></div>}>
+        <PublicClientReportView resource={shared.resource} />
       </Suspense>
     );
   }

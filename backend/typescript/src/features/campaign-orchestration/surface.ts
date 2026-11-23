@@ -34,9 +34,10 @@ import { resolveOne } from '../../host/featureToggles/service.js';
 import { planExemptScopeOfRun, tenantToggleSubject } from '../../host/operatorPlanExemption.js';
 import { runOrgScopeFilter, type Scope } from '../../host/accessControlService.js';
 import { getBrief } from '../campaign-brief/briefService.js';
-import { attachCampaignAssets, getCampaign, getCampaignByBrief, listCampaigns, finalizeFromBrief } from './campaignService.js';
+import { attachCampaignAssets, getCampaign, getCampaignByBrief, listCampaigns, finalizeFromBrief, recordChannelOutcome } from './campaignService.js';
+import { CAMPAIGN_CHANNELS } from '../campaign-brief/types.js';
 import { readCampaignLinks } from './campaignLinks.js';
-import type { CampaignGoal, MarketingCampaign } from './types.js';
+import { CHANNEL_OUTCOME_STATES, type CampaignChannel, type CampaignGoal, type ChannelOutcomeState, type MarketingCampaign } from './types.js';
 import { currentEffectContext } from '../../host/runEffectContext.js';
 import { autonomyToggleOn, CHOKEPOINT_CLASSES, closeVetoWindow, deliverAutonomyDigest, emitAutonomyNotice, markVetoNotified, openVetoWindow, vetoIdFor, decideGate, findRule, parseGateArgs, runAutonomyOf } from '../../host/autonomyPolicy/index.js';
 import type { RunRecord } from '../../types.js';
@@ -250,6 +251,30 @@ export function buildCampaignStudioSurface(scope: BundleScope): FeatureSurface {
       const r = await taggedCampaign(scope);
       if (!r.ok) return { found: false, error: { code: r.code, message: r.message } };
       return { found: true, campaignId: r.campaign.id, links: await readCampaignLinks(r.campaign, enabled) };
+    },
+
+    /**
+     * ADR 1154 D4 — record what THIS run's channel reached, on the run's own
+     * campaign. The campaign and the run id come from the stored run (its
+     * host-written tag), never from an argument, so a run can only ever record
+     * for itself. The arguments carry the channel and the state, both from
+     * closed sets. Refusals are typed; a run with no tag records nothing.
+     */
+    recordChannelOutcome: async (args) => {
+      const channel = str(args.channel) as CampaignChannel;
+      const state = str(args.state) as ChannelOutcomeState;
+      if (!CAMPAIGN_CHANNELS.includes(channel)) return { recorded: false, error: { code: 'unknown_channel', message: 'That is not a campaign channel.' } };
+      if (!CHANNEL_OUTCOME_STATES.includes(state)) return { recorded: false, error: { code: 'unknown_state', message: 'That is not a channel state.' } };
+      const r = await taggedCampaign(scope);
+      if (!r.ok || !scope.runId) return { recorded: false, error: r.ok ? { code: 'not_a_campaign_run', message: 'This run does not belong to a campaign.' } : { code: r.code, message: r.message } };
+      // A write: the run's person (when it has one) must hold write in the
+      // campaign's org. Refused as the same not-found as a missing campaign.
+      if (!(await mayUseOrg(r.campaign.orgId, undefined, 'workspace:write'))) {
+        return { recorded: false, error: { code: 'campaign_not_found', message: 'The campaign this run belongs to no longer exists.' } };
+      }
+      const out = await recordChannelOutcome(tenantId, r.campaign.id, channel, { runId: scope.runId, state });
+      if (!out) return { recorded: false, error: { code: 'campaign_not_found', message: 'The campaign this run belongs to no longer exists.' } };
+      return { recorded: true, changed: out.changed, campaignId: out.campaign.id, channel, state };
     },
 
     /** Finalize a brief into its campaign (upsert by briefId). The node calls this. */

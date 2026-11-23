@@ -8,7 +8,8 @@
  * - The fire gate refuses a slot, before any run, budget or approval, when the
  *   campaign-ops toggle or the client-reports sub-toggle is off, when the
  *   client is paused, archived or gone, or when the definition is gone or no
- *   longer at the pinned version.
+ *   longer at the pinned version, or when the member it runs for no longer
+ *   holds `workspace:write` on the client (`client-access-lost`).
  * - The job id is under a prefix only this feature mints (ADR 0908 D2), so the
  *   generic scheduler routes cannot retarget or rewrite it.
  * - The run acts for the person who set the schedule (`orgScopeSubject`), and
@@ -22,6 +23,7 @@ import { CAMPAIGN_OPS_RUN_STAMP } from '../surface.js';
 import type { ReportDefinition } from './types.js';
 import { CLIENT_REPORT_CHAIN_ID } from './types.js';
 import { getChainBackedWorkflow } from '../../../host/chainBackedWorkflows.js';
+import { assertRunOrgScope } from '../../../host/accessControlService.js';
 
 export const REPORT_JOB_PREFIX = 'campaign-ops-report:';
 export const REPORT_JOB_PURPOSE = 'campaign-ops.client-report';
@@ -77,6 +79,18 @@ export async function reportFireGate(job: ScheduledJob): Promise<ScheduleSkipRea
   // A job left pinned to an older version (a failed re-arm) never runs the
   // definition as it is now under the old pin.
   if (job.inputs?.definitionVersion !== def.version) return 'dispatch-error';
+  // ADR 0957 P1 security review (2026-11-19): the run acts for the member who
+  // set the schedule, and compute re-checks them on the client (`bindRunToClient`).
+  // Ask the same question before the slot starts a run, so a member who lost
+  // write on THIS client (still in the workspace, so ADR 0815's removal pause
+  // never fired) does not start a run, spend budget and fail every slot.
+  const subject = typeof job.metadata?.orgScopeSubject === 'string' ? job.metadata.orgScopeSubject : '';
+  if (!subject) return 'client-access-lost';
+  try {
+    await assertRunOrgScope(job.tenantId, subject, orgId, 'workspace:write', { cause: true });
+  } catch {
+    return 'client-access-lost';
+  }
   if (!getChainBackedWorkflow(CLIENT_REPORT_CHAIN_ID)) return 'workflow-unresolved';
   return null;
 }

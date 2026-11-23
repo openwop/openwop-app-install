@@ -60,6 +60,9 @@ const ALLOWED: Record<string, number> = {
   // ADR 0924 D5 — the PUBLIC client approver lane: tenant from the link, and a
   // client's approver is never paywalled on the agency's plan (the e-sign rule).
   'features/campaign-ops/portal.ts': 1,
+  // ADR 0957 D5 (P2) — the client-reports sub-toggle on the same public lane: the
+  // client's report link opens on the agency's settings, never the visitor's plan.
+  'features/campaign-ops/reports/portalLinks.ts': 1,
   'features/dealers/routes.ts': 1,
   'features/discovery/routes.ts': 1,
   'features/funnels/routes.ts': 1,

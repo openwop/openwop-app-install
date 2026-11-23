@@ -18,7 +18,13 @@ import { buildCampaignAutopilotSurface } from './surface.js';
 export const campaignAutopilotFeature: BackendFeature = {
   id: AUTOPILOT_TOGGLE,
   // `projects` (the campaign board, ADR 0961 D6) joins when P3's card stage imports it.
-  dependsOn: ['campaign-orchestration', 'campaign-brief'],
+  // ADR 1154 D6 — the preflight (the only code here that read a brief) moved to
+  // the campaign's owner, so this package no longer imports `campaign-brief`.
+  // ADR 0439: a lock follows a real import, so the brief is advisory, as it is
+  // for `campaign-orchestration` itself. A campaign with no brief is still
+  // refused (`brief_missing`).
+  dependsOn: ['campaign-orchestration'],
+  recommends: ['campaign-brief'],
   registerRoutes: (deps) => {
     registerChainBackedWorkflow(AUTOPILOT_CHAIN_ID, { featureId: AUTOPILOT_TOGGLE });
     setStageRunDeps({ storage: deps.storage, hostSuite: deps.hostSuite });

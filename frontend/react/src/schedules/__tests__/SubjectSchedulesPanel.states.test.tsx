@@ -197,6 +197,15 @@ describe('SubjectSchedulesPanel — ADR 0787 contract', () => {
     expect(screen.queryByText(/does not recognize it/i)).toBeNull();
   });
 
+  // ADR 0957 P1 security review — red if `client-access-lost` is missing from
+  // SKIP_REASON_KEY (it would read "does not recognize it").
+  it('ADR 0957 P1 — client-access-lost is a known reason that names the person and when it resumes', async () => {
+    renderWith([{ ...base, lastSkippedAt: new Date().toISOString(), lastSkipReason: 'client-access-lost' }], {});
+    await waitFor(() => expect(screen.getByText(/can no longer edit this client/i)).toBeTruthy());
+    expect(screen.getByText(/resumes when their access returns/i)).toBeTruthy();
+    expect(screen.queryByText(/does not recognize it/i)).toBeNull();
+  });
+
   it('ADR 0820 §7 — a plan-lapsed job reads "Paused — plan lapsed" with a store link and no next-run promise', async () => {
     renderWith([{ ...base, lastSkippedAt: new Date().toISOString(), lastSkipReason: 'plan-lapsed', planLapsed: { featureId: 'crm' } }], {});
     await waitFor(() => expect(screen.getByText(/paused — plan lapsed/i)).toBeTruthy());

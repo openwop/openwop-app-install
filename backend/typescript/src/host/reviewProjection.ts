@@ -35,6 +35,7 @@ import { definitionHashOf } from './definitionHash.js';
 import { staticCostFloor } from './workflowCostEstimate.js';
 import { nodeRoleMap } from './nodeCatalogBuilder.js';
 import { createLogger } from '../observability/logger.js';
+import { readCampaignRunTag } from './campaignRefs.js';
 
 const log = createLogger('host.reviewProjection');
 
@@ -115,6 +116,10 @@ export interface ReviewRequest extends FeatureReviewFields {
   /** ADR 0311 P2 — the chat conversation an approval traces back to (a filed
    *  todo's origin); the chat review strip filters on it. */
   conversationId?: string;
+  /** ADR 1154 D5 — the campaign this review belongs to. On an interrupt it is
+   *  read from the run's host-written tag (never from gate data); on an approval
+   *  it is the id its writer stored. Absent when the review names no campaign. */
+  campaignId?: string;
   artifactId?: string;
   revisionId?: string;
   requestedBy?: { kind: 'user' | 'agent' | 'system'; id: string; label?: string };
@@ -404,6 +409,17 @@ function conversationIdOf(run: RunRecord, data: { conversationId?: unknown }): {
   return id ? { conversationId: id } : {};
 }
 
+/** ADR 1154 D5 — the run's campaign, from its tag only. A tag naming two
+ *  clients (it throws) names no campaign here; the readers that act on it refuse. */
+function campaignIdOfRun(run: RunRecord): { campaignId?: string } {
+  try {
+    const tag = readCampaignRunTag(run.metadata as Record<string, unknown> | undefined);
+    return tag ? { campaignId: tag.campaignId } : {};
+  } catch {
+    return {};
+  }
+}
+
 export function interruptToReview(it: InterruptRecord, run: RunRecord): ReviewRequest {
   const data = (it.data ?? {}) as {
     prompt?: unknown; summary?: unknown; conversationId?: unknown;
@@ -453,6 +469,7 @@ export function interruptToReview(it: InterruptRecord, run: RunRecord): ReviewRe
     // `metadata.chatSessionId` is the stamp every chat-dispatched run carries;
     // `data.conversationId` is the fallback a node may set explicitly.
     ...conversationIdOf(run, data),
+    ...campaignIdOfRun(run),
     ...binding,
     // Attribute to the initiating human when known; otherwise the named workflow
     // (never the bare literal "workflow" — that told the reviewer nothing).
@@ -742,6 +759,7 @@ export function approvalToReview(a: PendingApproval): ReviewRequest {
       subject: a.emailSend.subject, body: a.emailSend.body, format: a.emailSend.format, estimatedRecipients: a.emailSend.estimatedRecipients,
     } } : {}),
     ...(a.conversationId ? { conversationId: a.conversationId } : {}),
+    ...(a.campaignId ? { campaignId: a.campaignId } : {}),
     ...(a.runId ? { runId: a.runId } : {}),
     requestedBy,
     requestedAt: a.createdAt,
@@ -813,6 +831,9 @@ export interface ListReviewsOpts {
   /** ADR 0311 P3 — only reviews whose provenance names this kanban board (the
    *  board page's "Needs review" lane). Post-authz narrowing, like above. */
   boardId?: string;
+  /** ADR 1154 D5 — only reviews of this campaign. Post-authz narrowing, like
+   *  above: it never widens what the caller may see. */
+  campaignId?: string;
 }
 
 /**
@@ -881,6 +902,7 @@ export async function listReviews(storage: Storage, ctx: ReviewAuthCtx, opts: Li
   let narrowed = out;
   if (opts.conversationId) narrowed = narrowed.filter((r) => r.conversationId === opts.conversationId);
   if (opts.boardId) narrowed = narrowed.filter((r) => r.provenanceRefs.some((ref) => ref.kind === 'board' && ref.ref === opts.boardId));
+  if (opts.campaignId) narrowed = narrowed.filter((r) => r.campaignId === opts.campaignId);
   return narrowed;
 }
 

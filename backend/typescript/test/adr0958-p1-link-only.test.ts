@@ -226,7 +226,9 @@ describe('ADR 0958 P1 — the approval link is backed by a grant', () => {
     const callers = walk(src, /\.ts$/).filter((f) => /\bgrantAccess\(/.test(readFileSync(f, 'utf8'))).map((f) => relative(src, f)).sort();
     // ADR 1099 P0b adds the host member route (routes/externalCollaborators.ts), the
     // same member mint for kinds that bring their own surface.
-    expect(callers).toEqual(['features/campaign-ops/collaboration/routes.ts', 'features/campaign-ops/portal.ts', 'host/externalCollaborators.ts', 'routes/externalCollaborators.ts']);
+    // ADR 0957 D5 (P2) adds the client report link: a view-only grant on one
+    // published report, minted only from the member send route (reports/routes.ts).
+    expect(callers).toEqual(['features/campaign-ops/collaboration/routes.ts', 'features/campaign-ops/portal.ts', 'features/campaign-ops/reports/portalLinks.ts', 'host/externalCollaborators.ts', 'routes/externalCollaborators.ts']);
     // Nodes and agent tools ship in packs: none names the grant route or the mint.
     const packs = join(__dirname, '../../../packs');
     const packHits = walk(packs, /\.(m?js|json)$/).filter((f) => /collaborators\/[^'"`\s]*\/grants|grantAccess/.test(readFileSync(f, 'utf8'))).map((f) => relative(packs, f));

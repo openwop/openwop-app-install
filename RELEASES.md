@@ -48,6 +48,21 @@ upgrade is neither: list it in `breakingConfig`.
 
 ## Version log
 
+### v0.18.0 — 2026-11-22
+
+- **Required stop:** no. **Rolling-safe:** yes.
+- **Schema:** sqlite 54 / postgres 52 (unchanged) · **App migrations:** 26 (unchanged).
+- **Breaking:** none. No route, env var or config key is removed or renamed. Behaviour
+  change: a node-pack import that fails on an I/O error answers `502` with its cause,
+  not `409 pack_restart_required` (#6164).
+- **New optional setting, unchanged by default:** `VITE_BRAND_APP_HOME_PATH`
+  (frontend build; default `/dashboard`).
+- A scheduled client report skips when its owner lost client access (ADR 0957 P1).
+- Link-only client report portal, off by default (ADR 0957 P2 slice 1).
+- Campaign Studio guided-flow records, progress and home reads, and campaign-scoped
+  spend approvals and attribution (ADR 1154 P1/P2, D5/D7).
+- [CHANGELOG §0.18.0](./CHANGELOG.md#0180--2026-11-22)
+
 ### v0.17.0 — 2026-11-21
 
 - **Required stop:** no. **Rolling-safe:** yes.

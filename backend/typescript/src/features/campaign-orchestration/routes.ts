@@ -14,9 +14,10 @@ import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
 import { requireFeatureEnabled, requireString } from '../featureRoute.js';
-import { getBrief } from '../campaign-brief/briefService.js';
+import { createBrief, getBrief, listBriefs } from '../campaign-brief/briefService.js';
+import type { CampaignBrief } from '../campaign-brief/types.js';
 import {
-  listCampaigns, getCampaign, finalizeFromBrief, updateCampaignStatus, renameCampaign, deleteCampaign,
+  listCampaigns, getCampaign, ensureDraftCampaign, finalizeFromBrief, updateCampaignStatus, renameCampaign, deleteCampaign,
   listCampaignVersions, setCampaignParent, setCampaignGoal,
 } from './campaignService.js';
 import { MAX_PRODUCT_REFS, readCampaignLinks, setCampaignLinks, type CampaignLinksPatch } from './campaignLinks.js';
@@ -36,6 +37,10 @@ import {
 } from '../../host/autonomyPolicy/index.js';
 import { buildCommandSnapshot, campaignRunOf } from './commandService.js';
 import { resolveRunDefinition } from '../../host/resolveRunDefinition.js';
+import { runPreflight } from './preflight.js';
+import { foldProgress, readCampaignProgress, type ProgressInputs } from './progress.js';
+import { listReviews } from '../../host/reviewProjection.js';
+import { authCtx as reviewReadCtx } from '../../routes/reviews.js';
 
 const TOGGLE_ID = 'campaign-orchestration';
 const LABEL = 'Campaign Studio';
@@ -169,6 +174,43 @@ export function registerCampaignStudioRoutes(deps: RouteDeps): void {
       await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const c = await loadCampaignScoped(req, 'workspace:write');
       res.json({ projectId: await ensureCampaignProject(c, actingUserOf(req) ?? 'unknown') });
+    } catch (err) { next(err); }
+  });
+
+  // ADR 1154 D3 — "New campaign": the brief and its draft campaign are created
+  // together, so the workspace has one id from the first click. The body is a
+  // brief's create body (`orgId`, `name`, …). Both toggles gate it; the same
+  // org write scope as creating a brief. The row is the ignition draft
+  // (`ensureDraftCampaign`), so a later run or finalize updates it.
+  app.post(`${BASE}/campaigns`, async (req, res, next) => {
+    try {
+      await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
+      await requireFeatureEnabled(req, 'campaign-brief', 'Campaign Brief');
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const orgId = requireString(body.orgId, 'orgId');
+      await requireOrgScopeFor(req, orgId, 'workspace:write');
+      const actor = actingUserOf(req) ?? 'unknown';
+      const brief = await createBrief(tenantOf(req), orgId, actor, body);
+      const { campaign } = await ensureDraftCampaign(tenantOf(req), brief, actor);
+      res.status(201).json({ campaign, brief });
+    } catch (err) { next(err); }
+  });
+
+  // ADR 1154 D3 — a brief that predates the route above has no campaign; the
+  // guided flow asks for one when the brief is opened. Create-or-return, so a
+  // repeat answers 200 with the same row. A brief the caller cannot read is the
+  // same 404 as a missing one; creating needs write in the brief's org.
+  app.post(`${BASE}/campaigns/for-brief`, async (req, res, next) => {
+    try {
+      await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
+      const briefId = requireString((req.body ?? {})?.briefId, 'briefId');
+      const brief = await getBrief(tenantOf(req), briefId);
+      if (!brief || !(await hasOrgScope(req, brief.orgId, 'workspace:read'))) {
+        throw new OpenwopError('not_found', 'Brief not found.', 404, { briefId });
+      }
+      await requireOrgScopeFor(req, brief.orgId, 'workspace:write');
+      const { campaign, created } = await ensureDraftCampaign(tenantOf(req), brief, actingUserOf(req) ?? 'unknown');
+      res.status(created ? 201 : 200).json({ campaign });
     } catch (err) { next(err); }
   });
 
@@ -347,6 +389,100 @@ export function registerCampaignStudioRoutes(deps: RouteDeps): void {
       const campaign = await loadCampaignScoped(req, 'workspace:read');
       const isEnabled = (featureId: string): Promise<boolean> => requireFeatureEnabled(req, featureId, featureId).then(() => true, () => false);
       res.json({ campaignId: campaign.id, links: await readCampaignLinks(campaign, isEnabled) });
+    } catch (err) { next(err); }
+  });
+
+  // ADR 1154 D6 — the launch checklist as a read on the campaign's owner, so the
+  // guided flow's Launch step works when `campaign-autopilot` is off. Pure read;
+  // same org predicate as every campaign read (uniform 404). It says nothing
+  // about who may launch: that stays on the autopilot route.
+  app.get(`${BASE}/campaigns/:campaignId/preflight`, async (req, res, next) => {
+    try {
+      await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
+      const campaign = await loadCampaignScoped(req, 'workspace:read');
+      res.json({ preflight: await runPreflight(tenantOf(req), campaign) });
+    } catch (err) { next(err); }
+  });
+
+  // ADR 1154 D1/D2 — where a campaign is on the guided path. A pure read folded
+  // from records the chains and gates already write; it stores nothing and
+  // moves nothing. The waiting count is the caller's own filtered view of the
+  // one review inbox (same gate as GET /reviews), so it never reveals a review
+  // the caller could not list there.
+  const waitingByCampaign = async (req: Request): Promise<Map<string, number> | 'unknown'> => {
+    try {
+      const counts = new Map<string, number>();
+      for (const r of await listReviews(deps.storage, reviewReadCtx(req), { status: 'pending' })) {
+        if (r.campaignId) counts.set(r.campaignId, (counts.get(r.campaignId) ?? 0) + 1);
+      }
+      return counts;
+    } catch {
+      return 'unknown';
+    }
+  };
+  const briefOf = async (req: Request, campaign: MarketingCampaign): Promise<ProgressInputs['brief']> => {
+    if (!campaign.briefId) return null;
+    try { return await getBrief(tenantOf(req), campaign.briefId); } catch { return 'unknown'; }
+  };
+
+  app.get(`${BASE}/campaigns/:campaignId/progress`, async (req, res, next) => {
+    try {
+      await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
+      const campaign = await loadCampaignScoped(req, 'workspace:read');
+      const [brief, waiting] = await Promise.all([briefOf(req, campaign), waitingByCampaign(req)]);
+      const isEnabled = (featureId: string): Promise<boolean> => requireFeatureEnabled(req, featureId, featureId).then(() => true, () => false);
+      res.json({ progress: await readCampaignProgress({ campaign, brief, waiting: waiting === 'unknown' ? 'unknown' : waiting.get(campaign.id) ?? 0 }, isEnabled) });
+    } catch (err) { next(err); }
+  });
+
+  // ADR 1154 — the Campaign Studio home, as ONE read: every campaign the caller
+  // may read with its step, and briefs that have no campaign yet (they sit at
+  // the Brief step; the row is created when one is opened, D3). Cost: one
+  // campaign list, one brief list and one approvals query. It never folds run
+  // events and never reads per-campaign detail.
+  app.get(`${BASE}/home`, async (req, res, next) => {
+    try {
+      await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
+      const orgId = typeof req.query.orgId === 'string' && req.query.orgId.length > 0 ? req.query.orgId : undefined;
+      const tenantId = tenantOf(req);
+      const readable = new Map<string, boolean>();
+      const mayRead = async (id: string): Promise<boolean> => {
+        let ok = readable.get(id);
+        if (ok === undefined) { ok = await hasOrgScope(req, id, 'workspace:read'); readable.set(id, ok); }
+        return ok;
+      };
+      const [all, waiting] = await Promise.all([listCampaigns(tenantId, orgId), waitingByCampaign(req)]);
+      let briefs: Map<string, CampaignBrief> | 'unknown';
+      try { briefs = new Map((await listBriefs(tenantId, orgId)).map((b) => [b.id, b])); } catch { briefs = 'unknown'; }
+
+      const campaigns = [];
+      const claimed = new Set<string>();
+      for (const c of all) {
+        if (c.briefId) claimed.add(c.briefId);
+        if (c.status === 'archived' || !(await mayRead(c.orgId))) continue;
+        const brief: ProgressInputs['brief'] = !c.briefId ? null : briefs === 'unknown' ? 'unknown' : briefs.get(c.briefId) ?? null;
+        const p = foldProgress({ campaign: c, brief, waiting: waiting === 'unknown' ? 'unknown' : waiting.get(c.id) ?? 0 });
+        campaigns.push({
+          id: c.id, orgId: c.orgId, name: c.name, status: c.status, objective: c.objective, updatedAt: c.updatedAt,
+          current: p.current, next: p.next, steps: p.steps.map((s) => ({ step: s.step, state: s.state })),
+          waiting: p.steps.find((s) => s.step === 'review')?.waiting ?? null,
+        });
+      }
+      const briefsWithoutCampaign = [];
+      if (briefs !== 'unknown') {
+        for (const b of briefs.values()) {
+          if (claimed.has(b.id) || !(await mayRead(b.orgId))) continue;
+          briefsWithoutCampaign.push({ briefId: b.id, orgId: b.orgId, name: b.name, status: b.status, updatedAt: b.updatedAt });
+        }
+      }
+      res.json({
+        home: {
+          campaigns,
+          briefsWithoutCampaign,
+          // `unknown` is said, never shown as zero.
+          sections: { briefs: briefs === 'unknown' ? 'unknown' : 'ok', waiting: waiting === 'unknown' ? 'unknown' : 'ok' },
+        },
+      });
     } catch (err) { next(err); }
   });
 

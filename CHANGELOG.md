@@ -18,6 +18,82 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-11-22
+
+A MINOR release under ADR 0052. **Nothing is breaking for API callers or operators:**
+no route, env var or config key is removed or renamed, and no default changes
+meaning. A white-label can choose where a signed-in visitor lands
+(`VITE_BRAND_APP_HOME_PATH`, requested by DeckTalk). Campaign Studio gains the
+backend records and reads its guided flow will use (ADR 1154 P1/P2, D5/D7), with no
+new screen yet. Client reports can be sent to a client's contacts as a view-only
+link, behind two toggles that are off by default (ADR 0957 P2 slice 1). One behaviour
+change is worth reading (see "Upgrading from 0.17.0"): a node-pack import that fails
+on an I/O error now reports that error instead of `409 pack_restart_required`. No
+schema migration (sqlite 54 / postgres 52) and no app migration (26). It is
+rolling-safe, not a required stop.
+
+### Security
+
+- **A scheduled client report stops when its owner lost access (ADR 0957 P1
+  security review, #6165).** A report slot set by a member who no longer has
+  `workspace:write` on that client now skips before it starts a run (skip reason
+  `client-access-lost`, shown in the schedules panel in four locales). Before, the
+  slot kept starting runs that spent budget and failed.
+
+### Added
+
+- **`VITE_BRAND_APP_HOME_PATH` brand key** (`brand.appHomePath`, default `/dashboard`): where a signed-in visitor lands from "Open app", the app shell's `/` and the canvas editor's exit after a delete. Only a plain in-app path is accepted (no `//`, backslash, whitespace, scheme, query or fragment), and at navigation time it must be a registered workspace route whose feature is on and unlocked for the visitor, else `/dashboard`. When set, "Open app" goes through a new, reserved `/open-app` entry that does that check (a key of `/open-app` itself falls back). Unset, nothing changes. Requested by DeckTalk (#6166).
+- **Link-only client report portal (ADR 0957 P2 slice 1, #6165).** Behind the
+  `campaign-ops-client-portal` toggle and the client-reports sub-toggle, both off by
+  default. `POST …/reports/:reportId/links` sends a PUBLISHED report to the client's
+  active contacts as one view-only grant per contact, with an email that carries the
+  link and no figures. Every view re-checks the grant, the report's state, both
+  toggles and the sender's authority, so revoking or withdrawing takes effect at once.
+- **Campaign records for the Campaign Studio guided flow (ADR 1154 P1, #6163).**
+  `POST /campaign-studio/campaigns` creates a brief and its draft campaign together,
+  `POST /campaigns/for-brief` creates or returns the campaign for an existing brief,
+  review requests carry `campaignId` (`GET /reviews?campaignId=`), and a campaign row
+  records each channel's outcome. The existing brief route is unchanged. All
+  host-extension routes; no screen yet.
+- **Campaign progress and home reads (ADR 1154 P2, #6167).**
+  `GET …/campaigns/:campaignId/progress` and `GET …/home` fold a campaign's place on
+  Brief → Plan → Create → Review → Launch → Measure from records the existing chains,
+  gates and people already write. Nothing new is stored. A read that failed reports
+  `unknown`, never "not started" or "done". The status agent tool answers through the
+  same fold.
+- **Spend approvals carry their campaign; attribution filters by campaign (ADR 1154
+  D5/D7, #6171).** A `campaign-spend` approval raised in a campaign run, or for a
+  one-campaign reallocation plan, records `campaignId` as a label (never part of the
+  spend key). `/attribution?campaignId=` keeps only that campaign's row, after the
+  client-scoped join.
+
+### Changed
+
+- **A node-pack import that fails on an I/O error reports that error (ADR 1152,
+  #6164).** A missing or unreadable `pack.json`, an `EACCES` or a `realpath` failure
+  used to answer `409 pack_restart_required`, which a restart cannot fix. It now
+  answers the generic `502` with the real cause and still refuses the load. The
+  guard's own refusals (changed manifest bytes or tree digest, a retargeted root, an
+  already-bound path) stay `409 pack_restart_required`.
+
+### Fixed
+
+- **The e2e tenant-toggle pin retries a `409`** instead of failing when two
+  Playwright workers pin the same toggle at once (#6170). Test-only.
+
+#### Upgrading from 0.17.0
+
+- **Required stop:** no. **Rolling-safe:** yes. `node scripts/upgrade-plan.mjs
+  0.17.0 0.18.0` → one step, no stop.
+- **Migrations:** none. Schema stays sqlite 54 / postgres 52; app migrations stay 26.
+- **Config:** nothing to change. One new optional frontend build key,
+  `VITE_BRAND_APP_HOME_PATH` (default `/dashboard`); rebuild the frontend only if you
+  set it. The client-report portal stays off until you turn on both toggles.
+- **Behaviour:** if you alert on `pack_restart_required`, an I/O failure during a
+  pack import now arrives as a `502` with its own cause instead.
+- **Steps:** back up the database, deploy the new backend image and then the
+  frontend, and check that `/readiness` reports `"version": "0.18.0"`.
+
 ## [0.17.0] — 2026-11-21
 
 A MINOR release under ADR 0052. **Nothing is breaking for API callers or operators:**

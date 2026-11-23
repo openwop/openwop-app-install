@@ -40,8 +40,25 @@ import { isTargetingPlatform, TARGETING_PLATFORMS } from './targetingService.js'
 import { MARKET_INTEL_WORKFLOW_ID, KERNEL_WORKFLOW_ID } from './intelWorkflows.js';
 import { untrustedToolError, launchRefusalResult, resolveFeatureAccess, featureUnavailable } from '../../host/agentToolKit.js';
 import { forwardedPlanExemption } from '../../host/operatorPlanExemption.js';
+import { CAMPAIGN_RUN_TAG_KEY, campaignRunTagForBrief } from '../../host/campaignRefs.js';
 
 const log = createLogger('campaign-brief.agent-tools');
+
+/**
+ * ADR 1154 D3 — the run tag for a brief-step run, when the brief already has a
+ * campaign. Composed by the campaign's owner through the host seam (this
+ * feature never imports it). A brief with no campaign, or a failed lookup,
+ * starts the run untagged, as before.
+ */
+async function briefRunTag(tenantId: string, briefId: string): Promise<Record<string, unknown>> {
+  try {
+    const tag = await campaignRunTagForBrief(tenantId, briefId, { role: 'brief' });
+    return tag ? { [CAMPAIGN_RUN_TAG_KEY]: tag } : {};
+  } catch (err) {
+    log.warn('brief_run_tag_failed', { tenantId, briefId, error: err instanceof Error ? err.message : String(err) });
+    return {};
+  }
+}
 
 const TOGGLE_ID = 'campaign-brief';
 const STRATEGIST_AGENT_ID = 'vendor.openwop-app.campaign-brief.agents.brief-strategist';
@@ -254,6 +271,8 @@ export async function runResearchRunTool(deps: StartRunDeps, input: Record<strin
       actingUserId: scope.actingUserId,
       ...(scope.conversationId ? { chatSessionId: scope.conversationId } : {}),
       campaignBrief: { briefId: guard.briefId, kind: 'market-intel' },
+      // ADR 1154 D3 — when the brief has a campaign, the run is one of its runs.
+      ...(await briefRunTag(scope.tenantId, guard.briefId)),
     },
   }).catch((err) => {
     // DATA-4 — a startWorkflowRun THROW must also release the claim; coerce to
@@ -308,6 +327,8 @@ export async function runGenerateKernelTool(deps: StartRunDeps, input: Record<st
       actingUserId: scope.actingUserId,
       ...(scope.conversationId ? { chatSessionId: scope.conversationId } : {}),
       campaignBrief: { briefId: guard.briefId, kind: 'messaging-kernel' },
+      // ADR 1154 D3 — when the brief has a campaign, the run is one of its runs.
+      ...(await briefRunTag(scope.tenantId, guard.briefId)),
     },
   }).catch((err) => {
     // DATA-4 — a startWorkflowRun THROW must also release the claim; coerce to

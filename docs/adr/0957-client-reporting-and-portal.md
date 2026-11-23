@@ -1,6 +1,6 @@
 # ADR 0957 — Client reporting and the client portal
 
-Status: Accepted (P0 implemented 2026-10-20; P1 in progress: current-main chain/publication rebuild prepared; execution, security review and full gate pending; P2–P5 open)
+Status: Accepted (P0 implemented 2026-10-20; P1 code on main, security review done 2026-11-19, full gate pending; P2 first slice prepared 2026-11-19, gate pending; P3–P5 open)
 
 Date: 2026-10-19. Program: Campaign Studio (ADRs 0941–0962), Tier 4 — agency scale.
 Net-new feature planned with `/feature-refinement`; not a MyndHyve port.
@@ -344,6 +344,101 @@ when the agency accepts them. The portal adds no upload pipeline of its own.
 |---|---|---|
 | P0 (2026-10-20) | `features/campaign-ops/reports/` (types, `REPORT_SECTION_SOURCES` with kpi/attribution/email, service, routes); the stores `campaign-ops:report-def` and `campaign-ops:report`; sub-toggle `campaign-ops.client-reports` (OFF, tenant); surface `computeReportSnapshot` / `readReportSnapshot`; the campaign-ops eraser covers definitions and reports; the internal review view (`ClientReportsSection`, lazy, 4 locales). Ratchet: undeclared feature edges 99 → 103. | `test/adr0957-client-reports.test.ts` (8): the snapshot equals the sources verbatim, client B is a uniform 404 (including by id under client A's path), the email org check, closed-world definitions, version bump and stale edit, frozen reports, the sub-toggle, erasure. Sabotage: a transformed figure, an org-less lookup, a dropped email org check and a wrong hash each red a case. `clientReportsSection.test.tsx` (3). |
 | P1 steps (2026-10-20) | `feature.campaign-ops.nodes` 1.1.0 (`compute-snapshot`, `report-snapshot-read`, `publish-report`); surface `publishReport`; the publish CAS on `snapshotHash`; one scheduler job per definition with a pinned version, re-armed on every edit; the fire gate and the `client-inactive` skip reason. The chain and gate step follow. | `test/adr0957-p1-report-steps.test.ts` (7). Sabotage: dropping the hash check, the version pin, the client-status check or the re-arm each reds its case. |
+| P1 close-out (2026-11-19, **pending gate**) | The `client-report` chain (compute → `autonomy-gate@1.1.0` `report.publish` → publish) and the P1b corrections below were already on main. This step adds the written security review (below) and its one fix: the scheduled-report fire gate now refuses `client-access-lost` when the member the run acts for no longer holds `workspace:write` on the client (new `ScheduleSkipReason`, labelled in the schedules UI in 4 locales). It also adds the two 2026-11-08 KPI controls no file pinned. P1 is marked done only after the parent session's full gate passes. | `test/adr0957-p1-security-review.test.ts` (1), `test/adr0957-kpi-legacy-counts.test.ts` (2), and the skip-reason label case in `SubjectSchedulesPanel.states.test.tsx` (1). The other 2026-11-08 controls were already authored: `adr0957-client-reports.test.ts` (`copies $name revenue reporting counts…`, 3 cases) and `clientReportsSection.test.tsx` (the two `labels source … count` cases, 4 cases). NOT RUN here: this session was edit-only. Red witnesses are named in each file header. |
+| P2 slice 1 (2026-11-19, **pending gate**) | The `client_report` sharing resolver and the `client-report` grant kind (system-minted, `view` only); `reports/portalLinks.ts` (send, per-view checks, projection, erasure hooks); `POST …/reports/:reportId/links` (`workspace:write`) and `POST …/reports/:reportId/withdraw` (`host:members:manage`, CAS `published → withdrawn`); the link-only email kind `campaign-ops.client-report-link` (4 locales) through `sendTransactional`; the client's page `PublicClientReportView`, sharing the review view's figures table (`reportFigures.tsx`). Behind `campaign-ops-client-portal` AND `campaign-ops.client-reports`, both off by default. | `test/adr0957-p2-report-links.test.ts` (11), `publicClientReportView.test.tsx` (3). NOT RUN here. |
+
+### P1 security review — 2026-11-19
+
+Read on `origin/main` at `beebfb28b`. Scope: report reads and publication,
+the publish CAS, the gate's exact-snapshot binding, scheduling, and erasure.
+One defect was found and fixed; the rest held. No test result is claimed here:
+this session made no runs.
+
+1. **Tenant and org isolation of reads: held.** Every HTTP route goes through
+   `authorizeClient` (a client the caller cannot read is a uniform 404) and then
+   the `campaign-ops.client-reports` sub-toggle. Rows are keyed
+   `tenant::org::id` and every read re-asserts both fields; the prefix listings
+   also filter on exact `orgId`, so an org id containing `::` cannot widen a
+   listing. The workflow surface binds every call with `bindRunToClient`: a
+   person is required, the run's stamp must name the same client, and that
+   person is checked on the client. The review preview writes into the run's
+   client org (the 2026-10-28 artifact fix), so a client-B viewer cannot read a
+   client-A preview.
+2. **Publication and the CAS: held.** `publishReport` (surface) needs a run,
+   a report that run computed or inherited through a verified branch
+   checkpoint, and the gate check below. The CAS moves only `in_review →
+   published` and requires the requested hash, the stored hash and the
+   recomputed hash of the stored snapshot to agree. A manual compute is a
+   `draft` and can never publish. *Residual, accepted:* a hand-built workflow
+   that wires the explicit-input `compute-snapshot` node creates an `in_review`
+   report bound to its own run. It can still publish only after an explicit
+   approval at a `report.publish` autonomy gate in that run's as-run definition,
+   under this client's frozen policy: the same bar as the shipped chain.
+3. **The gate's exact-snapshot binding: held.** `findCoveringGrant` compares
+   `contentHash` by strict equality; the report predicate further requires the
+   as-run gate node (no head-catalog fallback, so a pruned revision fails
+   closed), an explicit `approve`/`accept`, not cancelled or cascaded, and the
+   enforcement's `policyHash`. `enforceCampaignAction` re-reads the client's live
+   mode and status. The stamp keys cannot be forged by a caller:
+   `openwop-app.campaignOps` is stripped by `stripCallerAttribution`, and
+   `openwop-app.clientReportPeriod` and `orgScopeSubject` are reserved run
+   metadata.
+4. **Scheduling: one defect, fixed.** There is no system principal: a
+   scheduled run is actorless and acts for `orgScopeSubject`, which only
+   narrows (ADR 0832 D3) and is reserved on both job and run metadata, under a
+   job-id prefix the generic scheduler routes cannot retarget. *Defect (low,
+   fail-closed):* the fire gate never asked whether that member still holds
+   `workspace:write` on the client. A member demoted on one client but still in
+   the workspace is not reached by ADR 0815's removal pause, so every slot
+   started a run, spent autonomous-run budget and then failed in compute. The
+   gate now refuses first, with the new skip reason `client-access-lost`.
+   Witness: `test/adr0957-p1-security-review.test.ts`. *Residual, not fixed:*
+   POST/PATCH write the definition before `syncReportSchedule`; if the scheduler
+   then refuses, the response is 400 although the definition was saved. The
+   cadence is validated before the write, so this needs a scheduler fault.
+5. **Erasure: held.** Definitions and reports tombstone `createdBy`,
+   `generatedBy` and `publishedBy` under bounded CAS (P2 adds `withdrawnBy`).
+   The scheduler's own eraser disables a job whose `orgScopeSubject` is the
+   erased person and scrubs the id. Snapshots hold aggregates, not people.
+
+### P2 slice 1 — 2026-11-19 (source prepared, gate pending)
+
+- **`campaign_change_set` already exists, under another name.** ADR 0958 P1
+  made ADR 0924's approval link a grant-backed resolver, `campaign_approval`,
+  with resource id `${changeSetId}:${grantId}` and the D2 decide-time checks
+  unchanged. D5's `campaign_change_set` is that resolver. Nothing new was built
+  for it, and a second resolver would be the parallel portal this ADR forbids.
+- **`client_report`** is the same shape: one `view` grant per (report,
+  stakeholder), resource kind `client-report` (system-minted only), and one
+  sharing link `${reportId}:${grantId}`. The recipients are the client's
+  existing link-only `client-stakeholder` collaborators (the approvers ADR 0924
+  already serves). Every view re-checks: both portal toggles and both report
+  toggles on the link's tenant, the client active, the grant live and current
+  for the pair, the sending member still holding `workspace:write` on the client,
+  and the report `published` with its hash intact. Any failure is the sharing
+  lane's uniform 404. Reads take the ADR 0934 shared counter, failing open.
+  The projection omits `generatedBy`, `publishedBy`, `runId` and the
+  definition id.
+- **Withdrawal** is a CAS `published → withdrawn` that keeps the row and
+  snapshot and drops the report's links; the resolver and the grant kind's
+  `exists` both serve only `published`, so a link is dark even if the drop does
+  not finish.
+- **The email** goes through `sendTransactional` (ADR 0905 D6), so the brokered
+  transport and the email adapter's recipient egress guard (erasure, bounce,
+  complaint and manual-hold suppression) apply. No new sender. It carries the
+  client's name, the report's title and the link, nothing computed. With no
+  email connection or sender, the response says `emailed: false` and returns
+  the link for the operator to copy.
+- **Erasure:** a sender's erasure tombstones the link record (and so darkens
+  it); a stakeholder's erasure or their org's teardown drops their links (the
+  ADR 0958 P5 hooks).
+
+**Remaining for P2:** the operator UI (send, copy a link that was not emailed,
+withdraw) in `ClientReportsSection`; `audience` on the definition and automatic
+delivery on publish (waits on Q2); the toggle description, which still says
+nothing reaches a client; a per-grant view audit beyond sharing's per-link view
+count (one link is one grant, so the count exists, but no report-level view is
+recorded); and the gate run for this slice.
 
 ## Alternatives weighed
 
@@ -380,6 +475,24 @@ Nothing is advertised.
    numerals in kanji. Owner: the i18n lane.
 5. No `/architect` pass has been run yet. Run it before Accepted, together with
    ADR 0958, because the portal's security rests on 0958 D2–D3.
+
+**Proposed defaults (2026-11-19, NOT decided; Q1–Q3 stay with David).** P2
+was built only where the default is reversible and off.
+
+- **Q1, narrative.** Recommend **off for new definitions until P3 ships**, then
+  revisit. The validator, repair and `narrative_ungrounded` path do not exist
+  yet, so "on" would promise a narrative the app cannot produce. The stored
+  `narrative` flag already defaults to `false`; nothing in P2 depends on it.
+- **Q2, link-only subscribers.** Recommend **yes, link-only, but explicit per
+  report**: an operator sends a published report to contacts the agency added
+  (the same link-only stakeholders who approve changes), and the grant lasts
+  until the report's next period ends plus 30 days (7 to 180). Recommend **not**
+  auto-sending on publish until Q2 is decided; `audience` stays refused. P2
+  slice 1 implements this behind `campaign-ops-client-portal`, off by default.
+  Turning the toggle off darkens every link at its next view.
+- **Q3, PDF.** Recommend **print to PDF** for the demo. The public page uses
+  standard tables and no app chrome, so the browser print path works;
+  the D4 print stylesheet is P4. No server renderer was added.
 
 ## Planning rows
 

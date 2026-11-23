@@ -8,7 +8,7 @@
  *  A `Record` so a new reason code on the wire is a compile-time prompt here;
  *  the runtime arm below covers the wire (an unknown code must neither
  *  fabricate a diagnosis nor go silent — the WF-COS-4 round-2 lesson). */
-const SKIP_REASON_KEY: Record<'budget' | 'workflow-unresolved' | 'dispatch-error' | 'feature-disabled' | 'plan-lapsed' | 'actor-inactive' | 'agent-paused' | 'policy-denied' | 'awaiting-approval' | 'goal-closed' | 'client-inactive' | 'target-refused' | 'cadence-too-frequent', string> = {
+const SKIP_REASON_KEY: Record<'budget' | 'workflow-unresolved' | 'dispatch-error' | 'feature-disabled' | 'plan-lapsed' | 'actor-inactive' | 'agent-paused' | 'policy-denied' | 'awaiting-approval' | 'goal-closed' | 'client-inactive' | 'client-access-lost' | 'target-refused' | 'cadence-too-frequent', string> = {
   budget: 'agents:recurringSkipBudget',
   'workflow-unresolved': 'agents:recurringSkipUnresolved',
   'dispatch-error': 'agents:recurringSkipDispatch',
@@ -20,6 +20,7 @@ const SKIP_REASON_KEY: Record<'budget' | 'workflow-unresolved' | 'dispatch-error
   'awaiting-approval': 'agents:recurringSkipAwaitingApproval',
   'goal-closed': 'agents:recurringSkipGoalClosed',
   'client-inactive': 'agents:recurringSkipClientInactive',
+  'client-access-lost': 'agents:recurringSkipClientAccessLost',
   'target-refused': 'agents:recurringSkipTargetRefused',
   'cadence-too-frequent': 'agents:recurringSkipTooFrequent',
 };

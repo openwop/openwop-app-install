@@ -21,7 +21,7 @@ import { createLogger } from '../../observability/logger.js';
 import { emitHostEvent } from '../../host/hostEventDispatcher.js';
 import { clearUsageForRef, getAsset, syncUsageRefs } from '../media/mediaService.js';
 import type { CampaignBrief } from '../campaign-brief/types.js';
-import type { CampaignGoal, CampaignStatus, CampaignVersion, MarketingCampaign } from './types.js';
+import type { CampaignChannel, CampaignGoal, CampaignStatus, CampaignVersion, ChannelOutcomeState, MarketingCampaign } from './types.js';
 
 /** ADR 0941 D2 — the brief → campaign index row (replaces the O(tenant) scan). */
 interface BriefIndexRow { tenantId: string; briefId: string; campaignId: string }
@@ -344,6 +344,31 @@ export async function updateCampaignStatus(tenantId: string, campaignId: string,
   const { before: existing, after: next } = written;
   if (status !== existing.status) recordCampaignAction('status-changed', next, actor, { from: existing.status });
   return next;
+}
+
+/**
+ * ADR 1154 D4 — record what a channel run reached. Idempotent by run and
+ * channel: the same run recording the same state again (a retry, a redrive)
+ * changes nothing and keeps the first `at`. A different run replaces the entry,
+ * because the newest run of a channel is the one a person is looking at. Never
+ * touches `status`: the lifecycle stays the person's (and the launch run's) to
+ * move. Returns null when the campaign does not exist.
+ */
+export async function recordChannelOutcome(
+  tenantId: string,
+  campaignId: string,
+  channel: CampaignChannel,
+  outcome: { runId: string; state: ChannelOutcomeState },
+): Promise<{ campaign: MarketingCampaign; changed: boolean } | null> {
+  let changed = false;
+  const written = await mutateCampaign(tenantId, campaignId, (c) => {
+    const prior = c.channelState?.[channel];
+    changed = !(prior && prior.runId === outcome.runId && prior.state === outcome.state);
+    if (!changed) return null;
+    const at = new Date().toISOString();
+    return { ...c, channelState: { ...(c.channelState ?? {}), [channel]: { runId: outcome.runId, state: outcome.state, at } }, updatedAt: at };
+  });
+  return written ? { campaign: written.after, changed } : null;
 }
 
 /**

@@ -148,7 +148,7 @@ describe('ADR 0942 P3 — ads: the policy decides a campaign run\'s spend', () =
     const run = await campaignRun({ actingUserId: undefined, orgScopeSubject: 'u1' });
     const out = await ads(run.runId).updateBudget(budget(36_101));
     if (out.outcome !== 'requires_approval') throw new Error('expected approval');
-    expect(await getApproval(out.approvalId)).toMatchObject({ autonomySourceRunId: run.runId, submitterCauses: ['u1'] });
+    expect(await getApproval(out.approvalId)).toMatchObject({ autonomySourceRunId: run.runId, submitterCauses: ['u1'], campaignId: campaign.id });
     for (const who of ['u1', `apikey:${key.keyId}`]) {
       await expect(decide(out.approvalId, who)).rejects.toMatchObject({ httpStatus: 403, details: { reason: 'autonomy_self_approval_refused' } });
     }

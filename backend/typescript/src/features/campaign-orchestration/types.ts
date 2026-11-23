@@ -61,6 +61,11 @@ export interface MarketingCampaign {
   /** ADR 0941 D3 — system-raised flags needing a person (the `needs_attention`
    *  state). Not a `status`: status is the campaign's lifecycle. */
   attention?: CampaignAttention[];
+  /** ADR 1154 D4 — what the newest run of each channel last recorded. Written
+   *  only by `recordChannelOutcome` (the channel chain's own nodes, through the
+   *  workflow surface). A fact for the guided flow's derived step; it is never
+   *  a stage, and no read writes it. Absent for a channel no run has recorded. */
+  channelState?: Partial<Record<CampaignChannel, ChannelOutcome>>;
   /** The last goal version before the goal was cleared, so a later goal never
    *  reuses a version a run may already name. */
   goalVersionFloor?: number;
@@ -82,6 +87,17 @@ export interface CampaignGoal {
   mediaBudget?: { totalMinor: number; currency: string; dailyCapMinor?: number };
   guardrails?: Array<{ metric: string; op: '<=' | '>='; value: number }>;
   version: number;
+}
+
+/** ADR 1154 D4 — the closed set of states a channel run records. */
+export const CHANNEL_OUTCOME_STATES = ['drafting', 'awaiting-review', 'approved', 'rejected', 'published'] as const;
+export type ChannelOutcomeState = (typeof CHANNEL_OUTCOME_STATES)[number];
+
+/** ADR 1154 D4 — one channel's recorded outcome: which run, what it reached, when. */
+export interface ChannelOutcome {
+  runId: string;
+  state: ChannelOutcomeState;
+  at: string;
 }
 
 /** ADR 0941 D3 — a link to a commerce catalog product. */

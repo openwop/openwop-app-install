@@ -50,6 +50,12 @@ async function requireOrgScopeFor(req: Request, orgId: string, scope: Scope): Pr
   }
 }
 
+/** ADR 1154 D7 — the optional `?campaignId=` of a per-campaign read (the
+ *  `/budget` precedent). A filter applied AFTER the org check and the org-scoped
+ *  read, so it only narrows: another client's campaign id matches nothing. */
+const campaignIdQuery = (req: Request): string | undefined =>
+  (typeof req.query.campaignId === 'string' && req.query.campaignId.length > 0 ? req.query.campaignId : undefined);
+
 export function registerCampaignIntelRoutes(deps: RouteDeps): void {
   const { app } = deps;
   const BASE = '/host/openwop-app/campaign-intel';
@@ -99,7 +105,7 @@ export function registerCampaignIntelRoutes(deps: RouteDeps): void {
       await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const orgId = requireString(req.query.orgId, 'orgId');
       await requireOrgScopeFor(req, orgId, 'workspace:read');
-      res.json({ anomalies: detectAnomalies(await listRecords(tenantOf(req), orgId)) });
+      res.json({ anomalies: detectAnomalies(await listRecords(tenantOf(req), orgId, campaignIdQuery(req))) });
     } catch (err) { next(err); }
   });
 
@@ -109,7 +115,7 @@ export function registerCampaignIntelRoutes(deps: RouteDeps): void {
       await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const orgId = requireString(req.query.orgId, 'orgId');
       await requireOrgScopeFor(req, orgId, 'workspace:read');
-      const records = await listRecords(tenantOf(req), orgId);
+      const records = await listRecords(tenantOf(req), orgId, campaignIdQuery(req));
       res.json({ funnel: funnelByPlatform(records), performers: topBottomPerformers(records) });
     } catch (err) { next(err); }
   });
@@ -160,7 +166,12 @@ export function registerCampaignIntelRoutes(deps: RouteDeps): void {
       await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const orgId = requireString(req.query.orgId, 'orgId');
       await requireOrgScopeFor(req, orgId, 'workspace:read');
-      res.json(await buildAttribution(tenantOf(req), orgId));
+      const report = await buildAttribution(tenantOf(req), orgId);
+      // ADR 1154 D7 — `?campaignId=` narrows the per-campaign ROWS only, after the
+      // whole org's join, so a shared join key is still attributed exactly as in
+      // the org report. The org-level sections (unattributed, email) are unchanged.
+      const campaignId = campaignIdQuery(req);
+      res.json(campaignId ? { ...report, rows: report.rows.filter((r) => r.campaignId === campaignId) } : report);
     } catch (err) { next(err); }
   });
 
@@ -235,7 +246,9 @@ export function registerCampaignIntelRoutes(deps: RouteDeps): void {
       await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const orgId = requireString(req.query.orgId, 'orgId');
       await requireOrgScopeFor(req, orgId, 'workspace:read');
-      res.json({ plans: await listPlans(tenantOf(req), orgId) });
+      const campaignId = campaignIdQuery(req);
+      const plans = await listPlans(tenantOf(req), orgId);
+      res.json({ plans: campaignId ? plans.filter((p) => p.campaignId === campaignId) : plans });
     } catch (err) { next(err); }
   });
 

@@ -60,6 +60,7 @@ export const messages = {
   typeBookingManage: 'Booking (app-minted)',
   typeSignRequest: 'Signature invite (app-minted)',
   typeCampaignApproval: 'Client approval link (app-minted)',
+  typeClientReport: 'Client report link (app-minted)',
   typeCollabInvite: 'Collaborator invite (app-minted)',
   expiryInvalid: 'Enter a whole number of days (1–3650), or leave empty for no expiry.',
   linksFailedTitle: 'Couldn’t load this workspace’s links',

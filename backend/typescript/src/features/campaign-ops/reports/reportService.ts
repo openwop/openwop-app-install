@@ -295,6 +295,30 @@ export async function publishReport(tenantId: string, orgId: string, reportId: s
   throw new OpenwopError('conflict', 'The report changed while publishing. Try again.', 409, { reason: 'report_publish_contended' });
 }
 
+/**
+ * ADR 0957 D5 — withdraw a published report: CAS `published → withdrawn`. The
+ * snapshot is kept (it is the record of what was shown); every client link is
+ * dark on its next request because the resolver serves only `published`.
+ * Withdrawing a withdrawn report returns the row.
+ */
+export async function withdrawReport(tenantId: string, orgId: string, reportId: string, actor: string): Promise<ClientReport> {
+  const key = `${tenantId}::${orgId}::${reportId}`;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const r = await reports.get(key);
+    if (!r || r.tenantId !== tenantId || r.orgId !== orgId) throw new OpenwopError('not_found', 'Report not found.', 404, { reportId });
+    if (r.status === 'withdrawn') return r;
+    if (r.status !== 'published') {
+      throw new OpenwopError('conflict', `Only a published report can be withdrawn (this one is ${r.status}).`, 409, { reason: 'report_not_published', status: r.status });
+    }
+    const next: ClientReport = { ...r, status: 'withdrawn', withdrawnAt: new Date().toISOString(), withdrawnBy: actor };
+    if (await reports.compareAndSwap(r, next)) {
+      recordAction('withdrawn', tenantId, orgId, actor, reportId, { reportId, definitionId: r.definitionId, snapshotHash: r.snapshotHash });
+      return next;
+    }
+  }
+  throw new OpenwopError('conflict', 'The report changed while withdrawing. Try again.', 409, { reason: 'report_withdraw_contended' });
+}
+
 export async function getReport(tenantId: string, orgId: string, reportId: string): Promise<ClientReport | null> {
   const r = await reports.get(`${tenantId}::${orgId}::${reportId}`);
   return r && r.tenantId === tenantId && r.orgId === orgId ? r : null;
@@ -323,8 +347,13 @@ export async function eraseReportActors(tenantId: string, forms: ReadonlySet<str
     if (r.tenantId !== tenantId) continue;
     for (let attempt = 0; attempt < 6; attempt++) {
       const current = await getReport(tenantId, r.orgId, r.reportId);
-      if (!current || !(forms.has(current.generatedBy) || (current.publishedBy !== undefined && forms.has(current.publishedBy)))) break;
-      const next = { ...current, generatedBy: forms.has(current.generatedBy) ? tombstone : current.generatedBy, ...(current.publishedBy !== undefined ? { publishedBy: forms.has(current.publishedBy) ? tombstone : current.publishedBy } : {}) };
+      const named = (v: string | undefined): boolean => v !== undefined && forms.has(v);
+      if (!current || !(forms.has(current.generatedBy) || named(current.publishedBy) || named(current.withdrawnBy))) break;
+      const next = {
+        ...current, generatedBy: forms.has(current.generatedBy) ? tombstone : current.generatedBy,
+        ...(current.publishedBy !== undefined ? { publishedBy: forms.has(current.publishedBy) ? tombstone : current.publishedBy } : {}),
+        ...(current.withdrawnBy !== undefined ? { withdrawnBy: forms.has(current.withdrawnBy) ? tombstone : current.withdrawnBy } : {}),
+      };
       if (await reports.compareAndSwap(current, next)) { n++; break; }
       if (attempt === 5) throw new Error('Report actor erasure could not be confirmed.');
     }

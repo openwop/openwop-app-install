@@ -11,25 +11,27 @@
  * @see docs/adr/0957-client-reporting-and-portal.md
  */
 import type { Request } from 'express';
+import type { ClientAccount } from '../types.js';
 import { OpenwopError } from '../../../types.js';
 import type { RouteDeps } from '../../../routes/registerAllRoutes.js';
-import { launchSubjectOf, requireFeatureEnabled } from '../../featureRoute.js';
+import { launchSubjectOf, publicBaseUrl, requireFeatureEnabled } from '../../featureRoute.js';
 import { authorizeClient } from '../routes.js';
 import { syncReportSchedule } from './schedule.js';
 import { startClientReportRun } from '../runLauncher.js';
 import { personalTenantOf } from '../../../host/requestSubject.js';
 import { planExemptStampOf } from '../../../host/operatorPlanExemption.js';
 import {
-  createDefinition, createReport, getDefinition, getReport, listDefinitions, listReports, parseDefinition, resolvePeriod, updateDefinition,
+  createDefinition, createReport, getDefinition, getReport, listDefinitions, listReports, parseDefinition, resolvePeriod, updateDefinition, withdrawReport,
 } from './reportService.js';
+import { dropReportLinks, sendReportLinks } from './portalLinks.js';
 
 export const CLIENT_REPORTS_TOGGLE = 'campaign-ops.client-reports';
 const BASE = '/host/openwop-app/campaign-ops/clients/:orgId';
 
-async function gate(req: Request, scope: 'workspace:read' | 'workspace:write'): Promise<{ tenantId: string; orgId: string; userId: string }> {
+async function gate(req: Request, scope: 'workspace:read' | 'workspace:write' | 'host:members:manage'): Promise<{ tenantId: string; orgId: string; userId: string; client: ClientAccount }> {
   const { client, tenantId, userId } = await authorizeClient(req, scope);
   await requireFeatureEnabled(req, CLIENT_REPORTS_TOGGLE, 'Client reports');
-  return { tenantId, orgId: client.orgId, userId };
+  return { tenantId, orgId: client.orgId, userId, client };
 }
 
 const notFound = (what: string, id: string): OpenwopError => new OpenwopError('not_found', `${what} not found.`, 404, { id });
@@ -118,6 +120,33 @@ export function registerClientReportRoutes(deps: RouteDeps): void {
       const { tenantId, orgId } = await gate(req, 'workspace:read');
       const definitionId = typeof req.query.definitionId === 'string' ? req.query.definitionId : undefined;
       res.json({ reports: await listReports(tenantId, orgId, definitionId) });
+    } catch (err) { next(err); }
+  });
+
+  // ADR 0957 D5/D7 (P2) — send a PUBLISHED report to the client's contacts: one
+  // grant-backed link each, emailed with the link only. Behind the client-portal
+  // sub-toggle (off by default). The URLs come back once, with `emailed`, so the
+  // operator can copy a link that was not emailed.
+  app.post(`${BASE}/reports/:reportId/links`, async (req, res, next) => {
+    try {
+      const { tenantId, userId, client } = await gate(req, 'workspace:write');
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const links = await sendReportLinks({
+        tenantId, client, reportId: req.params.reportId, sentBy: userId, baseUrl: publicBaseUrl(req),
+        ...(body.collaboratorIds !== undefined ? { collaboratorIds: body.collaboratorIds } : {}),
+      });
+      res.status(201).json({ links });
+    } catch (err) { next(err); }
+  });
+
+  // ADR 0957 D5 / matrix row 8 — withdraw a published report. Its client links
+  // go dark on the next request; the row and snapshot are kept.
+  app.post(`${BASE}/reports/:reportId/withdraw`, async (req, res, next) => {
+    try {
+      const { tenantId, orgId, userId } = await gate(req, 'host:members:manage');
+      const report = await withdrawReport(tenantId, orgId, req.params.reportId, userId);
+      await dropReportLinks(tenantId, orgId, report.reportId, userId);
+      res.json({ report });
     } catch (err) { next(err); }
   });
 

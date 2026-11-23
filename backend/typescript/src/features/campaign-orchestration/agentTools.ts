@@ -41,6 +41,9 @@ import { createLogger } from '../../observability/logger.js';
 import { getBrief } from '../campaign-brief/briefService.js';
 import type { CampaignBrief } from '../campaign-brief/types.js';
 import { ensureDraftCampaign, getCampaign, getCampaignByBrief, isFinalized, listCampaigns } from './campaignService.js';
+import { foldProgress, type ProgressInputs } from './progress.js';
+import { listReviews } from '../../host/reviewProjection.js';
+import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { readCampaignLinks } from './campaignLinks.js';
 import { CAMPAIGN_RUN_TAG_KEY, stampCampaignRun } from './campaignRunTag.js';
 import { ORCHESTRATION_ID } from './orchestrationWorkflow.js';
@@ -130,6 +133,23 @@ export async function runStatusTool(input: Record<string, unknown>, scope: Bundl
   const empty = JSON.stringify({ campaigns: [], brief: null });
   if (!scope.actingUserId) return { content: empty };
   if (!(await orchestrationEnabled(scope))) return { content: empty };
+
+  // ADR 1154 D1 — one campaign's place on the guided path. The SAME fold as
+  // `GET …/campaigns/:id/progress` under the same predicate (`workspace:read` on
+  // the campaign's org); the waiting count is this user's own view of the review
+  // inbox. Fails EMPTY for a campaign that is missing or not readable.
+  const campaignId = str(input.campaignId);
+  if (campaignId) {
+    const campaign = await getCampaign(scope.tenantId, campaignId);
+    if (!campaign || !(await hasOrgScope(scope.tenantId, scope.actingUserId, campaign.orgId, 'workspace:read'))) return { content: empty };
+    let brief: ProgressInputs['brief'] = null;
+    if (campaign.briefId) { try { brief = await getBrief(scope.tenantId, campaign.briefId); } catch { brief = 'unknown'; } }
+    let waiting: ProgressInputs['waiting'];
+    try {
+      waiting = (await listReviews(hostExtStorage(), { tenantId: scope.tenantId, subjectRef: scope.actingUserId }, { status: 'pending', campaignId })).length;
+    } catch { waiting = 'unknown'; }
+    return { content: JSON.stringify({ campaigns: [], brief: null, progress: foldProgress({ campaign, brief, waiting }) }) };
+  }
 
   const briefId = str(input.briefId);
   if (briefId) {
@@ -372,11 +392,15 @@ export function registerCampaignOrchestrationAgentTools(deps: StartRunDeps): voi
         'Read campaign readiness. Pass a `briefId` to see its messaging-kernel state, the enabled channels, which setup '
         + 'assets (brand / persona / KB) it still needs, and the campaign already made for it (`existingCampaign.finalized` tells an '
         + 'earlier run\'s draft from a finalized campaign) — call this BEFORE running '
-        + 'a campaign. Pass an `orgId` instead to list the workspace\'s campaigns (id, name, status, channels). Read-only.',
+        + 'a campaign. Pass an `orgId` instead to list the workspace\'s campaigns (id, name, status, channels). Pass a `campaignId` '
+        + 'to see where that campaign is on its path (`progress`): six steps in order (brief, plan, create, review, launch, measure), '
+        + 'each `not-started`, `in-progress`, `needs-you`, `done` or `unknown`, plus the `current` step and the `next` action. '
+        + '`unknown` means the records cannot say: never report it as done or as not started. Read-only.',
       inputSchema: {
         type: 'object',
         properties: {
           briefId: { type: 'string', description: 'A confirmed brief to check readiness for.' },
+          campaignId: { type: 'string', description: 'A campaign whose place on its path to read (when no briefId).' },
           orgId: { type: 'string', description: 'A workspace org to list campaigns for (when no briefId).' },
         },
         additionalProperties: false,

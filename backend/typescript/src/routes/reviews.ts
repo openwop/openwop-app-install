@@ -37,7 +37,9 @@ interface Deps {
   hostSuite: HostAdapterSuite;
 }
 
-function authCtx(req: Request): ReviewAuthCtx {
+/** Exported so a filtered view of this inbox (ADR 1154: a campaign's "waiting on
+ *  you" count) reads under the SAME gate instead of a copy of it. */
+export function authCtx(req: Request): ReviewAuthCtx {
   const tenantId = (req as { tenantId?: string }).tenantId ?? 'default';
   const subjectRef = req.userId ?? req.principal?.principalId;
   return {
@@ -79,7 +81,8 @@ export function registerReviewRoutes(app: Express, deps: Deps): void {
       const status: ReviewStatus = (REVIEW_STATUSES as readonly string[]).includes(raw) ? (raw as ReviewStatus) : 'pending';
       const conversationId = typeof req.query.conversationId === 'string' && req.query.conversationId ? req.query.conversationId : undefined;
       const boardId = typeof req.query.boardId === 'string' && req.query.boardId ? req.query.boardId : undefined;
-      const items = await listReviews(storage, await withDecider(req, authCtx(req)), { status, ...(conversationId ? { conversationId } : {}), ...(boardId ? { boardId } : {}) });
+      const campaignId = typeof req.query.campaignId === 'string' && req.query.campaignId ? req.query.campaignId : undefined;
+      const items = await listReviews(storage, await withDecider(req, authCtx(req)), { status, ...(conversationId ? { conversationId } : {}), ...(boardId ? { boardId } : {}), ...(campaignId ? { campaignId } : {}) });
       res.status(200).json({ items });
     } catch (err) {
       next(err);

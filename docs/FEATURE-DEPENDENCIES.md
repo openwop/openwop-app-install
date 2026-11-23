@@ -9,7 +9,7 @@
 
 | Bucket | Count | Meaning |
 |---|---|---|
-| Declared (`dependsOn`) | 17 | real hard deps, disable-lock active |
+| Declared (`dependsOn`) | 16 | real hard deps, disable-lock active |
 | Undeclared → always-on target | 119 | correctly undeclared — an always-on dep can never lock (ADR 0439) |
 | **[1] Primitive** (undeclared → toggleable) | **0** | misfiled cross-cutting infra → **extract to a `host/` seam** |
 | **[2] Soft-read** (undeclared → toggleable) | **109** | domain read, target vacuous-when-off → **leave documented** (no lock) |
@@ -50,7 +50,7 @@ _None._
 | `campaign-ops` | `campaign-intel` | dyn | budgetPlanner, reallocation | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `campaign-journeys` | `campaign-ops` | static | clientService, surface | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `campaign-orchestration` | `campaign-ops` | static | assetService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
-| `sharing` | `campaign-ops` | static | portal | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
+| `sharing` | `campaign-ops` | static | portal, reports/portalLinks | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `campaign-connectors` | `campaign-orchestration` | static | campaignService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `campaign-intel` | `campaign-orchestration` | static | campaignService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `campaign-ops` | `campaign-orchestration` | static | campaignService, campaignRunTag, types | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |

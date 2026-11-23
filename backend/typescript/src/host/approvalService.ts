@@ -397,6 +397,11 @@ export interface PendingApproval {
   assetId?: string;
   verdictId?: string;
   reviewHash?: string;
+  /** ADR 1154 D5 — the marketing campaign this approval belongs to, when its
+   *  writer knew one (an id of the SAME org, checked by the writer). Lets a
+   *  campaign's Review step list its own approvals. Not `emailSend.campaignId`,
+   *  which names an email campaign. */
+  campaignId?: string;
   /** ADR 0292 / CDP-D §6 — when `kind: 'warehouse-load'`, this approval gates a
    *  reverse-ETL BigQuery `insertAll` (the `warehouse.load` action policy defaults to
    *  `approval-required`, fail-closed). `rosterId`/`persona`/`workflowId` are empty (no
@@ -1328,11 +1333,16 @@ export async function createCampaignSpendApproval(input: {
   submitters?: string[];
   submitterCauses?: string[];
   autonomySourceRunId?: string;
+  /** ADR 1154 D5 — the marketing campaign, when the writer knows one of the
+   *  SAME org (a campaign run's tag, or a per-campaign plan). A label for the
+   *  campaign's review list: never part of the spend key or of any gate check. */
+  campaignId?: string;
 }): Promise<PendingApproval> {
   const approval: PendingApproval = {
     approvalId: `appr:${randomUUID()}`,
     tenantId: input.tenantId,
     ...(input.orgId ? { orgId: input.orgId } : {}),
+    ...(input.campaignId ? { campaignId: input.campaignId } : {}),
     ...(input.submitters?.length ? { submitters: input.submitters } : {}),
     ...(input.submitterCauses?.length ? { submitterCauses: input.submitterCauses } : {}),
     ...(input.autonomySourceRunId ? { autonomySourceRunId: input.autonomySourceRunId } : {}),
@@ -1362,7 +1372,7 @@ export async function createCampaignSpendApproval(input: {
  *  immutable primary is confirmed before its binding index. Same queue and CAS resolve. */
 export async function insertCreativeReviewApproval(input: {
   approvalId: string; tenantId: string; orgId: string; assetId: string; verdictId: string; reviewHash: string;
-  policy: ApprovalPolicy; submitters: string[]; proposal: string;
+  policy: ApprovalPolicy; submitters: string[]; proposal: string; campaignId?: string;
 }): Promise<PendingApproval> {
   const owned = (row: PendingApproval): boolean => row.kind === 'creative-publish-review' && row.tenantId === input.tenantId
     && row.orgId === input.orgId && row.assetId === input.assetId && row.verdictId === input.verdictId && row.reviewHash === input.reviewHash;
@@ -1376,6 +1386,7 @@ export async function insertCreativeReviewApproval(input: {
     approvalId: input.approvalId, tenantId: input.tenantId, orgId: input.orgId, submitters: input.submitters,
     rosterId: '', persona: '', workflowId: '', kind: 'creative-publish-review',
     assetId: input.assetId, verdictId: input.verdictId, reviewHash: input.reviewHash,
+    ...(input.campaignId ? { campaignId: input.campaignId } : {}),
     proposal: input.proposal, policy: input.policy, status: 'pending', createdAt: nowIso(),
   };
   if (await approvals.compareAndSwap(null, approval)) {

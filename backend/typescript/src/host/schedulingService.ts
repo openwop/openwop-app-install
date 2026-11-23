@@ -93,6 +93,10 @@ export type ScheduleSkipReason =
   /** ADR 0957 D2 — a client report's client is paused, archived or gone, or
    *  its definition no longer exists. The slot is skipped; the job stays. */
   | 'client-inactive'
+  /** ADR 0957 P1 security review — the member a client report runs for no
+   *  longer holds write on that client. Asked before the run; restoring their
+   *  access, or an edit by someone who has it (which re-arms the job), resumes it. */
+  | 'client-access-lost'
   /** ADR 0985 D1 — a scheduled chat's person may no longer act in the workspace, or
    *  its reply could not land in its conversation. Asked BEFORE the run, so no model
    *  is paid for a reply that would be refused. Restoring access resumes it. */

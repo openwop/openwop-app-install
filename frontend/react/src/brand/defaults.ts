@@ -74,6 +74,32 @@ export interface BrandConfig {
   defaultTheme: 'system' | 'light' | 'dark';
   /** Reserved for the AppGate primitive; default keeps the app ungated. */
   appGate: { mode: 'none' | 'password' | 'sign-in'; password: string };
+  /** Where a signed-in visitor lands in the app: "Open app" on the public site
+   *  and the app shell's `/`. An in-app path; see `appHomePath()` for what is
+   *  accepted. Build-time only. */
+  appHomePath: string;
+}
+
+/** The stock signed-in landing path (ADR 0487). */
+export const DEFAULT_APP_HOME_PATH = '/dashboard';
+
+/**
+ * `VITE_BRAND_APP_HOME_PATH` as a safe in-app path, else `/dashboard`.
+ *
+ * Accepted: one leading `/`, then path characters only. Refused, so the key can
+ * never become an open redirect: `//host` (protocol-relative), any backslash
+ * (browsers read `/\host` as `//host`), any whitespace or control character (the
+ * URL parser strips tab and newline, so `/\t/host` becomes `//host`), and a
+ * scheme (`https://…`, `javascript:…`), which cannot start with `/` anyway. A
+ * query or fragment is refused too: the value names a route, nothing more.
+ * Whether the route exists and is enabled is checked at navigation time
+ * (`chrome/appHome.ts`), not here.
+ */
+export function appHomePath(raw: string | undefined): string {
+  const v = raw?.trim();
+  if (!v || v[0] !== '/' || v[1] === '/') return DEFAULT_APP_HOME_PATH;
+  if (/[\\\s\u0000-\u001f\u007f?#]/.test(v)) return DEFAULT_APP_HOME_PATH;
+  return v;
 }
 
 /**
@@ -135,6 +161,7 @@ export const BRAND_DEFAULTS: BrandConfig = {
   // brand config so identity is mandatory from the first request (`password`
   // is a shared-secret stopgap, not an identity posture). See WHITE-LABEL.md.
   appGate: { mode: 'none', password: '' },
+  appHomePath: DEFAULT_APP_HOME_PATH,
 };
 
 /**
@@ -235,6 +262,7 @@ export const BRAND_ENV_KEYS = {
   /** Read by `consentOptions.ts` (#6150, #6155); listed for BRAND-01 like the one above. */
   consentClearance: 'VITE_BRAND_CONSENT_CLEARANCE',
   consentFooter: 'VITE_BRAND_CONSENT_FOOTER',
+  appHomePath: 'VITE_BRAND_APP_HOME_PATH',
 } as const;
 
 /** Every `VITE_BRAND_*` build variable this app reads. The Vite config refuses any
@@ -343,6 +371,7 @@ export function resolveBrandFromEnv(
       mode: coalesceGateMode(env[k.appGateMode], BRAND_DEFAULTS.appGate.mode),
       password: coalesce(env[k.appGatePassword], BRAND_DEFAULTS.appGate.password),
     },
+    appHomePath: appHomePath(env[k.appHomePath]),
   };
 }
 

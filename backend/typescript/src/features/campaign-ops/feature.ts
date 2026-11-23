@@ -30,6 +30,8 @@ import { ownsReportJob, reportFireGate, REPORT_JOB_PREFIX } from './reports/sche
 import { registerScheduledJobFireGate } from '../../host/scheduledJobFireGates.js';
 import { getChain } from '../../host/workflowChainPackLoader.js';
 import { CLIENT_REPORT_CHAIN_ID } from './reports/types.js';
+import { CLIENT_REPORT_GRANT_KIND, publishedReportExists } from './reports/portalLinks.js';
+import { registerClientReportLinkTemplate } from './reports/reportLinkMail.js';
 import { registerRunStartContributor } from '../../host/runStartContext.js';
 import { registerRunContextProvider } from '../../host/runContextProviders.js';
 import { registerRunClientKnowledge } from '../../host/runClientKnowledge.js';
@@ -110,6 +112,18 @@ export const campaignOpsFeature: BackendFeature = {
       async exists(tenantId, orgId, id) { return (await getChangeSet(tenantId, orgId, id)) !== null; },
       async project() { return null; },
     });
+    // ADR 0957 D5 (P2) — a client stakeholder's link to one published report views
+    // through a grant on that report. Only the report portal mints these
+    // (`system:` actor); a withdrawn or unpublished report does not exist for it.
+    registerGrantResourceKind(CLIENT_REPORT_GRANT_KIND, {
+      featureId: CAMPAIGN_OPS_TOGGLE,
+      actions: ['view'],
+      systemMintOnly: true,
+      exists: publishedReportExists,
+      async project() { return null; },
+    });
+    // ADR 0957 D7 — the report-link email kind (link only, no figures).
+    registerClientReportLinkTemplate();
     registerCollaborationRoutes(deps);
   },
   surface: { id: CAMPAIGN_OPS_TOGGLE, build: buildCampaignOpsSurface },

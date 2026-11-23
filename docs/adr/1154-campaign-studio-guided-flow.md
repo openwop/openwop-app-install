@@ -1,6 +1,6 @@
 # ADR 1154 — Campaign Studio guided flow
 
-Status: Accepted (plan, 2026-11-20; nothing implemented yet)
+Status: Accepted (P1 backend records and P2 progress reads built 2026-11-21, with one P1 part still owed, the D4 channel chain step; no screen yet)
 
 Date: 2026-11-20. Extends `campaigns` (ADR 0200) and `campaign-orchestration`
 (ADRs 0158, 0941, 0960). Source: an in-conversation design, drawn at
@@ -128,6 +128,14 @@ read route under that toggle. `campaign-autopilot` imports them, which keeps the
 existing import direction (autopilot already imports orchestration). The launch
 action stays behind `campaign-autopilot`.
 
+> **Correction, 2026-11-21 (P1).** The preflight was the only autopilot code
+> that imported `campaign-brief`, so moving it left autopilot's declared
+> `dependsOn: campaign-brief` with no import behind it, which ADR 0439's
+> parity test refuses. The brief is now a `recommends` on `campaign-autopilot`,
+> as it already is on `campaign-orchestration`. The effect: a workspace can turn
+> the brief feature off while autopilot stays on. Autopilot still refuses a
+> campaign with no brief (`brief_missing`).
+
 ### D7 — Results filter by campaign
 
 `GET /anomalies`, `/overview`, `/attribution` and `/reallocations` in
@@ -228,6 +236,37 @@ to the existing console (`campaigns`) and campaign-scoped work belongs to
 | P6 | Sub-toggle on for the demo; acceptance pass in a browser; make it the default; retire the tabs and re-pin their tests; mark this ADR implemented | acceptance pass |
 
 P1–P2 and P3 can run in parallel once the shape of the P2 read is fixed.
+
+### Implementation record
+
+| Decision | Built in P1 (2026-11-21) | Still owed |
+|---|---|---|
+| D3 | `POST …/campaign-studio/campaigns` creates a brief and its draft campaign together; `POST …/campaigns/for-brief` creates or returns the campaign for an existing brief; brief research runs carry the campaign run tag with role `brief`. The existing brief route is unchanged. | — |
+| D4 | `channelState` on the campaign row; `recordChannelOutcome` on the workflow surface. The campaign and run id come from the run tag only, never from an argument; the same run and state writes nothing. | No chain calls it yet. The channel chains are also edited by the unmerged channel-publish work, so the node and the chain step follow that. |
+| D5 | `campaignId` on `ReviewRequest`; `GET /reviews?campaignId=`. A workflow gate takes its id from the run tag. `creative-publish-review` stores it. A `campaign-spend` approval stores it when a campaign run's policy asked for it, or when a reallocation plan was made for one campaign (added 2026-11-21; a label only, never part of the spend key). | A `campaign-spend` approval raised outside a campaign run (the threshold gate, brand compliance, audience upload) carries none: that code knows only the brief. |
+| D6 | `runPreflight` lives in `campaign-orchestration`; `GET …/campaigns/:id/preflight` works with autopilot off; autopilot re-exports it. See the correction under D6. | — |
+| D7 | `campaignId` on `/anomalies`, `/overview` and `/reallocations`. On `/attribution` it keeps only that campaign's row, after the whole client's join (added 2026-11-21); the client-level sections are unchanged. | — |
+
+Tests: `backend/typescript/test/adr1154-p1-campaign-records.test.ts` (15 route-level
+cases). Sabotage-witnessed red on four mechanisms: the review filter, the run-tag
+read, the overview filter and the same-run no-op.
+
+**P2 (built 2026-11-21).** `campaign-orchestration/progress.ts` holds the pure
+fold (`foldProgress`) and the per-campaign detail read. Two routes use it:
+`GET …/campaigns/:campaignId/progress` and `GET …/home`. The status tool returns
+the same fold for a `campaignId`. The current step depends only on the campaign
+row, the brief row and the count of waiting reviews, so the home list and the
+workspace read cannot disagree. Detail sections (launch checklist, plan links,
+review windows, run count) read `ok`, `unknown` or `unavailable` and never
+change a step. Measure detail stays with the campaign-intel routes.
+
+Until a channel chain calls `recordChannelOutcome` (owed from D4), the Create
+step reads `not-started` for a draft campaign and `unknown` for a finalized one.
+
+Tests: `backend/typescript/test/adr1154-p2-campaign-progress.test.ts` (13 cases).
+Sabotage-witnessed red on four mechanisms: the other-client brief rule, the
+`unknown` state for a finalized campaign, the per-campaign waiting count on the
+route, and the same count in the status tool.
 
 ## Risks
 

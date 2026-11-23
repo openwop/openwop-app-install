@@ -376,6 +376,8 @@ async function ensureApproval(plan: ReallocationPlan): Promise<ReallocationPlan>
     // (`reallocationApprovers`); the bare-submitters branch below is left for a plan
     // proposed without a binding (a direct call; no production lane does).
     orgId: plan.orgId,
+    // ADR 1154 D5 — a plan made for one campaign shows in that campaign's review list.
+    ...(plan.campaignId ? { campaignId: plan.campaignId } : {}),
     ...(plan.approvalBinding
       // The plan names its approvers, so the decide-time eligibility check
       // (spendEligibility.ts) refuses the requesters (the sole-admin self-approval

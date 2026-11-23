@@ -97,6 +97,8 @@ export async function requestCreativeReview(input: {
       approvalId, tenantId: input.tenantId, orgId, assetId: input.assetId, verdictId: input.verdictId, reviewHash: key,
       policy: approvalPolicy, submitters: [requester],
       proposal: `Publish "${asset.name || input.assetId}" although its brand-accuracy check asked for a person to review it.`,
+      // ADR 1154 D5 — checked above to be a campaign of this asset's client.
+      ...(input.campaignId ? { campaignId: input.campaignId } : {}),
     });
     const next: ReviewBinding = { key, tenantId: input.tenantId, orgId, assetId: input.assetId, verdictId: input.verdictId, approvalIds: [...(cur?.approvalIds ?? []), approvalId] };
     if (!(await bindings.compareAndSwap(cur, next))) continue;

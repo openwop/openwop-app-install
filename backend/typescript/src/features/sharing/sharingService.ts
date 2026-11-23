@@ -34,6 +34,7 @@ import { shareCodeMailReady } from './shareCodeMail.js';
 import { clearVerification, isVerified, maskEmail, SESSION_HOURS_DEFAULT, SESSION_HOURS_MAX } from './verificationStore.js';
 import { createHash } from 'node:crypto';
 import { approvalShareValidate, approvalShareLoad } from '../campaign-ops/portal.js';
+import { reportShareValidate, reportShareLoad } from '../campaign-ops/reports/portalLinks.js';
 import { anySurfaceAdmits, getCollaborator, normalizeEmail } from '../../host/externalCollaborators.js';
 import { getCollection, listDocuments } from '../kb/kbService.js';
 import { publicDocumentView, getDocument, canReadDocument } from '../documents/documentsService.js';
@@ -61,8 +62,8 @@ const MAX = {
   maxViews: 1_000_000,
 } as const;
 
-export type ResourceType = 'cms_page' | 'kb_collection' | 'document' | 'conversation' | 'prompt' | 'commerce_quote' | 'commerce_order' | 'app_builder_canvas' | 'slides_canvas' | 'creative_brief' | 'booking_manage' | 'sign_request' | 'campaign_approval' | 'collab_invite';
-export const RESOURCE_TYPES: readonly ResourceType[] = ['cms_page', 'kb_collection', 'document', 'conversation', 'prompt', 'commerce_quote', 'commerce_order', 'app_builder_canvas', 'slides_canvas', 'creative_brief', 'booking_manage', 'sign_request', 'campaign_approval', 'collab_invite'];
+export type ResourceType = 'cms_page' | 'kb_collection' | 'document' | 'conversation' | 'prompt' | 'commerce_quote' | 'commerce_order' | 'app_builder_canvas' | 'slides_canvas' | 'creative_brief' | 'booking_manage' | 'sign_request' | 'campaign_approval' | 'client_report' | 'collab_invite';
+export const RESOURCE_TYPES: readonly ResourceType[] = ['cms_page', 'kb_collection', 'document', 'conversation', 'prompt', 'commerce_quote', 'commerce_order', 'app_builder_canvas', 'slides_canvas', 'creative_brief', 'booking_manage', 'sign_request', 'campaign_approval', 'client_report', 'collab_invite'];
 
 export interface ShareLink {
   /** sha256 of the raw token — the ONLY at-rest identifier (ADR 0448 P2).
@@ -637,6 +638,25 @@ const RESOLVERS: Record<ResourceType, ShareResolver> = {
     },
     entitlement: ORG_SCOPED_ENTITLEMENT, // system-minted (visitor lane) — never re-checked (ADR 0887 D1 step 1)
   },
+  // ADR 0957 D5 (P2) — a client stakeholder's link to ONE published report
+  // (resourceId `${reportId}:${grantId}`). A CAPABILITY link: `load` serves the
+  // frozen snapshot and re-runs every per-use check (both portal toggles and both
+  // client-report toggles, client active, grant live and current, sender still
+  // able to write the client, report published with its hash intact); `card` is
+  // null. Gated on the portal sub-toggle; the rest is checked in the hooks.
+  client_report: {
+    toggleId: 'campaign-ops-client-portal',
+    async validate(tenantId, orgId, resourceId) {
+      await reportShareValidate(tenantId, orgId, resourceId);
+    },
+    async load(tenantId, orgId, resourceId) {
+      return reportShareLoad(tenantId, orgId, resourceId);
+    },
+    async card() {
+      return null; // private report link — no social card, no figures in an unfurl
+    },
+    entitlement: ORG_SCOPED_ENTITLEMENT, // system-minted (visitor lane) — never re-checked (ADR 0887 D1 step 1)
+  },
   // ADR 0958 D2 — the single-use invite a vendor, freelancer or client
   // stakeholder accepts while signed in to THEIR OWN account. A CAPABILITY link:
   // `load` shows who the invite is for (never the email); accepting is a signed-in
@@ -794,7 +814,7 @@ export type ShareMintAccess =
 /** ADR 0924 D5 — types only their owning feature may mint, on the visitor lane.
  *  A member-lane mint of a client approval link would hand a member a decision
  *  token written under someone else's authority (security review, 2026-10-19). */
-const SYSTEM_MINT_ONLY: ReadonlySet<ResourceType> = new Set(['campaign_approval']);
+const SYSTEM_MINT_ONLY: ReadonlySet<ResourceType> = new Set(['campaign_approval', 'client_report']);
 
 async function assertMintAccess(resourceType: ResourceType, tenantId: string, actor: string, resourceId: string, access: ShareMintAccess): Promise<void> {
   if (access.lane !== 'visitor' && SYSTEM_MINT_ONLY.has(resourceType)) throw notFound(resourceId);
@@ -1353,7 +1373,7 @@ export async function listLinks(tenantId: string, orgId: string, caller: string)
     // gated-in AND the card path can answer at all (`booking_manage` /
     // `sign_request` return null BY DESIGN — private links have no social card),
     // so those two are never falsely marked missing.
-    const cardCapable = l.resourceType !== 'booking_manage' && l.resourceType !== 'sign_request' && l.resourceType !== 'campaign_approval';
+    const cardCapable = l.resourceType !== 'booking_manage' && l.resourceType !== 'sign_request' && l.resourceType !== 'campaign_approval' && l.resourceType !== 'client_report';
     const resourceMissing = gated && cardCapable && !cardFailed && !redacted && !card;
     // ADR 0887 D2 — the owner's side of D1: a link dark because its publisher lost
     // access says so (and, for a caller who could, offers D5's adopt) instead of

@@ -15,11 +15,12 @@ import { Button } from '../../ui/Button.js';
 import { InlineState } from '../../ui/InlineState.js';
 import { Notice } from '../../ui/Notice.js';
 import { SelectField, TextField } from '../../ui/Field.js';
-import { formatCurrency, formatDateTime, formatNumber } from '../../i18n/format.js';
+import { formatDateTime } from '../../i18n/format.js';
+import { ReportFiguresTable } from './reportFigures.js';
 import { CampaignOpsError } from './campaignOpsClient.js';
 import {
   computeReport, createDefinition, listDefinitions, listReports, sendReportForReview,
-  type ClientReport, type ReportDefinition, type ReportMetric, type ReportPeriodKind,
+  type ClientReport, type ReportDefinition, type ReportPeriodKind,
 } from './reportsClient.js';
 
 type Load = { kind: 'loading' } | { kind: 'off' } | { kind: 'failed' } | { kind: 'ready'; definitions: ReportDefinition[]; reports: ClientReport[] };
@@ -29,67 +30,14 @@ function isOff(e: unknown): boolean {
   return e instanceof CampaignOpsError && e.status === 404 && /not enabled/i.test(e.message);
 }
 
-function MetricValue({ m, t }: { m: ReportMetric; t: TFn }): JSX.Element {
-  if (m.value === null) return <span className="muted">{t('reportsNotAvailable')}</span>;
-  if (m.unit === 'currency') return <>{m.currency ? formatCurrency(m.value, m.currency) : t('reportsNoCurrency', { amount: formatNumber(m.value) })}</>;
-  return <>{formatNumber(m.value)}</>;
-}
-
-function noteText(note: string, computedAt: string, t: TFn): string {
-  if (note === 'all-data-to-computedAt') return t('reportsNoteWindow', { when: formatDateTime(computedAt) });
-  const kind = note.split(':')[0] ?? note;
-  const value = note.slice(note.indexOf(':') + 1);
-  const known = ['currency-mixed', 'currency-unknown', 'unreported-conversions', 'unreported-revenue', 'shared-join-keys', 'platform-and-web-conversions-not-summed', 'opens-approximate', 'unsubscribes-unenforced', 'data-range'];
-  return known.includes(kind) ? t(`reportsNote_${kind.replace(/-/g, '_')}`, { value }) : note;
-}
-
-const METRIC_NAMES = new Set(['spend', 'revenue', 'reportedRevenueRecordCount', 'reportedConversionRecordCount', 'impressions', 'clicks', 'conversions', 'ctr', 'cvr', 'cpc', 'cpa', 'roas', 'unattributedConversions', 'uniqueClicks', 'opens', 'uniqueOpens', 'unsubscribes', 'unsubscribesUnenforced']);
-const SOURCE_KEYS: Record<string, string> = {
-  'campaign-connectors.kpiSummary': 'reportsSource_kpi', 'campaign-intel.buildAttribution': 'reportsSource_attribution', 'email.engagementStats': 'reportsSource_email',
-};
-
-function sourceLabel(source: string, t: TFn): string {
-  const key = SOURCE_KEYS[source];
-  return key ? t(key) : source;
-}
-
-/** A plain-words label for a metric key (`kpi.spend` → "Ad performance: Spend"). */
-function metricLabel(key: string, m: ReportMetric, t: TFn): string {
-  const dot = key.lastIndexOf('.');
-  const name = key.slice(dot + 1);
-  const section = SOURCE_KEYS[m.lineage.source] ? sourceLabel(m.lineage.source, t) : key.slice(0, dot);
-  return `${section}: ${METRIC_NAMES.has(name) ? t(`reportsMetric_${name}`) : name}`;
-}
-
 function ReportView({ report, t }: { report: ClientReport; t: TFn }): JSX.Element {
-  const metrics = Object.entries(report.snapshot.metrics).sort(([a], [b]) => a.localeCompare(b));
   return (
     <div className="u-mt-3">
       <p className="u-fs-13 u-mt-0">
         <span className="chip chip--muted">{t(`reportsStatus_${report.status}`)}</span>{' '}
         {t('reportsPeriodRange', { start: report.periodStart, end: report.periodEnd })} · {t('reportsFingerprint')} <code title={report.snapshotHash}>{report.snapshotHash.slice(0, 10)}</code>
       </p>
-      <table className="data-table">
-        <caption className="sr-only">{t('reportsMetricsCaption', { title: report.title })}</caption>
-        <thead><tr><th scope="col">{t('reportsMetric')}</th><th scope="col">{t('reportsValue')}</th><th scope="col">{t('reportsSource')}</th></tr></thead>
-        <tbody>
-          {metrics.map(([key, m]) => (
-            <tr key={key}>
-              <th scope="row">{metricLabel(key, m, t)}</th>
-              <td><MetricValue m={m} t={t} /></td>
-              <td>
-                <details>
-                  <summary className="u-fs-13">{sourceLabel(m.lineage.source, t)}</summary>
-                  <ul className="u-fs-13 u-m-0">
-                    {(m.lineage.notes ?? []).map((n) => <li key={n}>{noteText(n, m.lineage.computedAt, t)}</li>)}
-                    {m.lineage.rows !== undefined ? <li>{t('reportsRows', { count: m.lineage.rows })}</li> : null}
-                  </ul>
-                </details>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <ReportFiguresTable metrics={report.snapshot.metrics} title={report.title} />
     </div>
   );
 }

@@ -109,6 +109,7 @@ export const messages = {
   recurringSkipActorInactive: 'la persona en cuyo nombre se ejecuta ha sido desactivada',
   recurringSkipGoalClosed: 'su objetivo terminó o superó un límite, así que no se ejecutará nada más para él',
   recurringSkipClientInactive: "su cliente está en pausa o archivado, o su informe ya no existe; se reanuda cuando el cliente vuelve a estar activo",
+  recurringSkipClientAccessLost: "la persona para la que se ejecuta ya no puede editar este cliente; se reanuda cuando recupera el acceso o alguien con acceso edita el informe",
   recurringSkipTargetRefused: "su respuesta no se pudo publicar en la conversación; se reanuda cuando vuelva el acceso",
   recurringSkipTooFrequent: "se ejecuta más de una vez por hora; elige un horario más espaciado",
   recurringSkipAgentPaused: 'el agente con el que se ejecuta está en pausa; reanude el agente para reanudar esto',

@@ -25,8 +25,9 @@ export const CAMPAIGN_RUN_TAG_KEY = 'campaignOrchestration';
 /** The ADR 0921 client stamp a campaign-ops run carries. */
 const CAMPAIGN_OPS_STAMP_KEY = 'openwop-app.campaignOps';
 
-export type CampaignRunRole = 'spine' | 'stage' | 'optimizer' | 'report';
-const ROLES: readonly CampaignRunRole[] = ['spine', 'stage', 'optimizer', 'report'];
+/** `brief` (ADR 1154 D3): a brief-step run (messaging kernel, market research). */
+export type CampaignRunRole = 'spine' | 'stage' | 'optimizer' | 'report' | 'brief';
+const ROLES: readonly CampaignRunRole[] = ['spine', 'stage', 'optimizer', 'report', 'brief'];
 
 /** ADR 0941 D2b — the run tag. The ONE source of "which campaign and client is this run for". */
 export interface CampaignRunTag {

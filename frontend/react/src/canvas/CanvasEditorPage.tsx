@@ -78,6 +78,7 @@ import { OutlineTree } from './OutlineTree.js';
 import { FlowOutline } from './FlowOutline.js';
 import { PropertyField } from './PropertyForm.js';
 import { CanvasWorkbench, CanvasWorkbenchStatus } from './CanvasWorkbench.js';
+import { appHomeHref } from '../chrome/appHome.js';
 import type { FrameBase } from './frameOps.js';
 import type { TreeNodeBase } from './treeOps.js';
 import type { CanvasPropDef, CanvasSelectionInfo, CanvasTypeDefinition, ElementActions, ElementsCollectionDef, FramesTraitDef, TreeTraitDef } from './types.js';
@@ -2091,8 +2092,9 @@ export function CanvasEditorPage<
                 toast.success(tt('deleteDocDone'));
                 // ADR 0487 — the in-app "home" is the Dashboard's own URL ('/' is
                 // the public marketing home; navigating there would eject an anon
-                // demo user out of the app onto the landing page).
-                navigate('/dashboard');
+                // demo user out of the app onto the landing page). A brand's
+                // VITE_BRAND_APP_HOME_PATH is that home when set (checked on arrival).
+                navigate(appHomeHref());
               } catch (e) {
                 toast.error((e as { status?: number }).status === 403 ? t('noWriteAccess') : e instanceof Error ? e.message : tt('deleteDocFailed'));
               }

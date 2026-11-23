@@ -1,4 +1,4 @@
-import { test, expect, type APIRequestContext, type Locator } from '@playwright/test';
+import { test, expect, type APIRequestContext, type APIResponse, type Locator } from '@playwright/test';
 import { API } from './support/session.js';
 
 /**
@@ -72,13 +72,21 @@ type ToggleConfig = Record<string, unknown> & { tenantOverrides?: Record<string,
 async function pinTenantToggle(ctx: APIRequestContext, id: string, tenantId: string): Promise<() => Promise<void>> {
   const url = `${API}/feature-toggles/admin/configs/${encodeURIComponent(id)}`;
   const write = async (status: 'on' | null): Promise<void> => {
-    const get = await ctx.get(url);
-    expect(get.status(), `read toggle ${id}: ${await get.text()}`).toBe(200);
-    const config = (await get.json()) as ToggleConfig;
-    const overrides = { ...(config.tenantOverrides ?? {}) };
-    if (status) overrides[tenantId] = { status };
-    else delete overrides[tenantId];
-    const put = await ctx.put(url, { data: { ...config, id, tenantOverrides: overrides } });
+    // The config is ONE global row holding every tenant's override, and the PUT is
+    // compare-and-swap. Two workers pinning the same toggle for different tenants
+    // race, and the loser gets a 409. Read again and re-apply: only this tenant's
+    // key changes, so the retry cannot undo the other worker's write.
+    const attempt = async (): Promise<APIResponse> => {
+      const get = await ctx.get(url);
+      expect(get.status(), `read toggle ${id}: ${await get.text()}`).toBe(200);
+      const config = (await get.json()) as ToggleConfig;
+      const overrides = { ...(config.tenantOverrides ?? {}) };
+      if (status) overrides[tenantId] = { status };
+      else delete overrides[tenantId];
+      return ctx.put(url, { data: { ...config, id, tenantOverrides: overrides } });
+    };
+    let put = await attempt();
+    for (let retry = 0; retry < 5 && put.status() === 409; retry += 1) put = await attempt();
     expect(put.status(), `${status ? 'pin' : 'unpin'} ${id} for ${tenantId}: ${await put.text()}`).toBe(200);
     const saved = (await put.json()) as ToggleConfig;
     if (status) expect(saved.tenantOverrides?.[tenantId]).toMatchObject({ status });

@@ -59,6 +59,8 @@ export type EnforceVerdict =
       kind: 'approve'; approver: ApproverSpec; ruleId: string; layer: ResolutionLayer; policyHash: string; attended: boolean; runId: string;
       /** The client org (approver roles resolve here) and the run's requesters (D10.2). */
       orgId?: string; requesters: string[]; requesterCauses: string[];
+      /** ADR 1154 D5 — the run's campaign, from its tag: carried onto the approval row for the review filter only. */
+      campaignId?: string;
     };
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -130,7 +132,7 @@ export async function enforceCampaignAction(
     const causes = !acting.length && typeof metadata.orgScopeSubject === 'string' && metadata.orgScopeSubject.trim() ? [metadata.orgScopeSubject] : [];
     return {
       kind: 'approve', approver: d.approver, ruleId: r.ruleId, layer: r.layer, policyHash: r.policyHash, attended, runId: run.runId,
-      ...(tag ? { orgId: tag.orgId } : {}), requesters: acting, requesterCauses: causes,
+      ...(tag ? { orgId: tag.orgId, campaignId: tag.campaignId } : {}), requesters: acting, requesterCauses: causes,
     };
   }
   return {

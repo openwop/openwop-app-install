@@ -1,6 +1,6 @@
 /**
  * Campaign ops subject erasure (ADR 0464 store ledger). Client accounts,
- * assets, agent bindings (ADR 0943), report definitions and reports (ADR 0957), and change
+ * assets, agent bindings (ADR 0943), report definitions, reports and report links (ADR 0957), and change
  * requests (ADR 0923; their text and answer values, CHAN-F19 #3) are the agency's configuration for a
  * client, so they are never deleted on a person's erasure. What goes is the
  * person in them: `createdBy` (a binding's `updatedBy`) becomes the erased-user
@@ -15,6 +15,7 @@ import { eraseApproverCreators, purgePortalForOrg } from './portal.js';
 import { eraseClientDecisionWriters } from './approval.js';
 import { eraseAgentBindingEditors } from './agentBindingService.js';
 import { eraseReportActors } from './reports/reportService.js';
+import { dropReportLinksOfCollaborator, eraseReportLinkSenders } from './reports/portalLinks.js';
 import { eraseClientNoteProposalDeciders } from './clientMemory.js';
 import { eraseClientContextSourceEditors } from './clientContext.js';
 import { eraseRequestActors } from './requestService.js';
@@ -35,6 +36,7 @@ export async function eraseCampaignOpsSubject(tenantId: string, subjectKey: stri
     + (await eraseClientDecisionWriters(tenantId, forms, ERASED_USER_REF))
     + (await eraseAgentBindingEditors(tenantId, forms, ERASED_USER_REF))
     + (await eraseReportActors(tenantId, forms, ERASED_USER_REF))
+    + (await eraseReportLinkSenders(tenantId, forms, ERASED_USER_REF)) // ADR 0957 P2 — who sent a report link
     + (await eraseClientNoteProposalDeciders(tenantId, forms, ERASED_USER_REF))
     + (await eraseClientContextSourceEditors(tenantId, forms, ERASED_USER_REF))
     + (await eraseRequestActors(tenantId, forms, ERASED_USER_REF)); // CHAN-F19 #3 — change requests
@@ -46,14 +48,15 @@ export async function eraseCampaignOpsSubject(tenantId: string, subjectKey: stri
  *  before the collaborator record is deleted, for both the home-tenant and the
  *  agency (email-keyed) erasure. */
 export async function eraseCollaboratorRows(c: ExternalCollaborator): Promise<number> {
-  const n = await eraseIntakesOfCollaborator(c);
+  const n = await eraseIntakesOfCollaborator(c) + await dropReportLinksOfCollaborator(c); // ADR 0957 P2
   return n + await purgeLinksForResource(c.tenantId, 'collab_invite', c.collaboratorId);
 }
 
 /** ADR 0958 P5 — campaign-ops' rows that name a collaborator, deleted when the
  *  client org is torn down: every intake (accepted ones too) and the invite link. */
 export async function purgeCollaboratorRows(c: ExternalCollaborator): Promise<number> {
-  const n = await purgeIntakesForOrg(c.tenantId, c.orgId, (r) => r.collaboratorId === c.collaboratorId);
+  const n = await purgeIntakesForOrg(c.tenantId, c.orgId, (r) => r.collaboratorId === c.collaboratorId)
+    + await dropReportLinksOfCollaborator(c); // ADR 0957 P2
   return n + await purgeLinksForResource(c.tenantId, 'collab_invite', c.collaboratorId);
 }
 
