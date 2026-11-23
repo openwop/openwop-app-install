@@ -331,8 +331,8 @@ import {
 } from '../entities/entitiesService.js';
 import { makeKernelAdapter } from '../entities/kernelAdapter.js';
 import {
-  afterSystemWrite, beforeSystemWrite, builtTenants, checkSystemIndex, drainSystemIndexBuilds, ensureSystemIndexBuilt, indexedCount, indexedFamilyCount,
-  indexedTenantCount, listIndexPage, pendingIntentCount, queuedBuildCount, queueSystemIndexBuild, registerStoreIndex, registerSystemIndex, repairSystemIndex,
+  afterSystemWrite, beforeSystemWrite, ensureSystemIndexBuilt, indexedCount, indexedFamilyCount,
+  indexedTenantCount, listIndexPage, pendingIntentCount, queuedBuildCount, queueSystemIndexBuild, registerStoreIndex, registerSystemIndex,
 } from '../entities/systemIndex.js';
 import {
   PRODUCT_INDEX, foldText, nameKeyOf, readRowProjection, readSearchProjection, searchProjection, tokensOf, type ProductRowProjection, type ProductSearchProjection,
@@ -771,29 +771,23 @@ async function searchPage(tenantId: string, orgId: string, q: string, query: Pro
   };
 }
 
-/** ADR 1110 D1 + round fix — the catalog and order indexes' upkeep, run by their own
- *  sweep (`catalogIndexSweep.ts`, so a long rebuild never holds up reservation release):
- *  unfinished write intents every tick (bounded, fresh ones left to their writers), one
- *  queued background build per tick, and once per UTC HOUR a drift check of every built
- *  tenant of both types (a mismatch queues a rebuild; counters are recounted) plus a
- *  backfill queue for product tenants whose index was never built. Hourly, not daily: an
- *  older revision still serving during a deploy overlap writes rows without markers, and
- *  those must reappear in lists within the hour, not the next day. */
+/** ADR 1110 D1 — commerce's own hourly index step: queue a background build for each
+ *  product tenant whose index was never built. The generic upkeep (intent repair, queued
+ *  builds, the hourly drift check of every indexed type) is the entities sweep's
+ *  (`features/entities/systemIndexSweep.ts`, ADR 1155 P3a); commerce no longer runs its
+ *  own copy of it. Run by `catalogIndexSweep.ts`. */
 const catalogIndexDay = new DurableCollection<{ k: string; day: number }>('commerce:catalog-index-day', (r) => r.k);
-export async function repairCatalogIndex(now = Date.now()): Promise<{ repaired: number; built: number; drifted: number }> {
-  const { repaired } = await repairSystemIndex({ limit: 100, now });
-  const builtNow = await drainSystemIndexBuilds({ limit: 1 });
+export async function queueUnbuiltCatalogIndexes(now = Date.now()): Promise<{ queued: number }> {
   const hour = Math.floor(now / 3_600_000);
   const cur = await catalogIndexDay.get('day');
-  if (cur && cur.day >= hour) return { repaired, built: builtNow, drifted: 0 };
-  if (!(await catalogIndexDay.compareAndSwap(cur, { k: 'day', day: hour }))) return { repaired, built: builtNow, drifted: 0 };
-  let drifted = 0;
-  for (const type of [COMMERCE_PRODUCT_TYPE, COMMERCE_ORDER_TYPE]) {
-    for await (const tenantId of builtTenants(type)) if (!(await checkSystemIndex(tenantId, type))) drifted += 1;
+  if (cur && cur.day >= hour) return { queued: 0 };
+  if (!(await catalogIndexDay.compareAndSwap(cur, { k: 'day', day: hour }))) return { queued: 0 };
+  let queued = 0;
+  for (const tenantId of await listSystemTypeTenants(COMMERCE_PRODUCT_TYPE)) {
+    await queueSystemIndexBuild(tenantId, COMMERCE_PRODUCT_TYPE);
+    queued += 1;
   }
-  for (const tenantId of await listSystemTypeTenants(COMMERCE_PRODUCT_TYPE)) await queueSystemIndexBuild(tenantId, COMMERCE_PRODUCT_TYPE);
-  if (drifted > 0) log.warn('catalog_index_drift_queued', { tenants: drifted });
-  return { repaired, built: builtNow, drifted };
+  return { queued };
 }
 
 /** ADR 1104 gauge — read-only: tenants whose catalog index drifted from the kernel, and

@@ -30,6 +30,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { DurableCollection, publishHostExtEvent, subscribeHostExtEvent } from './hostExtPersistence.js';
 import { onWorkflowForked } from './workflowsRegistry.js';
 import { registerTenantIndexAdoption } from './tenantIndexAdoption.js';
+import {
+  __clearSystemIndexType, afterSystemWrite, beforeSystemWrite, ensureSystemIndexBuilt, familyPrefix, indexedFamilyCount, listIndexPage, registerStoreIndex, resyncSystemRow,
+} from '../features/entities/systemIndex.js';
 import { casRepoint } from './forkRepoint.js';
 import type { Subject } from './subject.js';
 import { registerSubjectEraser } from './subjectErasure.js';
@@ -39,7 +42,7 @@ import { getRetentionHold } from './retentionHold.js';
 import { isWorkspaceMember } from './accessControlService.js';
 import { subjectReadAllowed, subjectRoleResolver } from './subjectAccess.js';
 import { isPersonalTenantId } from './requestSubject.js';
-import { emitAssignmentNotification } from './kanbanAssignmentNotify.js';
+import { emitAssignmentNotification, withdrawDueNotifications } from './kanbanAssignmentNotify.js';
 
 /** Opaque hold state shared by restore, selection and erasure (ADR 0963 D3). */
 export const RESTORE_NOTE_MARK = '[auto:run-restore]';
@@ -158,6 +161,11 @@ export interface KanbanCard {
   estimateHours?: number;
   /** Free-form labels (host.kanban automateRules `label-changed` triggers). */
   labels?: string[];
+  /** ADR 1155 D1 — stable grouping keys (`{ stage: 'rough-in', room: 'r-12' }`):
+   *  at most {@link FACETS_MAX} keys, each {@link FACET_KEY_RE}, each value
+   *  1–{@link FACET_VALUE_MAX} characters. Labels are free tags; facets are what
+   *  a board groups and filters by. */
+  facets?: KanbanCardFacets;
   /** Ids of tasks this one depends on (host.kanban timelinePlan critical path,
    *  getReadyTasks). A lightweight DAG over cards on the same board. */
   dependsOn?: string[];
@@ -173,6 +181,73 @@ export interface KanbanCard {
 }
 
 export interface KanbanCardSourceRef { label: string; path: string }
+
+/** ADR 1155 D1 — a card's grouping keys. */
+export type KanbanCardFacets = Record<string, string>;
+export const FACETS_MAX = 8;
+export const FACET_KEY_RE = /^[a-z][a-z0-9_-]{0,31}$/;
+export const FACET_VALUE_MAX = 64;
+// Control characters, including the C1 range and the line/paragraph separators.
+const FACET_VALUE_BAD = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+
+function facetsInvalid(why: string): Error {
+  return boardCommandError('kanban_card_invalid', `Card facets ${why}`);
+}
+
+function assertFacetKey(key: string): void {
+  if (!FACET_KEY_RE.test(key)) throw facetsInvalid(`need lower-case keys of at most 32 characters ('${key.slice(0, 40)}').`);
+}
+
+function assertFacetValue(key: string, value: unknown): asserts value is string {
+  if (typeof value !== 'string' || value.trim().length === 0 || value.length > FACET_VALUE_MAX || FACET_VALUE_BAD.test(value)) {
+    throw facetsInvalid(`'${key}' needs a value of 1–${FACET_VALUE_MAX} characters with no control characters.`);
+  }
+}
+
+/** ADR 1155 D1 — a complete facet map, validated and copied. Throws `kanban_card_invalid`. */
+export function assertFacets(value: unknown): KanbanCardFacets {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw facetsInvalid('must be an object of string values.');
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > FACETS_MAX) throw facetsInvalid(`can have at most ${FACETS_MAX} keys.`);
+  const out: KanbanCardFacets = {};
+  for (const [key, v] of entries) {
+    assertFacetKey(key);
+    assertFacetValue(key, v);
+    out[key] = v;
+  }
+  return out;
+}
+
+/** ADR 1155 D1 — a facet PATCH: `null` clears the map; a key set to `null` clears
+ *  that key and keeps the rest. Validated here; the key count is checked on the
+ *  merged result ({@link mergeFacets}). */
+export function assertFacetPatch(value: unknown): Record<string, string | null> | null {
+  if (value === null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) throw facetsInvalid('must be an object, or null to clear them.');
+  const out: Record<string, string | null> = {};
+  for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+    assertFacetKey(key);
+    if (v === null) { out[key] = null; continue; }
+    assertFacetValue(key, v);
+    out[key] = v;
+  }
+  return out;
+}
+
+function mergeFacets(current: KanbanCardFacets | undefined, patch: Record<string, string | null>): KanbanCardFacets | undefined {
+  const next: KanbanCardFacets = { ...(current ?? {}) };
+  for (const [key, v] of Object.entries(patch)) {
+    if (v === null) delete next[key];
+    else next[key] = v;
+  }
+  if (Object.keys(next).length > FACETS_MAX) throw facetsInvalid(`can have at most ${FACETS_MAX} keys.`);
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
+function sameFacets(a: KanbanCardFacets | undefined, b: KanbanCardFacets | undefined): boolean {
+  const ak = Object.keys(a ?? {});
+  return ak.length === Object.keys(b ?? {}).length && ak.every((k) => (b ?? {})[k] === (a ?? {})[k]);
+}
 
 const SOURCE_REF_LABEL_MAX = 80;
 const SOURCE_REF_PATH_MAX = 512;
@@ -525,6 +600,9 @@ export interface KanbanWorkItemProposal {
   assignmentReason?: string;
   sourceLabel?: string;
   labels?: string[];
+  /** ADR 1155 D1 — the card's grouping keys. A source-owned fact: written at
+   *  create and kept in step by `refresh`. */
+  facets?: KanbanCardFacets;
 }
 
 export interface MaterializeKanbanWorkItemsCommand {
@@ -550,7 +628,8 @@ export interface MaterializeKanbanWorkItemsCommand {
 
 /** The set of editable card fields. A combined content + lane mutation is one
  * canonical command, so an invalid destination cannot leave its content half
- * persisted. `null` is intentionally limited to the two assignment clears. */
+ * persisted. `null` clears only the fields that say so below (the two
+ * assignment clears, `dueAt`, `sourceRef`, `handoff`, `lastRunStatus`). */
 export interface KanbanCardPatch {
   title?: string;
   description?: string;
@@ -565,7 +644,9 @@ export interface KanbanCardPatch {
   /** ADR 1138 D1 — `null` clears it. */
   sourceRef?: KanbanCardSourceRef | null;
   priority?: 'low' | 'normal' | 'high';
-  dueAt?: string;
+  /** ADR 1155 D6 — `null` clears it. Clearing or changing it withdraws the
+   *  assignee's open due notices for the card (ADR 1138). */
+  dueAt?: string | null;
   createdBy?: string;
   assignmentReason?: string;
   blockerNote?: string;
@@ -577,6 +658,8 @@ export interface KanbanCardPatch {
   handoffAt?: string;
   estimateHours?: number;
   labels?: string[];
+  /** ADR 1155 D1 — `null` clears the map; a key set to `null` clears that key. */
+  facets?: Record<string, string | null> | null;
   dependsOn?: string[];
 }
 
@@ -600,7 +683,69 @@ export interface PatchKanbanCardCommand {
   precondition?: (card: KanbanCard, board: KanbanBoard) => boolean;
 }
 
-export type KanbanBoardCommand = MaterializeKanbanWorkItemsCommand | PatchKanbanCardCommand;
+/** ADR 1155 D4 — one card of a batch create, named by its source's own id. */
+export interface KanbanBatchCardInput {
+  /** 1–200 characters, unique in the batch. The card id is derived from it, so a
+   *  retried or resumed batch converges on the same cards. */
+  sourceId: string;
+  title: string;
+  columnId: string;
+  description?: string;
+  dueAt?: string;
+  assigneeId?: string;
+  assigneeRole?: string;
+  priority?: 'low' | 'normal' | 'high';
+  labels?: string[];
+  facets?: KanbanCardFacets;
+  sourceLabel?: string;
+  sourceRef?: KanbanCardSourceRef;
+}
+
+/** ADR 1155 D4 — create up to `KANBAN_BATCH_CREATE_MAX` plain cards in one command.
+ *  Host code only (an adopter's backend, a feature): it trusts its caller like every
+ *  `applyBoardCommand`. Every item is validated before anything is written; then each
+ *  card is its own atomic write, and the result names each item's outcome. */
+export interface CreateKanbanCardsBatchCommand {
+  type: 'cards.create-batch';
+  tenantId: string;
+  boardId: string;
+  items: KanbanBatchCardInput[];
+  /** `skip` (default) leaves an existing card alone; `refresh` updates only the facts
+   *  its source owns (ADR 1137 D3), never a card in a terminal lane. */
+  onExisting?: 'skip' | 'refresh';
+  /** Default false: a 6,000-card import must not send 6,000 notices. Due reminders
+   *  (ADR 1138) still reach dated, assigned cards. */
+  notifyAssignees?: boolean;
+}
+
+export type KanbanBatchCreateStatus = 'created' | 'existing' | 'refreshed' | 'collision' | 'failed';
+export interface CreateKanbanCardsBatchResult {
+  items: Array<{ sourceId: string; cardId: string; status: KanbanBatchCreateStatus; error?: string }>;
+}
+
+/** ADR 1155 D5 — the fields a batch may change: re-dating and grouping only.
+ *  Assignment, moves and content keep their single-card paths and side effects. */
+export interface KanbanBatchCardPatch {
+  dueAt?: string | null;
+  priority?: 'low' | 'normal' | 'high';
+  labels?: string[];
+  facets?: Record<string, string | null> | null;
+}
+
+/** ADR 1155 D5 — patch up to `KANBAN_BATCH_PATCH_MAX` cards, each under its own CAS. */
+export interface PatchKanbanCardsBatchCommand {
+  type: 'cards.patch-batch';
+  tenantId: string;
+  boardId: string;
+  items: Array<{ cardId: string; expectedVersion?: number; patch: KanbanBatchCardPatch }>;
+}
+
+export type KanbanBatchPatchStatus = 'updated' | 'unchanged' | 'conflict' | 'not_found' | 'invalid' | 'failed';
+export interface PatchKanbanCardsBatchResult {
+  items: Array<{ cardId: string; status: KanbanBatchPatchStatus; card?: KanbanCard; error?: string }>;
+}
+
+export type KanbanBoardCommand = MaterializeKanbanWorkItemsCommand | PatchKanbanCardCommand | CreateKanbanCardsBatchCommand | PatchKanbanCardsBatchCommand;
 
 export interface MaterializeKanbanWorkItemsResult {
   dryRun: boolean;
@@ -681,7 +826,112 @@ export function workingColumnOf(board: KanbanBoard): KanbanColumn | undefined {
 const boards = new DurableCollection<KanbanBoard>('kanban:board', (b) => b.id);
 // ADR 0872 — indexed by the stamped board tenant. An unstamped (legacy) row maps
 // to '' and gets no marker; it keeps the index unverified until it is stamped.
-const cards = new DurableCollection<KanbanCard>('kanban:card', (c) => c.id, undefined, (c) => c.tenantId ?? '');
+const cardRows = new DurableCollection<KanbanCard>('kanban:card', (c) => c.id, undefined, (c) => c.tenantId ?? '');
+
+// ADR 1155 P3b — the card read index: an ADR 1110 P5 store index over `kanban:card`
+// (host imports the core entities index directly; decided 2026-11-23). Families:
+//   board      [boardId, columnId, order]  every stamped card; the counted family
+//   board-due  [boardId, dueAt | '~']
+//   assignee   [userId, dueAt | '~']
+//   role       [roleKey, dueAt | '~']
+// Facets are not indexed: every marker costs one more write per card write (measured,
+// ADR 1155 P3a), so only a board's group-by key will be, with D7. Nothing reads the
+// index yet; P3c moves the board and assigned reads onto it.
+export const KANBAN_CARD_TYPE = 'kanban.card';
+const NO_DUE = '~';
+/** A card's `order` (any finite double, fractional and negative included) as a key
+ *  that sorts like the number: IEEE 754 bits, sign-flipped so negatives come first. */
+export function sortableOrder(n: number): string {
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, Number.isFinite(n) ? n : 0);
+  let hi = view.getUint32(0);
+  let lo = view.getUint32(4);
+  if (hi & 0x80000000) { hi = ~hi >>> 0; lo = ~lo >>> 0; } else { hi = (hi | 0x80000000) >>> 0; }
+  return hi.toString(16).padStart(8, '0') + lo.toString(16).padStart(8, '0');
+}
+type BoardFamily = 'board' | 'board-due';
+function boardMarkerSegments(c: KanbanCard, family: BoardFamily): string[] {
+  return family === 'board' ? [c.boardId, c.columnId, sortableOrder(c.order)] : [c.boardId, c.dueAt ?? NO_DUE];
+}
+/** The facts a board page filters on: small, and never free text. A type alias, not an
+ *  interface, so it fits a marker's `Record<string, unknown>` projection. */
+type KanbanCardIndexFacts = {
+  columnId: string;
+  dueAt?: string;
+  assigneeId?: string;
+  assigneeRole?: string;
+  completedAt?: string;
+  labels?: string[];
+};
+function cardFactsOf(c: KanbanCard): KanbanCardIndexFacts {
+  return {
+    columnId: c.columnId,
+    ...(c.dueAt ? { dueAt: c.dueAt } : {}),
+    ...(c.assigneeId ? { assigneeId: c.assigneeId } : {}),
+    ...(c.assigneeRole ? { assigneeRole: c.assigneeRole } : {}),
+    ...(c.completedAt ? { completedAt: c.completedAt } : {}),
+    ...(c.labels?.length ? { labels: c.labels } : {}),
+  };
+}
+registerStoreIndex<KanbanCard>(KANBAN_CARD_TYPE, {
+  isRow: (v): v is KanbanCard => typeof v === 'object' && v !== null && typeof (v as KanbanCard).id === 'string' && typeof (v as KanbanCard).boardId === 'string',
+  idOf: (c) => c.id,
+  tenantOf: (c) => c.tenantId ?? '',
+  orgOf: () => undefined,
+  countedFamily: 'board',
+  markers: (c) => {
+    const due = c.dueAt ?? NO_DUE;
+    const facts = cardFactsOf(c);
+    return [
+      // Both board families carry the filter facts, so a page in either order filters
+      // without reading a row (ADR 1155 P3c-1).
+      { family: 'board', segments: boardMarkerSegments(c, 'board'), p: facts },
+      { family: 'board-due', segments: boardMarkerSegments(c, 'board-due'), p: facts },
+      ...(c.assigneeId ? [{ family: 'assignee', segments: [c.assigneeId, due], p: {} }] : []),
+      ...(c.assigneeRole ? [{ family: 'role', segments: [c.assigneeRole, due], p: {} }] : []),
+    ];
+  },
+  read: async (tenantId, id) => { const c = await cardRows.get(id); return c && c.tenantId === tenantId ? c : null; },
+  scan: async function* (tenantId) { for (const c of await cardRows.listForTenantIndexed(tenantId)) if (c.tenantId === tenantId) yield c; },
+  count: (tenantId) => cardRows.countForTenantIndexed(tenantId),
+});
+/** A card with a tenant is indexed; a legacy unstamped card (ADR 0872 D3) is not until
+ *  the hourly stamp gives it one, which is itself a write through this store. */
+const stamped = (c: KanbanCard | null | undefined): c is KanbanCard & { tenantId: string } => typeof c?.tenantId === 'string' && c.tenantId.length > 0;
+/** The card store with the index's hooks around every write (the commerce `orders`
+ *  shape): intent before, sync after; an index failure never fails the card write.
+ *  Every card write in this module goes through here (ratchet: adr1155-p3b-card-index). */
+const cards = {
+  get: (id: string) => cardRows.get(id),
+  list: () => cardRows.list(),
+  listForTenantIndexed: (tenantId: string) => cardRows.listForTenantIndexed(tenantId),
+  tenantIndexVerified: () => cardRows.tenantIndexVerified(),
+  async put(c: KanbanCard): Promise<void> {
+    if (stamped(c)) await beforeSystemWrite(KANBAN_CARD_TYPE, c.tenantId, c.id, c);
+    await cardRows.put(c);
+    if (stamped(c)) await afterSystemWrite(KANBAN_CARD_TYPE, c.tenantId, c.id, c);
+  },
+  async putIfAbsent(c: KanbanCard): Promise<boolean> {
+    if (stamped(c)) await beforeSystemWrite(KANBAN_CARD_TYPE, c.tenantId, c.id, c);
+    const ok = await cardRows.putIfAbsent(c);
+    if (stamped(c)) await afterSystemWrite(KANBAN_CARD_TYPE, c.tenantId, c.id, ok ? c : await cardRows.get(c.id));
+    return ok;
+  },
+  async compareAndSwap(expected: KanbanCard | null, next: KanbanCard): Promise<boolean> {
+    if (stamped(next)) await beforeSystemWrite(KANBAN_CARD_TYPE, next.tenantId, next.id, next);
+    const ok = await cardRows.compareAndSwap(expected, next);
+    if (stamped(next)) await afterSystemWrite(KANBAN_CARD_TYPE, next.tenantId, next.id, ok ? next : await cardRows.get(next.id));
+    return ok;
+  },
+  async delete(id: string): Promise<boolean> {
+    const cur = await cardRows.get(id);
+    if (stamped(cur)) await beforeSystemWrite(KANBAN_CARD_TYPE, cur.tenantId, id, null);
+    const gone = await cardRows.delete(id);
+    if (stamped(cur)) await afterSystemWrite(KANBAN_CARD_TYPE, cur.tenantId, id, null);
+    return gone;
+  },
+  __clear: () => cardRows.__clear(),
+};
 const workItems = new DurableCollection<KanbanWorkItem>(
   'kanban:work-item',
   (item) => item.workItemId,
@@ -765,7 +1015,7 @@ export async function stampCardTenants(): Promise<{ stamped: number; orphans: nu
   return { stamped, orphans };
 }
 
-registerTenantIndexAdoption('kanban:card', cards, { beforeReconcile: async () => { await stampCardTenants(); } });
+registerTenantIndexAdoption('kanban:card', cardRows, { beforeReconcile: async () => { await stampCardTenants(); } });
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -962,6 +1212,214 @@ export async function deleteBoard(boardId: string): Promise<boolean> {
 
 const byColumnThenOrder = (a: KanbanCard, b: KanbanCard): number => a.columnId.localeCompare(b.columnId) || a.order - b.order;
 
+// ── ADR 1155 D3 / P3c-1 — one page of a board's cards, filtered on the server ─────────
+// The read pages the card index (P3b) by key range and filters on the facts each
+// marker carries, then point-reads only the page. While a large tenant's index is
+// still building, the same query runs over today's read and returns the same shape,
+// the same order and the same cursors. The stored row is truth: a card whose row no
+// longer matches its marker is dropped from the page and its markers are re-synced.
+
+export const KANBAN_PAGE_MAX = 100;
+export const KANBAN_PAGE_DEFAULT = 50;
+
+export interface KanbanBoardPageQuery {
+  /** 1–100. */
+  limit: number;
+  /** An opaque value from the previous page's `nextCursor`, bound to this query. */
+  cursor?: string;
+  /** Any of these columns. */
+  columns?: string[];
+  /** `order` (column, then position) or `dueAt` (ascending, undated last). */
+  sort?: 'order' | 'dueAt';
+  /** Inclusive ISO bounds on `dueAt`. A card with no `dueAt` never matches a date filter. */
+  dueFrom?: string;
+  dueTo?: string;
+  /** `dueAt` is before now and the card is not in a terminal lane. */
+  overdue?: boolean;
+  /** A user id, `none`, or `role:<key>`. The route resolves `me`. */
+  assignee?: string;
+  /** Any of these labels. */
+  labels?: string[];
+}
+
+export interface KanbanBoardPage {
+  cards: KanbanCard[];
+  /** Every card on the board that matches, across all pages. */
+  total: number;
+  nextCursor?: string;
+}
+
+const PAGE_SCAN = 200;
+const PAGE_READ_CONCURRENCY = 4;
+
+function pageFamily(q: KanbanBoardPageQuery): BoardFamily {
+  return q.sort === 'dueAt' ? 'board-due' : 'board';
+}
+
+/** The narrowest key range the query allows: one column when only one is asked for. */
+function pageSegments(boardId: string, q: KanbanBoardPageQuery): string[] {
+  return pageFamily(q) === 'board' && q.columns?.length === 1 ? [boardId, q.columns[0]!] : [boardId];
+}
+
+/** True when the slice alone answers the query, so `total` is a counted read. */
+function sliceOnly(q: KanbanBoardPageQuery): boolean {
+  const columnsInSlice = !q.columns?.length || (pageFamily(q) === 'board' && q.columns.length === 1);
+  return columnsInSlice && !q.dueFrom && !q.dueTo && !q.overdue && q.assignee === undefined && !q.labels?.length;
+}
+
+function factsMatch(board: KanbanBoard, f: KanbanCardIndexFacts, q: KanbanBoardPageQuery, nowMs: number): boolean {
+  if (q.columns?.length && !q.columns.includes(f.columnId)) return false;
+  if (q.dueFrom || q.dueTo || q.overdue) {
+    if (!f.dueAt) return false;
+    if (q.dueFrom && f.dueAt < q.dueFrom) return false;
+    if (q.dueTo && f.dueAt > q.dueTo) return false;
+    if (q.overdue && (Date.parse(f.dueAt) >= nowMs || isTerminalColumn(board, f.columnId))) return false;
+  }
+  if (q.assignee !== undefined) {
+    if (q.assignee === 'none') { if (f.assigneeId || f.assigneeRole) return false; }
+    else if (q.assignee.startsWith('role:')) { if (f.assigneeRole !== q.assignee.slice('role:'.length)) return false; }
+    else if (f.assigneeId !== q.assignee) return false;
+  }
+  if (q.labels?.length && !(f.labels ?? []).some((l) => q.labels!.includes(l))) return false;
+  return true;
+}
+
+function isFacts(p: Record<string, unknown>): p is Record<string, unknown> & KanbanCardIndexFacts {
+  return typeof p.columnId === 'string';
+}
+
+/** The query a cursor is bound to: a cursor reused with another query is refused. */
+function pageQueryHash(boardId: string, q: KanbanBoardPageQuery): string {
+  const norm = {
+    b: boardId,
+    c: [...(q.columns ?? [])].sort(),
+    s: q.sort ?? 'order',
+    f: q.dueFrom ?? null,
+    t: q.dueTo ?? null,
+    o: q.overdue === true,
+    a: q.assignee ?? null,
+    l: [...(q.labels ?? [])].sort(),
+  };
+  return createHash('sha256').update(JSON.stringify(norm)).digest('hex').slice(0, 16);
+}
+
+function encodePageCursor(hash: string, key: string): string {
+  return Buffer.from(JSON.stringify({ h: hash, k: key }), 'utf8').toString('base64url');
+}
+
+function decodePageCursor(cursor: string, hash: string): string {
+  try {
+    const o = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as { h?: unknown; k?: unknown };
+    if (o.h === hash && typeof o.k === 'string' && o.k.length > 0) return o.k;
+  } catch { /* fall through */ }
+  throw boardCommandError('kanban_cursor_invalid', 'This cursor belongs to a different query. Start again without it.');
+}
+
+const keyAfter = (a: string, b: string): boolean => Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8')) > 0;
+
+/** A card's key in the family the page walks: the marker key a built index stores. */
+function pageKeyOf(c: KanbanCard & { tenantId: string }, family: BoardFamily): string {
+  return `${familyPrefix(c.tenantId, KANBAN_CARD_TYPE, family, undefined, boardMarkerSegments(c, family))}${encodeURIComponent(c.id)}`;
+}
+
+async function readCardsBounded(ids: readonly string[]): Promise<(KanbanCard | null)[]> {
+  const out: (KanbanCard | null)[] = new Array(ids.length).fill(null);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < ids.length) { const i = next++; out[i] = await cards.get(ids[i]!); }
+  };
+  await Promise.all(Array.from({ length: Math.min(PAGE_READ_CONCURRENCY, ids.length) }, worker));
+  return out;
+}
+
+export async function listBoardCardsPage(board: KanbanBoard, q: KanbanBoardPageQuery, now = Date.now()): Promise<KanbanBoardPage> {
+  if (!Number.isInteger(q.limit) || q.limit < 1 || q.limit > KANBAN_PAGE_MAX) {
+    throw boardCommandError('kanban_command_invalid', `limit must be a whole number from 1 to ${KANBAN_PAGE_MAX}.`);
+  }
+  const hash = pageQueryHash(board.id, q);
+  const after = q.cursor ? decodePageCursor(q.cursor, hash) : undefined;
+  const family = pageFamily(q);
+  const segments = pageSegments(board.id, q);
+
+  if ((await ensureSystemIndexBuilt(board.tenantId, KANBAN_CARD_TYPE)) === 'building') {
+    return boardPageFromRows(board, q, now, hash, after, family, segments);
+  }
+
+  // Index path. A counted slice reads only as far as the page; a filtered one walks the
+  // slice's markers (never its rows) once, so `total` counts every match.
+  const picked: { id: string; key: string }[] = [];
+  let total = 0;
+  const walkAll = !sliceOnly(q);
+  let cursor = walkAll || after === undefined ? undefined : Buffer.from(after, 'utf8').toString('base64url');
+  for (;;) {
+    const page = await listIndexPage(board.tenantId, KANBAN_CARD_TYPE, family, undefined, { segments, limit: PAGE_SCAN, ...(cursor ? { cursor } : {}) });
+    for (const row of page.rows) {
+      let facts: KanbanCardIndexFacts | null = isFacts(row.p) ? row.p : null;
+      if (!facts) {
+        // A marker without the facts projection (written before P3c-1 gave the board
+        // families one). It is never trusted or skipped: read its row, judge the row,
+        // and re-sync the markers so the next read finds the facts.
+        const c = await cards.get(row.id);
+        await resyncSystemRow(board.tenantId, KANBAN_CARD_TYPE, row.id).catch(() => undefined);
+        facts = c && c.boardId === board.id && c.tenantId === board.tenantId ? cardFactsOf(c) : null;
+      }
+      if (!facts || !factsMatch(board, facts, q, now)) continue;
+      total += 1;
+      const key = Buffer.from(row.cursor, 'base64url').toString('utf8');
+      if (after !== undefined && !keyAfter(key, after)) continue;
+      if (picked.length <= q.limit) picked.push({ id: row.id, key });
+    }
+    if (!page.cursor || page.rows.length < PAGE_SCAN) break;
+    if (!walkAll && picked.length > q.limit) break;
+    cursor = page.cursor;
+  }
+  if (!walkAll) total = await indexedFamilyCount(board.tenantId, KANBAN_CARD_TYPE, family, '_', segments);
+
+  const hasMore = picked.length > q.limit;
+  const onPage = picked.slice(0, q.limit);
+  const rows = await readCardsBounded(onPage.map((p) => p.id));
+  const out: KanbanCard[] = [];
+  for (let i = 0; i < onPage.length; i += 1) {
+    const c = rows[i];
+    if (c && c.boardId === board.id && c.tenantId === board.tenantId && factsMatch(board, cardFactsOf(c), q, now)) { out.push(c); continue; }
+    // The marker was stale: the row moved, changed or went. Heal it; the next page is right.
+    await resyncSystemRow(board.tenantId, KANBAN_CARD_TYPE, onPage[i]!.id).catch(() => undefined);
+  }
+  return {
+    cards: out,
+    total,
+    ...(hasMore ? { nextCursor: encodePageCursor(hash, onPage[onPage.length - 1]!.key) } : {}),
+  };
+}
+
+/** Test-only: the while-building path for any tenant size, so a test can show it
+ *  returns what the index path returns. */
+export async function __listBoardCardsPageFromRows(board: KanbanBoard, q: KanbanBoardPageQuery, now = Date.now()): Promise<KanbanBoardPage> {
+  const hash = pageQueryHash(board.id, q);
+  return boardPageFromRows(board, q, now, hash, q.cursor ? decodePageCursor(q.cursor, hash) : undefined, pageFamily(q), pageSegments(board.id, q));
+}
+
+/** The same page over today's read (`listCards`), while the index builds. */
+async function boardPageFromRows(
+  board: KanbanBoard, q: KanbanBoardPageQuery, now: number, hash: string, after: string | undefined,
+  family: BoardFamily, segments: string[],
+): Promise<KanbanBoardPage> {
+  const prefix = familyPrefix(board.tenantId, KANBAN_CARD_TYPE, family, undefined, segments);
+  const keyed = (await listCards(board.id))
+    .filter((c): c is KanbanCard & { tenantId: string } => stamped(c) && c.tenantId === board.tenantId)
+    .map((c) => ({ c, key: pageKeyOf(c, family) }))
+    .filter((e) => e.key.startsWith(prefix) && factsMatch(board, cardFactsOf(e.c), q, now))
+    .sort((a, b) => Buffer.compare(Buffer.from(a.key, 'utf8'), Buffer.from(b.key, 'utf8')));
+  const rest = after === undefined ? keyed : keyed.filter((e) => keyAfter(e.key, after));
+  const onPage = rest.slice(0, q.limit);
+  return {
+    cards: onPage.map((e) => e.c),
+    total: keyed.length,
+    ...(rest.length > q.limit ? { nextCursor: encodePageCursor(hash, onPage[onPage.length - 1]!.key) } : {}),
+  };
+}
+
+
 /** A board's cards, for display and the work loop (ADR 0872 D4: indexed once
  *  verified; a missed card shows after the next hourly repair). A decision that
  *  must see every card (dedupe, caps, repoint) uses {@link listCardsExact}. */
@@ -1045,6 +1503,8 @@ export async function createCard(input: {
   assigneeRole?: string;
   estimateHours?: number;
   labels?: string[];
+  /** ADR 1155 D1. */
+  facets?: KanbanCardFacets;
   dependsOn?: string[];
   /** Internal core projection link; only `applyBoardCommand` should supply it. */
   workItemId?: string;
@@ -1069,6 +1529,7 @@ export async function createCard(input: {
   if (!board) throw new Error(`kanban_board_not_found: ${input.boardId}`);
   if (input.assigneeRole !== undefined) assertAssigneeRoleFits(board, input.assigneeRole);
   if (input.sourceRef !== undefined) assertSourceRef(input.sourceRef);
+  const facets = input.facets !== undefined ? assertFacets(input.facets) : undefined;
   // Ordering only (D4): a missed sibling can only repeat an `order`.
   const siblings = (await cardsOnBoards(board.tenantId, new Set([board.id]))).filter((c) => c.columnId === input.columnId);
   const card: KanbanCard = {
@@ -1093,6 +1554,7 @@ export async function createCard(input: {
     ...(input.assigneeRole !== undefined ? { assigneeRole: input.assigneeRole } : {}),
     ...(input.estimateHours !== undefined ? { estimateHours: input.estimateHours } : {}),
     ...(input.labels !== undefined ? { labels: input.labels } : {}),
+    ...(facets !== undefined && Object.keys(facets).length > 0 ? { facets } : {}),
     ...(input.dependsOn !== undefined ? { dependsOn: input.dependsOn } : {}),
     ...(input.workItemId !== undefined ? { workItemId: input.workItemId } : {}),
     version: 1,
@@ -1434,6 +1896,11 @@ function assertAssignmentShape(item: KanbanWorkItemProposal): void {
     || item.labels.some((l) => typeof l !== 'string' || l.trim().length === 0 || l.length > LABEL_MAX))) {
     throw boardCommandError('kanban_work_items_invalid', `Work item '${item.key}' has invalid labels (at most ${LABELS_MAX}, each 1–${LABEL_MAX} characters).`);
   }
+  if (item.facets !== undefined) {
+    try { assertFacets(item.facets); } catch (err) {
+      throw boardCommandError('kanban_work_items_invalid', `Work item '${item.key}': ${err instanceof Error ? err.message : 'invalid facets'}`);
+    }
+  }
 }
 
 /**
@@ -1476,7 +1943,7 @@ async function assertAssigneesCanRead(board: KanbanBoard, items: readonly Kanban
 
 /** ADR 1137 D3 — the source-owned fields a refresh may change, and only those. */
 /** ADR 1137 D3 — the facts a card's SOURCE owns, and so may refresh. */
-export interface KanbanCardFacts { title: string; description?: string; dueAt?: string; sourceLabel?: string }
+export interface KanbanCardFacts { title: string; description?: string; dueAt?: string; sourceLabel?: string; facets?: KanbanCardFacets }
 
 function refreshPatchFor(card: KanbanCard, proposal: KanbanCardFacts): KanbanCardPatch {
   const patch: KanbanCardPatch = {};
@@ -1484,6 +1951,13 @@ function refreshPatchFor(card: KanbanCard, proposal: KanbanCardFacts): KanbanCar
   if ((proposal.description ?? '') !== (card.description ?? '')) patch.description = proposal.description ?? '';
   if (proposal.dueAt !== undefined && proposal.dueAt !== card.dueAt) patch.dueAt = proposal.dueAt;
   if (proposal.sourceLabel !== undefined && proposal.sourceLabel !== card.sourceLabel) patch.sourceLabel = proposal.sourceLabel;
+  // ADR 1155 D1 — the source's map replaces the card's: keys it dropped clear.
+  if (proposal.facets !== undefined && !sameFacets(proposal.facets, card.facets)) {
+    patch.facets = {
+      ...Object.fromEntries(Object.keys(card.facets ?? {}).map((k) => [k, null])),
+      ...proposal.facets,
+    };
+  }
   return patch;
 }
 
@@ -1506,13 +1980,14 @@ export async function refreshCardFacts(board: KanbanBoard, card: KanbanCard, fac
 }
 
 /** ADR 1137 D1 — the assignment fields a proposal puts on the card it creates. */
-function assignmentFieldsOf(proposal: KanbanWorkItemProposal): Pick<KanbanCard, 'assigneeId' | 'assigneeRole' | 'assignmentReason' | 'sourceLabel' | 'labels'> {
+function assignmentFieldsOf(proposal: KanbanWorkItemProposal): Pick<KanbanCard, 'assigneeId' | 'assigneeRole' | 'assignmentReason' | 'sourceLabel' | 'labels' | 'facets'> {
   return {
     ...(proposal.assigneeId !== undefined ? { assigneeId: proposal.assigneeId.trim() } : {}),
     ...(proposal.assigneeRole !== undefined ? { assigneeRole: proposal.assigneeRole.trim() } : {}),
     ...(proposal.assignmentReason !== undefined ? { assignmentReason: proposal.assignmentReason } : {}),
     ...(proposal.sourceLabel !== undefined ? { sourceLabel: proposal.sourceLabel } : {}),
     ...(proposal.labels !== undefined ? { labels: [...proposal.labels] } : {}),
+    ...(proposal.facets !== undefined && Object.keys(proposal.facets).length > 0 ? { facets: { ...proposal.facets } } : {}),
   };
 }
 
@@ -1569,14 +2044,18 @@ async function recordWorkItemCommandEvent(
  * visible to every core caller. */
 export function applyBoardCommand(command: MaterializeKanbanWorkItemsCommand): Promise<MaterializeKanbanWorkItemsResult>;
 export function applyBoardCommand(command: PatchKanbanCardCommand): Promise<PatchKanbanCardResult>;
+export function applyBoardCommand(command: CreateKanbanCardsBatchCommand): Promise<CreateKanbanCardsBatchResult>;
+export function applyBoardCommand(command: PatchKanbanCardsBatchCommand): Promise<PatchKanbanCardsBatchResult>;
 /** Reviewed-plan materialization uses deterministic aggregate/card/event ids
  * and `putIfAbsent` so a retry after any partial durable write converges without
  * duplicate work or delivery. `dryRun` validates and projects exactly the
  * records that a real command would create, but writes nothing. */
 export async function applyBoardCommand(
   command: KanbanBoardCommand,
-): Promise<MaterializeKanbanWorkItemsResult | PatchKanbanCardResult> {
+): Promise<MaterializeKanbanWorkItemsResult | PatchKanbanCardResult | CreateKanbanCardsBatchResult | PatchKanbanCardsBatchResult> {
   if (command.type === 'card.patch') return applyKanbanCardPatchCommand(command);
+  if (command.type === 'cards.create-batch') return applyCardsCreateBatch(command);
+  if (command.type === 'cards.patch-batch') return applyCardsPatchBatch(command);
   if (command.type !== 'work-items.materialize') {
     throw boardCommandError('kanban_command_unknown', 'Unsupported Kanban board command.');
   }
@@ -1723,7 +2202,8 @@ function applyKanbanCardPatch(card: KanbanCard, patch: KanbanCardPatch): KanbanC
   if (patch.sourceRef === null) delete next.sourceRef;
   else if (patch.sourceRef !== undefined) next.sourceRef = { label: patch.sourceRef.label, path: patch.sourceRef.path };
   if (patch.priority !== undefined) next.priority = patch.priority;
-  if (patch.dueAt !== undefined) next.dueAt = patch.dueAt;
+  if (patch.dueAt === null) delete next.dueAt;
+  else if (patch.dueAt !== undefined) next.dueAt = patch.dueAt;
   if (patch.createdBy !== undefined) next.createdBy = patch.createdBy;
   if (patch.assignmentReason !== undefined) next.assignmentReason = patch.assignmentReason;
   if (patch.blockerNote !== undefined) next.blockerNote = patch.blockerNote;
@@ -1739,6 +2219,11 @@ function applyKanbanCardPatch(card: KanbanCard, patch: KanbanCardPatch): KanbanC
   }
   if (patch.estimateHours !== undefined) next.estimateHours = patch.estimateHours;
   if (patch.labels !== undefined) next.labels = patch.labels;
+  if (patch.facets === null) delete next.facets;
+  else if (patch.facets !== undefined) {
+    const merged = mergeFacets(card.facets, patch.facets);
+    if (merged) next.facets = merged; else delete next.facets;
+  }
   if (patch.dependsOn !== undefined) next.dependsOn = patch.dependsOn;
   return next;
 }
@@ -1750,11 +2235,258 @@ function applyKanbanCardPatch(card: KanbanCard, patch: KanbanCardPatch): KanbanC
  * deliberately canvas-neutral: it only knows a board/card and returns an
  * optional normal workflow trigger for the caller's existing delivery bridge.
  */
+// ── ADR 1155 D4 / D5 (P4) — batch create and batch patch ─────────────────────────────
+// Caps sized from the P3a writes-per-card measurement: a card write costs 7 fixed kv
+// calls plus one per index marker. A create here is about 10 writes and 11 reads (no
+// facet is indexed), so 200 creates are about 4,200 kv calls. A re-date moves every
+// marker keyed on `dueAt` (about 13 writes), so 500 re-dates are about 6,500, run 4 at
+// a time. Each is a few seconds on Postgres: inside one request, and small enough that
+// a client can resume a large import batch by batch.
+export const KANBAN_BATCH_CREATE_MAX = 200;
+export const KANBAN_BATCH_PATCH_MAX = 500;
+const BATCH_CONCURRENCY = 4;
+const BATCH_PATCH_FIELDS = new Set(['dueAt', 'priority', 'labels', 'facets']);
+const PRIORITIES = new Set(['low', 'normal', 'high']);
+
+/** The card a source id names on a board: deterministic, so a retried or resumed
+ *  batch converges on the same cards instead of duplicating them. */
+export function batchCardIdOf(tenantId: string, boardId: string, sourceId: string): string {
+  return `card-src-${createHash('sha256').update([tenantId, boardId, sourceId].join('\u0000')).digest('hex').slice(0, 32)}`;
+}
+
+/** The inverse of `sortableOrder`. */
+function orderFromSortable(key: string): number {
+  if (!/^[0-9a-f]{16}$/.test(key)) return 0;
+  let hi = Number.parseInt(key.slice(0, 8), 16);
+  let lo = Number.parseInt(key.slice(8), 16);
+  if (hi & 0x80000000) hi = (hi & 0x7fffffff) >>> 0; else { hi = ~hi >>> 0; lo = ~lo >>> 0; }
+  const view = new DataView(new ArrayBuffer(8));
+  view.setUint32(0, hi);
+  view.setUint32(4, lo);
+  const n = view.getFloat64(0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/** The highest `order` in each column, so a batch appends after it. From the index's
+ *  column slice when it is built (markers only, never rows); otherwise one read of the
+ *  board's cards for the whole batch. A missed card can only repeat an order (D4). */
+async function columnTopOrders(board: KanbanBoard, columnIds: readonly string[]): Promise<Map<string, number>> {
+  const tops = new Map<string, number>();
+  if ((await ensureSystemIndexBuilt(board.tenantId, KANBAN_CARD_TYPE)) === 'built') {
+    for (const columnId of columnIds) {
+      const prefix = familyPrefix(board.tenantId, KANBAN_CARD_TYPE, 'board', undefined, [board.id, columnId]);
+      let last: string | undefined;
+      let cursor: string | undefined;
+      for (;;) {
+        const page = await listIndexPage(board.tenantId, KANBAN_CARD_TYPE, 'board', undefined, { segments: [board.id, columnId], limit: 500, ...(cursor ? { cursor } : {}) });
+        if (page.rows.length > 0) last = Buffer.from(page.rows[page.rows.length - 1]!.cursor, 'base64url').toString('utf8');
+        if (!page.cursor || page.rows.length < 500) break;
+        cursor = page.cursor;
+      }
+      if (last?.startsWith(prefix)) tops.set(columnId, orderFromSortable(last.slice(prefix.length).split(':')[0] ?? ''));
+    }
+    return tops;
+  }
+  for (const c of await cardsOnBoards(board.tenantId, new Set([board.id]))) {
+    if (columnIds.includes(c.columnId)) tops.set(c.columnId, Math.max(tops.get(c.columnId) ?? Number.NEGATIVE_INFINITY, c.order));
+  }
+  return tops;
+}
+
+/** Run `fn` over every index with at most `limit` in flight, keeping each result's slot. */
+async function mapBounded<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) { const i = next++; out[i] = await fn(items[i]!, i); }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+const isoOk = (v: unknown): v is string => typeof v === 'string' && Number.isFinite(Date.parse(v));
+const stringList = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === 'string');
+
+/** One batch item, checked before anything is written. */
+function assertBatchCardInput(board: KanbanBoard, item: KanbanBatchCardInput, index: number, seen: Set<string>): void {
+  const bad = (why: string): never => { throw boardCommandError('kanban_card_invalid', `Item ${index}: ${why}`); };
+  if (typeof item !== 'object' || item === null) bad('is not an object.');
+  if (typeof item.sourceId !== 'string' || item.sourceId.length === 0 || item.sourceId.length > 200) bad('sourceId must be 1–200 characters.');
+  if (seen.has(item.sourceId)) bad(`sourceId '${item.sourceId}' appears twice.`);
+  seen.add(item.sourceId);
+  if (typeof item.title !== 'string' || item.title.trim().length === 0) bad('title must be non-empty text.');
+  if (!board.columns.some((c) => c.id === item.columnId)) bad(`column '${String(item.columnId)}' is not on this board.`);
+  if (item.description !== undefined && typeof item.description !== 'string') bad('description must be text.');
+  if (item.dueAt !== undefined && !isoOk(item.dueAt)) bad('dueAt must be an ISO date.');
+  if (item.assigneeId !== undefined && (typeof item.assigneeId !== 'string' || item.assigneeId.trim().length === 0)) bad('assigneeId must be non-empty text.');
+  if (item.priority !== undefined && !PRIORITIES.has(item.priority)) bad('priority must be low, normal or high.');
+  if (item.labels !== undefined && !stringList(item.labels)) bad('labels must be a list of text.');
+  if (item.sourceLabel !== undefined && typeof item.sourceLabel !== 'string') bad('sourceLabel must be text.');
+  try {
+    if (item.assigneeRole !== undefined) assertAssigneeRoleFits(board, item.assigneeRole);
+    if (item.sourceRef !== undefined) assertSourceRef(item.sourceRef);
+    if (item.facets !== undefined) assertFacets(item.facets);
+  } catch (err) {
+    bad(err instanceof Error ? err.message : 'is invalid.');
+  }
+}
+
+async function applyCardsCreateBatch(command: CreateKanbanCardsBatchCommand): Promise<CreateKanbanCardsBatchResult> {
+  if (!command.tenantId || !command.boardId) throw boardCommandError('kanban_command_invalid', 'A batch create needs a tenant and a board.');
+  if (!Array.isArray(command.items) || command.items.length === 0 || command.items.length > KANBAN_BATCH_CREATE_MAX) {
+    throw boardCommandError('kanban_command_invalid', `A batch create takes 1–${KANBAN_BATCH_CREATE_MAX} items.`);
+  }
+  const onExisting = command.onExisting ?? 'skip';
+  if (onExisting !== 'skip' && onExisting !== 'refresh') throw boardCommandError('kanban_command_invalid', 'onExisting must be skip or refresh.');
+  const board = await boards.get(command.boardId);
+  if (!board || board.tenantId !== command.tenantId) throw boardCommandError('kanban_board_not_found', 'Board does not exist in this tenant.');
+
+  // Everything is checked before anything is written: one bad item fails the batch.
+  const seen = new Set<string>();
+  command.items.forEach((item, i) => assertBatchCardInput(board, item, i, seen));
+  for (const assigneeId of new Set(command.items.flatMap((i) => (i.assigneeId ? [i.assigneeId.trim()] : [])))) {
+    if (!(await assigneeCanSeeBoard(board, assigneeId))) {
+      throw boardCommandError('kanban_assignee_invalid', `The assignee '${assigneeId}' cannot see this board.`);
+    }
+  }
+
+  const tops = await columnTopOrders(board, [...new Set(command.items.map((i) => i.columnId))]);
+  const now = nowIso();
+  const planned = command.items.map((item) => {
+    const order = Math.max(tops.get(item.columnId) ?? 0, 0) + 1;
+    tops.set(item.columnId, order);
+    const card: KanbanCard = {
+      id: batchCardIdOf(board.tenantId, board.id, item.sourceId),
+      boardId: board.id,
+      tenantId: board.tenantId,
+      columnId: item.columnId,
+      title: item.title,
+      source: 'api',
+      ...(item.description !== undefined ? { description: item.description } : {}),
+      ...(item.sourceLabel !== undefined ? { sourceLabel: item.sourceLabel } : {}),
+      ...(item.sourceRef !== undefined ? { sourceRef: { label: item.sourceRef.label, path: item.sourceRef.path } } : {}),
+      ...(item.priority !== undefined ? { priority: item.priority } : {}),
+      ...(item.dueAt !== undefined ? { dueAt: new Date(item.dueAt).toISOString() } : {}),
+      ...(item.assigneeId !== undefined ? { assigneeId: item.assigneeId.trim() } : {}),
+      ...(item.assigneeRole !== undefined ? { assigneeRole: item.assigneeRole.trim() } : {}),
+      ...(item.labels !== undefined ? { labels: [...item.labels] } : {}),
+      ...(item.facets !== undefined && Object.keys(item.facets).length > 0 ? { facets: { ...item.facets } } : {}),
+      version: 1,
+      order,
+      createdAt: now,
+      updatedAt: now,
+    };
+    return { item, card };
+  });
+
+  // Each card is its own atomic write; a failure is reported for that item alone.
+  const items = await mapBounded(planned, BATCH_CONCURRENCY, async ({ item, card }) => {
+    const base = { sourceId: item.sourceId, cardId: card.id };
+    try {
+      if (await cards.putIfAbsent(card)) return { ...base, status: 'created' as const };
+      const existing = await cards.get(card.id);
+      if (!existing || existing.boardId !== board.id || existing.tenantId !== board.tenantId) {
+        return { ...base, status: 'collision' as const, error: 'The derived card id belongs to another board.' };
+      }
+      if (onExisting === 'skip') return { ...base, status: 'existing' as const };
+      const facts: KanbanCardFacts = {
+        title: item.title,
+        ...(item.description !== undefined ? { description: item.description } : {}),
+        ...(item.dueAt !== undefined ? { dueAt: new Date(item.dueAt).toISOString() } : {}),
+        ...(item.sourceLabel !== undefined ? { sourceLabel: item.sourceLabel } : {}),
+        ...(item.facets !== undefined ? { facets: item.facets } : {}),
+      };
+      return { ...base, status: (await refreshCardFacts(board, existing, facts)).refreshed ? 'refreshed' as const : 'existing' as const };
+    } catch (err) {
+      return { ...base, status: 'failed' as const, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  if (command.notifyAssignees === true) {
+    for (const [i, r] of items.entries()) {
+      const card = planned[i]!.card;
+      if (r.status === 'created' && card.assigneeId) {
+        await emitAssignmentNotification({ tenantId: board.tenantId, card, assigneeId: card.assigneeId, boardName: board.name });
+      }
+    }
+  }
+  if (items.some((r) => r.status === 'created' || r.status === 'refreshed')) notifyBoardChanged(board.id);
+  return { items };
+}
+
+/** A batch patch item's shape, or why it is not one. */
+function batchPatchProblem(item: PatchKanbanCardsBatchCommand['items'][number]): string | null {
+  if (typeof item !== 'object' || item === null) return 'is not an object.';
+  if (typeof item.cardId !== 'string' || item.cardId.length === 0) return 'cardId must be non-empty text.';
+  if (item.expectedVersion !== undefined && (!Number.isInteger(item.expectedVersion) || item.expectedVersion < 1)) return 'expectedVersion must be a whole number of at least 1.';
+  const patch = item.patch;
+  if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) return 'patch must be an object.';
+  const extra = Object.keys(patch).filter((k) => !BATCH_PATCH_FIELDS.has(k));
+  if (extra.length > 0) return `a batch patch may change only dueAt, priority, labels and facets (got ${extra.join(', ')}).`;
+  if (Object.keys(patch).length === 0) return 'patch changes nothing.';
+  if (patch.dueAt !== undefined && patch.dueAt !== null && !isoOk(patch.dueAt)) return 'dueAt must be an ISO date or null.';
+  if (patch.priority !== undefined && !PRIORITIES.has(patch.priority)) return 'priority must be low, normal or high.';
+  if (patch.labels !== undefined && !stringList(patch.labels)) return 'labels must be a list of text.';
+  if (patch.facets !== undefined) {
+    try { assertFacetPatch(patch.facets); } catch (err) { return err instanceof Error ? err.message : 'facets are invalid.'; }
+  }
+  return null;
+}
+
+const batchFieldsOf = (c: KanbanCard): string => JSON.stringify([c.dueAt ?? null, c.priority ?? null, c.labels ?? null, c.facets ?? null]);
+
+async function applyCardsPatchBatch(command: PatchKanbanCardsBatchCommand): Promise<PatchKanbanCardsBatchResult> {
+  if (!command.tenantId || !command.boardId) throw boardCommandError('kanban_command_invalid', 'A batch patch needs a tenant and a board.');
+  if (!Array.isArray(command.items) || command.items.length === 0 || command.items.length > KANBAN_BATCH_PATCH_MAX) {
+    throw boardCommandError('kanban_command_invalid', `A batch patch takes 1–${KANBAN_BATCH_PATCH_MAX} items.`);
+  }
+  const board = await boards.get(command.boardId);
+  if (!board || board.tenantId !== command.tenantId) throw boardCommandError('kanban_board_not_found', 'Board does not exist in this tenant.');
+
+  // Each item is its own CAS. Not atomic across cards: the caller retries conflicts.
+  const items = await mapBounded(command.items, BATCH_CONCURRENCY, async (item): Promise<PatchKanbanCardsBatchResult['items'][number]> => {
+    const cardId = typeof item?.cardId === 'string' ? item.cardId : '';
+    const problem = batchPatchProblem(item);
+    if (problem) return { cardId, status: 'invalid', error: problem };
+    const patch: KanbanCardPatch = {
+      ...(item.patch.dueAt !== undefined ? { dueAt: item.patch.dueAt === null ? null : new Date(item.patch.dueAt).toISOString() } : {}),
+      ...(item.patch.priority !== undefined ? { priority: item.patch.priority } : {}),
+      ...(item.patch.labels !== undefined ? { labels: [...item.patch.labels] } : {}),
+      ...(item.patch.facets !== undefined ? { facets: item.patch.facets } : {}),
+    };
+    try {
+      // A patch that would change nothing writes nothing and reports `unchanged`.
+      const current = await cards.get(cardId);
+      if (current && current.boardId === board.id && current.tenantId === board.tenantId
+        && (item.expectedVersion === undefined || (current.version ?? 1) === item.expectedVersion)
+        && batchFieldsOf(applyKanbanCardPatch(current, patch)) === batchFieldsOf(current)) {
+        return { cardId, status: 'unchanged', card: current };
+      }
+      const { card } = await applyKanbanCardPatchCommand({
+        type: 'card.patch', tenantId: board.tenantId, boardId: board.id, cardId, patch,
+        // A data comparison the service makes, never a function built from input (ADR 0774).
+        precondition: (fresh) => item.expectedVersion === undefined || (fresh.version ?? 1) === item.expectedVersion,
+      });
+      return { cardId, status: 'updated', card };
+    } catch (err) {
+      const code = err && typeof err === 'object' ? (err as { code?: unknown }).code : undefined;
+      const status: KanbanBatchPatchStatus = code === 'kanban_card_not_found' ? 'not_found'
+        : code === 'kanban_card_precondition_failed' || code === 'kanban_card_conflict' ? 'conflict'
+        : code === 'kanban_card_invalid' || code === 'kanban_command_invalid' ? 'invalid'
+        : 'failed';
+      return { cardId, status, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  if (items.some((r) => r.status === 'updated')) notifyBoardChanged(board.id);
+  return { items };
+}
+
 async function applyKanbanCardPatchCommand(command: PatchKanbanCardCommand): Promise<PatchKanbanCardResult> {
   if (!command.tenantId || !command.boardId || !command.cardId) {
     throw boardCommandError('kanban_command_invalid', 'Card mutations require a tenant, board, and card.');
   }
   if (command.patch.sourceRef !== undefined && command.patch.sourceRef !== null) assertSourceRef(command.patch.sourceRef);
+  if (command.patch.facets !== undefined) assertFacetPatch(command.patch.facets);
   if (command.patch.title !== undefined && command.patch.title.trim().length === 0) {
     throw boardCommandError('kanban_card_invalid', 'Card title must be a non-empty string.');
   }
@@ -1807,6 +2539,11 @@ async function applyKanbanCardPatchCommand(command: PatchKanbanCardCommand): Pro
     if (moved) {
       await syncWorkItemStateFromCard(board, next);
       if (next.workItemId) await reconcileDependentWorkItemStates(board, next.workItemId);
+    }
+    // ADR 1155 D6 — a due notice is about one date; once the date is gone or
+    // moved, the notice is stale. The sweep sends a fresh one for a new date.
+    if (card.dueAt && card.assigneeId && next.dueAt !== card.dueAt) {
+      await withdrawDueNotifications({ tenantId: board.tenantId, cardId: card.id, recipientUserId: card.assigneeId });
     }
     const workflowId = moved ? next.workflowId ?? destination.triggerWorkflowId : undefined;
     const trigger = workflowId
@@ -2330,6 +3067,41 @@ export async function updateCardFields(
   })).card;
 }
 
+/** Every id in one family slice of the card index, in key order. */
+async function cardIndexIds(tenantId: string, family: string, segments: string[]): Promise<string[]> {
+  const ids: string[] = [];
+  let cursor: string | undefined;
+  for (;;) {
+    const page = await listIndexPage(tenantId, KANBAN_CARD_TYPE, family, undefined, { segments, limit: 500, ...(cursor ? { cursor } : {}) });
+    for (const row of page.rows) ids.push(row.id);
+    if (!page.cursor || page.rows.length < 500) return ids;
+    cursor = page.cursor;
+  }
+}
+
+/** ADR 1155 P3c-2 — the cards that might be addressed to `userId`, and their boards.
+ *  Index path: the caller's slice of the `assignee` family plus the tenant's `role`
+ *  family (role-addressed cards only), point-read, and only the boards those cards
+ *  sit on. Before the tenant's index is built: today's read of every tenant board and
+ *  card. The caller judges each stored row either way, so a stale marker costs a read
+ *  and never a wrong card; a card whose marker is missing appears once the hourly
+ *  drift check rebuilds the tenant (the ADR 0872 D4 stance for display reads). */
+async function assignedCandidates(tenantId: string, userId: string): Promise<{ candidates: KanbanCard[]; boardById: Map<string, KanbanBoard> }> {
+  if ((await ensureSystemIndexBuilt(tenantId, KANBAN_CARD_TYPE)) === 'built') {
+    const ids = new Set([...(await cardIndexIds(tenantId, 'assignee', [userId])), ...(await cardIndexIds(tenantId, 'role', []))]);
+    const rows = (await readCardsBounded([...ids])).filter((c): c is KanbanCard => c !== null && c.tenantId === tenantId);
+    const boardById = new Map<string, KanbanBoard>();
+    for (const boardId of new Set(rows.map((c) => c.boardId))) {
+      const board = await boards.get(boardId);
+      if (board && board.tenantId === tenantId) boardById.set(board.id, board);
+    }
+    return { candidates: rows, boardById };
+  }
+  const tenantBoards = (await boards.list()).filter((b) => b.tenantId === tenantId);
+  const boardById = new Map(tenantBoards.map((b) => [b.id, b]));
+  return { candidates: await cardsOnBoards(tenantId, new Set(boardById.keys())), boardById };
+}
+
 /** ADR 0049 — every card across the tenant addressed to a given user: their
  *  direct assignments (`assigneeId`) plus cards role-addressed to a role they
  *  hold (`assigneeRole` ∈ roleKeys). This is the derived "assigned to me"
@@ -2341,8 +3113,7 @@ export async function listCardsAssignedToUser(
   userId: string,
   roleKeys: readonly string[] = [],
 ): Promise<Array<KanbanCard & { boardName: string; columnName: string; terminal: boolean; doneColumnId?: string }>> {
-  const tenantBoards = (await boards.list()).filter((b) => b.tenantId === tenantId);
-  const boardById = new Map(tenantBoards.map((b) => [b.id, b]));
+  const { candidates, boardById } = await assignedCandidates(tenantId, userId);
   const roles = new Set(roleKeys);
   // ADR 1137 D4 — the viewer's own role on a board's subject, resolved once per
   // board and only for boards that carry a subject-role card.
@@ -2363,7 +3134,7 @@ export async function listCardsAssignedToUser(
     return (await heldOn(board, parsed.kind)) === parsed.role;
   };
   const out: Array<KanbanCard & { boardName: string; columnName: string; terminal: boolean; doneColumnId?: string }> = [];
-  for (const card of await cardsOnBoards(tenantId, new Set(boardById.keys()))) {
+  for (const card of candidates) {
     const board = boardById.get(card.boardId);
     if (!board) continue; // cross-tenant / orphaned — never leak
     const mine = card.assigneeId === userId || (card.assigneeRole ? await roleMatches(board, card.assigneeRole) : false);
@@ -2722,6 +3493,8 @@ export async function eraseSubjectKanban(tenantId: string, subjectKey: string): 
         // opaque hold bit so erasure cannot authorize autonomous execution.
         if (next.blockerNote !== undefined) next.blockerNote = card.blockerNote?.includes(RESTORE_NOTE_MARK)
           ? `${ERASED}\n${RESTORE_NOTE_MARK}` : ERASED;
+        // ADR 1155 D1 — facet values are ids, but one could still name a person.
+        delete next.facets;
       }
       delete next.handoff; delete next.handoffBy; delete next.handoffAt;
       if (await cards.compareAndSwap(card, next)) { settled = true; break; }
@@ -2741,6 +3514,7 @@ export function registerKanbanErasure(): void {
 export async function __resetKanbanStore(): Promise<void> {
   await boards.__clear();
   await cards.__clear();
+  await __clearSystemIndexType(KANBAN_CARD_TYPE);
   await workItems.__clear();
   await workItemAudit.__clear();
   await workItemOutbox.__clear();

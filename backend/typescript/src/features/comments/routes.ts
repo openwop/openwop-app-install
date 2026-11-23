@@ -30,7 +30,8 @@ type Scope = 'workspace:read' | typeof COMMENT_WRITE_SCOPE;
 function httpCaller(req: Request, userId: string): CommentCaller {
   const principal = req.userId ?? req.principal?.principalId;
   const { tenantId: _t, ...toggle } = toggleSubjectOf(req);
-  return { subject: userId, ...(principal ? { principal } : {}), toggle };
+  // Issue 6109 — every comments route authorizes org scope first, so its caller is a member.
+  return { subject: userId, ...(principal ? { principal } : {}), toggle, audience: 'member' };
 }
 
 export function registerCommentsRoutes(deps: RouteDeps): void {
@@ -118,7 +119,7 @@ export function registerCommentsRoutes(deps: RouteDeps): void {
       // this door, so they moderate with PREAUTHORIZED_CALLER and do not lose the ability
       // to delete a comment on a bound resource they are not a member of. Visibility is
       // NOT widened: the admin receives the delete, never the thread.
-      const caller: CommentCaller = isAdmin ? { ...PREAUTHORIZED_CALLER, toggle: httpCaller(req, user.userId).toggle } : httpCaller(req, user.userId);
+      const caller: CommentCaller = isAdmin ? { ...PREAUTHORIZED_CALLER, toggle: httpCaller(req, user.userId).toggle, audience: 'member' } : httpCaller(req, user.userId);
       if (!(await deleteComment(tenantId, orgId, req.params.commentId, { userId: user.userId, isAdmin }, caller))) {
         throw new OpenwopError('not_found', 'Comment not found.', 404, { commentId: req.params.commentId });
       }

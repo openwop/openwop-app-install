@@ -33,6 +33,7 @@ import { isDeniedWebhookHost } from '../../host/webhookEgressGuard.js';
 import { configuredPublicBaseUrl } from '../featureRoute.js';
 import { tierOf, TAKEOVER_UNSUPPORTED, type ComputerUseAdapter, type CuAction } from './adapter.js';
 import { privateOriginOf } from './hostResolution.js';
+import { shownUrl } from './shownUrl.js';
 import { createHash } from 'node:crypto';
 import {
   claimSession, getSession, requestHashFor, sessionIdFor, writeSession,
@@ -376,8 +377,11 @@ export async function advance(adapter: ComputerUseAdapter, session: CuSession): 
       // navigation is never silently skipped.
       await adapter.submitDecision(psid, action.actionId, false);
       await adapter.abortSession(psid);
-      log.warn('computer-use origin denied', { sessionId: s.sessionId, url: action.url });
-      return finish({ ...s, status: 'failed', error: `origin_denied:${action.url ?? 'unknown'}` });
+      // ADR 1136 D8 — origin and path only, in the log AND the stored error (which
+      // the session read returns): a query string can carry typed text.
+      const where = shownUrl(action.url) ?? 'unknown';
+      log.warn('computer-use origin denied', { sessionId: s.sessionId, url: where });
+      return finish({ ...s, status: 'failed', error: `origin_denied:${where}` });
     }
     if (action.kind === 'credential') {
       // ADR 1136 P3a — in the person's OWN browser window (an adapter that offers
@@ -502,8 +506,15 @@ export async function completeTakeover(adapter: ComputerUseAdapter, input: Takeo
   if ((s.consumedApprovals ?? []).includes(input.takeoverInterruptId)) {
     throw new OpenwopError('approval_required', 'That answer was already used.', 409, { sessionId: s.sessionId });
   }
-  const { takeover: _tk, ...rest } = s;
-  const resumed = await writeSession(s, { ...rest, status: 'running', idleRounds: 0, consumedApprovals: [...(s.consumedApprovals ?? []), input.takeoverInterruptId] });
+  const { takeover: tk, ...rest } = s;
+  // ADR 1136 P3b — the person's sign-in is a step on the trajectory: kind
+  // `credential`, decided by a person, at the host the browser reported. Nothing
+  // they typed is known to the host, so nothing typed is recorded.
+  const signedIn: CuStep = {
+    action: { actionId: `takeover-${tk.n}`, kind: 'credential', url: tk.origin, description: tk.label },
+    tier: 'commit', decidedBy: 'human', approvalInterruptId: input.takeoverInterruptId, at: new Date().toISOString(),
+  };
+  const resumed = await writeSession(s, { ...rest, steps: [...s.steps, signedIn], status: 'running', idleRounds: 0, consumedApprovals: [...(s.consumedApprovals ?? []), input.takeoverInterruptId] });
   if (!resumed) {
     throw new OpenwopError('conflict', 'This session changed while your answer was being recorded.', 409, { sessionId: s.sessionId });
   }

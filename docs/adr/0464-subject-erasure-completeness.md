@@ -768,3 +768,113 @@ Tests: `test/chan-f19-toggle-cohort-erasure.test.ts` (real app, `eraseSubject`):
 principal leaves the cohort and others stay, with `updatedBy` redacted; an emptied cohort
 keeps the sentinel and the beta stays closed; the alias is home-tenant only; a pending
 replay copy no longer holds the principal.
+
+**Follow-ups A (2026-11-22, 1a; user: "proceed with all 4", "erase legacy rows").**
+- *Sender health:* the read-only transition read of the legacy raw-address key in
+  `recordBounceSignal` is removed. Its 2-day window closed on 2026-11-15 (the hashed key
+  went live 2026-11-13). `eraseSenderHealthSeen` keeps matching both key shapes, because an
+  adopter that upgrades across CHAN-F19 #1 later still holds legacy rows for up to 2 days.
+- *Chat-widget pre-A5 rows:* the four `chatwidget:*` counter stores register on the age-out
+  lane with `timestampField: 'updatedAt'`, and rows written before A5 have no such field,
+  so the lane skipped them forever ("never delete on a guess"). They also lack `tenantId`,
+  so the retention purger matched no tenant. The new opt-in `stampMissingTimestamp`
+  (`host/kvAgeOut.ts`) writes `updatedAt = now` into such a row by compare-and-swap the
+  first time a sweep sees it, and the TTL deletes it `ttlDays` later. This keeps the rule:
+  the stamp is a time the row is known to exist, never earlier than its real last write. A
+  fixed date (A5's commit, 2026-07-22) was rejected, because an adopter that upgraded later
+  wrote legacy rows after it. A present but unparseable value is never stamped, the stamp
+  counts toward the per-tick write cap, and a tenant-indexed collection refuses the option.
+Tests: `size-retention-ttl` (stamp then age out; garbled and non-JSON rows untouched; a
+concurrent writer wins; off by default), `chat-first-port-phase5-lifecycle` (the four
+registrations; a pre-A5 session and day row are stamped, then deleted), and
+`chan-f19-sender-health-seen` (a same-day redelivery counts once).
+
+**Follow-ups B (2026-11-22, 1a; user decisions the same day): baseline 93 → 90 (ceiling 90).**
+The four stores ADR 0464 §9 wave 3 left "unresolved" were read again with the writers
+followed. Three hold person data that nothing erased, and a fourth was **counted as
+covered while nothing touched it**:
+- *`crm:booking-link` (false coverage).* The row has `ownerUserId` and `createdBy`, and
+  `crm/erasure.ts` never read it. The census marked it covered because the crm folder
+  registers an eraser: the directory-level `hasEraser` shape this file warns about (EM-4b).
+  Now `eraseBookingLinkSubject` runs from the member eraser (`eraseCrmTaskAssignees`).
+  *Decision:* a link the subject OWNS is disabled, its owner and creator become
+  `erased:subject`, and its slug is replaced with `meeting-<random>`. The slug is the
+  public URL, the owner types it, and it can carry their name. The old slug's index row is
+  released, but only if it still points at this link. A link the subject only created for
+  another owner keeps running, with `createdBy` replaced. Invitees' bookings are kept as
+  other people's and the workspace's records. *Stated limit:* the title, description and
+  location are kept, because they describe the meeting. `crm:booking-link` and
+  `crm:booking-link-slug` now declare PII in `registerCrmErasure`.
+- *`crm:territory-rule`.* A filter literal can be a person's id: `owner = <user id>` (the
+  demo seed writes exactly that), `contactId`, or a custom field. *Decision:* rewrite,
+  don't delete. `__eraseRuleLiterals` replaces every literal equal to a subject key form
+  (an `eq` value or an `in` element) with `ERASED_USER_REF`, so the rule keeps its
+  priority and model but no longer matches the person. It reaches an active model, as the
+  other territory erasure helpers do, and the territory index is invalidated. The seam's
+  hop expands a CRM subject to its contact ids, so `contactId` literals match too.
+  Assignments a rule already produced hold only rule and record ids and are kept.
+- *`sales-maps:geocode`.* The key was the raw posted address, and manual rows were kept
+  forever. Nothing names whose address a row is, so no DSAR could ever match it.
+  *Decision:* the cache holds no address. Keys are
+  `g2|…|h:<sha256(normalized address)>`, rows have no `address` field (the route echoes
+  the caller's input), and every row ages out 90 days after its last write. That bound also
+  removes the `g1` and older rows that still hold a raw address, in the row AND in its
+  key, with no new migration. The existing `rekey-geocode-cache` migration (v26) now drops
+  the raw field when it moves a row, but only for instances that have not run it yet: an
+  instance that already ran v26 (openwop-dev, every v0.17.0 install) never re-runs it, so
+  its `g1` rows keep the raw address in the key until the 90-day age-out. No ratchet pins
+  v26's content (`check-migration-integrity` checks only contiguity). The 503 on a miss no longer echoes the address.
+  Reviewed signal-free.
+Tests: `test/chan-f19-followups-b.test.ts`.
+
+**Follow-ups C (2026-11-22, 1a): baseline −14 (ceiling 90 → 76, after follow-up B).** The 14
+stores wave 3 called "covered by an eraser the census cannot see" were each traced to the
+line that touches the store. The claim held for all 14, but most are reached through a
+cascade (a deleted thread, device, deal, document or entry), not a direct leg.
+- *Ten declare their PII in colon form*, next to the collection, with
+  `maskGloballyByFieldName: false` (none of them adds a word to the global log-masking
+  union): `analytics:replay`, `cdp:collected-event`, `channel-ingress:conversation`,
+  `commissions:deal-claim`, `goals`, `kb:docrev`, `kb:enrichcache`, `kb:veccache`,
+  `campaign-ops:intake-bytes`, `prompts:entry-version`. Two of them already had DOTTED
+  declarations (`analytics.replay`, `campaignOps.intake`), which name no store, so the
+  census never saw them. `cdp:collected-event` leaves `NON_COLLECTION_STORES`: with the
+  declaration the census sees it, so it is an ordinary covered store (the entry is kept,
+  commented, for its reasoning).
+- *Four are reviewed signal-free*: `job-search:attestation-hashidx` and
+  `orgs:invite-hashidx` (token-hash index rows deleted with what they point at),
+  `claude-code:presence` (a device id, deleted with the device) and `job-search:digest`
+  (posting content, documented as not the applicant's data).
+- *A bug found on the way:* `eraseClaimSubjects` (`commissions:deal-claim`, the orphan path)
+  ignored its compare-and-swap result, so a write between the list and the swap left the
+  rep's id in the claim while the erasure reported success. It now retries on a fresh read
+  and fails 409 when exhausted, as `repointClaims` does.
+- *Stated test gaps* (pinned only indirectly, through the delete cascades' own tests): the
+  erasure paths of `prompts:entry-version`, `kb:docrev` and `kb:veccache`.
+Tests: `test/chan-f19-followups-c-deal-claims.test.ts`, and the census.
+
+**Follow-ups D (2026-11-22, 1a; user decision the same day): baseline −1 (ceiling 76 → 75, after
+follow-up C).** The CHAN-F19 #2 follow-up: a decision suggestion an AGENT filed from a
+person's chat message kept the model's title and summary of their words. `suggestedBy` is
+the agent, so `eraseSuggestionSubject` never matched it, while the message itself is
+tombstoned on erasure (ADR 0879 D6). That inverted the rule the notebook summaries already
+follow, where a summary follows its source.
+- *Going forward:* the suggester copies the queue row's `authorUserId` onto the suggestion
+  as `sourceAuthorUserId` (message-sourced agent suggestions only).
+- *On erasure:* a suggestion whose source author is the subject gets its title and text
+  blanked at EVERY status. The row, its status, `source`, and another person's `decidedBy`,
+  `reason` and `documentId` stay.
+- *Legacy rows* (no field) are matched through the source message: by its author, or by
+  its already being an erasure tombstone (meta `erased: true`, if the chat-post eraser ran
+  first). This resolves only where the ref is the stored message id, i.e. channel posts.
+  A failed message read PROPAGATES, so the erasure reports incomplete and is retried
+  (fail-closed; release-manager review). *Accepted over-reach:* the tombstone match blanks a
+  suggestion sourced from ANY erased author, not only this subject. That reaches only the
+  words of people who were already erased.
+  *Stated residual:* a chat turn's ref is `<session>:<index>`, not a message id, so a
+  pre-2026-11-22 suggestion from a chat turn keeps its summary.
+- *Stated limit (decided):* a decision already RECORDED into the team ledger document is
+  the team's record, written by the person who recorded it, and is not reached (the
+  kb-document precedent).
+- `team-ledger:suggestions` declares its PII in colon form (the dotted
+  `teamLedger.suggestion` names no store) and leaves the baseline.
+Tests: `test/chan-f19-followups-d.test.ts`.

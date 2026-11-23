@@ -219,6 +219,8 @@ export const messages = {
   uiPluginsHint: 'Pacotes de plugins front-end isolados',
   claudeCodeLabel: 'Claude Code',
   claudeCodeHint: 'Seus dispositivos Claude Code pareados',
+  computerUseLabel: 'Sessões do navegador',
+  computerUseHint: 'O que o agente do navegador fez, passo a passo',
   // ADR 0874 P3 follow-up (NAV-1): the nine entries whose words used to live only in a feature catalog.
   webinarsLabel: 'Webinars',
   webinarsHint: 'Webinars do Zoom → presença no CRM',

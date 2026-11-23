@@ -131,6 +131,63 @@ describe('kv age-out seam (ADR 0380 §3)', () => {
   });
 });
 
+describe('kv age-out: stampMissingTimestamp (chat-widget pre-A5 rows, 2026-11-22)', () => {
+  const reg = () => registerKvAgeOut({ id: 'test:stamp', prefix: 'hostext:stamp:', ttlDays: 2, timestampField: 'updatedAt', stampMissingTimestamp: true });
+
+  it('stamps a row that lacks the field instead of deleting it, then ages it out ttlDays after the first sighting', async () => {
+    reg();
+    await storage.kvSet('hostext:stamp:legacy', JSON.stringify({ sKey: 'legacy', turns: 3 }));
+    const first = await __runKvAgeOutOnce(storage, NOW);
+    expect(first.find((r) => r.id === 'test:stamp')).toMatchObject({ scanned: 1, stamped: 1, deleted: 0, skipped: 0 });
+    expect(JSON.parse((await storage.kvGet('hostext:stamp:legacy'))!)).toEqual({ sKey: 'legacy', turns: 3, updatedAt: NOW.toISOString() });
+
+    // Inside the TTL from the stamp: kept.
+    await __runKvAgeOutOnce(storage, new Date(NOW.getTime() + 1 * DAY));
+    expect(await storage.kvGet('hostext:stamp:legacy')).not.toBeNull();
+    // Past it: deleted.
+    const later = await __runKvAgeOutOnce(storage, new Date(NOW.getTime() + 3 * DAY));
+    expect(later.find((r) => r.id === 'test:stamp')).toMatchObject({ deleted: 1, stamped: 0 });
+    expect(await storage.kvGet('hostext:stamp:legacy')).toBeNull();
+  });
+
+  it('never stamps over a present but unreadable value, or a non-JSON row: those stay skipped', async () => {
+    reg();
+    await storage.kvSet('hostext:stamp:garbled', JSON.stringify({ updatedAt: 'not a date' }));
+    await storage.kvSet('hostext:stamp:not-json', 'nope');
+    const out = await __runKvAgeOutOnce(storage, NOW);
+    expect(out.find((r) => r.id === 'test:stamp')).toMatchObject({ stamped: 0, skipped: 2 });
+    expect(await storage.kvGet('hostext:stamp:garbled')).toBe(JSON.stringify({ updatedAt: 'not a date' }));
+  });
+
+  it('loses to a concurrent writer: the stamp is a compare-and-swap against the bytes it read', async () => {
+    reg();
+    await storage.kvSet('hostext:stamp:race', JSON.stringify({ sKey: 'race', turns: 1 }));
+    const live = JSON.stringify({ sKey: 'race', turns: 2, updatedAt: iso(0) });
+    const racing: Storage = new Proxy(storage, {
+      get(target, prop, receiver) {
+        if (prop === 'kvCompareAndSwap') {
+          return async (key: string, expected: string | null, next: string) => {
+            await target.kvSet(key, live); // a visitor's turn lands between the read and the stamp
+            return target.kvCompareAndSwap(key, expected, next);
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const out = await __runKvAgeOutOnce(racing, NOW);
+    expect(out.find((r) => r.id === 'test:stamp')).toMatchObject({ stamped: 0, deleted: 0 });
+    expect(await storage.kvGet('hostext:stamp:race')).toBe(live);
+  });
+
+  it('is off by default: without the option a field-less row is skipped, as before', async () => {
+    registerKvAgeOut({ id: 'test:nostamp', prefix: 'hostext:nostamp:', ttlDays: 2, timestampField: 'updatedAt' });
+    await storage.kvSet('hostext:nostamp:legacy', JSON.stringify({ turns: 1 }));
+    const out = await __runKvAgeOutOnce(storage, NOW);
+    expect(out.find((r) => r.id === 'test:nostamp')).toMatchObject({ stamped: 0, skipped: 1 });
+    expect(await storage.kvGet('hostext:nostamp:legacy')).toBe(JSON.stringify({ turns: 1 }));
+  });
+});
+
 describe('deleteOrphanAgentRunActivity (ADR 0380 §2 / app-migration v3)', () => {
   it('deletes exactly the rows whose run is gone; idempotent on re-run', async () => {
     const live: RunRecord = {

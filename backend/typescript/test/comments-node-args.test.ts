@@ -25,6 +25,8 @@ import { createComment, listThread, __resetCommentsStore } from '../src/features
 import { buildCommentsSurface } from '../src/features/comments/surface.js';
 import { createOrg } from '../src/host/accessControlService.js';
 import { PREAUTHORIZED_CALLER } from '../src/host/subjectAccess.js';
+/** Issue 6109 — a comments read as an org member (internal threads included). */
+const MEMBER_READ = { ...PREAUTHORIZED_CALLER, audience: 'member' as const };
 
 /** ADR 0659 D1 — `listThread` now answers `null` when the target is absent OR invisible.
  *  Every fixture here creates a real resource and is not testing that gate, so a null is
@@ -69,7 +71,7 @@ describe('WF-CMNT-3 — a param frozen into `config` reaches the node', () => {
     const r = await nodes['feature.comments.nodes.post']!(viaConfig(args));
 
     expect(r.status).toBe('success');
-    const rows = await listThreadOrFail(T, 'o1', 'cms_page', page.pageId, PREAUTHORIZED_CALLER);
+    const rows = await listThreadOrFail(T, 'o1', 'cms_page', page.pageId, MEMBER_READ);
     expect(rows.map((c) => c.body)).toEqual(['from config']);
   });
 
@@ -90,7 +92,7 @@ describe('WF-CMNT-3 — a param frozen into `config` reaches the node', () => {
     const r = await nodes['feature.comments.nodes.resolve']!(viaConfig({ orgId: 'o1', commentId: c.comment.commentId }));
 
     expect(r.status).toBe('success');
-    expect((await listThreadOrFail(T, 'o1', 'cms_page', page.pageId, PREAUTHORIZED_CALLER))[0]!.status).toBe('resolved');
+    expect((await listThreadOrFail(T, 'o1', 'cms_page', page.pageId, MEMBER_READ))[0]!.status).toBe('resolved');
   });
 
   it('INPUTS WIN over config on a conflict (a DAG value is a runtime fact)', async () => {
@@ -103,14 +105,14 @@ describe('WF-CMNT-3 — a param frozen into `config` reaches the node', () => {
 
     await nodes['feature.comments.nodes.post']!(ctx);
 
-    expect((await listThreadOrFail(T, 'o1', 'cms_page', page.pageId, PREAUTHORIZED_CALLER)).map((c) => c.body)).toEqual(['the runtime value']);
+    expect((await listThreadOrFail(T, 'o1', 'cms_page', page.pageId, MEMBER_READ)).map((c) => c.body)).toEqual(['the runtime value']);
   });
 
   it('CONTROL: the `inputs` channel still works (the merge must not break the old lane)', async () => {
     const page = await createPage({ tenantId: T, orgId: 'o1', title: 'Doc', createdBy: 'owner1' });
     const r = await nodes['feature.comments.nodes.post']!(viaInputs({ orgId: 'o1', resourceType: 'cms_page', resourceId: page.pageId, body: 'from inputs' }));
     expect(r.status).toBe('success');
-    expect((await listThreadOrFail(T, 'o1', 'cms_page', page.pageId, PREAUTHORIZED_CALLER)).map((c) => c.body)).toEqual(['from inputs']);
+    expect((await listThreadOrFail(T, 'o1', 'cms_page', page.pageId, MEMBER_READ)).map((c) => c.body)).toEqual(['from inputs']);
   });
 });
 

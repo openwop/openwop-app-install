@@ -1,6 +1,10 @@
 # ADR 1116 — Market-intel chains read the pages they discover (CC-CHAIN-7)
 
-Status: Accepted, implemented on branch fix/cc-chain-7-market-intel-fetch (2026-11-13; user chose "Fetch top pages", relayed by openwop-app-81; reviewed by 81)
+Status: implemented (merged to main as `f152c240f8`, 2026-11-15; accepted 2026-11-13: user chose "Fetch top pages", relayed by openwop-app-81; reviewed by 81)
+
+> **CORRECTED 2026-11-22 (grade-tests `TST-OAK-3`):** this line said "implemented on
+> branch fix/cc-chain-7-market-intel-fetch". That branch is merged (`f152c240f8`), so
+> the ADR is implemented on main.
 
 ## Context
 

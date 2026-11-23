@@ -76,7 +76,6 @@ interface SlugEntry { slug: string; bookingLinkId: string; tenantId: string }
 // purgeTenantRows) reclaims slug rows — otherwise a deleted tenant's slugs
 // orphan and could block a future tenant from reusing them.
 const slugIndex = new DurableCollection<SlugEntry>('crm:booking-link-slug', (s) => s.slug, undefined, (s) => s.tenantId);
-
 // ── availability validation (fail-closed) ──────────────────────────────────
 
 function cleanWeeklyHours(raw: unknown): WeeklyHours[] {
@@ -274,6 +273,47 @@ export async function deleteBookingLink(tenantId: string, orgId: string, booking
   await links.delete(bookingLinkId);
   await slugIndex.delete(cur.slug);
   return true;
+}
+
+/** The value an erased person's id is replaced with on a booking link. */
+export const ERASED_BOOKING_ACTOR = 'erased:subject';
+
+/**
+ * CHAN-F19 follow-up B (ADR 0464 §9, user decision 2026-11-22): a member DSAR on booking
+ * links. A link the subject OWNS is their own availability page, so it is disabled, its
+ * owner and creator become `ERASED_BOOKING_ACTOR`, and its slug (the public URL, which the
+ * owner may have typed with their name in it) is replaced with a neutral random one. The
+ * old slug's index row is released. Invitees' bookings are kept: they are other people's
+ * records and the workspace's. A link the subject only CREATED for another owner keeps
+ * running; only `createdBy` is replaced. The title, description and location are kept:
+ * they describe the meeting, not the person (stated limit, ADR 0464 §9).
+ * Idempotent. Returns how many links changed.
+ */
+export async function eraseBookingLinkSubject(tenantId: string, forms: ReadonlySet<string>): Promise<number> {
+  if (!tenantId || forms.size === 0) return 0; // fail-closed — never a tenant-wide sweep
+  let changed = 0;
+  for (const cur of await links.listForTenantIndexed(tenantId)) {
+    if (cur.tenantId !== tenantId) continue;
+    const owns = forms.has(cur.ownerUserId);
+    const created = forms.has(cur.createdBy);
+    if (!owns && !created) continue;
+    const next: BookingLink = { ...cur, updatedAt: nowIso() };
+    if (created) next.createdBy = ERASED_BOOKING_ACTOR;
+    if (owns) {
+      next.ownerUserId = ERASED_BOOKING_ACTOR;
+      next.status = 'disabled';
+      next.slug = await claimSlug(`meeting-${randomUUID().slice(0, 8)}`, cur.bookingLinkId, tenantId);
+    }
+    await links.put(next);
+    // Release the old slug only after the link points at the new one, and only if the
+    // index row is still this link's (a slug is globally unique; never free another's).
+    if (owns) {
+      const old = await slugIndex.get(cur.slug);
+      if (old && old.bookingLinkId === cur.bookingLinkId) await slugIndex.delete(cur.slug);
+    }
+    changed += 1;
+  }
+  return changed;
 }
 
 // ── Test-only reset ─────────────────────────────────────────────────────────

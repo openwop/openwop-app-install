@@ -847,24 +847,28 @@ const NON_COLLECTION_STORES = new Map<string, { eraser: string; why: string }>([
       + 'PARTY, which no id-keyed eraser reaches — the same limit named for '
       + '`campaign-brief:voc-evidence`.',
   }],
-  ['cdp:collected-event', {
-    eraser: 'src/features/cdp/erasure.ts',
-    why: 'CONS-6, reason (b) above. The app\'s raw first-party ingest store. Its row type is '
-      + '`{ eventId; tenantId; eventType; payload: Record<string, unknown>; piiFields: string[]; at }` '
-      + '— the subject identity lives INSIDE `payload`, so no field-name signal can ever bind '
-      + 'it, and the census walks past it reporting nothing. Meanwhile `tagPiiFields` computes '
-      + 'the payload\'s PII keys AT INGEST: this is the one store in the app that self-declares '
-      + 'it holds PII, and `features/cdp/` registered ZERO erasers and zero resolvers. Its only '
-      + 'lifecycle was a retention purger that is opt-in and default-off (triple-gated behind '
-      + 'OPENWOP_RETENTION_SWEEP_ENABLED, listGovernedTenants() and a set window), so on a '
-      + 'default install the rows were reachable by NOTHING. RESIDUALS, stated: the eraser '
-      + 'matches only a payload field that is an identity field BY NAME or one the ingest '
-      + 'itself flagged, and only on an EXACT case-folded value match — deliberately narrow, '
-      + 'because matching a subject key against free text over-erases a stranger\'s row on a '
-      + 'coincidence and over-erasure is unrecoverable (the forms:submission reasoning). And a '
-      + 'DSAR keyed by a contactId does not expand to that person\'s email, because '
-      + 'resolveCrmSubjectKeys is one-directional email/phone -> contactId (CONS-11).',
-  }],
+  // RETIRED 2026-11-22 (CHAN-F19 follow-up C): `cdp:collected-event` now declares
+  // `payload` PII (`features/cdp/visitorEventIndex.ts`), so the census sees it and it is an
+  // ordinary COVERED store (features/cdp registers its eraser). The entry is kept below,
+  // commented, for its reasoning.
+  // ['cdp:collected-event', {
+  //   eraser: 'src/features/cdp/erasure.ts',
+  //   why: 'CONS-6, reason (b) above. The app\'s raw first-party ingest store. Its row type is '
+  //     + '`{ eventId; tenantId; eventType; payload: Record<string, unknown>; piiFields: string[]; at }` '
+  //     + '— the subject identity lives INSIDE `payload`, so no field-name signal can ever bind '
+  //     + 'it, and the census walks past it reporting nothing. Meanwhile `tagPiiFields` computes '
+  //     + 'the payload\'s PII keys AT INGEST: this is the one store in the app that self-declares '
+  //     + 'it holds PII, and `features/cdp/` registered ZERO erasers and zero resolvers. Its only '
+  //     + 'lifecycle was a retention purger that is opt-in and default-off (triple-gated behind '
+  //     + 'OPENWOP_RETENTION_SWEEP_ENABLED, listGovernedTenants() and a set window), so on a '
+  //     + 'default install the rows were reachable by NOTHING. RESIDUALS, stated: the eraser '
+  //     + 'matches only a payload field that is an identity field BY NAME or one the ingest '
+  //     + 'itself flagged, and only on an EXACT case-folded value match — deliberately narrow, '
+  //     + 'because matching a subject key against free text over-erases a stranger\'s row on a '
+  //     + 'coincidence and over-erasure is unrecoverable (the forms:submission reasoning). And a '
+  //     + 'DSAR keyed by a contactId does not expand to that person\'s email, because '
+  //     + 'resolveCrmSubjectKeys is one-directional email/phone -> contactId (CONS-11).',
+  // }],
   ['campaign-connectors:conversion', {
     eraser: 'src/features/campaign-connectors/erasure.ts',
     why: 'ADR 0907 D8. A THIRD reason beside (a) and (b): a typed DurableCollection whose subject '
@@ -1491,12 +1495,18 @@ describe('ADR 0464 — feature-owned subject-bearing stores', () => {
     // …and KB must NOT be recorded as debt while it is covered (the debt would be a lie).
     expect(ACTOR_ATTRIBUTED_DEBT.has('kb:document')).toBe(false);
     expect(ACTOR_ATTRIBUTED_DEBT.has('kb:collection')).toBe(false);
-    // BLIND SPOT, stated: `kb:veccache` and `kb:docrev` carry no subject field at all
-    // (they are keyed derivatives — a vector and a content hash), so this gate cannot
-    // see them and must not be read as proving their coverage. The eraser reaches them
-    // by CASCADE through deleteDocument, and the retention purger reclaims orphans.
-    expect(stores.has('kb:veccache'), 'still invisible — see the comment above').toBe(false);
-    expect(stores.has('kb:docrev'), 'still invisible — see the comment above').toBe(false);
+    // `kb:veccache` and `kb:docrev` are keyed derivatives (a vector and a content hash)
+    // with no subject field, so this gate could not see them. CHAN-F19 follow-up C
+    // (2026-11-22) closed that blind spot: each now declares its PII in colon form
+    // (kbService.ts), so the census SEES both. Being seen proves no coverage on its own:
+    // `hasEraser` is the folder-level shape (EM-4b). The coverage is the CASCADE through
+    // deleteDocument, which follow-up C traced line by line (ADR 0464 §9), plus the
+    // retention purger for orphans, which the last assertion pins.
+    for (const ns of ['kb:veccache', 'kb:docrev']) {
+      expect(stores.has(ns), `${ns} declares PII, so the census must see it`).toBe(true);
+      expect(stores.get(ns)?.signal).toBe('topic');
+      expect(stores.get(ns)?.hasEraser).toBe(true);
+    }
     const kbSrc = readFileSync(join(FEATURES_ROOT, 'kb', 'kbService.ts'), 'utf8');
     expect(/registerRetentionPurger\s*\(/.test(kbSrc), 'and the retention seam, not only the eraser').toBe(true);
   });
@@ -1889,8 +1899,17 @@ const SIGNAL_FREE_BASELINE: readonly string[] =
  *  eraser strips the subject's room keys; the two chat-widget session counters hold a
  *  hash of a random browser session id and a count, reviewed → 94.
  *  CHAN-F19 #12 (2026-11-19): analytics:replay-toggle-writes declares `rows` PII and
- *  the replay eraser strips the subject from pending copies → 93. */
-const SIGNAL_FREE_BASELINE_CEILING = 93;
+ *  the replay eraser strips the subject from pending copies → 93.
+ *  CHAN-F19 follow-up B (2026-11-22): crm:booking-link-slug and crm:territory-rule declare
+ *  PII and their erasers now reach them; sales-maps:geocode holds no address and ages
+ *  out, reviewed → 90.
+ *  CHAN-F19 follow-up C (2026-11-22): the 14 stores ADR 0464 §9 wave 3 found "covered by an
+ *  eraser the census cannot see". Each eraser path was traced to the line that touches the
+ *  store. Ten now declare their PII in colon form; four are pointers or a device id and are
+ *  reviewed → 76.
+ *  CHAN-F19 follow-up D (2026-11-22): team-ledger:suggestions declares its PII in colon
+ *  form, and its eraser now also blanks an agent's summary of the subject's message → 75. */
+const SIGNAL_FREE_BASELINE_CEILING = 75;
 
 /** Reviewed signal-free feature stores: each holds no subject data, and says why.
  *  Each was read at its declaration: the row type with its nested types, AND the
@@ -1906,6 +1925,11 @@ const SIGNAL_FREE_BASELINE_CEILING = 93;
  *  refuses a reviewed entry whose row carries such a field, so this list cannot
  *  absorb them. */
 const SIGNAL_FREE_REVIEWED = new Map<string, string>([
+  ['sales-maps:geocode', 'CHAN-F19 follow-up B: a manual geocode cache keyed g2|tenant|org|h:<sha256 of the normalized address>, with lat, lng, source and at. No row holds the address (rows from before 2026-11-22 did, and age out on the same lane), no row names whose address it is, so no DSAR can match it; every row ages out 90 days after its last write'],
+  ['job-search:attestation-hashidx', 'CHAN-F19 follow-up C: a token-hash index row: the hash of an attestation token and the attestation id it points to. No person identifier. eraseSubjectAttestations redacts the attestation and deletes this row with it (job-search-data-integrity)'],
+  ['job-search:digest', 'CHAN-F19 follow-up C: a job posting digest (title, company, salary, quotes from the posting) keyed by deal id and version. Posting content, not the applicant (digest.ts); deleted with its deal, which the applicant eraser deletes, and aged under internal'],
+  ['orgs:invite-hashidx', 'CHAN-F19 follow-up C: a token-hash index row: the hash of an invite token, the invite id and its expiry. No person identifier. eraseOrgInvitationsSubject deletes it with an email-keyed subject\'s invite; it ages out 30 days after expiry'],
+  ['claude-code:presence', 'CHAN-F19 follow-up C: which instance a paired device\'s terminal is on: device id, instance id, connected and last-seen times. It names a device, not a person (terminalStore.ts); eraseClaudeCodeSubject deletes the subject\'s devices and their presence rows'],
   ['agent-deployment-pending-approvals', 'an open-approval claim: tenant, agent id, version, run id and created time'],
   ['agent-deployments', 'an agent version\'s deploy state: canary percent, channels, eval and run ids'],
   ['analytics:heat', 'daily heatmap counts per page, device and arm (views, clicks, scroll); page path only, no query'],
@@ -1957,8 +1981,8 @@ const SIGNAL_FREE_REVIEWED = new Map<string, string>([
   ['cdp:retention-watermark', 'one row per tenant: the purge cutoff timestamp'],
   ['cdp:visitor-index-built', 'a per-tenant marker that the visitor index backfill ran: tenant, time, format'],
   ['cdp:warehouse-load-approval', 'approval index: tenant and approval id, keyed by a hash of the load target'],
-  ['chatwidget:session', 'CHAN-F19 #11: a public-widget turn counter keyed widgetId:<session hash>. It holds a hash of the visitor\'s random browser session id (122 bits in sessionStorage; the raw id is never stored, CW68C-2) and an integer count, plus tenantId and updatedAt; 2-day default-on age-out. No person identifier, so no DSAR can match it. Rows from before A5 carry no updatedAt, so the age-out skips them, and may hold the raw session id: a pseudonymous online identifier, not a person identifier, that no DSAR can match either. Deleting those rows would be a data migration, left to the user'],
-  ['chatwidget:anonautowrite:session', 'CHAN-F19 #11: a public-widget auto-write counter keyed widgetId:<session hash>:day. Same shape as chatwidget:session: it holds a hash of the visitor\'s random browser session id (122 bits in sessionStorage; the raw id is never stored, CW68C-2) and an integer count, plus tenantId and updatedAt; 2-day default-on age-out. No person identifier, so no DSAR can match it. Rows from before A5 carry no updatedAt, so the age-out skips them, and may hold the raw session id: a pseudonymous online identifier, not a person identifier, that no DSAR can match either. Deleting those rows would be a data migration, left to the user'],
+  ['chatwidget:session', 'CHAN-F19 #11: a public-widget turn counter keyed widgetId:<session hash>. It holds a hash of the visitor\'s random browser session id (122 bits in sessionStorage; the raw id is never stored, CW68C-2) and an integer count, plus tenantId and updatedAt; 2-day default-on age-out. No person identifier, so no DSAR can match it. Rows from before A5 carried no updatedAt and may hold the raw session id (a pseudonymous online identifier no DSAR can match); since 2026-11-22 the age-out stamps them on first sighting and deletes them 2 days later (stampMissingTimestamp, user decision)'],
+  ['chatwidget:anonautowrite:session', 'CHAN-F19 #11: a public-widget auto-write counter keyed widgetId:<session hash>:day. Same shape as chatwidget:session: it holds a hash of the visitor\'s random browser session id (122 bits in sessionStorage; the raw id is never stored, CW68C-2) and an integer count, plus tenantId and updatedAt; 2-day default-on age-out. No person identifier, so no DSAR can match it. Rows from before A5 carried no updatedAt and may hold the raw session id (a pseudonymous online identifier no DSAR can match); since 2026-11-22 the age-out stamps them on first sighting and deletes them 2 days later (stampMissingTimestamp, user decision)'],
   ['chatwidget:anonwrite:day', 'a per-widget daily held-write counter, keyed widgetId:day'],
   ['chatwidget:tokenidx', 'index row: a random widget embed token to the widget config key'],
   ['cms:redirect', 'an operator-authored slug-to-slug redirect'],
@@ -2014,6 +2038,7 @@ const SIGNAL_FREE_REVIEWED = new Map<string, string>([
   ['entity:sysidx-build', 'ADR 1110: a tenant waiting for a background index build (tenant, type, when)'],
   ['entity:sysidx-built', 'ADR 1110: when a tenant index was last rebuilt'],
   ['entity:sysidx-count', 'ADR 1110: a per-org row count'],
+  ['entity:sysidx-hour', 'ADR 1155 P3a: the UTC hour the index upkeep drift check last ran'],
   ['entity:sysidx-manifest', 'ADR 1110: the index keys and projection hash of one row'],
   ['entity:sysidx-pend', 'ADR 1110: an unfinished index write: row id, lease token and expiry'],
   ['entity:taxonomy', 'a taxonomy definition: name and display name'],
@@ -2031,7 +2056,6 @@ const SIGNAL_FREE_REVIEWED = new Map<string, string>([
   ['kb:reindex', 're-embedding job state per collection: spec, cursor, counters and status'],
   ['kb:vertexrerankusage', 'per-tenant daily rerank query count, keyed tenant:date'],
   ['knowledge-sync:filestate', 'a sync cursor: source id, provider file id, KB document id and revision'],
-  ['media:index-hour', '#5928: the UTC hour the media-index drift check last ran'],
   ['media:token-idx', 'index row keyed by a sha256 of the share token: tenant and asset id'],
   ['media:usage', 'a used-by link: asset id and the referencing page, campaign or brief id and title'],
   ['notebook-source-level', 'a context-level setting (full, summary, excluded) per notebook source'],

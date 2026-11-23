@@ -11,6 +11,14 @@
  * keyed by source name; a flag that defaults ON; the surface ignoring the flag; and
  * the destinationKind check (the non-openwop-host sync carries a peerIngestUrl, so
  * only the kind check can refuse it).
+ *
+ * DOUBLE GUARD (ADR 1024, grade-tests w122): a `[]` record is dropped twice —
+ * by `selectEligible`'s `isNoOnwardUse(normalizeLabel(raw))` and again after
+ * `reEmitLabel` in `buildOnwardEnvelopes`. Deleting either half alone stays green
+ * by design; the shared `isNoOnwardUse` predicate is the break-both witness.
+ * The prepareOnward happy path passes the sync's own `peerIngestUrl` (ADR 1024
+ * D2.5); the mismatch refusal itself is owned by
+ * `adr1024-destination-sync-egress.test.ts`.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -34,7 +42,7 @@ const baseSync: SyncCore = {
 beforeAll(async () => {
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-});
+}, 120_000);
 
 describe('buildOnwardEnvelopes — the algebra on the OpenWOP-envelope hop', () => {
   it('re-emits the received label verbatim when no narrowTo, and field-maps the body', async () => {

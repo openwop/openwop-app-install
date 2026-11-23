@@ -232,7 +232,7 @@ describe('D10 — erasure reaches mentions', () => {
     const c = await owner.post<Posted>(base, { resourceType: 'cms_page', resourceId: pageId, body: 'ping', mentions: [a!.userId] });
     expect(c.body.mentions).toEqual([a!.userId]);
     await deleteSubjectComments(tenantId, a!.userId);
-    const after = await getComment(tenantId, orgId, c.body.commentId, { preAuthorized: true });
+    const after = await getComment(tenantId, orgId, c.body.commentId, { preAuthorized: true, audience: 'member' });
     expect(after?.body).toBe('ping');
     expect(after?.mentions).toBeUndefined();
   });
@@ -253,7 +253,7 @@ describe('CM2CD-6 — the witnesses /grade-code found missing', () => {
     const c = await owner.post<Posted>(base, { resourceType: 'cms_page', resourceId: pageId, body: 'keep me' });
     await a!.c.patch(`${base}/${c.body.commentId}`, { status: 'resolved' });
     await deleteSubjectComments(tenantId, a!.userId);
-    const after = await getComment(tenantId, orgId, c.body.commentId, { preAuthorized: true });
+    const after = await getComment(tenantId, orgId, c.body.commentId, { preAuthorized: true, audience: 'member' });
     expect(after?.body).toBe('keep me');
     expect(after?.status).toBe('resolved');
     expect(after?.resolvedBy).toBeUndefined();

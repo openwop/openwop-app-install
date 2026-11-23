@@ -15,6 +15,16 @@
  * Retry-After). The pack node owns the
  * `merge: 'shallow'` default (`packs/vendor.myndhyve.canvas/index.mjs`), so the
  * surface's own default is not reachable from the node case.
+ *
+ * Red when (wave 122 probes): the canvas row is written before the claim (either
+ * create path); the claim CAS is a blind put; the abandoned-claim takeover is not a
+ * CAS on the stale value; the 30 s grace is dropped or widened; the in-flight error
+ * loses its code / retryAfter or the envelope its Retry-After; the run-lane load
+ * stops checking the tenant; a stale expectedVersion is accepted; deep or shallow
+ * merge loses a key; an unknown invoke workflow is not refused.
+ * Equivalent (recorded): skipping the "row exists → replay" read is invisible on a
+ * sequential retry, because the in-flight wait (`awaitCanvasRow`) finds the same row
+ * 25 ms later; the row COUNT is what the sequential case pins.
  */
 
 import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
@@ -110,7 +120,10 @@ describe('durable CAS idempotency (CODEBASE-ASSESSMENT CAS-adoption pass)', () =
     // winner killed between claim and write) and the `ct:` idem row is not cascaded.
     expect(await deleteCanvasForTenant('t-cas-stale', first.canvasId)).toBe(true);
     expect(await listCanvasesForTenant('t-cas-stale')).toEqual([]);
-    vi.useFakeTimers({ toFake: ['Date'] });
+    // `shouldAdvanceTime`: the clock keeps moving after the jump, so a path that
+    // waits on the in-flight row (a mis-set grace) ends on its 2 s deadline with a
+    // typed 409 instead of spinning on a frozen Date.
+    vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: true });
     try {
       vi.setSystemTime(Date.now() + 31_000);
       const [a, b] = await Promise.all([
@@ -128,7 +141,17 @@ describe('durable CAS idempotency (CODEBASE-ASSESSMENT CAS-adoption pass)', () =
   it('a FRESH claim with no canvas row (an in-flight winner that never lands) answers idempotency_in_flight (409 + Retry-After), not a dead id', async () => {
     const first = await createCanvasForTenant('t-cas-young', { canvasTypeId: 'doc', idempotencyKey: 'young-key-1' });
     expect(await deleteCanvasForTenant('t-cas-young', first.canvasId)).toBe(true);
-    const err = await createCanvasForTenant('t-cas-young', { canvasTypeId: 'doc', idempotencyKey: 'young-key-1' }).then(() => null, (e: unknown) => e);
+    // The caller waits up to 2 s for the in-flight row (25 ms polls). Fake that
+    // clock rather than spend it; `shouldAdvanceTime` keeps it moving regardless.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'Date'], shouldAdvanceTime: true });
+    let err: unknown;
+    try {
+      const pending = createCanvasForTenant('t-cas-young', { canvasTypeId: 'doc', idempotencyKey: 'young-key-1' }).then(() => null, (e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(2_100);
+      err = await pending;
+    } finally {
+      vi.useRealTimers();
+    }
     expect(err).toBeInstanceOf(OpenwopError);
     expect(err).toMatchObject({ code: 'idempotency_in_flight', httpStatus: 409, details: { idempotencyKey: 'young-key-1', retryAfter: 1 } });
     expect(await listCanvasesForTenant('t-cas-young')).toEqual([]);

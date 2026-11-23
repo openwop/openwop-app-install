@@ -12,7 +12,9 @@
  * write shows the exact shared forbidden copy.
  * Sabotage that turns it red: granting org-share without the scope, keeping the
  * secret after save, dropping the revoke confirm, or printing the server's 403
- * sentence.
+ * sentence. ADR 0994 (workspace-default rows): offering the `workspace` scope
+ * value wrongly, dropping its hint or its toast, offering "Just me" under the hub
+ * Workspace pill, or the share selector under the Personal pill.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup, act } from '@testing-library/react';
@@ -71,6 +73,9 @@ beforeEach(() => {
   mAccess.mockResolvedValue({ ...MEMBER_ACCESS });
   accessState.value = { access: { roles: [], basis: 'member', scopes: ['workspace:write'] }, resolved: true };
   vi.mocked(toast.error).mockReset();
+  // vitest 4's restoreAllMocks leaves vi.fn() call history alone, so the success
+  // toast is reset here or one case's toast satisfies the next case's check.
+  vi.mocked(toast.success).mockReset();
   vi.spyOn(window, 'confirm').mockReturnValue(true);
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
@@ -165,7 +170,9 @@ describe('ConnectionsManager (FP-2)', () => {
       expect.objectContaining({ provider: 'servicenow', secret: 'super-secret', scope: 'user' }),
     ));
     // The secret is write-only: it leaves the DOM once the connection is made.
-    await waitFor(() => expect(secret.value).toBe(''));
+    // Settle on the success toast (it fires after the clear), then read the value.
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1));
+    expect(secret.value).toBe('');
   });
 
   it('ADR 0994: an admin can create a workspace-default row, the only kind an unattended send resolves', async () => {
@@ -183,7 +190,8 @@ describe('ConnectionsManager (FP-2)', () => {
     await waitFor(() => expect(mCreate).toHaveBeenCalledWith(
       expect.objectContaining({ provider: 'postmark', secret: 'server-token', scope: 'workspace' }),
     ));
-    expect(toast.success).toHaveBeenCalledWith('Postmark connected for the whole workspace.');
+    await waitFor(() => expect(toast.success).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(toast.success).mock.calls[0]?.[0]).toBe('Postmark connected for the whole workspace.');
   });
 
   it('ADR 0994: under the hub Workspace pill an admin chooses org-shared or workspace-default; Personal offers neither', async () => {
@@ -292,6 +300,6 @@ describe('ConnectionsManager (FP-2)', () => {
     fireEvent.change(document.querySelector('input[type="password"]') as HTMLInputElement, { target: { value: 'k' } });
     fireEvent.click(screen.getByText('Connect'));
     await waitFor(() => expect(vi.mocked(toast.error)).toHaveBeenCalled());
-    expect(String(vi.mocked(toast.error).mock.calls[0]?.[0])).toMatch(/allowlist/);
+    expect(vi.mocked(toast.error).mock.calls[0]?.[0]).toBe("This provider isn't allowed in this workspace — an admin sets the allowlist under Governance.");
   });
 });

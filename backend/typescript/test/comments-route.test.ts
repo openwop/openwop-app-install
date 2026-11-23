@@ -31,6 +31,8 @@ import { buildCommentsSurface } from '../src/features/comments/surface.js';
 import { getNotificationEmitter } from '../src/notifications/emitter.js';
 import type { NotificationRecord } from '../src/types.js';
 import { PREAUTHORIZED_CALLER } from '../src/host/subjectAccess.js';
+/** Issue 6109 — a comments read as an org member (internal threads included). */
+const MEMBER_READ = { ...PREAUTHORIZED_CALLER, audience: 'member' as const };
 import { createMember } from '../src/host/accessControlService.js';
 
 /** ADR 0659 D1 — `listThread` now answers `null` when the target is absent OR invisible.
@@ -264,19 +266,19 @@ describe('Comments: delete-cascade authorization (no data-loss by a non-admin)',
     const root = await createComment({ tenantId: 'tD', orgId: 'o1', resourceType: 'cms_page', resourceId: page.pageId, body: 'root by A', authorId: 'A' , caller: { subject: 'A' }});
     await createComment({ tenantId: 'tD', orgId: 'o1', resourceType: 'cms_page', resourceId: page.pageId, parentId: root.comment.commentId, body: 'reply by B', authorId: 'B' , caller: { subject: 'B' }});
     // A (author, non-admin) is blocked — B's reply must not be destroyed.
-    await expect(deleteComment('tD', 'o1', root.comment.commentId, { userId: 'A', isAdmin: false }, PREAUTHORIZED_CALLER)).rejects.toThrow(/replies from other people/);
-    expect((await listThreadOrFail('tD', 'o1', 'cms_page', page.pageId, PREAUTHORIZED_CALLER)).length).toBe(2);
+    await expect(deleteComment('tD', 'o1', root.comment.commentId, { userId: 'A', isAdmin: false }, MEMBER_READ)).rejects.toThrow(/replies from other people/);
+    expect((await listThreadOrFail('tD', 'o1', 'cms_page', page.pageId, MEMBER_READ)).length).toBe(2);
     // An org admin may delete the root — cascade removes the thread.
-    expect(await deleteComment('tD', 'o1', root.comment.commentId, { userId: 'admin', isAdmin: true }, PREAUTHORIZED_CALLER)).toBe(true);
-    expect((await listThreadOrFail('tD', 'o1', 'cms_page', page.pageId, PREAUTHORIZED_CALLER)).length).toBe(0);
+    expect(await deleteComment('tD', 'o1', root.comment.commentId, { userId: 'admin', isAdmin: true }, MEMBER_READ)).toBe(true);
+    expect((await listThreadOrFail('tD', 'o1', 'cms_page', page.pageId, MEMBER_READ)).length).toBe(0);
   });
 
   it('a non-admin author CAN delete their own root when only their own replies hang off it', async () => {
     const page = await createPage({ tenantId: 'tD2', orgId: 'o1', title: 'Doc', createdBy: 'A' });
     const root = await createComment({ tenantId: 'tD2', orgId: 'o1', resourceType: 'cms_page', resourceId: page.pageId, body: 'root by A', authorId: 'A' , caller: { subject: 'A' }});
     await createComment({ tenantId: 'tD2', orgId: 'o1', resourceType: 'cms_page', resourceId: page.pageId, parentId: root.comment.commentId, body: 'self reply', authorId: 'A' , caller: { subject: 'A' }});
-    expect(await deleteComment('tD2', 'o1', root.comment.commentId, { userId: 'A', isAdmin: false }, PREAUTHORIZED_CALLER)).toBe(true);
-    expect((await listThreadOrFail('tD2', 'o1', 'cms_page', page.pageId, PREAUTHORIZED_CALLER)).length).toBe(0);
+    expect(await deleteComment('tD2', 'o1', root.comment.commentId, { userId: 'A', isAdmin: false }, MEMBER_READ)).toBe(true);
+    expect((await listThreadOrFail('tD2', 'o1', 'cms_page', page.pageId, MEMBER_READ)).length).toBe(0);
   });
 });
 
@@ -302,7 +304,7 @@ describe('Comments: ctx.features.comments + nodes', () => {
 
     const resolved = (await surf.resolve({ orgId: 'o1', commentId: String(posted.comment?.commentId) })) as { comment: Record<string, unknown> | null };
     expect(resolved.comment?.status).toBe('resolved');
-    expect((await listThreadOrFail('tS', 'o1', 'cms_page', page.pageId, PREAUTHORIZED_CALLER))[0]!.status).toBe('resolved');
+    expect((await listThreadOrFail('tS', 'o1', 'cms_page', page.pageId, MEMBER_READ))[0]!.status).toBe('resolved');
   });
 });
 

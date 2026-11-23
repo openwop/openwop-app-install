@@ -13,46 +13,60 @@
  *    empty state or a spinner), an unknown currency is unlabelled, an inactive
  *    pixel is marked, `sent: 0` is not a success, Dispatch is disabled without a
  *    wired (meta/tiktok) pixel, and the last-sync line renders.
+ *  - ADR 0907 D3: records a platform could not report are named, never a silent 0.
+ *  - ADR 1022 D7 (CP71UX-1..5, -15): the freshness line carries the last
+ *    SUCCESS with its date and a failed last attempt, stays outside the KPI
+ *    branch, and a failed manual sync is an error notice whose advice fits the
+ *    reason (wait / setup / sign in).
  *
- * Sabotage that turns it red: drop `danger`, ignore the confirm result or swallow the
- * remove error; drop either currency flag from `orgMoney` or the mixed notice, or label
- * with a fixed currency; skip `setPixelsFailed`/`setKpiFailed`; hide the Inactive chip;
- * toast success on `sent: 0`; count google as wired; hide the sync line.
+ * Sabotage that turns it red: drop `danger`, ignore the confirm result, remove the wrong
+ * platform or swallow the remove error; drop either currency flag from `orgMoney` or the
+ * mixed notice, or label with a fixed currency; drop the revenue leg of the unreported
+ * note; skip `setPixelsFailed`/`setKpiFailed`; hide the Inactive chip; toast success on
+ * `sent: 0`; count google as wired; show the success time without its date, drop the
+ * failed-attempt note, say "none yet" for a pre-ADR-1022 row, or put the line back inside
+ * the KPI branch; tone the failed-sync notice down, or give a 401, a rate limit or a
+ * missing developer token the wrong advice (probes w122g4-pc-*).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, waitFor, fireEvent, act } from '@testing-library/react';
-import type { KpiSummary, PixelConfig } from '../campaignConnectorsClient.js';
+import type {
+  CatalogFeed, ConnectorSettings, ConversionHealth, DispatchResult, KpiSummary, LiveSyncPlatform,
+  OrgRef, PixelConfig, PixelPlatform, PlatformStatus, QueuedConversion, SyncResult, SyncStatus,
+} from '../campaignConnectorsClient.js';
 import type { ConfirmOptions } from '../../../ui/confirm.js';
 
-const getKpi = vi.fn();
-const listPixels = vi.fn();
-const removePixel = vi.fn();
+// Typed against the real client signatures, so a fixture that drifts from the
+// SSoT types fails `tsc` instead of passing an untyped mock.
+const getKpi = vi.fn<() => Promise<KpiSummary>>();
+const listPixels = vi.fn<() => Promise<PixelConfig[]>>();
+const removePixel = vi.fn<(orgId: string, platform: PixelPlatform) => Promise<void>>();
 const confirmMock = vi.fn<(o: ConfirmOptions) => Promise<boolean>>();
 // R2 review m4 — the new client fns must be EXPLICIT stubs: spreading
 // `...actual` left them as real jsdom fetches, so the new surfaces had zero
 // coverage while their tracker rows said done.
-const getSyncStatus = vi.fn();
-const listConversions = vi.fn();
-const dispatchConversions = vi.fn();
-const syncNow = vi.fn();
+const getSyncStatus = vi.fn<() => Promise<SyncStatus[]>>();
+const listConversions = vi.fn<() => Promise<QueuedConversion[]>>();
+const dispatchConversions = vi.fn<(orgId: string) => Promise<DispatchResult>>();
+const syncNow = vi.fn<(orgId: string, platform: LiveSyncPlatform) => Promise<SyncResult>>();
 
 vi.mock('../campaignConnectorsClient.js', async (orig) => {
   const actual = await orig<Record<string, unknown>>();
   return {
     ...actual,
-    listOrgs: vi.fn(async () => [{ orgId: 'org-1', name: 'Acme' }]),
+    listOrgs: vi.fn(async (): Promise<OrgRef[]> => [{ orgId: 'org-1', name: 'Acme' }]),
     getKpi: () => getKpi(),
     listPixels: () => listPixels(),
-    removePixel: (...a: unknown[]) => removePixel(...a),
+    removePixel: (orgId: string, platform: PixelPlatform) => removePixel(orgId, platform),
     upsertPixel: vi.fn(async () => {}),
-    getSyncStatus: (..._a: unknown[]) => getSyncStatus(),
-    listConversions: (..._a: unknown[]) => listConversions(),
-    dispatchConversions: (...a: unknown[]) => dispatchConversions(...a),
-    syncNow: (...a: unknown[]) => syncNow(...a),
-    getCatalogFeed: vi.fn(async () => ({ enabled: false, version: 1, contentLanguage: 'en', feedLabel: 'US', items: 0, excluded: [] })),
-    getConnectorSettings: vi.fn(async () => ({ orgId: 'org-1', platform: 'meta', syncScope: 'dispatched', adAccountIds: [], updatedAt: '' })),
-    getPlatformStatus: vi.fn(async () => ({ liveSync: ['meta', 'google'], liveConversions: ['meta'] })),
-    getConversionHealth: vi.fn(async () => { throw new Error('not under test'); }),
+    getSyncStatus: () => getSyncStatus(),
+    listConversions: () => listConversions(),
+    dispatchConversions: (orgId: string) => dispatchConversions(orgId),
+    syncNow: (orgId: string, platform: LiveSyncPlatform) => syncNow(orgId, platform),
+    getCatalogFeed: vi.fn(async (): Promise<CatalogFeed> => ({ enabled: false, version: 1, contentLanguage: 'en', feedLabel: 'US', items: 0, excluded: [] })),
+    getConnectorSettings: vi.fn(async (): Promise<ConnectorSettings> => ({ orgId: 'org-1', platform: 'meta', syncScope: 'dispatched', adAccountIds: [], updatedAt: '' })),
+    getPlatformStatus: vi.fn(async (): Promise<PlatformStatus> => ({ liveSync: ['meta', 'google'], liveConversions: ['meta'] })),
+    getConversionHealth: vi.fn(async (): Promise<ConversionHealth> => { throw new Error('not under test'); }),
   };
 });
 vi.mock('../../../ui/confirm.js', () => ({ confirm: (o: ConfirmOptions) => confirmMock(o) }));
@@ -87,6 +101,8 @@ beforeEach(() => {
   getSyncStatus.mockReset().mockResolvedValue([]);
   listConversions.mockReset().mockResolvedValue([]);
   dispatchConversions.mockReset().mockResolvedValue({ sent: 0 });
+  // Queued `mockResolvedValueOnce` replies must not survive into another case.
+  syncNow.mockReset();
   // The toast module mock is module-level: reset it so no case inherits another's calls.
   vi.mocked(toast.success).mockReset();
   vi.mocked(toast.info).mockReset();
@@ -271,15 +287,27 @@ describe('R2 CC-SP-6/13 — the new surfaces have real coverage (review m4)', ()
     fireEvent.click(await screen.findByRole('button', { name: /Sync Meta/ }));
     const notice = await screen.findByText(/No Meta Ads account returned data/);
     expect(notice.textContent).toMatch(/Check the ad-platform sign-in in Connections/);
+    // An ERROR notice, not an info/warning one (the tone is the claim).
+    expect(notice.closest('.alert')?.classList.contains('error')).toBe(true);
     // A 401 reads as the sign-in problem it is, not a raw code.
     expect((await screen.findByText('act_1')).parentElement?.textContent).toMatch(/not connected \(sign in/);
+    // The sync buttons are disabled while a sync (and its refresh) runs: wait
+    // for them to come back before the next click, or the click is dropped.
+    await waitFor(() => expect((screen.getByRole('button', { name: /Sync Meta/ }) as HTMLButtonElement).disabled).toBe(false));
+    expect(syncNow).toHaveBeenLastCalledWith('org-1', 'meta');
     syncNow.mockResolvedValueOnce({ outcome: 'sync_failed', platform: 'meta', reason: 'rate_limited', failures: [{ adAccountId: 'act_1', reason: 'Some provider English text' }] });
     fireEvent.click(screen.getByRole('button', { name: /Sync Meta/ }));
-    await screen.findByText(/Wait a few minutes/);
+    const wait = await screen.findByText(/Wait a few minutes/);
+    expect(wait.textContent).not.toMatch(/Check the ad-platform sign-in/);
     expect((await screen.findByText('act_1')).parentElement?.textContent).toMatch(/the platform rejected the request \(Some provider English text\)/);
     // A setup problem is not a sign-in problem (CP71UX-15).
+    await waitFor(() => expect((screen.getByRole('button', { name: /Sync Google/ }) as HTMLButtonElement).disabled).toBe(false));
     syncNow.mockResolvedValueOnce({ outcome: 'sync_failed', platform: 'google', reason: 'no_developer_token', failures: [{ adAccountId: '123', reason: 'no_developer_token' }] });
     fireEvent.click(screen.getByRole('button', { name: /Sync Google/ }));
-    await screen.findByText(/ask your workspace admin/);
+    const setup = await screen.findByText(/No Google Ads account returned data/);
+    expect(setup.textContent).toMatch(/ask your workspace admin/);
+    expect(setup.textContent).not.toMatch(/Check the ad-platform sign-in/);
+    expect((await screen.findByText('123')).parentElement?.textContent).toMatch(/Google Ads is not set up on this server \(no developer token\)/);
+    expect(syncNow).toHaveBeenLastCalledWith('org-1', 'google');
   });
 });

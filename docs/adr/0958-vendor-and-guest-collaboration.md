@@ -163,6 +163,14 @@ interface CollaboratorGrant {             // hostext:extcollab:g, key tenant::or
   media listing. A witness test lists those routes and asserts 404 for a
   collaborator session.
 
+  > **AMENDED 2026-11-22 (ADR 1099 D4).** One exception, worded as narrowly as
+  > ADR 1099 answer 2 puts it: a holder of a `project` grant with `view` may
+  > drive the host collaborator-turn lane for that one project. Its tools are
+  > only the registered client-project tools, and every tool call re-runs
+  > `checkGrantUse`. Member chat, `/runs`, agents and every other route above
+  > stay closed. The lane itself ships in ADR 1099 P2; until then the
+  > exception has nothing to admit.
+
 ### D2 — Signed-in mode: their own account, the agency's grant
 
 - A vendor signs in through the normal auth lanes into **their own home

@@ -197,11 +197,25 @@ export function parseAnchor(raw: unknown): CommentAnchor {
 export interface CommentCaller extends SubjectCaller {
   principal?: string;
   toggle?: Omit<ToggleSubject, 'tenantId'>;
+  /** Issue 6109 — `'member'` when the caller's org membership was established at its
+   *  door (the route's org scope, the chat tool's or the surface's org check). Only a
+   *  member sees `internal` threads (ADR 0947 D2). Anything else, absent included,
+   *  sees `shared` threads only: a new reader that forgets to say who it is gets the
+   *  client's view, never the firm's notes. */
+  audience?: 'member';
+}
+
+/** Issue 6109 — may `caller` see comment `c`? A reply takes its thread root's
+ *  visibility; a thread with no `shared` mark is internal (fail closed). */
+function visibleToAudience(caller: CommentCaller, c: Comment, root: Comment | null | undefined): boolean {
+  if (caller.audience === 'member') return true;
+  return (c.parentId ? root?.visibility : c.visibility) === 'shared';
 }
 
 /** The caller a RECIPIENT is checked as (ADR 0881 D3): one id, every spelling. */
 function recipientCaller(userId: string): CommentCaller {
-  return { subject: userId, principal: userId, toggle: { userId } };
+  // Recipients are filtered to org members before this is asked (`deliverable`).
+  return { subject: userId, principal: userId, toggle: { userId }, audience: 'member' };
 }
 
 /** A resolved commentable target. `restricted` (ADR 0881 D8) = its visibility is
@@ -450,8 +464,14 @@ export async function listThread(
   // empty tenantId to another feature's store). Caught by `comments-bounded-reads`.
   if (!tenantId) return null;
   if (!(await resolveCommentTarget(tenantId, orgId, resourceType, resourceId, caller))) return null;
-  return (await rowsForTenant(tenantId))
-    .filter((c) => c.orgId === orgId && c.resourceType === resourceType && c.resourceId === resourceId)
+  const thread = (await rowsForTenant(tenantId))
+    .filter((c) => c.orgId === orgId && c.resourceType === resourceType && c.resourceId === resourceId);
+  // Issue 6109 — a non-member sees shared threads only. Filtered here, in the one
+  // reader every door calls, so neither the bodies nor the count of internal
+  // comments reach a caller that did not establish membership.
+  const roots = new Map(thread.filter((c) => !c.parentId).map((c) => [c.commentId, c]));
+  return thread
+    .filter((c) => visibleToAudience(caller, c, c.parentId ? roots.get(c.parentId) : undefined))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt)); // thread order: oldest first
 }
 
@@ -466,6 +486,8 @@ export async function getComment(tenantId: string, orgId: string, commentId: str
   const c = await comments.get(commentId);
   if (!c || c.tenantId !== tenantId || c.orgId !== orgId) return null;
   if (!(await resolveCommentTarget(tenantId, orgId, c.resourceType, c.resourceId, caller))) return null;
+  // Issue 6109 — the by-id lane answers a non-member exactly as a missing row.
+  if (caller.audience !== 'member' && !visibleToAudience(caller, c, c.parentId ? await comments.get(c.parentId) : undefined)) return null;
   return c;
 }
 

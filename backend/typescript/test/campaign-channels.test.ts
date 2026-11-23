@@ -1,14 +1,17 @@
 /**
  * Campaign Channels (ADR 0157) — the generate + content-quality nodes over a
  * stubbed 3-surface ctx, the five channel child workflows (a generate → HITL
- * approval-gate DAG — nothing reaches publish without a human), the agent pack
+ * approval-gate → publish DAG — nothing reaches publish without a human; the
+ * run-time approve/reject legs are in `campaign-channels-publish-after-approval.test.ts`), the agent pack
  * loading (CFP-1), and the creative_briefs prompt↔schema parity (CRB-SP-6).
  * The agent's exact tool allowlist is pinned in `campaign-agent-tools.test.ts`
  * › "the generator allowlist is exactly [channels, generate]" (not duplicated here).
  *
  * Sabotage that turns it red: accept an unknown channel; generate without a kernel;
  * drop the brand-voice or KB-grounding prompt leg; pass every quality check; drop the
- * generate → approve edge or its `falsy(skipped)` condition; generate a channel the
+ * generate → approve edge or its `falsy(skipped)` condition; wire a channel's publish
+ * node to anything but the approval (control) and the generated draft (data), or wire
+ * the wrong publish node; generate a channel the
  * brief does not enable, or skip one it does; stop writing `channelResult`; remove
  * `directions` from the creative_briefs schema.
  */
@@ -184,41 +187,51 @@ describe('campaign-channels — channel workflows (the chain-backed definitions 
     expect(defs.map((d) => d.workflowId)).toEqual([...CHANNEL_WORKFLOW_IDS]);
   });
 
-  it('each is generate → approve, where a SKIPPED channel never reaches the approval (ADR 1020 D3)', () => {
+  // The post-approval step per channel: ADR 1020 D14 for creative_briefs, the
+  // ADR 0162 correction (user decision 2026-11-19) for the other four.
+  const AFTER_APPROVAL: Record<string, { bare: string; typeId: string }> = {
+    'campaign-studio.channel.landing-page': { bare: 'publish', typeId: 'feature.campaign-channels.nodes.publish-landing-page' },
+    'campaign-studio.channel.ad-variants': { bare: 'publish', typeId: 'feature.campaign-channels.nodes.publish-ad-variants' },
+    'campaign-studio.channel.email-sequence': { bare: 'publish', typeId: 'feature.campaign-channels.nodes.publish-email-sequence' },
+    'campaign-studio.channel.creative-briefs': { bare: 'briefs', typeId: 'feature.campaign-channels.nodes.create-creative-briefs' },
+    'campaign-studio.channel.social-posts': { bare: 'publish', typeId: 'feature.campaign-channels.nodes.publish-social-posts' },
+  };
+
+  it('each is generate → approve → its post-approval step, where a SKIPPED channel never reaches the approval (ADR 1020 D3)', () => {
     for (const wf of defs) {
-      const creative = wf.workflowId === 'campaign-studio.channel.creative-briefs';
-      // ADR 1020 D14 — creative_briefs creates its managed briefs only after the approval.
-      expect(wf.nodes.map((n) => bare(n.nodeId))).toEqual(creative ? ['generate', 'approve', 'skipped', 'briefs'] : ['generate', 'approve', 'skipped']);
+      const after = AFTER_APPROVAL[wf.workflowId]!;
+      expect(wf.nodes.map((n) => bare(n.nodeId))).toEqual(['generate', 'approve', 'skipped', after.bare]);
       expect(wf.nodes[0]!.typeId).toBe('feature.campaign-channels.nodes.generate');
       expect(wf.nodes[1]!.typeId).toBe('core.approvalGate');
       // A skipped channel ends on a no-op terminal: a run whose only terminal is
       // condition-skipped counts as FAILED (scheduler.ts inspectDisposition).
       expect(wf.nodes[2]!.typeId).toBe('core.noop');
       const edge = (to: string) => (wf.edges ?? []).find((e) => bare(e.targetNodeId) === to)!;
-      expect(wf.edges ?? []).toHaveLength(creative ? 4 : 2);
-      if (creative) {
-        const create = wf.nodes[3]!;
-        expect(create.typeId).toBe('feature.campaign-channels.nodes.create-creative-briefs');
-        const into = (wf.edges ?? []).filter((e) => e.targetNodeId === create.nodeId);
-        expect(into.map((e) => [bare(e.sourceNodeId), e.sourceOutput ?? null, e.targetInput ?? null]).sort()).toEqual([['approve', null, null], ['generate', 'draft', 'draft']]);
-      }
+      expect(wf.edges ?? []).toHaveLength(4);
+      // The post-approval step runs only off the approval (a rejected core.approvalGate
+      // fails, so its out-edges skip) and reads the generated draft.
+      const step = wf.nodes[3]!;
+      expect(step.typeId, wf.workflowId).toBe(after.typeId);
+      const into = (wf.edges ?? []).filter((e) => e.targetNodeId === step.nodeId);
+      expect(into.map((e) => [bare(e.sourceNodeId), e.sourceOutput ?? null, e.targetInput ?? null]).sort(), wf.workflowId).toEqual([['approve', null, null], ['generate', 'draft', 'draft']]);
       expect(edge('approve').condition).toEqual({ path: 'skipped', op: 'falsy' });
       expect(edge('skipped').condition).toEqual({ path: 'skipped', op: 'truthy' });
       expect(wf.variables?.map((v) => v.name)).toEqual(expect.arrayContaining(['briefId', 'channelResult']));
     }
   });
 
-  it('the REGISTERED definitions carry the roles: draft secondary, approval primary, skip terminal primary', () => {
+  it('the REGISTERED definitions carry the roles: draft + approval secondary, post-approval step primary, skip terminal primary', () => {
     // Asserted on what the boot registrar builds (not on the role-map constant),
     // so a registrar that stopped restoring roles reds this.
     _resetChainBackedWorkflowsForTest();
     registerLegacyDefsChainBacked(CHANNEL_WORKFLOWS);
     for (const id of CHANNEL_WORKFLOW_IDS) {
       const wf = getChainBackedWorkflow(id)!;
+      // The primary output is what the post-approval step created (the briefs, the
+      // page, the campaigns, the document).
       expect(Object.fromEntries(wf.nodes.map((n) => [bare(n.nodeId), n.outputRole ?? null]))).toEqual(id.endsWith('creative-briefs')
-        // The creative_briefs run's primary output is the creation summary (how many, where).
         ? { generate: 'secondary', approve: 'secondary', skipped: 'primary', briefs: 'primary' }
-        : { generate: 'secondary', approve: 'primary', skipped: 'primary' });
+        : { generate: 'secondary', approve: 'secondary', skipped: 'primary', publish: 'primary' });
     }
   });
 

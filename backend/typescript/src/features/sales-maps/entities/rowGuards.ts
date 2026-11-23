@@ -12,7 +12,8 @@ const isNeStr = (v: unknown): v is string => typeof v === 'string' && v.length >
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 
 function isGeocode(v: unknown): v is GeocodeResult {
-  return isObj(v) && isNeStr(v.cacheKey) && isNeStr(v.tenantId) && isNeStr(v.orgId) && isNeStr(v.address) && isNum(v.lat) && isNum(v.lng);
+  // `address` is optional: only legacy rows carry it (CHAN-F19 follow-up B).
+  return isObj(v) && isNeStr(v.cacheKey) && isNeStr(v.tenantId) && isNeStr(v.orgId) && (v.address === undefined || isNeStr(v.address)) && isNum(v.lat) && isNum(v.lng);
 }
 
 export const validateGeocode = (v: unknown): GeocodeResult | null => (isGeocode(v) ? v : null);

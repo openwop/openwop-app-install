@@ -22,6 +22,10 @@
  * MEASURED 2026-10-23: 15 trusted tools (13 feature-registered + the static
  * `openwop:kanban.add-todo` and `openwop:schema.lookup`), not the 13 pinned.
  * 16 since ADR 1001 P2 (`openwop:ask-user`, 2026-10-29).
+ * CORRECTED (grade-tests w122): 15 again since ADR 1100 D5 (2026-11-11) moved
+ * `openwop:accessibility.alt-text.generate` to UNTRUSTED (a vision model's reading
+ * of an uploaded image); it is now pinned in the untrusted list, and the WHY
+ * case's title said "16" against a 15-entry EXPECTED.
  * The static set is read at RUNTIME (BUILTINS is populated on bare import, see
  * case 2); feature registrations are read from source as before.
  */
@@ -225,7 +229,7 @@ describe('RFC 0137 §F1 — every builtin tool declares its trust', () => {
     expect(actual.sort(), 'the trusted set changed — every addition is unfenced on the chat path').toEqual(EXPECTED);
   });
 
-  it('every TRUSTED tool states WHY — the 16 are the entire security surface', () => {
+  it('every TRUSTED tool states WHY — the 15 are the entire security surface', () => {
     // The compiler forces a VALUE but cannot force a REASON, and an unexplained
     // `trusted` is the same fail-open shape one level up: nothing distinguishes
     // "audited, host-authored" from "nobody looked". An error among the untrusted

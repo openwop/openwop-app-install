@@ -7,16 +7,24 @@
  *   - OPENWOP_RATELIMIT_DISABLED=true bypasses all checks.
  *
  * Decision records: ADR 0640 (the read/write tier split and FORCE overriding
- * both) and the spec's rest-endpoints §429 envelope (`rate-limit-envelope`).
- * Every knob this file sets is snapshotted at load and restored in `afterAll`.
+ * both), ADR 0987 P2 (the concurrent cap is counted by the store INSIDE the run
+ * insert, and a terminal status frees the slot) and P3 (the per-minute run window
+ * is a FIXED one-minute window in the shared counter), and the spec's
+ * rest-endpoints §429 envelope (`rate-limit-envelope`). Every knob this file sets
+ * is snapshotted at load and restored in `afterAll`.
+ *
+ * The per-minute cases pin `Date` mid-minute (`pinMidMinute`): a burst that
+ * straddled a minute boundary would be admitted by the next fixed window.
  *
  * What turns it red (sabotage-witnessed, /grade-tests 8f wave 1, probes
- * 8fw1g3-rl-*): the read floor, the tier split, FORCE, the SSE exemption's
- * accept/path/exempt legs, the session key, the concurrent cap and its release,
- * the DISABLED bypass, the loopback XFF handling and the IP scope.
+ * 8fw1g3-rl-*; re-probed wave 122, w122g4-rl-*): the read floor, the tier split,
+ * the read/write reason, FORCE, the Retry-After value, the SSE exemption's
+ * accept/path/exempt legs, the session key, the per-minute limit, the concurrent
+ * cap, its scope key, its refusal reason and its release, the DISABLED bypass,
+ * the loopback XFF handling and the IP scope.
  */
 
-import { beforeEach, afterAll, describe, expect, it } from 'vitest';
+import { beforeEach, afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import http from 'node:http';
 import { ipRateLimitMiddleware, refuseRunAdmission, runAdmissionFor, runQuotaMiddleware, _resetRateLimitState , snapshotRateLimits } from '../src/middleware/rateLimit.js';
@@ -81,7 +89,17 @@ const KNOBS = [
 ] as const;
 const savedKnobs = new Map<string, string | undefined>(KNOBS.map((k) => [k, process.env[k]]));
 
+/** Pins `Date` 30 s into the current minute. The run windows are FIXED
+ *  one-minute windows (ADR 0987 P3), so a burst that crossed a minute boundary
+ *  would land in a fresh window and be admitted. Restore with `vi.useRealTimers()`. */
+function pinMidMinute(): void {
+  const t = Date.now();
+  vi.useFakeTimers({ toFake: ['Date'], now: t - (t % 60_000) + 30_000 });
+}
+
 describe('P0.4 rate limit', () => {
+  afterEach(() => { vi.useRealTimers(); });
+
   beforeEach(async () => {
     _resetRateLimitState();
     process.env.OPENWOP_RATELIMIT_DISABLED = '';
@@ -120,7 +138,9 @@ describe('P0.4 rate limit', () => {
     }
     const r = await fetch(`http://127.0.0.1:${port}/ping`);
     expect(r.status).toBe(429);
-    expect(r.headers.get('retry-after')).toBeTruthy();
+    // Whole seconds until the oldest request leaves the 60 s window: 1..60.
+    const retryAfter = Number(r.headers.get('retry-after'));
+    expect(Number.isInteger(retryAfter) && retryAfter >= 1 && retryAfter <= 60, `Retry-After was ${r.headers.get('retry-after')}`).toBe(true);
     const body = (await r.json()) as { error: string; details: { scope: string; reason: string } };
     expect(body.error).toBe('rate_limited');
     // Canonical closed enum per rest-endpoints.md §429 (per-IP bucket → "key").
@@ -169,17 +189,29 @@ describe('P0.4 rate limit', () => {
     process.env.OPENWOP_RATELIMIT_IP_READ_REQS_PER_MIN = '1000'; // FORCE overrides BOTH tiers (ADR 0640)
     _resetRateLimitState();
     let last: Response | undefined;
+    let sent = 0;
     for (let i = 0; i < 5; i++) {
       last = await fetch(`http://127.0.0.1:${port}/ping`);
+      sent = i + 1;
       if (last.status === 429) break;
     }
     expect(last!.status).toBe(429);
+    // FORCE is a 3/min budget on the READ tier too: the 4th read is the first refused.
+    expect(sent, 'the first 429 must be the 4th request').toBe(4);
     const body = (await last!.json()) as { error: string; details: { scope: string; reason: string } };
     expect(body.error).toBe('rate_limited');
     expect(body.details.scope).toBe('key');
+    expect(body.details.reason).toBe('ip_read_rate');
+    // …and the WRITE tier: the 4th write is refused too, with the write reason.
+    _resetRateLimitState();
+    for (let i = 0; i < 3; i++) expect((await fetch(`http://127.0.0.1:${port}/ping`, { method: 'POST' })).status).not.toBe(429);
+    const w4 = await fetch(`http://127.0.0.1:${port}/ping`, { method: 'POST' });
+    expect(w4.status).toBe(429);
+    expect(((await w4.json()) as { details: { reason: string } }).details.reason).toBe('ip_request_rate');
   });
 
   it('per-session run quota: 3 runs/min then 429', async () => {
+    pinMidMinute();
     for (let i = 0; i < 3; i++) {
       const r = await fetch(`http://127.0.0.1:${port}/runs`, {
         method: 'POST',
@@ -201,20 +233,22 @@ describe('P0.4 rate limit', () => {
   });
 
   it('per-session quota is isolated between sessions', async () => {
-    for (let i = 0; i < 3; i++) {
-      await fetch(`http://127.0.0.1:${port}/runs`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-test-tenant': 'anon:alice' },
-        body: '{}',
-      });
-    }
-    // Alice exhausted; Bob still has full quota.
-    const bob = await fetch(`http://127.0.0.1:${port}/runs`, {
+    pinMidMinute();
+    const post = (tenant: string): Promise<Response> => fetch(`http://127.0.0.1:${port}/runs`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-test-tenant': 'anon:bob' },
+      headers: { 'content-type': 'application/json', 'x-test-tenant': tenant },
       body: '{}',
     });
+    for (let i = 0; i < 3; i++) expect((await post('anon:alice')).status).toBe(201);
+    // Alice exhausted; Bob still has full quota.
+    const bob = await post('anon:bob');
     expect(bob.status).toBe(201);
+    expect(await bob.json()).toEqual({ ok: true });
+    // Positive control: alice really is at her cap, so bob's 201 is the isolation
+    // and not a limiter that never fires.
+    const alice = await post('anon:alice');
+    expect(alice.status).toBe(429);
+    expect(((await alice.json()) as { details: { reason: string } }).details.reason).toBe('session_runs_per_min');
   });
 
   /**
@@ -274,10 +308,14 @@ describe('P0.4 rate limit', () => {
     });
 
     expect((await reserveAs('anon:alice')).status).toBe(201);
-    expect((await reserveAs('anon:alice')).status, 'alice is now at her cap').toBe(429);
+    const refused = await reserveAs('anon:alice');
+    expect(refused.status, 'alice is now at her cap').toBe(429);
+    expect(((await refused.json()) as { details: { reason: string } }).details.reason).toBe('session_concurrent');
     // The quota is per session, so bob is unaffected — a shared-key bug would
     // show up here and nowhere else.
-    expect((await reserveAs('anon:bob')).status, 'bob has his own quota').toBe(201);
+    const bob = await reserveAs('anon:bob');
+    expect(bob.status, 'bob has his own quota').toBe(201);
+    expect(((await bob.json()) as { runId: string }).runId).toMatch(/^run-\d+$/);
   });
 
 
@@ -289,8 +327,11 @@ describe('P0.4 rate limit', () => {
     for (let i = 0; i < 12; i++) {
       const a = await fetch(`http://127.0.0.1:${port}/host/openwop-app/notifications/stream`, { headers: sse });
       expect(a.status).toBe(200);
+      // The handler answered (not the limiter's envelope).
+      expect(await a.json()).toEqual({ ok: true });
       const b = await fetch(`http://127.0.0.1:${port}/runs/run-xyz/events`, { headers: sse });
       expect(b.status).toBe(200);
+      expect(await b.json()).toEqual({ ok: true });
     }
   });
 
@@ -340,7 +381,16 @@ describe('P0.4 rate limit', () => {
     for (let i = 0; i < 20; i++) {
       const r = await fetch(`http://127.0.0.1:${port}/ping`);
       expect(r.status).toBe(200);
+      expect(await r.json()).toEqual({ ok: true });
     }
+    // Positive control: the same burst with the flag cleared IS limited (5/min),
+    // so the 20 × 200 above is the bypass and not an idle limiter.
+    process.env.OPENWOP_RATELIMIT_DISABLED = '';
+    _resetRateLimitState();
+    for (let i = 0; i < 5; i++) expect((await fetch(`http://127.0.0.1:${port}/ping`)).status).toBe(200);
+    const sixth = await fetch(`http://127.0.0.1:${port}/ping`);
+    expect(sixth.status).toBe(429);
+    expect(((await sixth.json()) as { details: { reason: string } }).details.reason).toBe('ip_read_rate');
   });
 
   it('loopback self-traffic (no XFF) is exempt; a spoofed XFF is NOT', async () => {

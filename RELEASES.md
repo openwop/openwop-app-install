@@ -48,6 +48,29 @@ upgrade is neither: list it in `breakingConfig`.
 
 ## Version log
 
+### v0.19.0 — 2026-11-23
+
+- **Required stop:** no. **Rolling-safe:** yes.
+- **Schema:** sqlite 54 / postgres 52 (unchanged) · **App migrations:** 26 (unchanged).
+- **Breaking:** none. No route, env var or config key is removed or renamed.
+  Behaviour change: approving a Campaign Studio channel draft now creates that draft
+  in the connected tool (ads are created paused) (ADR 0162 correction, #6200).
+- **New optional settings, unchanged by default:** `OPENWOP_SYSTEM_INDEX_SWEEP_MS`
+  (default 60 s; `OPENWOP_MEDIA_INDEX_SWEEP_MS` still honoured) and the
+  `projects.client-portal` sub-toggle (default off).
+- **One-time work after upgrade:** each tenant's kanban card index is built on its
+  first indexed read (inline up to 500 cards, else by the background sweep while
+  reads use the old path).
+- Kanban at scale (ADR 1155 P1–P4): `dueAt: null`, card `facets`, a paged
+  `GET /boards/:id?limit=`, an index-backed "Assigned to me", batch board commands.
+  The 2,000-card cap (P5b) is NOT in this release.
+- Project client access (ADR 1099 P1), computer-use trajectory viewer (ADR 1136 P3b),
+  reallocation-plan withdraw (ADR 1022), shared approval quorum groundwork (ADR 0924
+  P2a), offline `onlineOnly` (ADR 0873 D6).
+- Fixes: internal comment threads are member-only (#6109); origin-denied URLs keep
+  origin and path only; CHAN-F19 erasure follow-ups.
+- [CHANGELOG §0.19.0](./CHANGELOG.md#0190--2026-11-23)
+
 ### v0.18.0 — 2026-11-22
 
 - **Required stop:** no. **Rolling-safe:** yes.

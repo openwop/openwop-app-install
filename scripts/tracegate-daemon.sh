@@ -25,6 +25,9 @@
 #      had to run, for a docs-only PR. It was retried 4 times and a starting gate
 #      killed every attempt. Each PR is now tried at most 3 times per head, and a
 #      PR that does not merge cleanly is skipped (the train cannot use it either).
+#   2a. PACKAGE RECORDING (01:00–05:59 local, once per 20 h, after the nightly):
+#      the tracegate-ci package's own whole-lane recording (ADR 1028 P1), since
+#      the package reuses no footprint older than 72 h. See package_record.
 #   3. SYNC the ledger with the other machine, if `config.json` names one (P4).
 #
 # IT YIELDS TO GATES, ALWAYS. It starts nothing while any suite, gate, waiting
@@ -166,13 +169,14 @@ checkout_work() { # checkout_work <commit>
 }
 ensure_work_deps() {
   local lane dir sha
-  for lane in backend/typescript frontend/react; do
+  # The root holds the tracegate-ci PACKAGE (ADR 1028 P1a), which package_record runs.
+  for lane in . backend/typescript frontend/react; do
     dir="$WORK/$lane"; [ -f "$dir/package-lock.json" ] || continue
     sha="$(shasum -a 256 "$dir/package-lock.json" | cut -d' ' -f1)"
     if [ "$(cat "$dir/node_modules/.tracegate-lock-sha" 2>/dev/null)" != "$sha" ]; then
       say "installing $lane dependencies for $(git -C "$WORK" rev-parse --short HEAD)"
-      # npm 10.9.8 for the backend, never the local npm (CLAUDE.md, ADR 0739).
-      if [ "$lane" = backend/typescript ]; then ( cd "$dir" && nice -n 10 npx -y npm@10.9.8 ci --no-audit --no-fund >/dev/null 2>&1 ); else ( cd "$dir" && nice -n 10 npm ci --no-audit --no-fund >/dev/null 2>&1 ); fi
+      # npm 10.9.8 for the backend and root, never the local npm (CLAUDE.md, ADR 0739).
+      if [ "$lane" != frontend/react ]; then ( cd "$dir" && nice -n 10 npx -y npm@10.9.8 ci --no-audit --no-fund >/dev/null 2>&1 ); else ( cd "$dir" && nice -n 10 npm ci --no-audit --no-fund >/dev/null 2>&1 ); fi
       echo "$sha" > "$dir/node_modules/.tracegate-lock-sha"
     fi
   done
@@ -307,6 +311,51 @@ nightly() {
   say "nightly full run complete at $(git -C "$WORK" rev-parse --short HEAD)"
 }
 
+# ── the PACKAGE's recording (ADR 1028 P1) ─────────────────────────────────────
+# The package reuses no footprint older than 72 h, and nothing else records for it:
+# from 2026-11-20 every P1 compare row had the package selecting the whole frontend
+# lane (1315 of 1332 files "footprint older than 72 h"), so none of them counted.
+# So once per 20 h, in the nightly window and only after the nightly is done, the
+# tick records each lane in OPENWOP_PACKAGE_RECORD_LANES (default: frontend) with
+# `tracegate-package.sh record`, at origin/main. It runs inside this tick's daemon
+# lease, so a gate, train or deploy stops it as it stops the nightly; a tick without
+# a lease (legacy yielding) records nothing, as `record` never runs outside one.
+PKG_LEDGER="${TRACEGATE_PACKAGE_LEDGER:-$COMMON/tracegate-package}"
+PKG_RECORD_LANES="${OPENWOP_PACKAGE_RECORD_LANES-frontend}"
+# A lane whose recording FAILED twice in the last 20 h is not tried again until the 20 h
+# pass: each try is a whole lane (~6.5 min for the frontend), and a tick comes every
+# 20 min. A run the broker stopped (75) is not a failure and does not count.
+PKG_RECORD_MAX_FAILS="${OPENWOP_PACKAGE_RECORD_MAX_FAILS:-2}"
+package_record_due() { # package_record_due → 0 with PKG_DUE set to the lanes due
+  local lane last now since fails
+  now="$(date +%s)"; PKG_DUE=""
+  since="$(date -u -r $((now - 72000)) +%Y-%m-%dT%H:%M:%SZ)"
+  for lane in $PKG_RECORD_LANES; do
+    last="$(cat "$PKG_LEDGER/record-$lane.last" 2>/dev/null || echo 0)"
+    [ $((now - last)) -ge 72000 ] || continue
+    fails="$(awk -F'\t' -v s="$since" -v l="$lane" '$1 >= s && $3 == l && $4 != 0 && $4 != 75' "$PKG_LEDGER/record.tsv" 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "${fails:-0}" -ge "$PKG_RECORD_MAX_FAILS" ]; then say "package recording $lane failed $fails time(s) in 20 h — not trying again until that has passed"; continue; fi
+    PKG_DUE="$PKG_DUE $lane"
+  done
+  [ -n "$PKG_DUE" ]
+}
+package_record() {
+  [ "${DAEMON_YIELD:-}" = broker ] || { say "package recording needs this tick's broker lease — skipped"; return 1; }
+  checkout_work origin/main || return 1
+  mkdir -p "$PKG_LEDGER"
+  local lane rc t0
+  for lane in $PKG_DUE; do
+    if gate_live; then say "a gate appeared before the package recording of $lane — yielding"; return 0; fi
+    say "package recording $lane at $(git -C "$WORK" rev-parse --short HEAD)"
+    t0="$(date +%s)"; rc=0
+    ( cd "$WORK" && TRACEGATE_PACKAGE_LEDGER="$PKG_LEDGER" TRACEGATE_PACKAGE_NO_LEASE=1 OPENWOP_VITEST_NO_WAIT=1 \
+        exec taskpolicy -c utility nice -n 15 bash scripts/tracegate-package.sh record "$lane" ) >> "$LEDGER/package-record.log" 2>&1 || rc=$?
+    printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(git -C "$WORK" rev-parse --short=12 HEAD)" "$lane" "$rc" "$(( $(date +%s) - t0 ))" >> "$PKG_LEDGER/record.tsv"
+    if [ "$rc" = 0 ]; then date +%s > "$PKG_LEDGER/record-$lane.last"; say "package recording $lane done in $(( $(date +%s) - t0 ))s"
+    else say "package recording $lane exited $rc (log $LEDGER/package-record.log); it is tried again next tick, at most $PKG_RECORD_MAX_FAILS failures per 20 h"; return 0; fi
+  done
+}
+
 pregate_one() {
   command -v gh >/dev/null 2>&1 || return 1
   local list pr oid n main
@@ -369,6 +418,8 @@ tick_work() {
   hour="$(date +%H)"; now="$(date +%s)"; last="$(cat "$LEDGER/nightly.last" 2>/dev/null || echo 0)"
   if [ "$((10#$hour))" -ge 1 ] && [ "$((10#$hour))" -le 5 ] && [ $((now - last)) -ge 72000 ]; then
     nightly
+  elif [ "$((10#$hour))" -ge 1 ] && [ "$((10#$hour))" -le 5 ] && package_record_due; then
+    package_record || pregate_one || say "nothing to pre-gate"
   else
     pregate_one || say "nothing to pre-gate"
   fi
@@ -419,6 +470,8 @@ status() {
   node "$ROOT/scripts/tracegate.mjs" status
 }
 
+# Tests source the functions without running a command (test-tracegate-package-shadow.sh).
+if [ "${OPENWOP_DAEMON_SOURCE_ONLY:-}" = 1 ]; then return 0 2>/dev/null || exit 0; fi
 case "${1:-}" in
   tick) tick ;;
   # Internal: started by `tick` under the broker lease; the parent holds the lock.

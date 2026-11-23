@@ -15,6 +15,7 @@
 import { DurableCollection } from '../../../host/hostExtPersistence.js';
 import { validateDealClaim } from './rowGuards.js';
 import { OpenwopError } from '../../../types.js';
+import { declarePiiFields } from '../../../host/dataClassification.js';
 
 export interface DealClaim {
   claimId: string; // `dc1|<planId.length>|<planId>|<dealId>` (see dealClaimId)
@@ -28,6 +29,8 @@ export interface DealClaim {
 }
 
 const claims = new DurableCollection<DealClaim>('commissions:deal-claim', (c) => c.claimId, validateDealClaim, (c) => c.tenantId);
+// CHAN-F19 follow-up C (ADR 0464 §9) — the rep's id sits inside statementId; eraseSubjectCommissions re-points or rewrites it.
+declarePiiFields('commissions:deal-claim', ['statementId'], { maskGloballyByFieldName: false });
 
 // Length-prefixed, never a NUL separator: the id is the `host_ext_kv.k` TEXT primary key,
 // and Postgres TEXT cannot store 0x00 (grade-code B1 — the first cut's NUL key would have
@@ -106,12 +109,27 @@ export async function repointClaims(tenantId: string, fromStatementId: string, t
  * erased subject, so no claim keeps the id.
  */
 export async function eraseClaimSubjects(tenantId: string, forms: ReadonlySet<string>, erasedRef: string): Promise<void> {
-  for (const c of await claims.listForTenantIndexed(tenantId)) {
-    if (c.tenantId !== tenantId || !c.statementId.startsWith(`${c.planId}:`)) continue;
+  // The subject's rewritten statement id, or null when this claim does not name them.
+  const rewrite = (c: DealClaim): string | null => {
+    if (c.tenantId !== tenantId || !c.statementId.startsWith(`${c.planId}:`)) return null;
     const rest = c.statementId.slice(c.planId.length + 1);
     const cut = rest.lastIndexOf(':');
-    if (cut <= 0 || !forms.has(rest.slice(0, cut))) continue;
-    await claims.compareAndSwap(c, { ...c, statementId: `${c.planId}:${erasedRef}:${rest.slice(cut + 1)}` });
+    if (cut <= 0 || !forms.has(rest.slice(0, cut))) return null;
+    return `${c.planId}:${erasedRef}:${rest.slice(cut + 1)}`;
+  };
+  for (const listed of await claims.listForTenantIndexed(tenantId)) {
+    // CHAN-F19 follow-up C — the CAS result used to be ignored, so a write that beat it
+    // left the rep's id in the claim. Retried on a fresh read, as `repointClaims` above
+    // does; exhausted → 409, so the erasure job retries.
+    let c: DealClaim | null = listed;
+    let done = false;
+    for (let attempt = 0; attempt < 5 && c; attempt += 1) {
+      const next = rewrite(c);
+      if (next === null) { done = true; break; } // no longer names the subject
+      if (await claims.compareAndSwap(c, { ...c, statementId: next })) { done = true; break; }
+      c = await claims.get(listed.claimId);
+    }
+    if (!done && c) throw new OpenwopError('conflict', 'A deal claim kept changing during erasure; retry the erasure.', 409, {});
   }
 }
 

@@ -11,7 +11,7 @@
  * owner — the excess is refused and logged, not queued).
  */
 import { randomUUID } from 'node:crypto';
-import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { DurableCollection, hostExtStorage } from '../../host/hostExtPersistence.js';
 import { declarePiiFields } from '../../host/dataClassification.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { ERASED, subjectKeyForms } from '../../host/subjectErasureRedaction.js';
@@ -32,6 +32,11 @@ export interface DecisionSuggestion {
   text: string;
   source: { kind: SuggestionSourceKind; ref: string; link?: string };
   suggestedBy: { kind: 'agent' | 'host' | 'user'; id: string };
+  /** CHAN-F19 follow-up D — for a suggestion an AGENT filed from a person's chat message
+   *  (`source.kind === 'message'`): who wrote that message. The title and text are the
+   *  model's summary of their words, so an erasure of that person blanks them. Absent on
+   *  rows from before 2026-11-22 (matched best-effort through the source message). */
+  sourceAuthorUserId?: string;
   /** `sent-back` (ADR 0855 D2): a drift finding returned to whoever started the run. */
   status: 'open' | 'recorded' | 'dismissed' | 'sent-back';
   createdAt: string;
@@ -43,6 +48,9 @@ export interface DecisionSuggestion {
 }
 
 declarePiiFields('teamLedger.suggestion', ['text', 'title', 'reason']);
+// CHAN-F19 follow-up D — the colon-form name the erasure census reads (the dotted one names
+// no store). `eraseSuggestionSubject` covers every field.
+declarePiiFields('team-ledger:suggestions', ['text', 'title', 'reason', 'decidedBy', 'sourceAuthorUserId'], { maskGloballyByFieldName: false });
 
 const rows = new DurableCollection<DecisionSuggestion>('team-ledger:suggestions', (s) => s.suggestionId, undefined, (s) => s.tenantId);
 
@@ -67,6 +75,8 @@ export async function getSuggestion(tenantId: string, suggestionId: string): Pro
 export async function createSuggestion(input: {
   tenantId: string; projectId: string; title: string; text: string;
   source: DecisionSuggestion['source']; suggestedBy: DecisionSuggestion['suggestedBy'];
+  /** Who wrote the source message (an agent-filed `message` suggestion only). */
+  sourceAuthorUserId?: string;
 }): Promise<DecisionSuggestion | null> {
   const all = (await rows.listForTenantIndexed(input.tenantId)).filter((s) => s.tenantId === input.tenantId && s.projectId === input.projectId);
   const ref = input.source.ref.slice(0, SUGGESTION_LIMITS.ref);
@@ -85,6 +95,7 @@ export async function createSuggestion(input: {
     suggestionId: `tls_${randomUUID()}`, tenantId: input.tenantId, projectId: input.projectId, title, text,
     source: { kind: input.source.kind, ref, ...(link ? { link } : {}) },
     suggestedBy: input.suggestedBy, status: 'open', createdAt: nowIso(),
+    ...(input.sourceAuthorUserId && input.source.kind === 'message' ? { sourceAuthorUserId: input.sourceAuthorUserId } : {}),
   };
   await rows.put(s);
   return s;
@@ -117,7 +128,40 @@ export async function requireOpenSuggestion(tenantId: string, projectId: string,
   return s;
 }
 
-/** DSAR: a person's suggestion text (when a person suggested it), and their decider identity + reason. */
+/** The conversation id in an agent message suggestion's `/chat?conversation=<id>` link. */
+function conversationOfLink(link: string | undefined): string | null {
+  if (!link || !link.startsWith('/chat?')) return null;
+  const id = new URLSearchParams(link.slice('/chat?'.length)).get('conversation');
+  return id || null;
+}
+
+/**
+ * CHAN-F19 follow-up D — a suggestion from before `sourceAuthorUserId` existed: look the
+ * source message up and match its author, or find it already erased (the chat-post eraser
+ * may have run first, and it tombstones the message with meta `erased: true`). Resolves
+ * only where the ref is the stored message id (channel posts). A ref it cannot resolve
+ * (a chat turn's `<session>:<index>`) is the stated residual.
+ *
+ * A storage failure PROPAGATES (release-manager review): swallowing it would report a
+ * complete erasure while the subject's paraphrased words survive, which is fail-open. The
+ * erasure then reports incomplete and is retried. `getChatMessage` is a required `Storage`
+ * method, so no adapter lacks it. Only an unparseable `meta` is read as "not erased": that
+ * is a corrupt row, not a failed read.
+ */
+async function legacySourceIsSubjects(s: DecisionSuggestion, forms: ReadonlySet<string>): Promise<boolean> {
+  if (s.sourceAuthorUserId !== undefined || s.suggestedBy.kind !== 'agent' || s.source.kind !== 'message') return false;
+  const sessionId = conversationOfLink(s.source.link);
+  if (!sessionId) return false;
+  const m = await hostExtStorage().getChatMessage(sessionId, s.source.ref);
+  if (!m) return false;
+  if (m.authorSubject && forms.has(m.authorSubject)) return true;
+  let meta: { erased?: unknown } | null = null;
+  try { meta = m.meta ? JSON.parse(m.meta) as { erased?: unknown } : null; } catch { meta = null; }
+  return meta?.erased === true;
+}
+
+/** DSAR: a person's suggestion text (when a person suggested it, or an agent summarized
+ *  their message), and their decider identity + reason. */
 export async function eraseSuggestionSubject(tenantId: string, subjectKey: string): Promise<void> {
   if (!tenantId || !subjectKey) return;
   const { forms } = subjectKeyForms(subjectKey);
@@ -125,10 +169,17 @@ export async function eraseSuggestionSubject(tenantId: string, subjectKey: strin
     if (s.tenantId !== tenantId) continue;
     const suggested = s.suggestedBy.kind === 'user' && forms.has(s.suggestedBy.id);
     const decided = s.decidedBy !== undefined && forms.has(s.decidedBy);
-    if (!suggested && !decided) continue;
+    // CHAN-F19 follow-up D (user decision 2026-11-22): the agent's summary of the
+    // subject's own message is their words, at every status. The row, its status and
+    // another person's `decidedBy` stay; a decision already recorded into the ledger
+    // document is the team's record and is not reached here (stated limit).
+    const authored = (s.sourceAuthorUserId !== undefined && forms.has(s.sourceAuthorUserId))
+      || (await legacySourceIsSubjects(s, forms));
+    if (!suggested && !decided && !authored) continue;
     await rows.put({
       ...s,
       ...(suggested ? { suggestedBy: { kind: 'user' as const, id: ERASED }, text: ERASED, title: ERASED } : {}),
+      ...(authored ? { text: ERASED, title: ERASED, ...(s.sourceAuthorUserId !== undefined ? { sourceAuthorUserId: ERASED } : {}) } : {}),
       ...(decided ? { decidedBy: ERASED, ...(s.reason ? { reason: ERASED } : {}) } : {}),
     });
   }

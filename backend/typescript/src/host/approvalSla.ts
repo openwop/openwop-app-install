@@ -28,7 +28,7 @@ import { splitRunReaders } from './runClientAccess.js';
 import { openInterruptsForSweep } from '../executor/openInterruptSweep.js';
 import { resumeRunsAwaitingApproval } from './autonomyPolicy/waiters.js';
 import { activeDelegations } from './approvalDelegations.js';
-import { kindHasRejectSideEffects } from './approvalDecision.js';
+import { expireApprovalThroughKind, kindHasRejectSideEffects } from './approvalDecision.js';
 import { approvalRecipients } from './approvalAudience.js';
 import { OpenwopError } from '../types.js';
 import { runUnderWorkerContract } from '../storage/eventEraAdapter.js';
@@ -261,10 +261,17 @@ async function firePerRowRung(rung: Rung, approval: PendingApproval): Promise<vo
     return;
   }
   // D7 / RFC 0093 — expire is a REJECTION (`sla_expired`): silence is never consent.
-  const lock = await resolveApproval(approval.approvalId, { status: 'rejected', note: 'sla_expired', decidedBy: 'system:sla-expiry' });
-  if (!lock?.changed) return;
-  // A campaign run waiting on this row resumes and fails its step (P3 waiter store).
-  if (approval.kind === 'campaign-spend') await resumeRunsAwaitingApproval(tenantId, approval.approvalId, 'rejected');
+  // ADR 0924 P2a (review H4) — a kind that registered its own expiry rejects
+  // THROUGH the kind (a change set must leave review and its links must die with
+  // the row); every other kind keeps the raw reject below, unchanged.
+  const viaKind = await expireApprovalThroughKind(approval);
+  if (viaKind === 'unchanged') return;
+  if (viaKind === 'no_kind_expiry') {
+    const lock = await resolveApproval(approval.approvalId, { status: 'rejected', note: 'sla_expired', decidedBy: 'system:sla-expiry' });
+    if (!lock?.changed) return;
+    // A campaign run waiting on this row resumes and fails its step (P3 waiter store).
+    if (approval.kind === 'campaign-spend') await resumeRunsAwaitingApproval(tenantId, approval.approvalId, 'rejected');
+  }
   await notifyRefs(tenantId, refs, { type: 'approval.sla-expired', priority: 'high', title: 'Approval expired unanswered', message: `“${title}” was rejected after its approval deadline.`, approvalId: approval.approvalId });
 }
 

@@ -664,6 +664,17 @@ async function resolveOrgId(ctx, i, draft) {
   } catch { return ''; }
 }
 
+/** The fork-stable idempotency base for a publish write (CMS2WF-6 / CCH-FORK-1):
+ *  `<nodeId>:<briefId>:<hash of what is written>`. It carries no runId, because a
+ *  `:fork` re-runs the node under a new runId and must find the entity the
+ *  original run made. The hash covers the org and the content, so two different
+ *  approved drafts of the same brief, or the same draft in two orgs, never share
+ *  an id. Deterministic: no clock, no random. */
+function publishIdemBase(ctx, i, draft, nodeFallback, written) {
+  const briefKey = str(i.briefId) || str(draft && draft.briefId) || 'no-brief';
+  return `${ctx.nodeId ?? nodeFallback}:${briefKey}:${djb2(written)}`;
+}
+
 /** Map a landing_page draft `{ title, sections:[{heading,body,ctaText?}] }` onto
  *  CMS sections: first → hero, rest → richText (+ a cta block when a non-hero
  *  section carries ctaText). The CMS service sanitizes + validates the result. */
@@ -702,9 +713,16 @@ export async function publishLandingPage(ctx) {
   if (!orgId) return { status: 'failed', error: { code: 'org_required', message: 'Could not resolve orgId — pass briefId or orgId.' } };
   const sections = landingDraftToSections(draft);
   if (sections.length === 0) return { status: 'failed', error: { code: 'empty_draft', message: 'Landing-page draft has no sections to publish.' } };
-  const idemBase = `${ctx.runId ?? 'run'}:${ctx.nodeId ?? 'publish-lp'}`;
+  const title = str(draft && draft.title) || 'Campaign landing page';
+  // CMS2WF-6 / CCH-FORK-1 — NO runId: a `:fork` mints a new runId, so the old
+  // `${runId}:${nodeId}` base made a SECOND draft page on every fork (createPage
+  // auto-suffixes the slug, so nothing refused it). The key is the node + the
+  // brief + the content that would be written: a fork or retry of the same
+  // approved draft reuses the page, and a regenerated draft that a person
+  // approves again gets its own page instead of silently returning the old one.
+  const idemBase = publishIdemBase(ctx, i, draft, 'publish-lp', JSON.stringify({ orgId, title, sections }));
   try {
-    const page = await cms.createDraftPage({ orgId, title: str(draft && draft.title) || 'Campaign landing page', sections, pageId: `page:${idemBase}` });
+    const page = await cms.createDraftPage({ orgId, title, sections, pageId: `page:${idemBase}` });
     return { status: 'success', outputs: { page } };
   } catch (e) {
     return { status: 'failed', error: { code: 'publish_failed', message: e instanceof Error ? e.message : 'landing-page publish failed' } };
@@ -726,8 +744,10 @@ export async function publishEmailSequence(ctx) {
   // so the old base minted DUPLICATE draft campaigns. Anchored on the node + the
   // sequence's CONTENT (brief id when present, else a hash of the subjects), so a
   // fork or retry reuses the same entities and a genuinely different sequence does not.
-  const briefKey = str(i.briefId) || str(draft && draft.briefId) || djb2(JSON.stringify(emails.map((e) => (e && e.subject) || '')));
-  const idemBase = `${ctx.nodeId ?? 'publish-email'}:${briefKey}`;
+  // User decision 2026-11-19: a regenerated, re-approved sequence gets NEW drafts,
+  // like pages and documents (CMS2WF-6). The key is fork-stable (no runId) and
+  // covers the org, stage and every email, so a replay finds the same campaign.
+  const idemBase = publishIdemBase(ctx, i, draft, 'publish-email', `${orgId}\n${str(i.stage)}\n${JSON.stringify(emails)}`);
   try {
     // ADR 0245 — stamp provenance: the brief this email draft was published from
     // (links to its MarketingCampaign). Best-effort — absent briefId leaves it unset.
@@ -813,9 +833,13 @@ async function publishToDocument(ctx, { itemsKey, toMarkdown, kind, title, nodeF
   if (items.length === 0) return { status: 'failed', error: { code: 'empty_draft', message: `Draft has no ${itemsKey} to publish.` } };
   const content = toMarkdown(draft);
   if (!content) return { status: 'failed', error: { code: 'empty_draft', message: `Draft mapped to empty ${kind} content.` } };
-  const idemBase = `${ctx.runId ?? 'run'}:${ctx.nodeId ?? nodeFallback}`;
+  const docTitle = str(i.title) || title;
+  // CMS2WF-6 / CCH-FORK-1 — the same fork-stable key as the landing page (no
+  // runId): the document id AND its first version are keyed on this base, so a
+  // fork reused neither before and minted a second document.
+  const idemBase = publishIdemBase(ctx, i, draft, nodeFallback, `${orgId}\n${kind}\n${docTitle}\n${content}`);
   try {
-    const res = await docs.createDraftDocument({ orgId, kind, title: str(i.title) || title, content, idemBase });
+    const res = await docs.createDraftDocument({ orgId, kind, title: docTitle, content, idemBase });
     if (res && res.error) return { status: 'failed', error: res.error };
     return { status: 'success', outputs: { document: res.document, version: res.version } };
   } catch (e) {

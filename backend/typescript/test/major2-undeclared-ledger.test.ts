@@ -91,17 +91,25 @@ describe('RFC 0148 §B — the major-2 opt-out ledger and the served v2 root can
  * bump that brings a new gated family fails here, before any cut.
  *
  * Red when (sabotage witness): drop `'family.budget'` from the ledger, or pin a suite
- * that gates on a family the host neither advertises nor opts out of.
+ * that gates on a family the host neither advertises nor opts out of; stop
+ * advertising the env-gated `loopback` with its switch on, or advertise it with
+ * the switch off (re-probed /grade-tests wave 122, TST-DKD-5).
  */
 describe('every family the pinned suite gates on is advertised or opted out (suite pin bumps)', () => {
   const CONFIG: AppConfig = { port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.0', enableConsoleTracer: false };
-  const SCENARIOS = join(dirname(createRequire(import.meta.url).resolve('@openwop/openwop-conformance/package.json')), 'src', 'scenarios');
+  const SUITE_SRC = join(dirname(createRequire(import.meta.url).resolve('@openwop/openwop-conformance/package.json')), 'src');
+  // The scenarios AND the suite's shared helpers: `lib/standard-webhooks.ts` and
+  // `lib/memoryAttribution.ts` gate on a family themselves, so a family gated only
+  // inside a helper is still a gate a strict cut meets.
+  const GATE_DIRS = [join(SUITE_SRC, 'scenarios'), join(SUITE_SRC, 'lib')];
 
   function gatedFamilies(): Set<string> {
     const keys = new Set<string>();
-    for (const f of readdirSync(SCENARIOS)) {
-      if (!f.endsWith('.ts')) continue;
-      for (const m of readFileSync(join(SCENARIOS, f), 'utf8').matchAll(/\bgateFamily\(\s*['"]([A-Za-z][A-Za-z0-9]*)['"]\s*\)/g)) keys.add(m[1]!);
+    for (const dir of GATE_DIRS) {
+      for (const f of readdirSync(dir)) {
+        if (!f.endsWith('.ts')) continue;
+        for (const m of readFileSync(join(dir, f), 'utf8').matchAll(/\bgateFamily\(\s*['"]([A-Za-z][A-Za-z0-9]*)['"]\s*\)/g)) keys.add(m[1]!);
+      }
     }
     return keys;
   }

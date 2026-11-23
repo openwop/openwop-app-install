@@ -521,6 +521,15 @@ export interface ApprovalPolicy {
   escalateTo?: { roleRefs: string[] };
   /** ADR 0942 D7 — `false` turns ADR 0198 delegation off for this row. */
   allowDelegation?: boolean;
+  /** ADR 0924 P2a (review H1) — per-party minimums, carried from the ADR 0942
+   *  `ApproverSpec` by `compileApproverSpec` (it used to drop them, so a
+   *  `client_and_agency` spec compiled to a bare `requiredApprovals: 2` that two
+   *  agency votes satisfied). Read by `evaluateQuorum`, which records the party on
+   *  each vote from its lane. */
+  perParty?: Array<{ party: 'agency' | 'client'; min: 1 | 2 }>;
+  /** ADR 0924 P2a — the row admits client-approver votes (the ADR 0958
+   *  link-only portal lane). Only a per-party row may carry it. */
+  clientApprover?: true;
 }
 
 const approvals = new DurableCollection<PendingApproval>('approval', (a) => a.approvalId);
@@ -2051,7 +2060,7 @@ export type CampaignChangeSetApprovalHandler = (
   tenantId: string,
   approvalId: string,
   outcome: 'approved' | 'rejected',
-  opts: { decidedByUserId?: string; note?: string; expectedChangeSetHash?: string },
+  opts: { decidedByUserId?: string; note?: string; expectedChangeSetHash?: string; clientVoter?: { approverId: string; sentBy: string } },
 ) => Promise<{ approval: PendingApproval; changed: boolean } | null>;
 
 let campaignChangeSetApprovalHandler: CampaignChangeSetApprovalHandler | null = null;

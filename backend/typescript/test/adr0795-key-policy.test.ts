@@ -18,7 +18,10 @@
  * stream; a removed member's keys are not revoked; a non-member's key
  * authenticates; presence becomes membership-defined everywhere; a rekey or an
  * erasure leaves keys behind; the expiry notice repeats or fires early;
- * lastUsedAt is written on every use.
+ * lastUsedAt is written on every use; under #6053 step 2
+ * (`OPENWOP_API_KEY_EMPTY_SCOPES=deny`) an undeclared key still passes the floor.
+ * Since #6053 steps 3-4 `issueApiKey` mints no undeclared key, so the legacy `[]`
+ * declaration these cases need comes from `__issueUndeclaredLegacyKeyForTest`.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -65,6 +68,7 @@ interface ResBody {
   key?: { scopes?: string[]; expiresAt?: string };
   policy?: unknown;
   runId?: string;
+  runs?: unknown[];
   status?: string;
   interrupts?: Array<{ interruptId: string; nodeId: string }>;
 }
@@ -336,15 +340,21 @@ describe('ADR 0795 D5 — a key travels in a header', () => {
     expect(run.status, JSON.stringify(run.body)).toBe(201);
     const res = await fetch(`${BASE}/runs/${run.body?.runId}/events?apiKey=${encodeURIComponent(k)}`, { headers: { accept: 'text/event-stream', connection: 'close' } });
     expect(res.status).toBe(200);
+    // The stream itself answered, not a JSON refusal or the JSON event log.
+    expect(res.headers.get('content-type') ?? '').toMatch(/^text\/event-stream/);
     await res.body?.cancel();
   });
 
   it('report lets it through; an operator env key is not affected (CONTROL)', async () => {
     const k = await key(['runs:read']);
     process.env.OPENWOP_KEY_QUERY_PARAM = 'report';
-    expect((await call('GET', `/runs?apiKey=${encodeURIComponent(k)}`)).status).toBe(200);
+    const reported = await call('GET', `/runs?apiKey=${encodeURIComponent(k)}`);
+    expect(reported.status, JSON.stringify(reported.body)).toBe(200);
+    expect(Array.isArray(reported.body?.runs), 'the run list itself answered').toBe(true);
     delete process.env.OPENWOP_KEY_QUERY_PARAM;
-    expect((await call('GET', `/runs?apiKey=${OPERATOR}`)).status).toBe(200);
+    const operator = await call('GET', `/runs?apiKey=${OPERATOR}`);
+    expect(operator.status, JSON.stringify(operator.body)).toBe(200);
+    expect(Array.isArray(operator.body?.runs)).toBe(true);
   });
 });
 
@@ -370,6 +380,8 @@ describe('ADR 0795 D6 — a key stops when its issuer does', () => {
     const k = await key(['runs:read'], ws, 'user:never-a-member');
     const r = await call('GET', '/runs', k);
     expect(r.status, JSON.stringify(r.body)).toBe(401);
+    // The issuer-liveness refusal itself, not an unknown-token 401.
+    expect(r.body?.message).toBe('The person who created this API key no longer has access to this workspace.');
     process.env.OPENWOP_KEY_AUTHORITY = 'report';
     resetIssuerLiveCacheForTests();
     expect((await call('GET', '/runs', k)).status, 'report changes nothing').toBe(200);
@@ -414,6 +426,7 @@ describe('ADR 0795 D6 — a key stops when its issuer does', () => {
     await deleteMember(m.memberId);
     // NO cache reset here: a stale `live: true` must not keep the key working.
     expect((await call('GET', '/runs', k)).status).toBe(401);
+    expect(await verifyApiKey(k), 'the removal revoked it; the cache is only the backstop').toBeNull();
   });
 
   it('erasing a subject deletes their keys: the token no longer verifies and the row is gone', async () => {
@@ -433,8 +446,10 @@ describe('ADR 0795 D6 — a key stops when its issuer does', () => {
 describe('ADR 0795 D4 — expiry is not a surprise, and use is not a write per request', () => {
   const ALL = { callerSubject: 'x', isAdmin: true } as const;
   const rowOf = async (tenantId: string, keyId: string) => (await listApiKeys(tenantId, ALL)).find((k) => k.keyId === keyId)!;
+  // The stamp is a fire-and-forget CAS, so wait on the stored row itself. A write
+  // that never lands fails here by name instead of falling through to a later read.
   const settle = async (pred: () => Promise<boolean>): Promise<void> => {
-    for (let i = 0; i < 100 && !(await pred()); i++) await new Promise((r) => setTimeout(r, 10));
+    await vi.waitFor(async () => { expect(await pred(), 'the awaited key-row write landed').toBe(true); }, { timeout: 1_000, interval: 10 });
   };
 
   it('a key USED inside its last 14 days is MARKED for one notice; a key with months left is not (delivery itself is not asserted here)', async () => {

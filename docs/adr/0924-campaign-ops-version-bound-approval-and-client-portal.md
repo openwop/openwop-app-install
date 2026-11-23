@@ -1,6 +1,6 @@
 # ADR 0924 — Campaign ops: version-bound approval and the client approver portal
 
-Status: Accepted — P0 implemented (change-set PR); P1 client portal implemented (client-portal PR); P2 pending
+Status: Accepted — P0 implemented (change-set PR); P1 client portal implemented (client-portal PR); P2a quorum groundwork built, pending gate (`feat/adr0924-p2a-quorum`); P2b (`client_and_agency`) and P2c (verified emailed links) pending
 
 Program: agency campaign operations (ADRs 0921–0928). PRD features **F6**
 (version-bound approval) and **F2** (client approver role and portal). Depends on
@@ -259,6 +259,13 @@ routes. Nothing on the wire; nothing advertised.
 | P1 | `ClientApprover` store, tokens, public GET/POST portal, per-use re-check, revocation; `campaign-ops-client-portal` toggle | No (PRD tier 3) |
 | P2 | `client_and_agency` quorum; emailed link delivery through the agency's email connection | No |
 
+> **CORRECTION (2026-11-19, the architecture review
+> `docs/steward/adr-0924-0925-p2-architecture-review.md` § 8):** P2 is split into
+> **P2a** (shared quorum groundwork, the same work as ADR 0942 P3b), **P2c**
+> (verified emailed links, ADR 1141 recipient-bound) and **P2b**
+> (`client_and_agency` itself), in that order. P2b needs both: without verified
+> links one member can cast both votes (review C3).
+
 ## MyndHyve `commenter` role (amended 2026-10-18, ADR 0933 D8)
 
 MyndHyve's `commenter` (comment and approve, no edit) maps to the client
@@ -292,6 +299,27 @@ expressible scope today; that is a follow-up `comments:write` scope in
    capability token per approver; no external role in v1.
 
 ## Open questions
+
+> **DECIDED (user, 2026-11-19, in the acting session), on the recommendations of the
+> architecture review (§ 9):**
+> - **Q1:** keep the 7-day link, and keep the agency's vote when a link is re-sent
+>   (the change set is immutable and the vote is hash-bound). Add a **14-day**
+>   per-row expiry to change-set reviews that rejects a half-voted review as
+>   `sla_expired`, through the kind (review H4, built in P2a; the 14-day SLA is
+>   attached to rows by P2b, with the frozen row policy).
+> - **Q2:** no third outcome. The client's reject is labelled **"Request
+>   changes"**, needs a comment, and is recorded as `changes_requested` (P2b).
+> - **Q3:** campaign ops uses `host/approvalSelfCheck.ts` (it had landed). Both
+>   hand-copied comparisons are replaced (P2a, review M1). The request's author
+>   is a requester too.
+> - **Q4 (new), ALLOWED:** under `client_and_agency`, a **sole agency approver**
+>   may cast the agency vote on a change they proposed, only in their own
+>   signed-in session, never for a change that arrived through MCP, and audited.
+>   The client is the independent second person. This narrows ADR 1131's
+>   "never on a quorum gate" for this one case (correction notes in ADR 1131 and
+>   ADR 0942 D10.2). Built in P2b.
+> - **Q5 (new):** `ClientAccount.approvalPolicy` stays the one source of who
+>   approves a change set, compiled through ADR 0942's one compiler.
 
 - [ ] **Q1** Token lifetime: 7 days proposed. Should it end when the change set
       is approved by someone else? Proposed: yes (the change set leaves
@@ -397,3 +425,53 @@ expressible scope today; that is a follow-up `comments:write` scope in
 | P0 | campaign-ops change-set PR (follows #5015) | `test/campaign-ops-approval-execution.test.ts` |
 | P1 | campaign-ops client-portal PR (follows #5022 and #5026) | `test/campaign-ops-client-portal.test.ts` (10, sabotage ×9); frontend `operationsPage.test.tsx`, `publicApprovalView.test.tsx` |
 | P1 on ADR 0958 | `feat/0958-p1` (ADR 0958 P1) | the approver and link moved onto ADR 0958 grants; `test/adr0958-p1-link-only.test.ts` (8) |
+| P2a (= ADR 0942 P3b core) | `feat/adr0924-p2a-quorum`, **pending gate** | `test/adr0924-p2a-compile-per-party.test.ts`, `test/adr0924-p2a-vote-ledger.test.ts`, `test/adr0924-p2a-change-set-votes.test.ts`; regression: `campaign-ops-approval-execution`, `campaign-ops-client-portal`, `adr0958-p1-link-only`, `approval-quorum`, `quorum-review`, `approval-sla-hitl`, `adr0942-p4-sla-notify`, `adr0942-p2-autonomy-gate` |
+
+### As built — P2a (2026-11-20, pending gate)
+
+What landed, by review finding:
+- **C1.** One host vote entry, `castApprovalVote` (`host/approvalDecision.ts`).
+  `claimApproval` / `rejectApproval` are the `agency` lane; the portal's
+  `decideFromPortal` calls it on the `client` lane. The client vote reaches the
+  shared `review:decision` ledger and the one threshold function. On a row with
+  no quorum policy (every change-set row today) nothing is recorded on either
+  lane, exactly as before.
+- **C2.** Per-kind vote hooks (`registerApprovalVoteHooks`). The change-set
+  `voteCheck` runs D2 1–6 on every vote before it is recorded, so a stale
+  package or a requester's vote is refused on the first vote of a quorum. The
+  registered handler is now only the finalize (CAS, change-set transition, run
+  start).
+- **H1.** `ApprovalPolicy.perParty` / `clientApprover`; `compileApproverSpec`
+  carries them and refuses any spec field it cannot carry
+  (`COMPILED_APPROVER_FIELDS`, typed over every `ApproverSpec` key), and
+  refuses `majority` with `perParty`. `evaluateQuorumTally` needs each listed
+  party's minimum.
+- **H2.** `ReviewDecision.party`, written from the lane on every vote of a
+  per-party row; erasure keeps it.
+- **H3.** At completion, earlier votes are re-checked live (agency:
+  `approvals:respond` on the client org and not a requester; client: active
+  link-only approver with a live current grant). A failing vote is dropped,
+  audited `approval.vote-dropped`, and the row stays pending.
+- **H4.** The per-row SLA expiry goes through the kind: the change set moves to
+  `rejected` (row note `sla_expired`, by `system:sla-expiry`), its links and
+  grants are dropped, the ledger is cleared, `campaign-ops.approval.expired` is
+  audited. Kinds without an expiry hook keep the raw reject.
+- **H5.** An agency approve needs `decidedByHumanSession` (`not_a_person`). A
+  reject does not.
+- **M1 / Q3.** Separation of duties through `selfApprovalBlockedCore`, with the
+  proposer and the request's author as requesters, in both the vote check and
+  `agencyStandInRefusal`.
+
+Unchanged on purpose: `client_and_agency` is still refused, no change-set row
+is created with a policy, and the 14-day expiry is not attached yet (P2b). The
+portal can answer `pending` only on a per-party row, which nothing creates yet.
+
+Corrections found while building:
+- `agencyStandInRefusal` now takes the approval row. `sendApprovalLinks` refuses
+  `not_in_review` when the row is missing or not pending. Before, a missing row
+  was compared against an empty proposer, which refused only while another
+  approver existed. The shared helper allows an empty submitter list, so the
+  row is now required instead.
+- The change set has no rejection-reason field, so `sla_expired` lives on the
+  approval row's note and in the audit, not on the change set.
+- Review M2 (a reopened row with a met quorum) is not in this step.

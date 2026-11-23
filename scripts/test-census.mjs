@@ -20,7 +20,8 @@
  *
  * and per file: laundering casts (`as any`, `as unknown as`, @ts-ignore),
  * fixed sleeps without fake timers (wall-clock reads are a note — the clock-shift
- * lane is the measurement), a `createApp` boot, a
+ * lane is the measurement; the timer arm of a `Promise.race` hang guard is not a
+ * sleep, TST-OAO-3), a `createApp` boot, a
  * header that names no ADR / RFC / gap id, and (with --durations) runtime.
  *
  * It assigns each file a CEILING — the best grade the census allows — not a
@@ -225,7 +226,44 @@ for (const file of files) {
   visitCasts(sf);
   const fakeTimers = /useFakeTimers|setSystemTime|clockShift/.test(text);
   const clockUses = (text.match(/\bDate\.now\(\)|new Date\(\)|Math\.random\(\)|performance\.now\(\)/g) ?? []).length;
-  const sleeps = (text.match(/setTimeout\([^,)]*,\s*[1-9]\d*\s*\)|\bsleep\(\s*[1-9]|waitForTimeout\(/g) ?? []).length;
+  // A `setTimeout` whose only job is the timer arm of a `Promise.race` hang guard
+  // is not a sleep: `Promise.race([bothIn, new Promise((r) => setTimeout(r, 2000))])`
+  // resolves as soon as the other arm does, and only bounds a hang. It is exempt
+  // when the race has at least one arm that is not a timer, and the timer's
+  // callback is the executor's own resolve or reject parameter. Anything else
+  // in the callback, or a race of timers only, still counts (TST-OAO-3, user
+  // decision 2026-11-22: exempt the guard; do NOT start counting `2_000`, which
+  // the regex below never matched). Calibration: chat-autotitle-binding read B
+  // for the same guard that `approvals` spells `2_000` and read A.
+  let raceGuardTimers = 0;
+  const timerArmDelay = (e) => {
+    if (!ts.isNewExpression(e) || e.expression.getText(sf) !== 'Promise' || e.arguments?.length !== 1) return null;
+    const ex = e.arguments[0];
+    if (!(ts.isArrowFunction(ex) || ts.isFunctionExpression(ex))) return null;
+    const params = ex.parameters.map((p) => (ts.isIdentifier(p.name) ? p.name.text : null)).filter(Boolean);
+    let call = ex.body;
+    if (ts.isBlock(call)) {
+      if (call.statements.length !== 1 || !ts.isExpressionStatement(call.statements[0])) return null;
+      call = call.statements[0].expression;
+    }
+    if (!ts.isCallExpression(call) || call.expression.getText(sf) !== 'setTimeout' || call.arguments.length !== 2) return null;
+    const [cb, delay] = call.arguments;
+    if (!ts.isIdentifier(cb) || !params.includes(cb.text)) return null;
+    return delay.getText(sf);
+  };
+  const visitRaces = (n) => {
+    if (ts.isCallExpression(n) && n.expression.getText(sf) === 'Promise.race'
+        && n.arguments.length === 1 && ts.isArrayLiteralExpression(n.arguments[0])) {
+      const delays = n.arguments[0].elements.map(timerArmDelay);
+      if (delays.some((d) => d === null)) {
+        // Only the spellings the regex below counts are subtracted.
+        raceGuardTimers += delays.filter((d) => d !== null && /^[1-9]\d*$/.test(d)).length;
+      }
+    }
+    ts.forEachChild(n, visitRaces);
+  };
+  visitRaces(sf);
+  const sleeps = Math.max(0, (text.match(/setTimeout\([^,)]*,\s*[1-9]\d*\s*\)|\bsleep\(\s*[1-9]|waitForTimeout\(/g) ?? []).length - raceGuardTimers);
   const boots = (text.match(/\bcreateApp\(/g) ?? []).length;
 
   const cases = [];

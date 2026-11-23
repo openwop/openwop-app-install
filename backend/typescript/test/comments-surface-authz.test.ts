@@ -41,6 +41,8 @@ import { createPage, __resetCms } from '../src/features/cms/cmsService.js';
 import { createComment, getComment, listThread, __resetCommentsStore } from '../src/features/comments/commentsService.js';
 import { buildCommentsSurface } from '../src/features/comments/surface.js';
 import { PREAUTHORIZED_CALLER } from '../src/host/subjectAccess.js';
+/** Issue 6109 — a comments read as an org member (internal threads included). */
+const MEMBER_READ = { ...PREAUTHORIZED_CALLER, audience: 'member' as const };
 import { stripComments } from './helpers/stripComments.js';
 
 /** ADR 0659 D1 — `listThread` now answers `null` when the target is absent OR invisible.
@@ -93,7 +95,7 @@ describe('CMNT-4 — the MEMBER lane still works (a gate that blocks everyone is
     const posted = (await s.post({ orgId: ORG, resourceType: 'cms_page', resourceId: p.pageId, body: 'agent note' })) as { comment: Record<string, unknown> | null };
     expect(posted.comment?.body).toBe('agent note');
     expect(((await s.list({ orgId: ORG, resourceType: 'cms_page', resourceId: p.pageId })) as { comments: unknown[] }).comments).toHaveLength(1);
-    const row = (await listThreadOrFail(T, ORG, 'cms_page', p.pageId, PREAUTHORIZED_CALLER))[0]!;
+    const row = (await listThreadOrFail(T, ORG, 'cms_page', p.pageId, MEMBER_READ))[0]!;
     // NOT `toBeTruthy()`: a miss answers `{comment: null}`, which is truthy (/grade-tests wave 10 —
     // a resolve that wrote 'open' passed this lane).
     const resolved = (await s.resolve({ orgId: ORG, commentId: row.commentId })) as { comment: Record<string, unknown> | null };
@@ -113,7 +115,7 @@ describe('CMNT-4 — the NON-MEMBER lane is refused (this is the defect)', () =>
     const p = await page();
     await expect(asUser(STRANGER).post({ orgId: ORG, resourceType: 'cms_page', resourceId: p.pageId, body: 'intruding' }))
       .rejects.toThrow(/Missing required scope: host:comments:write/);
-    expect(await listThreadOrFail(T, ORG, 'cms_page', p.pageId, PREAUTHORIZED_CALLER)).toHaveLength(0);
+    expect(await listThreadOrFail(T, ORG, 'cms_page', p.pageId, MEMBER_READ)).toHaveLength(0);
   });
 
   it('a READ-only member may list but not post (the scope, not just membership, is checked)', async () => {
@@ -162,7 +164,7 @@ describe('CMNT-5 — resolve no longer forges the author-only guard’s own argu
 
     await asUser(MEMBER).resolve({ orgId: ORG, commentId: c.comment.commentId });
 
-    const after = await getComment(T, ORG, c.comment.commentId, PREAUTHORIZED_CALLER);
+    const after = await getComment(T, ORG, c.comment.commentId, MEMBER_READ);
     expect(after?.status).toBe('resolved');
     // The row's author is untouched — resolve is member-level, not authorship.
     expect(after?.authorId).toBe('a-different-human');

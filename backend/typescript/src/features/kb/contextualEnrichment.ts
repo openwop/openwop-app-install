@@ -24,6 +24,7 @@ import { resolveByokTextDescribed, type HeadlessDispatch } from '../../host/head
 import { fenceUntrustedBlock, hasUntrustedFenceMarker } from '../../host/untrustedContent.js';
 import { reserveEmbedBudget, estimateTokens } from './embedBudget.js';
 import type { KnowledgeDocument } from './kbService.js';
+import { declarePiiFields } from '../../host/dataClassification.js';
 
 export const ENRICH_DOC_CHARS = 32_000;
 export const MAX_PREFIX_CHARS = 400;
@@ -37,6 +38,8 @@ export interface EnrichRow {
 /** Legacy prototype rows are reachable for strict deletion/retention only.
  * New prefixes live under the document primary's incarnation and CAS. */
 const enrichCache = new DurableCollection<EnrichRow>('kb:enrichcache', (r) => `${r.tenantId}:${r.collectionId}:${r.documentId}:${r.chunkIndex}`);
+// CHAN-F19 follow-up C (ADR 0464 §9) — a subject-keyed document's id and model text derived from it; purged with the document.
+declarePiiFields('kb:enrichcache', ['documentId', 'prefix'], { maskGloballyByFieldName: false });
 
 const sha = (s: string): string => createHash('sha256').update(s).digest('hex');
 

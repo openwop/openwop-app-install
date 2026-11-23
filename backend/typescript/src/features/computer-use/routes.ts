@@ -12,11 +12,15 @@ import { listSessions, getSession, type CuSession } from './sessionStore.js';
 import { sendError } from '../../middleware/errorEnvelope.js';
 import { bindApprovalRecordReader } from './approvalBinding.js';
 import { endSession, isLive } from './computerUseService.js';
+import { shownUrl } from './shownUrl.js';
 
 const FEATURE = { toggleId: 'computer-use', label: 'Computer-use browser agents' };
 const ORG = '/host/openwop-app/computer-use/orgs/:orgId';
 
 const maskTask = (task: string): string => (task.startsWith('mock:') ? '(mock script)' : task);
+
+export { shownUrl };
+const withUrl = (u: string | undefined): { url?: string } => { const v = shownUrl(u); return v ? { url: v } : {}; };
 
 /** ADR 0894 D9 — the CLOSED read projection. Never the row: `providerSessionId`
  *  is a hosted-browser handle some providers accept as a connect token, and
@@ -27,14 +31,16 @@ export function projectSession(s: CuSession): Record<string, unknown> {
     orgId: s.orgId,
     status: s.status,
     task: maskTask(s.task),
-    startUrl: s.startUrl,
+    startUrl: shownUrl(s.startUrl) ?? '',
     allowedOrigins: s.allowedOrigins,
     steps: s.steps.map((st) => ({
       kind: st.action.kind, tier: st.tier, decidedBy: st.decidedBy, at: st.at,
-      ...(st.action.url ? { url: st.action.url } : {}),
+      ...withUrl(st.action.url),
       description: st.action.description,
     })),
-    ...(s.pendingAction ? { pendingAction: { kind: s.pendingAction.kind, description: s.pendingAction.description, ...(s.pendingAction.url ? { url: s.pendingAction.url } : {}) } } : {}),
+    ...(s.pendingAction ? { pendingAction: { kind: s.pendingAction.kind, description: s.pendingAction.description, ...withUrl(s.pendingAction.url) } } : {}),
+    // ADR 1136 P3a — the open take-over: the host the browser reported, never a value.
+    ...(s.takeover ? { takeover: { n: s.takeover.n, reason: s.takeover.reason, origin: s.takeover.origin, label: s.takeover.label, expiresAt: s.takeover.expiresAt } } : {}),
     ...(s.resultSummary ? { resultSummary: s.resultSummary } : {}),
     ...(s.error ? { error: s.error } : {}),
     ...(s.runId ? { runId: s.runId } : {}),
@@ -57,7 +63,7 @@ export function registerComputerUseRoutes(deps: RouteDeps): void {
       res.json({
         sessions: rows.map((s) => ({
           sessionId: s.sessionId, status: s.status, task: maskTask(s.task),
-          startUrl: s.startUrl, steps: s.steps.length, createdAt: s.createdAt, updatedAt: s.updatedAt,
+          startUrl: shownUrl(s.startUrl) ?? '', steps: s.steps.length, createdAt: s.createdAt, updatedAt: s.updatedAt,
           ...(s.runId ? { runId: s.runId } : {}),
           ...(s.error ? { error: s.error } : {}),
         })),

@@ -6,7 +6,9 @@
  *
  * Red if the hubTab filter, hub discriminator default, toggle gate, tier gate, group
  * ordering or scope default breaks (`w27g2-hp-*`), or the manifest stops tagging exactly
- * the Credentials + Identity surfaces in their groups.
+ * the Credentials + Identity surfaces in their groups (re-probed `w122g2-hp-*`). ADR 1042
+ * CHAN-P0-8: red when the Chat channels tab loses its `channel-ingress` toggle gate.
+ * #6094: the exact-set pins compare HOST routes only (`hostOnly` drops adopter paths).
  *
  * Every projection call runs INSIDE a case: a manifest call at describe level throws at
  * COLLECTION time, which errors the whole file instead of failing the cases it breaks.

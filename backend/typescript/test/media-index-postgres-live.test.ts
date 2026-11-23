@@ -14,7 +14,7 @@
  *      media API changes `orgId` or `sizeBytes`);
  *   2. `assertOrgCapacity` refuses at the count cap and at the byte cap, and admits an
  *      upload that fits when the counter is over-counted (the exact recount at the cap);
- *   3. a counter corrupted under and over is healed by `repairMediaIndex`;
+ *   3. a counter corrupted under and over is healed by the upkeep sweep (`runSystemIndexUpkeep`);
  *   4. keyset paging with an insert and a delete between pages: no repeat, no skip;
  *   5. concurrent `withOrgCapacity` writes: exactly N fit (as adr0818's race test).
  *
@@ -38,8 +38,10 @@ const available = !!externalDsn || dockerReachable();
 // Loaded only when the suite runs: the media module registers its indexes at import.
 type Media = typeof import('../src/features/media/mediaService.js');
 type Index = typeof import('../src/features/entities/systemIndex.js');
+type Sweep = typeof import('../src/features/entities/systemIndexSweep.js');
 let media: Media;
 let idx: Index;
+let sweep: Sweep;
 
 const RUN = `mipg${Date.now().toString(36)}`;
 let n = 0;
@@ -66,6 +68,7 @@ beforeAll(async () => {
   await client.connect();
   media = await import('../src/features/media/mediaService.js');
   idx = await import('../src/features/entities/systemIndex.js');
+  sweep = await import('../src/features/entities/systemIndexSweep.js');
 }, 180_000);
 
 afterEach(() => {
@@ -110,11 +113,11 @@ async function corruptCounter(T: string, org: string, count: number, sum: number
   await s().kvSet(`hostext:entity:sysidx-count:${k}`, JSON.stringify({ k, tenantId: T, orgId: org, type: T_ASSET, count, sum }));
 }
 
-/** `repairMediaIndex` runs its drift check once per UTC hour fleet-wide; clear the lease
+/** The upkeep sweep runs its drift check once per UTC hour fleet-wide; clear the lease
  *  so this run's check is not skipped by an earlier one on a shared database. */
 async function repairNow(): Promise<void> {
-  await s().kvDelete('hostext:media:index-hour:hour');
-  await media.repairMediaIndex();
+  await s().kvDelete('hostext:entity:sysidx-hour:hour');
+  await sweep.runSystemIndexUpkeep();
 }
 
 describe.skipIf(!available)('#5928 — the media index on real Postgres', () => {
@@ -154,7 +157,7 @@ describe.skipIf(!available)('#5928 — the media index on real Postgres', () => 
     expect(await totals(T, 'org-a')).toEqual({ count: 3, sum: 3000 });
   });
 
-  it('3. a counter corrupted under and over is healed by repairMediaIndex', async () => {
+  it('3. a counter corrupted under and over is healed by the upkeep sweep', async () => {
     const T = tenant();
     for (let i = 0; i < 3; i += 1) await seed(T, 'org-a', 400);
     await seed(T, 'org-b', 50);

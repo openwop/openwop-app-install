@@ -9,14 +9,14 @@
  * (re-seed creates), or the clear stops deleting the cache rows.
  */
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { initHostExtPersistence, DurableCollection } from '../src/host/hostExtPersistence.js';
 import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
 import { openStorage } from '../src/storage/index.js';
 import { seedDemoPeople } from '../src/host/demoPeopleSeed.js';
 import { seedDemoCrm } from '../src/host/demoCrmSeed.js';
 import { seedDemoDealers } from '../src/host/demoDealersSeed.js';
 import { seedDemoSalesMaps, clearDemoSalesMaps, countDemoSalesMaps } from '../src/host/demoSalesMapsSeed.js';
-import { getCachedGeocode } from '../src/features/sales-maps/entities/geocode.js';
+import { geocode, getCachedGeocode } from '../src/features/sales-maps/entities/geocode.js';
 import { listOrgs } from '../src/host/accessControlService.js';
 
 const ON = { status: 'on' as const, bucketUnit: 'tenant' as const };
@@ -66,5 +66,32 @@ describe('demo-sales-maps seeder', () => {
     expect(await countDemoSalesMaps(tenantId)).toBe(0);
 
     expect((await seedDemoSalesMaps(tenantId)).created).toBe(DEMO_METRO_COUNT);
+  });
+
+  // CHAN-F19 follow-up B: rows no longer hold the address, so the seeder recognises a demo
+  // row by its hashed key. A row from before that change (raw `address`, `g1` key) is still
+  // a demo row and is cleared; a manual row for another address is never touched.
+  // Red when the seeder matches by `row.address` alone (every new row is then invisible,
+  // and count/clear read 0 and throw on the missing field), or when the legacy match is
+  // dropped (the pre-change row survives a clear).
+  it('recognises hashed demo rows and pre-change rows; leaves other manual rows', async () => {
+    const tenantId = 'demo-maps-t2';
+    await seedDemoPeople(tenantId);
+    await seedDemoCrm(tenantId);
+    await seedDemoDealers(tenantId);
+    const orgId = (await listOrgs(tenantId))[0]!.orgId;
+    const raw = new DurableCollection<Record<string, unknown>>('sales-maps:geocode', (g) => g.cacheKey as string, undefined, (g) => g.tenantId as string);
+    await raw.put({ cacheKey: `g1|legacy-seattle`, tenantId, orgId, address: 'Seattle, WA', lat: 47.606, lng: -122.332, source: 'manual', at: new Date().toISOString() });
+    await geocode(tenantId, orgId, { address: '1 Not A Demo Street, Nowhere', lat: 1, lng: 2 });
+
+    expect(await countDemoSalesMaps(tenantId)).toBe(1); // only the legacy demo row so far
+    expect((await seedDemoSalesMaps(tenantId)).created).toBe(DEMO_METRO_COUNT - 1); // Seattle already warmed
+    expect(await countDemoSalesMaps(tenantId)).toBe(DEMO_METRO_COUNT);
+
+    const { cleared } = await clearDemoSalesMaps(tenantId);
+    expect(cleared).toBe(DEMO_METRO_COUNT);
+    expect(await countDemoSalesMaps(tenantId)).toBe(0);
+    expect(await raw.get('g1|legacy-seattle')).toBeNull();
+    expect((await getCachedGeocode(tenantId, orgId, '1 Not A Demo Street, Nowhere'))?.lat).toBe(1);
   });
 });

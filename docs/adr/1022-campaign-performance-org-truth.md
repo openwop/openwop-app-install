@@ -193,6 +193,30 @@ get that escalation again (stated).
   > names approvers (ADR 0942 D10.2, either direction); another approver rejects it, and an
   > unapproved plan never applies and expires after 7 days. Witnessed (designed) by
   > `backend/typescript/test/reallocation-self-approval.test.ts`.
+  >
+  > > **CORRECTED 2026-11-20 (user decision, same day) — the proposer may WITHDRAW an
+  > > open plan.** The "either direction" consequence above left no way out: the
+  > > rule's escape, "a requester who wants to stop the spend cancels the run", has no
+  > > run to cancel for a plan proposed from the route or the chat tool, so a mistaken
+  > > plan sat for its 7-day TTL. Following the ADR 1024 D3.4 precedent
+  > > (`host/approvalService.ts`, "separation of duties binds approve only; a submitter
+  > > may withdraw") and the agent-deployments requester withdraw
+  > > (`features/agent-deployments/service.ts`), `spendEligibility.ts` now lets a
+  > > requester REJECT a `campaign-spend` row whose `spendKind` is `'reallocation'`
+  > > when they vote as a person in their own interactive session
+  > > (`isInteractivePersonVote`: `humanSession`, not the wildcard-operator lane, not
+  > > a delegated key, agent or other non-person subject). The withdraw needs no
+  > > approver role. Approve is unchanged (sole-admin exception included), and every
+  > > other campaign-spend row (budget, launch, publish, audience) still refuses a
+  > > requester's reject. The plan records it honestly: a new terminal `PlanStatus`
+  > > `'withdrawn'` with `withdrawnBy` / `withdrawnAt`, set when the plan reconciles a
+  > > rejected approval whose decider is one of its requesters (the existing lazy
+  > > reconcile on apply; a reject by anyone else still closes it `rejected`).
+  > > `withdrawnBy` is tombstoned on erasure. The Campaign Intelligence panel shows
+  > > the status in four locales. No new route: the withdraw is the existing reject
+  > > (`POST …/approvals/:approvalId/reject` and the `/reviews` arm, i.e. the Inbox),
+  > > whose decide lanes already thread `humanSession` and `outcome`. Witnessed (designed, not run) by the "proposer
+  > > may withdraw" block of the same test file.
 - `CP71WF-28`: erasure writes in UTM governance and attribution settings use CAS with retry;
   plan-creator erasure retries like the caps loop.
 - `CP71WF-29`: `sync` emits a `summary` string (counts only: accounts, rows, failures; no campaign

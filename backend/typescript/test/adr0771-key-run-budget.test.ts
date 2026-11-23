@@ -14,6 +14,10 @@
  * charged; KEY_RUNS_PER_DAY=0 falls back to the session day cap; a keyed run is also
  * charged to the session day; the key's slots share the tenant's; the key gets the
  * session concurrency cap, or a session caller gets none.
+ * Since ADR 0987 P2 (c41e5194ba) the concurrency cap is counted by the STORE inside
+ * the run insert (`insertRunWithStartContext` + `chargedAdmission`), so `x-hold`
+ * inserts a real `running` row: red too when the insert admits one past the cap
+ * (wave 122 probe on the sqlite admission count).
  *
  * Date is faked to midday: the day bucket is `floor(now / 86 400 000)`, so a burst
  * that straddled UTC midnight would reset it mid-case.

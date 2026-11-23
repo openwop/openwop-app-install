@@ -144,6 +144,18 @@ describe('the control loop', () => {
     expect(out.error).toBe('origin_denied:https://evil.example.net/phish');
   });
 
+  it('ADR 1136 D8 — the origin-denied error keeps origin and path only, never the query', async () => {
+    // The stored error is returned by the session read, so a typed value in the
+    // denied URL's query or fragment must not survive into it.
+    const adapter = makeMockAdapter();
+    const typed = 'typed-search-value';
+    const task = mockTask([act('d2', 'navigate', `https://evil.example.net/search?q=${typed}#${typed}`)]);
+    const out = await startTask(adapter, { ...BASE_INPUT, task });
+    expect(out.status).toBe('failed');
+    expect(out.error).toBe('origin_denied:https://evil.example.net/search');
+    expect(JSON.stringify(await sessionStatus(T, out.sessionId))).not.toContain(typed);
+  });
+
   it('enforces the step ceiling (runaway backstop)', async () => {
     const adapter = makeMockAdapter();
     const actions = Array.from({ length: 60 }, (_, i) => act(`s${i}`, 'screenshot'));

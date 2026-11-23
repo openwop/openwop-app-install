@@ -23,15 +23,16 @@
  *      contract. The kernel is staged, not saved, until the gate is approved
  *      (ADR 1020 D8); a rejection saves nothing. Also the standalone kernel chain.
  *  (C) the orchestration past the gate: five children get the brief, only the
- *      enabled channel generates or raises a gate, consistency scores the real
- *      draft, finalize records the campaign (ADR 1020 D6).
+ *      enabled channel generates or raises a gate, its approval creates the draft
+ *      email campaigns (the ADR 0162 correction, 2026-11-19), consistency scores
+ *      the real draft, finalize records the campaign (ADR 1020 D6).
  *  (D) the creative_briefs channel creates its briefs only after approval, and
  *      none on a rejection (ADR 1020 D14).
  *
  * Red when (w89, sabotage-witnessed): generate-kernel saves without `stageKernel`
  * (B ×3); the autonomy gate misses a `reject` (B reject); the channel generate node
- * stops skipping a disabled channel, a skipped child counts as drafted, or finalize
- * records nothing (C); the chain's `approve → create_briefs` edge moves before the
+ * stops skipping a disabled channel, a skipped child counts as drafted, the email
+ * chain's `approve → publish` edge is dropped, or finalize records nothing (C); the chain's `approve → create_briefs` edge moves before the
  * gate (D ×2).
  *
  * One cast remains, and it is the production seam's own: `executeRun as never` into
@@ -65,6 +66,7 @@ import { CHANNEL_WORKFLOWS, CHANNEL_WORKFLOW_IDS } from '../src/features/campaig
 import { getCampaignByBrief } from '../src/features/campaign-orchestration/campaignService.js';
 import { KERNEL_WORKFLOWS, KERNEL_WORKFLOW_ID } from '../src/features/campaign-brief/intelWorkflows.js';
 import { listBriefs as listCreativeBriefs } from '../src/features/creative-briefs/creativeBriefsService.js';
+import { listCampaigns as listEmailCampaigns } from '../src/features/email/emailService.js';
 import { __resolveAndResumeForTests, __awaitRunResumeChainForTests } from '../src/routes/interrupts.js';
 import { getRunArtifact } from '../src/host/runArtifactStore.js';
 import { createBrief, getBrief, setKernel } from '../src/features/campaign-brief/briefService.js';
@@ -180,6 +182,9 @@ beforeAll(async () => {
   register('feature.campaign-orchestration.nodes.finalize', orchestration['feature.campaign-orchestration.nodes.finalize']!);
   // ADR 1020 D14 — the creative_briefs chain's post-approval creation step.
   register('feature.campaign-channels.nodes.create-creative-briefs', channels['feature.campaign-channels.nodes.create-creative-briefs']!);
+  // The email chain's post-approval step (ADR 0162 correction, 2026-11-19): the REAL
+  // publish node over the real email surface.
+  register('feature.campaign-channels.nodes.publish-email-sequence', channels['feature.campaign-channels.nodes.publish-email-sequence']!);
   register('feature.production.nodes.plan-generate', async () => ({ status: 'success', outputs: { skipped: true } }));
   // ADR 1020 D8 — the kernel is saved only by promote-kernel, after the approval.
   register('feature.campaign-brief.nodes.promote-kernel', brief['feature.campaign-brief.nodes.promote-kernel']!);
@@ -339,6 +344,9 @@ describe('(C) campaign-orchestration runs PAST the kernel gate to a finalized ca
     // CS70WF-3 — only the enabled channel reached the model or raised a gate.
     expect(channelGenerations).toEqual([{ channel: 'email_sequence', briefId: brief.id }]);
     expect(childGates).toEqual(['campaign-studio.channel.email-sequence']);
+    // The approved email sequence was created as draft email campaigns, from this brief.
+    const drafts = (await listEmailCampaigns(T, ORG)).filter((c) => c.sourceBriefId === brief.id);
+    expect(drafts.map((c) => c.status)).toEqual(['draft']);
 
     // CS70WF-2 — consistency scored the one real draft (never "no drafts to compare").
     const events = await storage.listEvents(run.runId);

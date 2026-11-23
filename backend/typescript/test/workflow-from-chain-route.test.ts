@@ -5,6 +5,20 @@
  * expands one into a fresh, owned, editable workflow (appears in the caller's
  * tenant-scoped list). Unresolved node typeIds surface as warnings, not failures
  * (R6). Each instantiation mints a distinct workflowId (R2, non-idempotent).
+ * The incident block (ADR 0903 D7) and the incompleteNodes block are documented
+ * at their describes. The market-intel chain is 5 nodes and requires three
+ * params since ADR 1116. The three RFC 0135 internal-chain cases moved to
+ * `test/kicktodo/` (ADR 1031 P2) and left this repo with KickTodo (ADR 1031 P3,
+ * 96cf0ce053); the route's gallery filter for `internal` chains is grade-code
+ * row TST-OBD-1.
+ *
+ * What turns it red (sabotage-witnessed, /grade-tests wave 122, w122g4-wfc-*):
+ * the list's `parameters`, the minted id made deterministic, the ownership
+ * record written to another tenant, `nodeCount`, the warnings filter inverted,
+ * Path A leaving `{{params.*}}` in node inputs, the 404 for an unknown chain,
+ * the `-N` collision name on the list and on the definition, a required-param
+ * refusal on the incident chain, the run AI default not filling the minted node,
+ * and the incompleteNodes report dropped or always sent.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
@@ -95,6 +109,9 @@ describe('workflow-chain templates (ADR 0163 Phase 2)', () => {
       body: JSON.stringify({ chainId: 'market-intel.digest', params: { topic: 'same topic' } }),
     })).json()) as { workflowId: string }).workflowId;
     const [a, b] = [await mk(), await mk()];
+    // Both are real mints (a failed second POST has no id and would also differ).
+    expect(a).toMatch(/^wf\.copy\.market-intel-digest\.[0-9a-f]{16}$/);
+    expect(b).toMatch(/^wf\.copy\.market-intel-digest\.[0-9a-f]{16}$/);
     expect(a).not.toBe(b);
   });
 
@@ -139,6 +156,10 @@ describe('from-chain: a blank copy still mints a RUNNABLE workflow', () => {
       body: JSON.stringify({ chainId: 'exec-ops.daily-briefing', params: {} }),
     });
     expect(r.status, 'copying a template must not require a form').toBe(201);
+    // …and it is a real owned copy, not an empty 201.
+    const body = (await r.json()) as { workflowId: string; nodeCount: number };
+    expect(body.workflowId).toMatch(/^wf\.copy\.exec-ops-daily-briefing\.[0-9a-f]{16}$/);
+    expect(body.nodeCount).toBe(5);
   });
 
   // Scope note (wave 64): this case reads the MINTED definition over HTTP and
@@ -202,11 +223,14 @@ describe('from-chain reports what the copy still needs', () => {
     const c = await cookie();
     const r = await fetch(url('/workflows/from-chain'), {
       method: 'POST', headers: { 'content-type': 'application/json', cookie: c },
-      // exec-ops' AI node carries provider/model defaults; orgId is a port, not config.
+      // exec-ops' three readers take `orgId` (supplied here) and its AI node pins
+      // no vendor (filled from the run's AI default, ADR 0903 D7), so nothing is missing.
       body: JSON.stringify({ chainId: 'exec-ops.daily-briefing', params: { orgId: 'org-1' } }),
     });
     expect(r.status).toBe(201);
-    const body = (await r.json()) as { incompleteNodes?: unknown[] };
+    const body = (await r.json()) as { workflowId: string; incompleteNodes?: unknown[] };
+    // Positive control: a real mint, so the absence below is the report's verdict.
+    expect(body.workflowId).toMatch(/^wf\.copy\.exec-ops-daily-briefing\.[0-9a-f]{16}$/);
     expect(body.incompleteNodes).toBeUndefined();
   });
 });

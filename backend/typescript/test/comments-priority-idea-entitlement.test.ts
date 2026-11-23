@@ -55,10 +55,10 @@ describe('comments degrade when priority-matrix is refused', () => {
     const free = await seed(FREE);
     const paid = await seed(PAID);
     refuse = true;
-    await expect(listThread(FREE, ORG, 'priority_idea', free.resourceId, { subject: 'u1' })).resolves.toBeNull();
-    await expect(getComment(FREE, ORG, free.commentId, { subject: 'u1' })).resolves.toBeNull();
+    await expect(listThread(FREE, ORG, 'priority_idea', free.resourceId, { subject: 'u1', audience: 'member' })).resolves.toBeNull();
+    await expect(getComment(FREE, ORG, free.commentId, { subject: 'u1', audience: 'member' })).resolves.toBeNull();
     // control
-    expect((await listThread(PAID, ORG, 'priority_idea', paid.resourceId, { subject: 'u1' }))?.length).toBe(1);
-    expect(await getComment(PAID, ORG, paid.commentId, { subject: 'u1' })).not.toBeNull();
+    expect((await listThread(PAID, ORG, 'priority_idea', paid.resourceId, { subject: 'u1', audience: 'member' }))?.length).toBe(1);
+    expect(await getComment(PAID, ORG, paid.commentId, { subject: 'u1', audience: 'member' })).not.toBeNull();
   });
 });

@@ -17,6 +17,8 @@ import { createComment, listThread, __resetCommentsStore } from '../src/features
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { PREAUTHORIZED_CALLER } from '../src/host/subjectAccess.js';
+/** Issue 6109 — a comments read as an org member (internal threads included). */
+const MEMBER_READ = { ...PREAUTHORIZED_CALLER, audience: 'member' as const };
 
 /** ADR 0659 D1 — `listThread` now answers `null` when the target is absent OR invisible.
  *  Every fixture here creates a real resource and is not testing that gate, so a null is
@@ -56,7 +58,7 @@ describe('canvas.document comments (CMT-1 target validator)', () => {
     expect(comment.resourceId).toBe(canvasId);
     // The notification names the document by the title the validator resolved from its state.
     expect(notify.resourceTitle).toBe('Doc');
-    expect((await listThreadOrFail(TENANT, ORG, 'canvas_document', canvasId, PREAUTHORIZED_CALLER))).toHaveLength(1);
+    expect((await listThreadOrFail(TENANT, ORG, 'canvas_document', canvasId, MEMBER_READ))).toHaveLength(1);
   });
 
   it('rejects a comment on a non-existent canvas (uniform 404)', async () => {
@@ -76,8 +78,8 @@ describe('canvas.document comments (CMT-1 target validator)', () => {
     const { comment } = await createComment({ tenantId: TENANT, orgId: ORG, resourceType: 'canvas_document', resourceId, body: 'on this phrase', authorId: AUTHOR , caller: { subject: AUTHOR }});
     expect(comment.resourceId).toBe(resourceId);
     // The whole-canvas thread and the inline thread are distinct threads.
-    expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', resourceId, PREAUTHORIZED_CALLER)).toHaveLength(1);
-    expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', canvasId, PREAUTHORIZED_CALLER)).toHaveLength(0);
+    expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', resourceId, MEMBER_READ)).toHaveLength(1);
+    expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', canvasId, MEMBER_READ)).toHaveLength(0);
   });
 
   it('rejects an inline comment whose canvasId portion is a wrong-type canvas (6b)', async () => {
@@ -91,17 +93,17 @@ describe('canvas.document delete → comments prune (CMT-2 / DATA-1)', () => {
   it('prunes a document\'s comments when the canvas-deleted seam fires', async () => {
     const canvasId = await makeCanvas('canvas.document');
     await createComment({ tenantId: TENANT, orgId: ORG, resourceType: 'canvas_document', resourceId: canvasId, body: 'to be orphaned', authorId: AUTHOR , caller: { subject: AUTHOR }});
-    expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', canvasId, PREAUTHORIZED_CALLER)).toHaveLength(1);
+    expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', canvasId, MEMBER_READ)).toHaveLength(1);
     // The real comments hook (registered at boot) runs via the seam.
     await fireCanvasDeleted({ tenantId: TENANT, canvasId, canvasTypeId: 'canvas.document' });
-    expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', canvasId, PREAUTHORIZED_CALLER)).toHaveLength(0);
+    expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', canvasId, MEMBER_READ)).toHaveLength(0);
   });
 
   it('does NOT prune when a non-document canvas is deleted (type gate)', async () => {
     const canvasId = await makeCanvas('canvas.document');
     await createComment({ tenantId: TENANT, orgId: ORG, resourceType: 'canvas_document', resourceId: canvasId, body: 'keep me', authorId: AUTHOR , caller: { subject: AUTHOR }});
     await fireCanvasDeleted({ tenantId: TENANT, canvasId, canvasTypeId: 'canvas.drawing' });
-    expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', canvasId, PREAUTHORIZED_CALLER)).toHaveLength(1);
+    expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', canvasId, MEMBER_READ)).toHaveLength(1);
   });
 
   it('cascades BOTH the whole-canvas AND inline range-anchored threads on delete (6b)', async () => {
@@ -118,14 +120,14 @@ describe('canvas.document delete → comments prune (CMT-2 / DATA-1)', () => {
 
     await fireCanvasDeleted({ tenantId: TENANT, canvasId, canvasTypeId: 'canvas.document' });
 
-    expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', canvasId, PREAUTHORIZED_CALLER)).toHaveLength(0);
-    expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', inlineA, PREAUTHORIZED_CALLER)).toHaveLength(0);
-    expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', inlineB, PREAUTHORIZED_CALLER)).toHaveLength(0);
-    expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', sibling, PREAUTHORIZED_CALLER)).toHaveLength(1);
+    expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', canvasId, MEMBER_READ)).toHaveLength(0);
+    expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', inlineA, MEMBER_READ)).toHaveLength(0);
+    expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', inlineB, MEMBER_READ)).toHaveLength(0);
+    expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', sibling, MEMBER_READ)).toHaveLength(1);
 
     // Prefix boundary: deleting an id that is a strict STRING PREFIX of the sibling's
     // id must not sweep the sibling — only `id` and `id#…` threads belong to it.
     await fireCanvasDeleted({ tenantId: TENANT, canvasId: sibling.slice(0, -4), canvasTypeId: 'canvas.document' });
-    expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', sibling, PREAUTHORIZED_CALLER)).toHaveLength(1);
+    expect(await listThreadOrFail(TENANT, ORG, 'canvas_document', sibling, MEMBER_READ)).toHaveLength(1);
   });
 });

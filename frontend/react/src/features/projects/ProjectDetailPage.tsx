@@ -30,6 +30,7 @@ import { ProjectLedgerTab } from './ProjectLedgerTab.js';
 import { ProjectStrategyChips } from '../strategy/StrategyAlignment.js';
 import { ProjectMembersTab } from './ProjectMembersTab.js';
 import { ProjectChatTab } from './ProjectChatTab.js';
+import { ProjectClientAccessTab } from './ProjectClientAccessTab.js';
 // ADR 0084 correction — notebooks (Sources) + podcasts as project tabs, not standalone.
 import { useFeatureAccess, useFeatureVisible } from '../../featureToggles/FeatureAccessContext.js';
 import { featureProjectTabs } from '../registry.js';
@@ -44,7 +45,7 @@ import {
   getProjectKnowledge, listOrgs, createCollection, unbindCollection, ingestText, deleteDocument, retrieve,
 } from './projectKnowledgeClient.js';
 
-type HostTab = 'overview' | 'ledger' | 'members' | 'chat' | 'board' | 'memory' | 'knowledge' | 'sources' | 'podcast' | 'workflows' | 'schedules';
+type HostTab = 'overview' | 'ledger' | 'members' | 'clients' | 'chat' | 'board' | 'memory' | 'knowledge' | 'sources' | 'podcast' | 'workflows' | 'schedules';
 /** A host tab, or a feature-contributed tab's key (ADR 1090). */
 type Tab = HostTab | (string & {});
 
@@ -55,6 +56,8 @@ const TAB_LABEL_KEYS: Record<HostTab, string> = {
   overview: 'tabOverview',
   ledger: 'tabLedger',
   members: 'tabMembers',
+  // ADR 1099 P1 — inviting outside parties to this project.
+  clients: 'tabClientAccess',
   chat: 'tabChat',
   board: 'tabBoard',
   memory: 'tabMemory',
@@ -94,8 +97,13 @@ export function ProjectDetailPage(): JSX.Element {
   // enabled for the tenant (notebooks/podcasts default OFF).
   const notebooksEnabled = useFeatureAccess('notebooks').enabled;
   const podcastsEnabled = useFeatureAccess('podcasts').enabled;
+  // ADR 1099 P1 — Client access shows when the sub-toggle is on and the caller can
+  // write here; the routes still decide (an editor who is not an admin is told so).
+  const clientPortalEnabled = useFeatureAccess('projects.client-portal').enabled;
   const HOST_TABS: readonly HostTab[] = [
-    'overview', 'ledger', 'members', 'chat', 'board', 'memory', 'knowledge',
+    'overview', 'ledger', 'members',
+    ...(clientPortalEnabled && project?.canWrite ? ['clients' as const] : []),
+    'chat', 'board', 'memory', 'knowledge',
     ...(notebooksEnabled ? ['sources' as const] : []),
     ...(podcastsEnabled ? ['podcast' as const] : []),
     'workflows', 'schedules',
@@ -182,6 +190,8 @@ export function ProjectDetailPage(): JSX.Element {
     c.entities ? t('dependentEntities', { count: c.entities, n: formatNumber(c.entities) }) : '',
     c.priorityLists ? t('dependentPriorityLists', { count: c.priorityLists, n: formatNumber(c.priorityLists) }) : '',
     c.teamLedger ? t('dependentTeamLedger') : '',
+    // ADR 1099 P1 — grants to people outside the workspace are revoked with the project.
+    c.collaboratorGrants ? t('dependentCollaboratorGrants', { count: c.collaboratorGrants, n: formatNumber(c.collaboratorGrants) }) : '',
   ].filter(Boolean);
 
   // ADR 0839 / grade-ux B1 — the delete now waits on a preview read BEFORE its confirm,
@@ -316,6 +326,8 @@ export function ProjectDetailPage(): JSX.Element {
         <ProjectLedgerTab project={project} canWrite={canWrite} />
       ) : tab === 'members' ? (
         <ProjectMembersTab project={project} canWrite={canWrite} onSaved={setProject} />
+      ) : tab === 'clients' ? (
+        <ProjectClientAccessTab project={project} />
       ) : tab === 'chat' ? (
         <ProjectChatTab project={project} canWrite={canWrite} onSaved={setProject} />
       ) : tab === 'board' ? (

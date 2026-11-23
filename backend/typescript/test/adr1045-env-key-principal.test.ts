@@ -43,6 +43,11 @@
  * and at the shared `isConfiguredOperatorIssuerFor` wrapper, the new-form tenant
  * binding, the `*` wildcard, the derivation hashing only 8 chars (the audit case
  * now reds on it too) and the audit row's principal truncated.
+ * S2 and S3 targeted the unique-prefix rule CHAN-F14 deleted, so they no longer
+ * apply. /grade-tests wave 122 (w122g4-ek-*) re-probed at a810cd43e7: the auth
+ * middleware minting the 8-char id, the unique-prefix rule put back, the
+ * new-form tenant binding, the wildcard, each of the three delegation readers,
+ * the A2A and MCP bucket keys, and the audit row's principal.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';

@@ -17,9 +17,10 @@
  * through, is invented when absent, is not refused when malformed, or a missing one
  * stops being the typed `eu_political_declaration_required`.
  *
- * CCH-FORK-1 (BLOCKED-ON-PRODUCT, `it.fails` below): `publishToDocument` keys its
- * document on `${runId}:${nodeId}`, so a `:fork` mints a SECOND draft document — the
- * EMWF-10 shape ADR 0655 D7 fixed for the email node only.
+ * CCH-FORK-1 / CMS2WF-6 (FIXED 2026-11-19, node pack 1.20.0): `publishToDocument` used
+ * to key its document on `${runId}:${nodeId}`, so a `:fork` minted a SECOND draft
+ * document — the EMWF-10 shape ADR 0655 D7 fixed for the email node only. It now keys
+ * on node + brief + content. Red witness: put `ctx.runId` back into `publishIdemBase`.
  */
 import { describe, it, expect, beforeEach, beforeAll, afterAll } from 'vitest';
 import { nodes as nodePack } from '../../../packs/feature.campaign-channels.nodes/index.mjs';
@@ -95,11 +96,11 @@ describe('publish-to-documents — mappers + fail-closed', () => {
     expect(captured?.orgId).toBe('org-5');
     expect(captured?.kind).toBe('campaign-ad-copy');
     // Deterministic idemBase: a re-run of the same node computes the SAME base, anchored
-    // on the node. (Its runId component is CCH-FORK-1 — not pinned here.)
+    // on the node, never the run (CMS2WF-6).
     await publishAd(ctx);
     expect(calls).toHaveLength(2);
     expect(calls[1]?.idemBase).toBe(captured?.idemBase);
-    expect(String(captured?.idemBase)).toMatch(/(^|:)n1(:|$)/);
+    expect(String(captured?.idemBase)).toMatch(/^n1:b1:[0-9a-f]+$/);
     const content = String(captured?.content);
     expect(content).toContain('## Google');
     expect(content).toContain('| Pick faster | 40% faster checkout | Demo |');
@@ -140,11 +141,10 @@ describe('real documents surface delegation — DRAFT doc, idempotent, tenant-is
     expect(await listVersions('t1', 'o1', docId)).toHaveLength(1);
   });
 
-  // CCH-FORK-1 — BLOCKED-ON-PRODUCT. Correct behaviour: a `:fork` re-runs the node under a
-  // NEW runId with the same node + brief, and must reuse the draft document it already
-  // made (the EMWF-10 fix shape). Today the idemBase carries the runId, so the fork mints
-  // a second document. Flip to `it` when the node anchors its key on nodeId + brief.
-  it.fails('CCH-FORK-1: a fork (new runId, same node + brief) reuses the same draft document', async () => {
+  // CCH-FORK-1 / CMS2WF-6 — a `:fork` re-runs the node under a NEW runId with the same
+  // node + brief + approved draft, and must reuse the draft document it already made.
+  // Was `it.fails` until node pack 1.20.0.
+  it('CCH-FORK-1: a fork (new runId, same node + brief) reuses the same draft document', async () => {
     const run = async (runId: string): Promise<unknown> => {
       const documents = buildDocumentsSurface({ tenantId: 't1', runId });
       const out = await publishAd({ features: { documents, 'campaign-brief': briefSurface('o1') }, inputs: { draft: adDraft, briefId: 'b1' }, runId, nodeId: 'n1' });

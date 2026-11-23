@@ -3,17 +3,23 @@
  *
  * Service-level tests can't observe the route's caller-resolution
  * (`req.userId ?? req.principal?.principalId`), which is exactly where the IDOR fix
- * lives. Two API keys map to two distinct `bearer:<id>` principals that SHARE the
- * `default` tenant (api-key path sets no req.tenantId), so this exercises a real
+ * lives. Two operator env keys map to two distinct `bearer:<id>` principals that
+ * SHARE the `default` tenant (a key configured with no `:<tenant>`), so this exercises a real
  * within-tenant IDOR: one principal must NOT be able to read or self-add to another
  * principal's private channel, and the owner (an api-key principal, so `req.userId` is
  * undefined) MUST still be able to manage — the regression guard for the owner-stamp
  * falling back to the principal id.
  *
- * Sabotage-witnessed (wave 26): `caller()` without the principal fallback, the
- * getChannel / assertChannelManage 404 masks, the owner-only 403, the message
- * and stream membership gates, the agent registry check, the discovery filter +
- * minimal row shape, the private-join mask and the `joined` flag each red a case.
+ * Sabotage-witnessed (wave 26, re-probed wave 122): `caller()` without the principal
+ * fallback, the getChannel / assertChannelManage 404 masks, the message and stream
+ * membership gates, the agent registry check, the discovery filter + minimal row
+ * shape, the private-join mask, the `joined` flag and `viewerIsOwner` each red a case.
+ * ADR 0879 D3/D4 (#1fa3e779fa): both env keys are the tenant's operator credential, so
+ * the OTHER key is a workspace ADMIN — it manages a public room it can see (D3), and
+ * nobody adds an id that is not a workspace member (D4, `assertAddableMember`). The
+ * owner-only 403 for a non-admin is pinned with real Editors in
+ * `adr0879-channels-security.test.ts`, not here. Each refusal is asserted by its
+ * MESSAGE as well as its status: three different guards answer 404 on these paths.
  * Denied writes are asserted to NOT land (roster / name re-read by the owner).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -48,7 +54,7 @@ interface ChannelDetail {
   participants?: Participant[];
 }
 interface DiscoveryRow { conversationId: string; joined: boolean; participants?: unknown; ownerUserId?: unknown }
-interface Body { channel?: ChannelDetail; channels?: DiscoveryRow[] }
+interface Body { channel?: ChannelDetail; channels?: DiscoveryRow[]; error?: string; message?: string }
 
 async function call(method: string, path: string, key: string, body?: unknown): Promise<{ status: number; body: Body }> {
   const res = await fetch(`${BASE}${path}`, {
@@ -95,8 +101,12 @@ describe('channel management authz (route-level, CHN-1/CHN-2)', () => {
     expect((await call('GET', `${CH}/${id}`, OTHER_KEY)).status).toBe(404);
 
     // CHN-1: a different principal cannot self-add (the IDOR), nor manage.
-    expect((await call('POST', `${CH}/${id}/members`, OTHER_KEY, { userId: envKeyPrincipalId(OTHER_KEY) })).status).toBe(404);
-    expect((await call('PATCH', `${CH}/${id}`, OTHER_KEY, { name: 'hijacked' })).status).toBe(404);
+    // The private-room mask answers both (`assertChannelManage`), not the D4
+    // member check or a manager refusal behind it.
+    const selfAdd = await call('POST', `${CH}/${id}/members`, OTHER_KEY, { userId: envKeyPrincipalId(OTHER_KEY) });
+    expect([selfAdd.status, selfAdd.body.message]).toEqual([404, 'Channel not found.']);
+    const hijack = await call('PATCH', `${CH}/${id}`, OTHER_KEY, { name: 'hijacked' });
+    expect([hijack.status, hijack.body.message]).toEqual([404, 'Channel not found.']);
     // ...and neither denied write landed: the roster is still the owner alone,
     // and the name is the owner's rename.
     const after = (await call('GET', `${CH}/${id}`, OWNER_KEY)).body.channel;
@@ -104,7 +114,8 @@ describe('channel management authz (route-level, CHN-1/CHN-2)', () => {
     expect((after?.participants ?? []).filter((p) => p.role !== 'owner')).toEqual([]);
 
     // And the private channel's messages stay unreadable to the other principal.
-    expect((await call('GET', `${CH}/${id}/messages`, OTHER_KEY)).status).toBe(403);
+    const msgs = await call('GET', `${CH}/${id}/messages`, OTHER_KEY);
+    expect([msgs.status, msgs.body.message]).toEqual([403, 'Not a member of this channel.']);
     // ADR 0154 FU-6 — the live message stream is membership-gated too (same
     // assertChannelAccess gate as messages/presence → 403 for a non-member).
     expect(await streamStatus(`${CH}/${id}/stream`, OTHER_KEY)).toBe(403);
@@ -126,9 +137,11 @@ describe('channel management authz (route-level, CHN-1/CHN-2)', () => {
     const id = created.body.channel!.conversationId;
 
     // An unknown agent is rejected at add-time (validated against the registry).
-    expect((await call('POST', `${CH}/${id}/members`, OWNER_KEY, { agentId: 'no.such.agent' })).status).toBe(404);
+    const unknown = await call('POST', `${CH}/${id}/members`, OWNER_KEY, { agentId: 'no.such.agent' });
+    expect([unknown.status, unknown.body.message]).toEqual([404, 'Agent "no.such.agent" not found.']);
     // Another principal cannot add an agent to a private room it cannot see.
-    expect((await call('POST', `${CH}/${id}/members`, OTHER_KEY, { agentId: 'test.helper' })).status).toBe(404);
+    const masked = await call('POST', `${CH}/${id}/members`, OTHER_KEY, { agentId: 'test.helper' });
+    expect([masked.status, masked.body.message]).toEqual([404, 'Channel not found.']);
     // The owner adds the registered agent...
     const added = await call('POST', `${CH}/${id}/members`, OWNER_KEY, { agentId: 'test.helper' });
     expect(added.status).toBe(200);
@@ -151,7 +164,8 @@ describe('channel management authz (route-level, CHN-1/CHN-2)', () => {
     // workspace admin), so it manages a public channel it can see; ADR 0879 D4 — but
     // nobody adds an id that is not a member of the workspace (404).
     expect((await call('PATCH', `${CH}/${id}`, OTHER_KEY, { name: 'renamed-by-admin' })).status).toBe(200);
-    expect((await call('POST', `${CH}/${id}/members`, OTHER_KEY, { userId: 'intruder' })).status).toBe(404);
+    const intruder = await call('POST', `${CH}/${id}/members`, OTHER_KEY, { userId: 'intruder' });
+    expect([intruder.status, intruder.body.message]).toEqual([404, 'That person is not a member of this workspace.']);
     const after = (await call('GET', `${CH}/${id}`, OWNER_KEY)).body.channel;
     expect(after?.channel?.name).toBe('renamed-by-admin');
     expect(refs(after)).not.toContain('user:intruder');

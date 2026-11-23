@@ -22,6 +22,7 @@
  * be abused as unmetered object storage the way an ungated `put` could.
  */
 
+import { sendErrorBody } from '../middleware/errorEnvelope.js';
 import type { Express, Request, Response } from 'express';
 import { resolveMediaAsset, storeMediaAsset } from '../host/inMemorySurfaces.js';
 import { ALLOWED_UPLOAD_MIME, storableContentType } from '../host/allowedUploadMime.js';
@@ -118,7 +119,7 @@ export function registerMediaAssetRoutes(app: Express): void {
     }
     if (!entry || (refused && mode === 'enforce')) {
       res.setHeader('Cache-Control', 'no-store');
-      res.status(404).json({ error: 'not_found', message: 'asset not found or expired' });
+      sendErrorBody(res, 404, { error: 'not_found', message: 'asset not found or expired' });
       return;
     }
     res.status(200);
@@ -138,16 +139,16 @@ export function registerMediaAssetRoutes(app: Express): void {
     const tenantId = req.tenantId ?? 'default';
     const body = (req.body ?? {}) as { contentBase64?: unknown; contentType?: unknown; name?: unknown };
     if (typeof body.contentBase64 !== 'string' || body.contentBase64.length === 0) {
-      res.status(400).json({ error: 'invalid_argument', message: 'contentBase64 (non-empty string) required' });
+      sendErrorBody(res, 400, { error: 'invalid_argument', message: 'contentBase64 (non-empty string) required' });
       return;
     }
     if (body.contentBase64.length > MAX_STORE_BASE64_LEN) {
-      res.status(413).json({ error: 'payload_too_large', message: `attachment exceeds ${Math.floor(MAX_STORE_BASE64_LEN / (1024 * 1024))} MiB` });
+      sendErrorBody(res, 413, { error: 'payload_too_large', message: `attachment exceeds ${Math.floor(MAX_STORE_BASE64_LEN / (1024 * 1024))} MiB` });
       return;
     }
     const declaredType = typeof body.contentType === 'string' ? body.contentType : '';
     if (!ALLOWED_UPLOAD_MIME.has(declaredType)) {
-      res.status(415).json({ error: 'unsupported_media_type', message: `contentType must be one of: ${[...ALLOWED_UPLOAD_MIME].join(', ')}` });
+      sendErrorBody(res, 415, { error: 'unsupported_media_type', message: `contentType must be one of: ${[...ALLOWED_UPLOAD_MIME].join(', ')}` });
       return;
     }
     // ADR 0818 §2 — the same byte check as the library: a mislabelled image is
@@ -155,13 +156,13 @@ export function registerMediaAssetRoutes(app: Express): void {
     const contentType = storableContentType(declaredType, Buffer.from(body.contentBase64, 'base64'));
     if (!contentType) {
       log.warn('media_upload_type_mismatch', { declaredType });
-      res.status(415).json({ error: 'unsupported_media_type', message: `The file's contents are not a valid ${declaredType}.` });
+      sendErrorBody(res, 415, { error: 'unsupported_media_type', message: `The file's contents are not a valid ${declaredType}.` });
       return;
     }
     const bytes = Buffer.byteLength(body.contentBase64, 'base64');
     const quotaReason = await chargeUploadQuota(tenantId, bytes);
     if (quotaReason) {
-      res.status(429).json({ error: 'quota_exceeded', message: quotaReason });
+      sendErrorBody(res, 429, { error: 'quota_exceeded', message: quotaReason });
       return;
     }
     const stored = await storeMediaAsset(tenantId, {
@@ -182,11 +183,11 @@ export function registerMediaAssetRoutes(app: Express): void {
       const tenantId = req.tenantId ?? 'default';
       const body = (req.body ?? {}) as { contentBase64?: unknown; contentType?: unknown; ttlSeconds?: unknown };
       if (typeof body.contentBase64 !== 'string' || body.contentBase64.length === 0) {
-        res.status(400).json({ error: 'invalid_argument', message: 'contentBase64 (non-empty string) required' });
+        sendErrorBody(res, 400, { error: 'invalid_argument', message: 'contentBase64 (non-empty string) required' });
         return;
       }
       if (body.contentBase64.length > MAX_STORE_BASE64_LEN) {
-        res.status(413).json({ error: 'payload_too_large', message: `contentBase64 exceeds ${MAX_STORE_BASE64_LEN} chars` });
+        sendErrorBody(res, 413, { error: 'payload_too_large', message: `contentBase64 exceeds ${MAX_STORE_BASE64_LEN} chars` });
         return;
       }
       const contentType = typeof body.contentType === 'string' && body.contentType ? body.contentType : 'application/octet-stream';
@@ -227,7 +228,7 @@ export function registerMediaAssetRoutes(app: Express): void {
       const body = (req.body ?? {}) as { prompt?: unknown };
       const prompt = typeof body.prompt === 'string' ? body.prompt : '';
       if (prompt.length === 0) {
-        res.status(400).json({ error: 'invalid_argument', message: 'prompt (non-empty string) required' });
+        sendErrorBody(res, 400, { error: 'invalid_argument', message: 'prompt (non-empty string) required' });
         return;
       }
       const stored = await storeMediaAsset(tenantId, { contentBase64: STUB_PNG_1x1_BASE64, contentType: 'image/png' });

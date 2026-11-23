@@ -18,6 +18,112 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-11-23
+
+A MINOR release under ADR 0052. **Nothing is breaking for API callers or operators:**
+no route, env var or config key is removed or renamed. Kanban boards get ready for
+thousands of cards (ADR 1155 P1–P4): due dates can be cleared, cards carry `facets`,
+the board read can be paged and filtered from a new card index, "Assigned to me"
+reads that index, and host code gets batch create/patch commands. The 2,000-card
+cap and its contract change (ADR 1155 P5b) are **not** in this release. Firms can
+give a client access to one project (ADR 1099 P1, off by default). One behaviour
+change is worth reading (see "Upgrading from 0.18.0"): approving a Campaign Studio
+channel draft now creates that draft in the connected tool. No schema migration
+(sqlite 54 / postgres 52) and no app migration (26). It is rolling-safe, not a
+required stop.
+
+### Security
+
+- **Internal comment threads are shown only to members, failing closed (#6180,
+  issue 6109).** `visibility: 'internal'` was stored but never filtered on read. A
+  reader that does not say it is a member now gets shared threads only, and an
+  internal comment read by id looks like a missing one. Every current door is a
+  member door, so today's readers see no change.
+- **An origin-denied browser-agent URL keeps origin and path only (ADR 1136 D8,
+  #6181).** The log line and the stored session error used to carry the full URL,
+  whose query or fragment can hold what was typed.
+- **`POST /host/openwop-app/sales-maps/orgs/:orgId/geocode`: a miss (`503 capability_not_provided`) no longer returns `details.address`.** The caller already has the address it sent; the error envelope and logs no longer carry it (ADR 0464 §9, CHAN-F19 follow-up B).
+
+### Added
+
+- **`PATCH /host/openwop-app/kanban/cards/:cardId` accepts `dueAt: null` to clear a card's due date (ADR 1155 D6).** Clearing or changing the date archives the assignee's open due-date notices for that card, and the sweep sends a fresh one for a new date. An assignee with only assignment access still cannot change it.
+- **Kanban cards carry `facets`, a small map of grouping keys (ADR 1155 D1).** At most 8 lower-case keys, each value 1–64 characters. Set them on `POST …/kanban/boards/:boardId/cards`, `PATCH …/kanban/cards/:cardId` (`null` clears the map; a key set to `null` clears that key) and on a work-item proposal, where `refresh` keeps them in step with the source. A bad map is a 400. The DSAR eraser clears them on the subject's cards.
+- **`GET /host/openwop-app/kanban/boards/:boardId` serves one filtered page when you pass `limit` (ADR 1155 D3, P3c-1).** Query: `limit` (1–100; empty means 50), `cursor`, `column` (repeatable), `sort` (`order` or `dueAt`, undated last), `dueFrom` / `dueTo` (inclusive; a plain date covers the whole day), `overdue=true`, `assignee` (a user id, `me`, `none` or `role:<key>`) and `label` (repeatable, any of). The response adds `total` (every match) and `nextCursor`; `workItems` holds only the page's. A cursor reused with another query is a 400 with `details.reason: kanban_cursor_invalid`. The page reads the card index (P3b) and point-reads only its cards; a tenant whose index is still building gets the same page from today's read. **Without `limit` the response is unchanged.**
+- **Kanban gains two batch board commands for host code (ADR 1155 D4/D5, P4).** `applyBoardCommand({ type: 'cards.create-batch', … })` creates up to 200 plain cards. Each card id derives from the item's `sourceId`, so a retried or resumed batch converges with no duplicates. `onExisting: 'refresh'` updates only source-owned facts, and `notifyAssignees` defaults to false. `applyBoardCommand({ type: 'cards.patch-batch', … })` re-dates or regroups up to 500 cards (`dueAt`, `priority`, `labels`, `facets`), each under its own compare-and-swap with an optional `expectedVersion`. Every item is reported on its own (`created` / `existing` / `refreshed` / `collision` / `failed`, and `updated` / `unchanged` / `conflict` / `not_found` / `invalid` / `failed`), and each batch fires one board event. There is no HTTP route; these are service commands for an in-process adopter.
+- **Project client access (ADR 1099 P1, #6194).** A `project` grant kind (`view`,
+  `comment`) and a **Client access** tab on the project page let a firm invite a
+  client, or another firm, to one project. Behind the new `projects.client-portal`
+  sub-toggle, default **off**. A project delete revokes its live grants.
+- **Computer-use trajectory viewer and Connect-a-browser card (ADR 1136 P3b,
+  #6192).** `/computer-use` lists a workspace's browser sessions and shows each step
+  in host words, with URLs shown without query or fragment. Hidden behind the
+  computer-use toggle.
+- **A reallocation plan's proposer may withdraw it (ADR 1022 CP71WF-23, #6186).**
+  Through the existing reject lane, in their own interactive session; the plan ends
+  `withdrawn`. Approve is unchanged.
+- **Shared quorum groundwork for two-party change-set review (ADR 0924 P2a / ADR
+  0942 P3b, #6177).** One vote entry for member routes and the client portal, with
+  per-party minimums and live re-checks. `client_and_agency` is still refused, so
+  single-party behaviour is unchanged apart from the fixes.
+- **Offline `onlineOnly` declaration (ADR 0873 D6, #6183).** A feature can keep a
+  network-only lazy chunk out of its offline precache. No in-tree feature uses it, so
+  no build output changes.
+
+### Changed
+
+- **Approving a Campaign Studio channel draft creates it in the real tool (ADR 0162
+  correction, CMS2WF-6, #6200).** The four non-creative channel chains are now
+  generate → approve → publish. The ad-variants chain creates the campaign
+  **paused** when given an ad account, else a draft ad-copy document. Publish writes
+  are keyed so a `:fork` or replay no longer makes a second draft.
+  `core.openwop.workflows.marketing` is re-pinned to 1.2.3.
+- **`GET /host/openwop-app/kanban/assigned` reads the card index (ADR 1155 P3c-2).** It used to scan every board in the table and read every card in the tenant. It now reads the caller's assigned cards and the tenant's role-addressed cards from the index, then only the boards those cards sit on, and checks board access once per board instead of once per card. The response is unchanged. A tenant whose index is still building is read the old way.
+- **Kanban cards now keep a read index on every write (ADR 1155 P3b).** Each card create, move, re-date or delete also writes its ADR 1110 index markers: one per board, due date, assignee and role. That is about 10 extra kv writes per card write, measured in ADR 1155. The paged board read and "Assigned to me" read from it (below). Each tenant's index is built once, on its first indexed read: inline up to 500 cards, otherwise queued for the background sweep while reads take the old path.
+- **One sweep now keeps every declared index (ADR 1155 P3a).** Commerce and media each ran their own copy of the ADR 1110 index upkeep: unfinished index writes, queued builds, and an hourly drift check of their own types. The upkeep now runs once, from the always-on entities feature, and its hourly drift check covers every indexed type. It drains two queued builds per tick, matching what the two copies did together. Its poll is `OPENWOP_SYSTEM_INDEX_SWEEP_MS` (default 60 s, minimum 10 s); an existing `OPENWOP_MEDIA_INDEX_SWEEP_MS` is still honoured. `OPENWOP_COMMERCE_INDEX_SWEEP_MS` now sets only commerce's own hourly step, which queues builds for product indexes that were never built.
+- **An indexed read no longer rescans a verified collection (#6196).** The first
+  read of a verified tenant index used to list the whole collection and rewrite
+  every marker (25,001 writes on one board `GET`). It now records the backfill as
+  done. Responses are unchanged.
+- **Chat-widget counter rows written before ADR 0467 A5 are now erased.** They carried no `updatedAt` (and no `tenantId`), so neither the 2-day age-out nor the retention purger could see them, and they were kept forever. The kv age-out lane has a new opt-in, `stampMissingTimestamp`: a row with no timestamp is stamped with the time the sweep first sees it (compare-and-swap) and ages out from then, never sooner than its real last write. The four chat-widget counter stores use it, so their legacy rows go within 2 days of the upgrade (ADR 0464 §9, CHAN-F19 follow-up).
+- **The CRM bounce breaker no longer reads the legacy raw-address dedup key.** That transition read had served its 2-day window after the hashed key shipped (CHAN-F19 #1). An instance that upgrades across both changes in one step may count one same-day redelivered bounce twice, once. Erasure still deletes both key shapes.
+- **Five route families send their errors through the error envelope (ADR 1147
+  GUARD-3, #6179):** media assets, admin, present-remote, memory and MCP's 401. Same
+  status, code and message.
+- **Conformance suite pinned to 2.49.8 (#6187).** No scenario, fixture or capability
+  change.
+
+### Fixed
+
+- **Erasing a workspace member now reaches their booking links and territory rules** (ADR 0464 §9, CHAN-F19 follow-up B). A booking link they own is disabled, de-attributed and given a neutral slug (its public URL could carry their name); a link they only created for someone else keeps running. A territory assignment rule whose filter names them keeps its place but no longer matches them. Before this, nothing erased either, and the erasure census wrongly counted booking links as covered.
+- **The sales-maps geocode cache no longer stores addresses.** Rows are keyed by a hash of the address, hold no raw address, and expire 90 days after their last write (manual rows used to be kept forever). Rows written before this change still hold a raw address, in the row and in its key, and expire on the same schedule. (An instance that already ran the v26 `rekey-geocode-cache` migration, including every v0.17.0 install, does not re-run it, so those rows are not re-keyed; they age out.)
+- **Erasing a sales rep now always removes them from orphaned commission deal claims.** If another write touched a claim during the erasure, the rep's id could be left in it while the erasure reported success; the rewrite now retries (ADR 0464 §9, CHAN-F19 follow-up C).
+- **Erasing a person now also blanks the decision suggestions the agent drafted from their chat messages.** The suggestion's title and summary paraphrase their words, and they used to survive the erasure even though the message itself was removed. A decision someone already recorded into the team ledger is kept as the team's record (ADR 0464 §9, CHAN-F19 follow-up D).
+
+#### Upgrading from 0.18.0
+
+- **Required stop:** no. **Rolling-safe:** yes. `node scripts/upgrade-plan.mjs
+  0.18.0` → one step, no stop: back up the database (and object store); the schema
+  permits 0.18.0 instances during 0.19.0 migrations; start 0.19.0 (sqlite 54 → 54,
+  postgres 52 → 52, app 26 → 26); check `/readiness` reports version 0.19.0.
+- **Migrations:** none. Schema stays sqlite 54 / postgres 52; app migrations stay 26.
+- **One-time work:** each tenant's kanban card index is built on its first indexed
+  read (a paged board read or "Assigned to me"): inline up to 500 cards, otherwise
+  queued for the background sweep, and reads take the old path until it finishes.
+  While 0.18.0 instances still run beside 0.19.0, cards they write carry no index
+  markers; the hourly drift check rebuilds that tenant.
+- **Config:** nothing to change. New optional `OPENWOP_SYSTEM_INDEX_SWEEP_MS`
+  (default 60 s, minimum 10 s); an existing `OPENWOP_MEDIA_INDEX_SWEEP_MS` is still
+  honoured, and `OPENWOP_COMMERCE_INDEX_SWEEP_MS` now sets only commerce's hourly
+  step. Project client access stays off until you turn on `projects.client-portal`.
+  The kanban board read pages only when a caller passes `limit`.
+- **Behaviour:** approving a Campaign Studio channel draft now creates it in the
+  connected tool (ads paused). If you install packs from the registry, the
+  `core.openwop.workflows.marketing` 1.2.3 pin ships vendored in the image.
+- **Not in this release:** the ADR 1155 per-board card cap (P5b) and its contract
+  change.
+- **Steps:** back up the database, deploy the new backend image and then the
+  frontend, and check that `/readiness` reports `"version": "0.19.0"`.
+
 ## [0.18.0] — 2026-11-22
 
 A MINOR release under ADR 0052. **Nothing is breaking for API callers or operators:**

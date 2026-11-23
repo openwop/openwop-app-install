@@ -3,10 +3,11 @@
  *
  * openwop-dev 2026-11-19: a certify cut ~3 h into a revision's life got 0 frames
  * on /host/events (heartbeats only). The listener re-established itself only on
- * 'error', so a connection that ended cleanly stayed "listening" while every
- * NOTIFY was lost. These cases drive `createPubSubListener` with a fake pg client
- * and pin each recovery path. The one that matches production is the clean 'end'
- * followed by a publish, which must reach the handler again.
+ * 'error', so a connection that went silently half-open stayed "listening" while
+ * every NOTIFY was lost. These cases drive `createPubSubListener` with a fake pg
+ * client and pin each recovery path. The one that matches production is the
+ * silent connection whose self-ping never comes back; the live-Postgres test
+ * shows a killed backend and a clean FIN both surface as 'error'.
  */
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';

@@ -16,7 +16,7 @@ import { TableScroll } from '../../ui/DataTable.js';
 
 const STATUS_CHIP: Record<ReallocationStatus, string> = {
   proposed: 'chip chip--warning', approved: 'chip chip--warning', applying: 'chip chip--muted',
-  applied: 'chip chip--success', partial: 'chip chip--danger', rejected: 'chip chip--muted', expired: 'chip chip--muted',
+  applied: 'chip chip--success', partial: 'chip chip--danger', rejected: 'chip chip--muted', withdrawn: 'chip chip--muted', expired: 'chip chip--muted',
 };
 
 /** Known reason/error codes → localized text; the raw code stays as a suffix for support. */

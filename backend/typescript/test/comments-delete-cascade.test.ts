@@ -45,6 +45,8 @@ import { createCollection, deleteCollection } from '../src/features/kb/kbService
 import { createList, submitIdea, deleteIdea, deleteList } from '../src/features/priority-matrix/priorityMatrixService.js';
 import { createComment, listThread, deleteSubjectComments, __resetCommentsStore } from '../src/features/comments/commentsService.js';
 import { PREAUTHORIZED_CALLER } from '../src/host/subjectAccess.js';
+/** Issue 6109 — a comments read as an org member (internal threads included). */
+const MEMBER_READ = { ...PREAUTHORIZED_CALLER, audience: 'member' as const };
 
 /** ADR 0659 D1 — `listThread` now answers `null` when the target is absent OR invisible.
  *  Every fixture here creates a real resource and is not testing that gate, so a null is
@@ -78,12 +80,12 @@ describe('CMNT-2 — cms_page', () => {
     for (const p of [doomed, keeper]) {
       await createComment({ tenantId: T, orgId: ORG, resourceType: 'cms_page', resourceId: p.pageId, body: 'a note naming a person', authorId: 'u2' , caller: { subject: 'u2' }});
     }
-    expect((await listThreadOrFail(T, ORG, 'cms_page', doomed.pageId, PREAUTHORIZED_CALLER)).length).toBe(1);
+    expect((await listThreadOrFail(T, ORG, 'cms_page', doomed.pageId, MEMBER_READ)).length).toBe(1);
 
     expect(await deletePage(T, ORG, doomed.pageId)).toBe(true);
 
-    expect(await listThread(T, ORG, 'cms_page', doomed.pageId, PREAUTHORIZED_CALLER), 'ADR 0659 D1 — the target is gone, so the thread does not resolve at all (stronger than an empty list)').toBeNull();
-    expect((await listThreadOrFail(T, ORG, 'cms_page', keeper.pageId, PREAUTHORIZED_CALLER)).length).toBe(1);
+    expect(await listThread(T, ORG, 'cms_page', doomed.pageId, MEMBER_READ), 'ADR 0659 D1 — the target is gone, so the thread does not resolve at all (stronger than an empty list)').toBeNull();
+    expect((await listThreadOrFail(T, ORG, 'cms_page', keeper.pageId, MEMBER_READ)).length).toBe(1);
     expect(await deleteSubjectComments(T, 'u2'), 'raw comment rows left — listThread cannot see an orphan (its resolver nulls a gone target)').toBe(1);
   });
 });
@@ -96,12 +98,12 @@ describe('CMNT-2 — kb_collection', () => {
     for (const c of [doomed, keeper]) {
       await createComment({ tenantId: T, orgId: ORG, resourceType: 'kb_collection', resourceId: c.collectionId, body: 'a note naming a person', authorId: 'u2' , caller: { subject: 'u2' }});
     }
-    expect((await listThreadOrFail(T, ORG, 'kb_collection', doomed.collectionId, PREAUTHORIZED_CALLER)).length).toBe(1);
+    expect((await listThreadOrFail(T, ORG, 'kb_collection', doomed.collectionId, MEMBER_READ)).length).toBe(1);
 
     await deleteCollection(T, ORG, doomed.collectionId);
 
-    expect(await listThread(T, ORG, 'kb_collection', doomed.collectionId, PREAUTHORIZED_CALLER), 'ADR 0659 D1 — the target is gone, so the thread does not resolve at all (stronger than an empty list)').toBeNull();
-    expect((await listThreadOrFail(T, ORG, 'kb_collection', keeper.collectionId, PREAUTHORIZED_CALLER)).length).toBe(1);
+    expect(await listThread(T, ORG, 'kb_collection', doomed.collectionId, MEMBER_READ), 'ADR 0659 D1 — the target is gone, so the thread does not resolve at all (stronger than an empty list)').toBeNull();
+    expect((await listThreadOrFail(T, ORG, 'kb_collection', keeper.collectionId, MEMBER_READ)).length).toBe(1);
     expect(await deleteSubjectComments(T, 'u2'), 'raw comment rows left — listThread cannot see an orphan (its resolver nulls a gone target)').toBe(1);
   });
 });
@@ -118,8 +120,8 @@ describe('CMNT-2 — priority_idea', () => {
 
     expect(await deleteIdea(T, list.id, doomed.id, 'u1')).toBe(true);
 
-    expect(await listThread(T, ORG, 'priority_idea', `${list.id}#${doomed.id}`, PREAUTHORIZED_CALLER), 'ADR 0659 D1 — the target is gone, so the thread does not resolve at all (stronger than an empty list)').toBeNull();
-    expect((await listThreadOrFail(T, ORG, 'priority_idea', `${list.id}#${keeper.id}`, PREAUTHORIZED_CALLER)).length).toBe(1);
+    expect(await listThread(T, ORG, 'priority_idea', `${list.id}#${doomed.id}`, MEMBER_READ), 'ADR 0659 D1 — the target is gone, so the thread does not resolve at all (stronger than an empty list)').toBeNull();
+    expect((await listThreadOrFail(T, ORG, 'priority_idea', `${list.id}#${keeper.id}`, MEMBER_READ)).length).toBe(1);
     expect(await deleteSubjectComments(T, 'u2'), 'raw comment rows left — listThread cannot see an orphan (its resolver nulls a gone target)').toBe(1);
   });
 
@@ -136,10 +138,10 @@ describe('CMNT-2 — priority_idea', () => {
 
     expect(await deleteList(T, doomedList.id, 'u1')).toBe(true);
 
-    expect(await listThread(T, ORG, 'priority_idea', `${doomedList.id}#${a.id}`, PREAUTHORIZED_CALLER), 'ADR 0659 D1 — the target is gone, so the thread does not resolve at all (stronger than an empty list)').toBeNull();
-    expect(await listThread(T, ORG, 'priority_idea', `${doomedList.id}#${b.id}`, PREAUTHORIZED_CALLER), 'ADR 0659 D1 — the target is gone, so the thread does not resolve at all (stronger than an empty list)').toBeNull();
+    expect(await listThread(T, ORG, 'priority_idea', `${doomedList.id}#${a.id}`, MEMBER_READ), 'ADR 0659 D1 — the target is gone, so the thread does not resolve at all (stronger than an empty list)').toBeNull();
+    expect(await listThread(T, ORG, 'priority_idea', `${doomedList.id}#${b.id}`, MEMBER_READ), 'ADR 0659 D1 — the target is gone, so the thread does not resolve at all (stronger than an empty list)').toBeNull();
     // The `#`-boundary match must not sweep a sibling LIST.
-    expect((await listThreadOrFail(T, ORG, 'priority_idea', `${otherList.id}#${c.id}`, PREAUTHORIZED_CALLER)).length).toBe(1);
+    expect((await listThreadOrFail(T, ORG, 'priority_idea', `${otherList.id}#${c.id}`, MEMBER_READ)).length).toBe(1);
     expect(await deleteSubjectComments(T, 'u2'), 'raw comment rows left — listThread cannot see an orphan (its resolver nulls a gone target)').toBe(1);
   });
 });

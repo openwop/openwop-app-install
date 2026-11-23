@@ -11,7 +11,17 @@
  * OPENWOP_EMAIL_DEFAULT_PROVIDER read each turns a case here red.
  * Double guard (recorded): skipping the `priorSend` read alone does NOT re-send — the
  * `reserveSend` CAS re-reads the winner's accepted row — so the dedup is witnessed by
- * breaking the KEY, not the read.
+ * breaking the KEY, which both read.
+ *
+ * ADR 0994 D2 (Postmark streams): transactional mail rides `outbound`, an unlabelled
+ * send is marketing and rides `broadcast`, and a server with no Broadcast stream gets
+ * the named `email_stream_missing` error. That detection is a double guard (ErrorCode
+ * 1235 OR a message naming the stream; the strict fixture sends both), so it is
+ * witnessed by breaking both at once.
+ * ADR 0994 D1: with no named provider the adapter picks the first CONNECTED provider in
+ * preference order, so the default-provider case connects BOTH SendGrid and Postmark —
+ * with only Postmark connected, the env read could be deleted and the walk would still
+ * land on Postmark.
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -182,6 +192,12 @@ describe('Email adapter — Postmark + idempotency ledger (ADR 0193 Phase 1)', (
   });
 
   it('OPENWOP_EMAIL_DEFAULT_PROVIDER picks the provider when the node sets none', async () => {
+    // BOTH providers connected: the default order puts SendGrid first, so only the
+    // env read can make this send ride Postmark. SendGrid points at an RFC 6761
+    // `.invalid` host, so a wrong pick fails fast and never leaves the machine.
+    await createSecretConnection({ tenantId: 'tpm', provider: 'sendgrid', kind: 'api_key', secret: 'SG.tpm-key', scope: 'user', userId: 'u1' });
+    const savedSg = process.env.OPENWOP_SENDGRID_API_BASE;
+    process.env.OPENWOP_SENDGRID_API_BASE = 'http://sendgrid.invalid';
     process.env.OPENWOP_EMAIL_DEFAULT_PROVIDER = 'postmark';
     try {
       const out = await adapter().send({ from: 'a@x.com', to: 'b@y.com', subject: 'def', text: 't', idempotencyKey: 'k-default' });
@@ -191,6 +207,7 @@ describe('Email adapter — Postmark + idempotency ledger (ADR 0193 Phase 1)', (
       expect(calls[0]?.token).toBe('PM-TOKEN-1');
     } finally {
       delete process.env.OPENWOP_EMAIL_DEFAULT_PROVIDER;
+      if (savedSg === undefined) delete process.env.OPENWOP_SENDGRID_API_BASE; else process.env.OPENWOP_SENDGRID_API_BASE = savedSg;
     }
   });
 });

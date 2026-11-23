@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.marketing",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "kind": "workflow-chain",
   "description": "Real-work workflow pack (RFC 0013, ADR 0149) — the Marketing & Advertising cluster: Full Campaign Launch, Ad Performance Optimization Loop, Content Brief Generator, and Content Repurposing. Reasons with core.ai.chatCompletion over real tenant data (feature.crm / feature.kb / feature.cms / feature.email); reads/optimizes the ad platforms provider-agnostically via the core.openwop.connectors.ad-* capability nodes (Meta or Google, whichever the tenant connected — ADR 0186). The optimization loop routes within-guardrail changes to auto-apply and out-of-guardrail changes to a core.chat.approvalGate via a core.flow.if conditional node (ADR 0149 open-question resolution: a flow conditional, not a new primitive). Every launch/publish/apply is approval- or guardrail-gated; all tenant values are run parameters (replay-deterministic). Published under core.openwop.workflows.* (openwop-team key).",
   "author": "openwop",
@@ -10,7 +10,7 @@
   "chains": [
     {
       "chainId": "marketing.campaign-launch",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "label": "Full Campaign Launch",
       "description": "From a brief: select the audience (CRM), draft ad copy and creative, reference the landing page (CMS), consolidate for review, then launch after approval through the governed ad step (feature.campaign-channels.nodes.publish-ad-variants, ADR 1111). With an ad account id and a connected platform it creates the campaign PAUSED (no spend until a person activates it; the tenant's spend threshold can require a further approval). With no account or no connection it hands the approved ad copy off as a draft document instead, so the run completes and the approved copy is kept.",
       "parameters": {
@@ -43,7 +43,7 @@
           { "id": "page", "typeId": "feature.cms.nodes.list-pages@1.0.0", "name": "Landing page (CMS)", "position": { "x": 320, "y": 280 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
           { "id": "review", "typeId": "core.chat.approvalGate@1.1.0", "name": "Consolidated review", "position": { "x": 640, "y": 140 }, "config": { "title": "Approve launching this campaign on the ad platform", "artifactType": "marketing.campaign", "actions": ["approve", "reject"] }, "inputs": {} },
           { "id": "gate-reject", "typeId": "core.flow.noop@1.0.0", "name": "Rejected — campaign not launched", "position": { "x": 960, "y": 300 }, "config": {}, "inputs": {} },
-          { "id": "launch", "typeId": "feature.campaign-channels.nodes.publish-ad-variants@1.4.0", "name": "Launch campaign (created paused)", "position": { "x": 960, "y": 140 }, "config": {}, "inputs": { "orgId": "{{params.orgId}}", "adAccountId": "{{params.adAccountId}}", "platform": "{{params.platform}}", "briefId": "{{params.briefId}}" } }
+          { "id": "launch", "typeId": "feature.campaign-channels.nodes.publish-ad-variants@1.5.0", "name": "Launch campaign (created paused)", "position": { "x": 960, "y": 140 }, "config": {}, "inputs": { "orgId": "{{params.orgId}}", "adAccountId": "{{params.adAccountId}}", "platform": "{{params.platform}}", "briefId": "{{params.briefId}}" } }
         ],
         "edges": [
           { "from": "audience", "to": "copy" },

@@ -25,7 +25,10 @@
  * Sabotage that turns it red: `subjectLinkService.ts` making the trust-root
  * check ignore `OPENWOP_SCIM_IDP_ENTITY_ID` reds the ALIGNED case (the seam
  * posture in `auth-subject-link.test.ts` stays green — it supplies the root via
- * `OPENWOP_TEST_SCIM_URL`).
+ * `OPENWOP_TEST_SCIM_URL`). Also re-probed in /grade-tests wave 122
+ * (w122g4-sla-*): the realm-alignment predicate, the `scim` lane dropped, a
+ * `saml` lane pushed for a SCIM-only host, and `subjectLinkKey` stated with one
+ * lane.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { buildV2Advertisement } from '../src/routes/discovery.js';
@@ -70,8 +73,9 @@ describe('USERS-13 — subjectLinking is advertised only when the leaver deny ca
     });
     expect(subjectLinkRealmAlignment()).toEqual({ aligned: true, scimRealm: 'acme', samlRealm: 'acme' });
     const a = await auth();
-    // Both lanes together IS the subject-linking claim at v2.
-    expect(a.lanes).toEqual(expect.arrayContaining(['saml', 'scim']));
+    // Both lanes together IS the subject-linking claim at v2: each exactly once
+    // (other lanes, e.g. OIDC, are env-dependent and not this claim).
+    expect(a.lanes.filter((l) => l === 'saml' || l === 'scim')).toEqual(['saml', 'scim']);
     expect(a.subjectLinkKey).toBe('opaque-idp');
   });
 

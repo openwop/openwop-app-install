@@ -117,6 +117,8 @@ const intakes = new DurableCollection<AssetIntake>('campaign-ops:intake', (r) =>
 /** The held bytes of a PENDING (or rejected, until purged) file. No route serves
  *  this store except the agency review download. */
 const heldBytes = new DurableCollection<HeldBytes>('campaign-ops:intake-bytes', (r) => r.key, undefined, (r) => r.tenantId);
+// CHAN-F19 follow-up C (ADR 0464 §9) — a file a collaborator supplied; deleted by the collaborator erase hook.
+declarePiiFields('campaign-ops:intake-bytes', ['contentBase64'], { maskGloballyByFieldName: false });
 
 const MiB = 1024 * 1024;
 /** One request: ≤ 5 files, ≤ 8 MiB decoded (the scoped body parser admits 12 MB of JSON). */

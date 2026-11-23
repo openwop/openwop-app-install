@@ -14,19 +14,38 @@
  * These legs pin the AUDIENCE DECISION, which is the thing that drifted — not
  * the copy, which was always fine.
  *
- * Sabotage record (/grade-tests wave 58, re-probed; tracker TST-BGF-14):
+ * Sabotage record (/grade-tests wave 58, re-probed in wave 122; tracker TST-BGF-14):
  *   - `runNoticeAudience` role-addresses a personal tenant   → leg 1
  *   - drop `recipientRole: 'admin'` for a shared tenant      → legs 2, 3
- *   - drop `recipientRole` from the failure EMIT (notify.ts) → leg 3 (behavioural), leg 6
+ *   - drop `recipientRole` from the failure EMIT (notify.ts) → legs 3, 9 (behavioural;
+ *     leg 6's same-spelling pin is also met by the approver-unreadable emit)
  *   - drop the role from the open-gate emit                  → leg 6
- *   - drop the participant-facing registry lookup            → legs 4, 9
+ *   - drop the FEATURE-declared purpose lookup               → leg 9
  *   - drop the `alreadyNoticedToday` aggregation guard       → leg 9
  *
+ * Leg 9 (ADR 1031 P2/P3): openwop-app composes no feature that declares a
+ * participant-facing purpose since KickTodo left, so the aggregation path would
+ * have no witness here. Leg 9 injects ONE declared purpose into the real
+ * registry read (`featureParticipantFacingPurposes`, wrapped below; empty for
+ * every other leg) and drives the real failure emit.
+ *
  * CEILINGS: legs 5, 7 and 8 are source checks (a registry that names written
- * purposes; the two conditional sites; a recorded decision comment). Behavioural
- * legs for approvalSla / actionExecution would be new coverage.
+ * purposes; the two conditional sites; a recorded decision comment). Leg 5's
+ * per-owner loop iterates nothing in openwop-app (no feature declares a purpose);
+ * it binds only in an adopter checkout that does. Behavioural legs for
+ * approvalSla / actionExecution would be new coverage.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+/** Purposes leg 9 declares on behalf of an adopter feature. Empty outside leg 9. */
+const testPurposes = vi.hoisted(() => new Set<string>());
+vi.mock('../src/host/featureContributions.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../src/host/featureContributions.js')>();
+  return {
+    ...real,
+    featureParticipantFacingPurposes: (): string[] => [...real.featureParticipantFacingPurposes(), ...testPurposes],
+  };
+});
 // ADR 1031 P2 — participant-facing purposes are feature-declared, recorded at composition.
 import '../src/features/index.js';
 import { runNoticeAudience, isParticipantFacingRun, PARTICIPANT_FACING_PURPOSES, participantFacingPurposes } from '../src/notifications/runNoticeAudience.js';
@@ -88,7 +107,7 @@ describe('ADR 0710 — run-notice audience', () => {
     expect(solo[0]!.recipientRole ?? null, 'a personal workspace keeps the broadcast').toBeNull();
   });
 
-  it('leg 4: an ordinary purpose is NOT participant-facing (the positive path over a real feature purpose lives with that feature\'s tests)', () => {
+  it('leg 4: an ordinary purpose is NOT participant-facing (the positive path is leg 9)', () => {
     const shared = 'ws:0d2f9c';
     expect(isParticipantFacingRun({ purpose: 'some-ordinary-workflow' })).toBe(false);
     expect(isParticipantFacingRun(undefined)).toBe(false);
@@ -145,6 +164,53 @@ describe('ADR 0710 — run-notice audience', () => {
     expect(c, 'the audience decision must be written where the emit is').toContain('ADR 0710 AUDIENCE DECISION');
     expect(c, 'and must state what would reverse it').toContain('What WOULD change this');
   });
-  // Leg 9 (BEHAVIOURAL aggregation over a participant-facing purpose) moved with its
-  // KickTodo purpose to test/kicktodo/kicktodo-run-notice-audience.test.ts (ADR 1031 P2).
+
+  it('leg 9: BEHAVIOURAL — a feature-declared participant-facing job emits ONE operator notice per day, an ordinary workflow emits every time', async () => {
+    const PURPOSE = 'adr0710-participant-reminder';
+    testPurposes.add(PURPOSE);
+    try {
+      expect([...participantFacingPurposes()], 'the host table unions the feature-declared purposes').toContain(PURPOSE);
+      expect(isParticipantFacingRun({ purpose: PURPOSE })).toBe(true);
+      expect(runNoticeAudience({ tenantId: 'ws:0d2f9c', metadata: { purpose: PURPOSE } })).toEqual({
+        recipientRole: 'admin', aggregatePerJobPerDay: true, reason: 'operator-role-participant-facing',
+      });
+
+      const storage = await openStorage('memory://');
+      setNotificationBackend(storage);
+      const TENANT = 'ws:leg9-agg';
+      const now = new Date().toISOString();
+      const seed = async (runId: string, workflowId: string, purpose?: string): Promise<void> => {
+        await storage.insertRun({
+          runId, tenantId: TENANT, workflowId, status: 'failed',
+          createdAt: now, updatedAt: now, inputs: {}, configurable: {},
+          metadata: purpose ? { purpose } : {},
+        });
+      };
+      const failedFor = async (workflowId: string) =>
+        (await storage.listNotifications({ tenantId: TENANT, limit: 200, includeArchived: true }))
+          .filter((r) => r.type === 'workflow.failed' && r.workflowId === workflowId);
+
+      // participant-facing: three failed runs of the SAME job (none is a schedule
+      // or trigger run, so the unattended dedupe cannot be what collapses them)
+      for (const r of ['run:p1', 'run:p2', 'run:p3']) {
+        await seed(r, 'wf:coach', PURPOSE);
+        await emitRunFailureNotification(storage, r, { code: 'x', userMessage: 'boom' });
+      }
+      const coach = await failedFor('wf:coach');
+      expect(coach, 'a broken reminder must page the operator ONCE, not once per participant').toHaveLength(1);
+      expect(coach[0]!.recipientRole).toBe('admin');
+      expect(coach[0]!.metadata?.noticeAudience).toBe('operator-role-participant-facing');
+
+      // ordinary workflow: aggregation must NOT apply — every failure is its own event
+      for (const r of ['run:o1', 'run:o2']) {
+        await seed(r, 'wf:ordinary');
+        await emitRunFailureNotification(storage, r, { code: 'x', userMessage: 'boom' });
+      }
+      const ordinary = await failedFor('wf:ordinary');
+      expect(ordinary, 'an ordinary workflow must not be silently aggregated').toHaveLength(2);
+      expect(ordinary.map((r) => r.metadata?.noticeAudience)).toEqual(['operator-role', 'operator-role']);
+    } finally {
+      testPurposes.delete(PURPOSE);
+    }
+  });
 });

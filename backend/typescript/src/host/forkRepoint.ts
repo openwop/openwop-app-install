@@ -15,7 +15,7 @@ import type { DurableCollection } from './hostExtPersistence.js';
  * (as freshly read) no longer needs it. Returns whether a write landed.
  */
 export async function casRepoint<T>(
-  col: DurableCollection<T>,
+  col: Pick<DurableCollection<T>, 'get' | 'compareAndSwap'>,
   id: string,
   rewrite: (row: T) => T | null,
 ): Promise<boolean> {

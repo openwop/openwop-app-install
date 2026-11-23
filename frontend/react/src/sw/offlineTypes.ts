@@ -28,4 +28,11 @@ export interface FeatureOffline {
   runtime?: { match: string; strategy: 'swr' | 'network-first'; maxEntries: number }[];
   /** D12. Absent = 'fail-closed' (the default). */
   entitlement?: 'fail-closed' | 'last-known';
+  /** D6. Source modules this feature loads with `import()` that need the network
+   *  anyway (e.g. the shared chat panel), so their chunks stay out of the offline
+   *  download. Each is a file path relative to this `offline.ts`, with its
+   *  extension: `'../../chat/EmbeddedChatPanel.tsx'`. The build refuses a path
+   *  that does not exist, is not in the output, or is still reached by a static
+   *  import. Offline, that `import()` fails, so render it only while online. */
+  onlineOnly?: string[];
 }

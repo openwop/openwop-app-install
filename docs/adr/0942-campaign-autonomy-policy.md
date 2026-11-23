@@ -1,6 +1,6 @@
 # ADR 0942 — Campaign autonomy policy: per-campaign HITL, frozen at run start
 
-Status: Accepted (P0–P3a, P4a, P4b, P5, P6 implemented 2026-10-20; P3b open)
+Status: Accepted (P0–P3a, P4a, P4b, P5, P6 implemented 2026-10-20; P3b core built as ADR 0924 P2a, pending gate; the `client_and_agency` mode itself is ADR 0924 P2b, open)
 Date: 2026-10-19
 
 Program: **Campaign Studio** (ADRs 0941–0962), Tier 0, the governance keystone.
@@ -443,6 +443,14 @@ These are floors (D3 layer 1); no preset or policy can relax them.
    > is kept: it still holds for every workspace with a second eligible approver.
    > Reason: a one-admin workspace (the default state, ADR 0905 D3) otherwise
    > dead-ends at its first autonomy gate (CasaVoga, Campaign Studio ledger CC-GATE-2).
+
+   > **CORRECTION (2026-11-19, user decision, ADR 0924 Q4; narrows ADR 1131):**
+   > "never on a quorum gate" has ONE exception. On a `client_and_agency`
+   > change-set review (ADR 0924 P2b), a sole agency approver may cast the
+   > **agency** vote on a change they proposed, only in their own signed-in
+   > session, never for a change that arrived through MCP (D10.3), and audited as
+   > `sole_admin`. The client is the independent second person, so the four-eyes
+   > rule still holds. Every other quorum gate keeps the rule as stated above.
 3. **Runs started over MCP never cause an external effect unattended.** A run
    carrying the host-written MCP origin (`source:'mcp-server-mount'`,
    `trustBoundary:'untrusted'`, `host/mcpSemantics.ts:404`) gets `approve` as a
@@ -588,6 +596,7 @@ before building it; its findings are folded in below.
 | P2b | Org-scoped freeze (cs-0943's gap): a CLIENT-bound run (ADR 0921 campaign-ops stamp, no campaign) freezes the client's default policy. `FrozenAutonomy.campaignId` optional; `clientBoundOrg` + `runAutonomyOf.bound` count the client stamp; campaign-ops contributor `features/campaign-ops/autonomyStamp.ts` (pure read; precedence: a campaign tag is the campaign arm's); one `autonomyToggleOn` helper for both arms | `test/adr0942-p2b-client-bound-freeze.test.ts` (6, two witnesses + a measured redundant guard) | branch `feat/autonomy-0942-p2b` (stacked on P2) |
 
 | P3a | `enforceCampaignAction` (the one chokepoint helper: run stamp + run floors + client floor and campaign status through seams + tenant ceiling; D8 audit of every bound external resolution); ads spend gate decided by the policy for campaign runs (governance threshold folded in as the ceiling; one approval row with policy approvers, requesters and the client org; attended forks namespaced); `campaign-spend` decide-time eligibility for policy rows; the waiter store + `resumeRunsAwaitingApproval`; `ad-budget-update` and `publish-ad-variants` wait on the row; `sms.send` chokepoint with the derived covering-grant check | `test/adr0942-p3-chokepoints.test.ts` (sabotage-witnessed) | branch `feat/autonomy-0942-p3` (stacked on P2, on #5035) |
+| P3b (core) | Built as ADR 0924 P2a: `castApprovalVote` (member and client-portal lanes), per-vote kind check, `ApprovalPolicy.perParty` carried and per-party counted, `ReviewDecision.party` from the lane, re-check of earlier votes at completion, per-row SLA expiry through the kind, agency approve needs a person's session, change-set separation of duties on `selfApprovalBlockedCore`. `client_and_agency` itself stays ADR 0924 P2b | `test/adr0924-p2a-compile-per-party.test.ts`, `test/adr0924-p2a-vote-ledger.test.ts`, `test/adr0924-p2a-change-set-votes.test.ts` | branch `feat/adr0924-p2a-quorum`, **pending gate** |
 | P4a | Per-row SLA ladders on PendingApprovals (`ApprovalPolicy.sla` / `escalateTo`, swept through the `approval:sla-row` index even with no tenant ladder; expire rejects `sla_expired` and resumes the waiting run); remind/escalate for autonomy gate interrupts (a second source in the same sweep, `autonomy:interrupt-sla`), expiry as the gate's own `timeoutMs` (the existing RFC 0093 timeout sweep); `delegation:'none'` as `allowDelegation:false`, read only by `approverResolution` through one refs builder (`gateApproverRefs` / `policyApproverRefs`) every lane now uses; notify-after notices after a successful effect (ads, sms) or at the gate (no-chokepoint classes), immediate or queued for the daily digest chain `campaign-autonomy.daily-digest` (chain pack, chain-backed, host-owned per-tenant job) | `test/adr0942-p4-sla-notify.test.ts` (sabotage-witnessed) | branch `feat/autonomy-0942-p4` (stacked on P3a) |
 | P5 | The read model carries the class vocabulary and each class's effective rule (`actionClasses`, `effective` per class and review stage from the resolver's own `findRule`, `presets`); `AutonomyPolicyPanel` (lazy chunk) on the campaign detail and, as a modal, from the campaign-ops client bar: levels, a step-by-outcome grid with approvers and escalation thresholds, customize mode (outcomes, thresholds, approver roles), "use the client's default", the always-applies explainer; run-timeline badge `autonomyBadgeOf`; 4 locales | `test/adr0942-p0-routes.test.ts` (read model pinned to `findRule`), `frontend/react/src/features/campaign-orchestration/__tests__/autonomyPolicyPanel.test.tsx`, `frontend/react/src/runs/__tests__/runTimelineAutonomyBadge.test.tsx` (sabotage-witnessed) | branch `feat/autonomy-0942-p5` (stacked on P4a) |
 | P6 | `openwop:campaign-orchestration.get-autonomy` (read, untrusted, fail-empty): the Strategist's projection of the SAME `describePolicy` read model (`host/autonomyPolicy/explain.ts` `projectPolicyForModel` + `ALWAYS_APPLIES`, keyed by the resolver's layer rule ids), through ONE access predicate shared with `GET …/campaigns/:id/autonomy` (`features/campaign-orchestration/autonomyAccess.ts`, a `{subject} \| {tenantPrincipal}` union); Strategist pack 1.3.0 (allowlist, prompt rewritten, `evalSuiteRef`); ADR 0889 suite `evals/campaign-strategist.json` (who signs off / asked to skip / asked to loosen) | `test/adr0942-p6-strategist-tool.test.ts`, `test/adr0942-p6-strategist-eval.test.ts` (pass script passes every task, violating script fails every task, each on a different axis), `src/features/campaign-orchestration/__tests__/promptCatalogParity.test.ts` (sabotage-witnessed) | branch `feat/autonomy-0942-p6` (stacked on P5) |
@@ -662,6 +671,20 @@ before building it; its findings are folded in below.
 > merges nothing records a client vote to count. P3b follows #5043, with the
 > required test: two agency votes on a `client_and_agency` change set leave it
 > pending, and one agency vote plus one client vote approves it.
+
+> **CORRECTION (2026-11-20, ADR 0924 P2a, pending gate):** P3b's core is built as
+> ADR 0924 P2a: one host vote entry (`castApprovalVote`) that the member routes
+> and the client portal both use; `ApprovalPolicy.perParty` carried by
+> `compileApproverSpec` (which now refuses any field it cannot carry); the party
+> recorded on each vote from its lane; per-party counting in
+> `evaluateQuorumTally`; a per-vote check, a re-check of earlier votes at
+> completion, and the per-row SLA expiry through the kind. The required test runs
+> on the host lane in `test/adr0924-p2a-vote-ledger.test.ts` (two agency votes
+> stay pending; one of each approves). It runs on a real change set only when
+> ADR 0924 P2b makes `client_and_agency` selectable. Decision D9's fold-in is
+> unchanged: `ClientAccount.approvalPolicy` stays the single input (ADR 0924 Q5,
+> user decision 2026-11-19); until the fold-in runs, an autonomy rule for
+> `campaign.change-set.apply` may only add parties.
 
 > **D1 / D5, the chokepoints a run can reach today:**
 > - **Ads:** `publishAd` (`ads.publish`, created PAUSED) and `updateBudget`

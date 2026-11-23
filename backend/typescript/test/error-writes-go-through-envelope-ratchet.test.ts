@@ -38,19 +38,17 @@ function directCounts(dir: string): Record<string, number> {
 /** Measured 2026-11-17. Shrink-only: a route moved onto `sendError` lowers its entry. */
 const ROUTES_BASELINE: Record<string, number> = {
   'routes/accessControl.ts': 1,
-  'routes/admin.ts': 4,
   'routes/appBrand.ts': 1,
   'routes/artifactTypeSeam.ts': 1,
   'routes/authBreakGlass.ts': 1,
+  // The SAML assertion-consume result ({ authenticated: false, reason }), read by the sign-in flow, not error envelopes; the exit guard still makes them no-store.
   'routes/authSaml.ts': 4,
   'routes/compensationSeam.ts': 4,
   'routes/discovery.ts': 2,
   'routes/health.ts': 1,
-  'routes/mcp.ts': 3,
+  // JSON-RPC error responses (rpcError), the MCP wire contract, not error envelopes; the exit guard still makes them no-store.
+  'routes/mcp.ts': 2,
   'routes/mcpInvokeSeam.ts': 1,
-  'routes/mediaAssets.ts': 9,
-  'routes/memory.ts': 3,
-  'routes/presentRemote.ts': 4,
   'routes/purposePropagationSeam.ts': 2,
   'routes/runs.ts': 1,
   'routes/scheduler.ts': 2,

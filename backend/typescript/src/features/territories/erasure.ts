@@ -27,6 +27,8 @@ import {
   __territoriesForErasure, __putTerritoryForErasure, __modelsForErasure, __putModelForErasure,
 } from './entities/territories.js';
 import { __quotasForErasure, __putQuotaForErasure } from './entities/quota.js';
+import { __eraseRuleLiterals } from './entities/assignment.js';
+import { declarePiiFields } from '../../host/dataClassification.js';
 import { invalidateTerritoryIndex } from './visibility.js';
 
 const log = createLogger('territories.erasure');
@@ -79,13 +81,21 @@ export async function eraseSubjectTerritories(tenantId: string, subjectKey: stri
     splitsTouched += 1;
   }
 
+  // CHAN-F19 follow-up B — a rule filter literal naming the subject (user decision
+  // 2026-11-22: rewrite the value, keep the rule). Assignments the rule already produced
+  // hold only the rule and record ids and are left as they are.
+  const ruleOrgs = await __eraseRuleLiterals(tenantId, forms, ERASED_USER_REF);
+  for (const o of ruleOrgs) orgsTouched.add(o);
+
   for (const orgId of orgsTouched) invalidateTerritoryIndex(tenantId, orgId);
 
-  if (territoriesTouched || splitsTouched || modelsTouched) {
-    log.info('territory subject erasure applied', { tenantId, territoriesTouched, splitsTouched, modelsTouched, indexesInvalidated: orgsTouched.size });
+  if (territoriesTouched || splitsTouched || modelsTouched || ruleOrgs.size) {
+    log.info('territory subject erasure applied', { tenantId, territoriesTouched, splitsTouched, modelsTouched, ruleOrgsTouched: ruleOrgs.size, indexesInvalidated: orgsTouched.size });
   }
 }
 
 export function registerTerritoryErasure(): void {
   registerSubjectEraser(eraseSubjectTerritories);
+  // CHAN-F19 follow-up B — a filter literal can be a person's id; this eraser rewrites it.
+  declarePiiFields('crm:territory-rule', ['filter'], { maskGloballyByFieldName: false });
 }

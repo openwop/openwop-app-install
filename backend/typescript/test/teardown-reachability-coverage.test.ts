@@ -278,6 +278,7 @@ const HOST_RESIDUAL_CLASSIFICATION: Record<string, { bucket: Bucket; reason: str
   'entity:sysidx-build': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'ADR 1110 round fix: row type BuildRow carries a top-level tenantId field; tenant-keyed, so teardown deletes its key range' },
   'entity:sysidx-built': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'ADR 1110: row type BuiltRow carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   'entity:sysidx-count': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'ADR 1110: row type CountRow carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
+  'entity:sysidx-hour': { bucket: 'EXEMPT', reason: 'ADR 1155 P3a: host-global UTC-hour lease for the one index upkeep sweep\'s drift check ({k, hour}); no tenant dimension, no subject data' },
   'entity:sysidx-manifest': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'ADR 1110: row type ManifestRow carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   'entity:sysidx-pend': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'ADR 1110: row type PendRow carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   'entity:term-idx': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type TermIndexRow carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
@@ -288,7 +289,6 @@ const HOST_RESIDUAL_CLASSIFICATION: Record<string, { bucket: Bucket; reason: str
   'kb:reindex': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type ReindexJob carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   'kb:veccache': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type VecCacheRow carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   'knowledge-sync:filestate': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type SyncFileState carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
-  'media:index-hour': { bucket: 'EXEMPT', reason: '#5928: host-global UTC-hour lease for the media-index drift check ({k, hour}); no tenant dimension, no subject data' },
   'navigation-settings:config': { bucket: 'REACHABLE_ROW_TENANTID', reason: 'row type StoredMenuConfig carries a top-level tenantId field → jsonTenantId reaches it on purgeTenantRows' },
   // notifications:prefs is AUTO-reachable — its composite key references
   // `.tenantId` (per-(tenant,user)); no map entry needed.

@@ -118,6 +118,8 @@ const sessions = new DurableCollection<StoredRecording>(
   undefined,
   (r) => r.tenantId,
 );
+// CHAN-F19 follow-up C (ADR 0464 §9) — the consented visitor's subject key and session; eraseSubjectReplays tombstones the row.
+declarePiiFields('analytics:replay', ['subjectKey', 'sessionKey', 'pageIds'], { maskGloballyByFieldName: false });
 
 function hasRecording(row: StoredRecording): row is Recording { return 'subjectKey' in row; }
 async function visibleRecording(row: StoredRecording | null): Promise<ReplaySession | null> {

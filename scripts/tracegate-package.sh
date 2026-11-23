@@ -10,7 +10,9 @@
 #       OWN ledger (<git common dir>/tracegate-package/) and one row comparing the two
 #       selections is appended to compare-<lane>.tsv there. In shadow the package's
 #       selected.txt is the WHOLE lane (shadow runs everything), so what it would run is
-#       read from its predict.json: the files decided `run`. It can never fail the gate:
+#       read from its predict.json: the files decided `run`. The fork's side is read the
+#       same way (its must-run files, never its audit draw), and the files that differ
+#       are kept in compare-<lane>-diff/<at>-<head>.json. It can never fail the gate:
 #       it always exits 0, and is killed after TRACEGATE_PACKAGE_TIMEOUT_S (default 60).
 #       It uses only the INSTALLED package (never npx): not installed, it logs and skips.
 #   scripts/tracegate-package.sh record <lane>
@@ -73,14 +75,34 @@ const wouldRun = () => {
   } catch { /* none: fall back */ }
   const set = read(pkgSel); return set ? { set, basis: 'selected' } : null;
 };
-const fork = read(forkSel), w = rc === '0' ? wouldRun() : null, pkg = w ? w.set : null;
+// What the fork MUST run, likewise from its predict.json: its selected.txt also holds the
+// random audit in enforce (and the whole lane in shadow), which says nothing about
+// prediction. A superset test against an audit draw is noise (2026-11-23: fork 85 = 13 must
+// run + 72 audited). selected.txt only when the fork wrote no decisions.
+const forkMust = () => {
+  try {
+    const d = JSON.parse(fs.readFileSync(path.join(path.dirname(forkSel), 'predict.json'), 'utf8')).decisions;
+    if (d && typeof d === 'object') return { set: new Set(Object.keys(d).filter((f) => d[f]?.run).map((f) => path.resolve(root, f))), basis: 'predict' };
+  } catch { /* none: fall back */ }
+  const set = read(forkSel); return set ? { set, basis: 'selected' } : null;
+};
+const fm = forkMust(), fork = fm ? fm.set : new Set(), w = rc === '0' ? wouldRun() : null, pkg = w ? w.set : null;
 const status = rc === 'not-installed' ? 'not-installed' : rc === '124' ? 'timeout' : rc !== '0' ? `error-${rc}` : pkg ? 'ok' : 'no-selection';
 const onlyFork = pkg ? [...fork].filter((f) => !pkg.has(f)).length : '';
 const onlyPkg = pkg ? [...pkg].filter((f) => !fork.has(f)).length : '';
-const header = 'at\thead\tstatus\tsecs\tfork\tpackage\tonly_fork\tonly_package\tsuperset\tbasis\n';
-const row = [new Date().toISOString(), head, status, secs, fork.size, pkg ? pkg.size : '', onlyFork, onlyPkg, pkg ? (onlyFork === 0 ? 'yes' : 'no') : '', w ? w.basis : ''].join('\t') + '\n';
-// A log with another header (the rows before `basis`, which compared the whole lane)
-// is set aside, never mixed in: those rows don't count toward the P1 exit.
+const header = 'at\thead\tstatus\tsecs\tfork\tpackage\tonly_fork\tonly_package\tsuperset\tbasis\tfork_basis\n';
+const at = new Date().toISOString();
+const row = [at, head, status, secs, fork.size, pkg ? pkg.size : '', onlyFork, onlyPkg, pkg ? (onlyFork === 0 ? 'yes' : 'no') : '', w ? w.basis : '', fm ? fm.basis : ''].join('\t') + '\n';
+// Which files differ, so a row that is not a superset can be explained file by file
+// (the P1 exit allows "or the differences are explained"). Repo-relative, at most 500 each.
+if (pkg && (onlyFork || onlyPkg)) {
+  const rel = (xs) => xs.map((f) => path.relative(root, f)).sort().slice(0, 500);
+  const dir = out.replace(/\.tsv$/, '-diff');
+  try { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, `${at.replace(/[:.]/g, '')}-${head}.json`), JSON.stringify({ at, head, onlyFork: rel([...fork].filter((f) => !pkg.has(f))), onlyPackage: rel([...pkg].filter((f) => !fork.has(f))) }, null, 1)); } catch { /* the row stands */ }
+}
+// A log with another header is set aside, never mixed in: those rows don't count toward
+// the P1 exit. The rows before `basis` compared the package's whole lane; the rows before
+// `fork_basis` compared against the fork's selected.txt, audit draw included.
 if (fs.existsSync(out) && fs.readFileSync(out, 'utf8').split('\n')[0] + '\n' !== header) fs.renameSync(out, out.replace(/\.tsv$/, `.before-${new Date().toISOString().slice(0, 10)}.tsv`));
 if (!fs.existsSync(out)) fs.writeFileSync(out, header);
 fs.appendFileSync(out, row);

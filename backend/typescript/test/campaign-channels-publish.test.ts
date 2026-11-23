@@ -14,9 +14,12 @@
  * the whole sequence; write an invalid stage; stop stamping relative UTM URLs; let a
  * typo'd platform dispatch to Meta.
  *
- * CCH-FORK-1 (BLOCKED-ON-PRODUCT, `it.fails` below): the landing-page node keys its
- * page on `${runId}:${nodeId}`, so a `:fork` (new runId) mints a SECOND draft page —
- * the EMWF-10 shape ADR 0655 D7 fixed for the email node only.
+ * CCH-FORK-1 / CMS2WF-6 (FIXED 2026-11-19, publish-landing-page 1.1.0): the node used
+ * to key its page on `${runId}:${nodeId}`, so a `:fork` (new runId) minted a SECOND
+ * draft page — the EMWF-10 shape ADR 0655 D7 fixed for the email node only. It now
+ * keys on node + brief + content. Red witness: put `ctx.runId` back into
+ * `publishIdemBase` (the fork case below mints a second page), or drop the content
+ * hash from it (the "different approved draft" case returns the old page).
  */
 import { describe, it, expect, beforeEach, beforeAll, afterAll } from 'vitest';
 import { nodes as nodePack } from '../../../packs/feature.campaign-channels.nodes/index.mjs';
@@ -98,11 +101,12 @@ describe('publish-landing-page — mapper + fail-closed', () => {
     const captured = calls[0];
     expect(captured?.orgId).toBe('org-7');
     // Deterministic idem key: a re-run of the same node computes the SAME pageId, and
-    // it is anchored on the node. (Its runId component is CCH-FORK-1 — not pinned here.)
+    // it is anchored on the node, never the run (CMS2WF-6).
     await publishLP(ctx);
     expect(calls).toHaveLength(2);
     expect(calls[1]?.pageId).toBe(captured?.pageId);
-    expect(String(captured?.pageId)).toMatch(/^page:(.+:)?n1(:.+)?$/);
+    expect(String(captured?.pageId)).toMatch(/^page:n1:b1:[0-9a-f]+$/);
+    expect(String(captured?.pageId)).not.toContain('r1');
     const sections = sectionsOf(captured);
     expect(sections.map((s) => s.type)).toEqual(['hero', 'richText', 'richText', 'cta']);
     expect(sections[0]?.data).toMatchObject({ heading: 'Pick faster', subheading: 'The fastest checkout.', ctaLabel: 'Get a demo' });
@@ -129,11 +133,24 @@ describe('publish-email-sequence — mapper + fail-closed', () => {
     const out = await publishEmail({ features: { email, 'campaign-brief': briefSurface('org-9') }, inputs: { draft: emailDraft, stage: 'lead', briefId: 'b-prov' }, runId: 'r2', nodeId: 'n2' });
     expect(out.status).toBe('success');
     expect(captured.orgId).toBe('org-9');
-    expect(captured.idemBase).toBe('n2:b-prov');
+    // Fork-stable (no runId), per brief AND per approved content (user decision 2026-11-19).
+    expect(captured.idemBase).toMatch(/^n2:b-prov:[0-9a-z]+$/);
     expect(captured.stage).toBe('lead');
     expect(captured.emails).toHaveLength(2);
     // ADR 0245 — provenance to the source brief threads through.
     expect(captured.sourceBriefId).toBe('b-prov');
+  });
+
+  it('a replay keeps the key; a regenerated, re-approved sequence gets a new one', async () => {
+    const keys: string[] = [];
+    const email = { createDraftCampaign: async (a: Captured) => { keys.push(String(a.idemBase)); return { campaignIds: ['c1'], templateIds: ['t1'], steps: 1 }; } };
+    const run = (draft: unknown, runId: string) => publishEmail({ features: { email, 'campaign-brief': briefSurface('org-9') }, inputs: { draft, stage: 'lead', briefId: 'b-prov' }, runId, nodeId: 'n2' });
+    await run(emailDraft, 'r-original');
+    await run(emailDraft, 'r-fork'); // a :fork re-runs the node under a new runId
+    const regenerated = { ...emailDraft, emails: [{ ...emailDraft.emails[0], subject: 'A new subject line' }, ...emailDraft.emails.slice(1)] };
+    await run(regenerated, 'r-next');
+    expect(keys[1]).toBe(keys[0]);
+    expect(keys[2]).not.toBe(keys[0]);
   });
 });
 
@@ -174,11 +191,10 @@ describe('real cms surface delegation — DRAFT-only + idempotent + tenant-isola
     expect(stored?.sections[0].data).toMatchObject({ heading: 'Pick faster' });
   });
 
-  // CCH-FORK-1 — BLOCKED-ON-PRODUCT. Correct behaviour: a `:fork` re-runs the node under a
-  // NEW runId with the same node + brief, and must reuse the draft page it already made
-  // (the EMWF-10 fix shape). Today the key carries the runId, so the fork mints a second
-  // page. Flip to `it` when the node anchors its key on nodeId + brief.
-  it.fails('CCH-FORK-1: a fork (new runId, same node + brief) reuses the same draft page', async () => {
+  // CCH-FORK-1 / CMS2WF-6 — a `:fork` re-runs the node under a NEW runId with the same
+  // node + brief + approved draft, and must reuse the draft page it already made (the
+  // EMWF-10 fix shape). Was `it.fails` until publish-landing-page 1.1.0.
+  it('CCH-FORK-1: a fork (new runId, same node + brief) reuses the same draft page', async () => {
     const run = async (runId: string): Promise<string> => {
       const cms = buildCmsSurface({ tenantId: 't1', runId });
       const out = await publishLP({ features: { cms, 'campaign-brief': briefSurface('o1') }, inputs: { draft: landingDraft, briefId: 'b1' }, runId, nodeId: 'n1' });
@@ -189,6 +205,20 @@ describe('real cms surface delegation — DRAFT-only + idempotent + tenant-isola
     const forked = await run('run-FORK-fork');
     expect(await listPages('t1', 'o1')).toHaveLength(1);
     expect(forked).toBe(original);
+  });
+
+  it('CMS2WF-6: a DIFFERENT approved draft of the same brief gets its own page (the key is not the brief alone)', async () => {
+    const publish = async (runId: string, title: string): Promise<string> => {
+      const cms = buildCmsSurface({ tenantId: 't1', runId });
+      const out = await publishLP({ features: { cms, 'campaign-brief': briefSurface('o1') }, inputs: { draft: { ...landingDraft, title }, briefId: 'b1' }, runId, nodeId: 'n1' });
+      expect(out.status, JSON.stringify(out)).toBe('success');
+      return pageIdOf(out);
+    };
+    const first = await publish('run-V1', 'Pick Faster');
+    const second = await publish('run-V2', 'Pick Even Faster');
+    expect(second).not.toBe(first);
+    expect(await listPages('t1', 'o1')).toHaveLength(2);
+    expect((await getPage('t1', 'o1', second))?.title).toBe('Pick Even Faster');
   });
 
   it('keys the write on the scope tenant — a different tenant cannot see the page', async () => {

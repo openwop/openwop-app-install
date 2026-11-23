@@ -20,11 +20,12 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { runSystemIndexUpkeep } from '../src/features/entities/systemIndexSweep.js';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import {
   MEDIA_ASSET_TYPE, UNCATEGORIZED, assertOrgCapacity, createAsset, createCollection, deleteAsset, listAssets, listAssetsPage,
-  listCollectionsPage, repairMediaIndex, __forgetMediaIndexReady, type MediaAsset,
+  listCollectionsPage, __forgetMediaIndexReady, type MediaAsset,
 } from '../src/features/media/mediaService.js';
 import {
   __forgetVerifiedIndexes, afterSystemWrite, beforeSystemWrite, indexedTenantTotals, indexedTotals, registerStoreIndex,
@@ -155,7 +156,7 @@ describe('#5928 — the capacity gate reads counters, not asset rows', () => {
     await tamperCounter(T, 'org-a', 1, 1);
     process.env.OPENWOP_MEDIA_ORG_MAX_BYTES = '1000';
     await assertOrgCapacity(T, 'org-a', 1); // the drift window: the under-count admits
-    await repairMediaIndex(clock + 3_600_000);
+    await runSystemIndexUpkeep(clock + 3_600_000);
     expect(await indexedTotals(T, MEDIA_ASSET_TYPE, 'org-a')).toEqual({ count: 3, sum: 1200 });
     await expect(assertOrgCapacity(T, 'org-a', 1)).rejects.toMatchObject({ details: { maxBytes: 1000 } });
     expect(await indexedTenantTotals(T, MEDIA_ASSET_TYPE)).toEqual({ count: 3, sum: 1200 });

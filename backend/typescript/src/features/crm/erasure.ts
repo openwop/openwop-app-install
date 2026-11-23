@@ -49,6 +49,7 @@ import { registerSubjectEraser, registerSubjectKeyResolver } from '../../host/su
 import { subjectKeyForms } from '../../host/subjectErasureRedaction.js';
 import { onMemberAuthorityLost } from '../../host/accessControlService.js';
 import { clearTaskAssignee } from './entities/tasks.js';
+import { eraseBookingLinkSubject } from './entities/bookingLinks.js';
 import { redactNamesInDealTitles } from './entities/deals.js';
 import { redactCompaniesNamedAfter } from './entities/companies.js';
 import { createLogger } from '../../observability/logger.js';
@@ -474,6 +475,7 @@ export async function eraseCrmTaskAssignees(tenantId: string, subjectKey: string
   await eraseRoutingPolicySubjects(tenantId, subjectKey);
   await eraseSlaSettingsSubjects(tenantId, subjectKey);
   await eraseLeadRoutingOwnerSubject(tenantId, subjectKey); // CHAN-F19 #7 — the owner's capacity pools
+  await eraseBookingLinkSubject(tenantId, forms); // CHAN-F19 follow-up B — their booking links
 }
 
 export function registerCrmErasure(): void {
@@ -503,6 +505,10 @@ export function registerCrmErasure(): void {
   // CHAN-F19 — the PII is in the row KEY (the address segment), and `key` is a generic
   // field name, so it is NOT masked globally by name.
   declarePiiFields('crm:sender-health-seen', ['key'], { maskGloballyByFieldName: false });
+  // CHAN-F19 follow-up B — a booking link's owner and creator, and its slug (typed by the
+  // owner, so it can carry their name). `eraseBookingLinkSubject` handles both stores.
+  declarePiiFields('crm:booking-link', ['ownerUserId', 'createdBy'], { maskGloballyByFieldName: false });
+  declarePiiFields('crm:booking-link-slug', ['slug'], { maskGloballyByFieldName: false });
   declarePiiFields('crm:merge-event', ['filledFields', 'absorbedIdentifiers']);
   declarePiiFields('cdp:contact-ident', ['value']);
   declarePiiFields('crm:lead-model', ['createdBy']);

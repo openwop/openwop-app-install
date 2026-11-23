@@ -6,15 +6,15 @@
  *  - a new row's key carries a hash of the address, never the address;
  *  - the store is on the kvAgeOut lane, and a LEGACY raw-key row ages out on it (the sweep
  *    selects by prefix and ages by `at`, so no migration is needed);
- *  - a bounce recorded under the legacy key before the deploy still dedupes a same-day
- *    redelivery after it (the read-only transition read);
+ *  - a same-day redelivery counts once under the hashed key. (The read-only transition read
+ *    of the legacy key was removed 2026-11-22, after its 2-day window closed.)
  *  - erasure deletes a subject's rows in BOTH key shapes, through the crm subject eraser
  *    for an email-keyed DSAR, and leaves another address's rows alone.
  *
  * Sabotage witnessed (each reds the named case, restored after):
  *  - the key built from the raw address again                    → "never the address"
  *  - the registerKvAgeOut line removed                           → "ages out"
- *  - the legacy transition read removed                          → "still counts once"
+ *  - the putIfAbsent dedupe replaced with a put                  → "counts once"
  *  - the legacy suffix dropped from eraseSenderHealthSeen        → "both key shapes"
  *  - the email-keyed call in eraseCrmSubject removed             → "crm subject eraser"
  *  - leg 6c (the key-set call) in eraseCrmSubject removed        → "contactId-keyed DSAR"
@@ -70,11 +70,11 @@ describe('CHAN-F19 — crm:sender-health-seen holds no raw address and is bounde
     expect(keys).toHaveLength(1); // today's hashed row is inside the TTL and stays
   });
 
-  it('a bounce seen under the legacy key before the deploy still counts once after it', async () => {
-    await seedLegacy('t1', 'org-a', NOW, 'bounced', 'same@example.test');
+  it('a same-day redelivery under the hashed key counts once', async () => {
     expect(await recordBounceSignal('t1', 'org-a', 'bounced', 'same@example.test', NOW)).toBe(false);
-    expect((await windowCounts('t1', 'org-a', NOW)).hardBounces).toBe(0); // the redelivery was not counted
-    expect(await seenKeys()).toHaveLength(1); // and no hashed twin was written
+    expect(await recordBounceSignal('t1', 'org-a', 'bounced', 'Same@Example.test', NOW)).toBe(false);
+    expect((await windowCounts('t1', 'org-a', NOW)).hardBounces).toBe(1);
+    expect(await seenKeys()).toHaveLength(1);
   });
 });
 

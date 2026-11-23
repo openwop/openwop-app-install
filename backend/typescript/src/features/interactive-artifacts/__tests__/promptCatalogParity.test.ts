@@ -25,6 +25,9 @@
  * ADR 1017 D5 — a fourth side: the render NODE pack refuses an undrawable chart
  * itself (it cannot import the schema), so its `CHART_TYPES` literal is pinned here to
  * the renderer too, and the schema's `datasets` requirement to the prompt's wording.
+ * ADR 1017 D2 — a fifth: `TurnReceipt`'s `CHAT_ARTIFACT_TOOLS` names only real,
+ * registered chat tools. Red if the node's or the receipt's literal drifts, the
+ * schema drops `datasets` / `minItems`, or the prompt drops the wording.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -105,7 +108,10 @@ describe('ADR 0708 D2 — artifact SCHEMA ↔ ChartRenderer chartType parity', (
 
   it('a chartType the renderer cannot draw FAILS validation (the gate is real, not decorative)', () => {
     registerInteractiveArtifactTypes();
-    const bad = validateArtifact('interactive.chart', { chartType: 'pie', data: {} });
+    // The payload is drawable in every other respect: since ADR 1017 D5 an empty
+    // `data` is refused by the `datasets` requirement too, which would hide an
+    // open chartType enum behind a second guard (grade-tests w122).
+    const bad = validateArtifact('interactive.chart', { chartType: 'pie', data: { labels: ['a'], datasets: [{ label: 's', data: [1] }] } });
     expect(bad.valid, 'an unsupported chartType must not persist as a valid typed chart').toBe(false);
     const good = validateArtifact('interactive.chart', { chartType: 'bar', data: { labels: ['a'], datasets: [{ label: 's', data: [1] }] } });
     expect(good.valid, 'a supported one still validates — the enum must not be a blanket refusal').toBe(true);
@@ -129,6 +135,12 @@ describe('ADR 1017 D5 — render NODE ↔ renderer chartType parity, and the dat
   it('the prompt tells the model `datasets` is required', () => {
     const prompt = readFileSync(promptPath, 'utf8');
     expect(prompt).toContain('`datasets` is a non-empty list');
+    // …and that is what the schema actually enforces, read from the SSoT rather
+    // than assumed: `data.datasets` required, at least one item.
+    const chart = INTERACTIVE_ARTIFACT_TYPES.find((t) => t.artifactTypeId === 'interactive.chart');
+    const data = (chart?.schema as { properties?: { data?: { required?: string[]; properties?: { datasets?: { minItems?: number } } } } } | undefined)?.properties?.data;
+    expect(data?.required).toEqual(['datasets']);
+    expect(data?.properties?.datasets?.minItems).toBe(1);
   });
 });
 

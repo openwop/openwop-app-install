@@ -105,11 +105,9 @@ export async function recordBounceSignal(tenantId: string, orgId: string, reason
   const day = dayOf(at);
   const addr = normalizeSeenAddress(address);
   const prefix = `${tenantId}::${orgId}::${day}::${reason}::`;
-  // TRANSITION (CHAN-F19): a bounce seen just before the deploy sits under the legacy
-  // raw-address key; a same-day redelivery after it must still count once. Read-only.
-  // REMOVE once SEEN_TTL_DAYS have passed after the deploy that shipped the hashed key:
-  // the age-out lane has then deleted every legacy row, so this read can only miss.
-  if (await seen.get(`${prefix}${address.toLowerCase()}`)) return false; // the legacy key, spelled as it was written
+  // The CHAN-F19 transition read of the legacy raw-address key was removed on 2026-11-22,
+  // more than SEEN_TTL_DAYS after the hashed key went live (2026-11-13). An adopter that
+  // upgrades across that change may count one same-day redelivery twice, once.
   if (!(await seen.putIfAbsent({ key: `${prefix}${seenAddressHash(addr)}`, tenantId, at: at.toISOString() }))) return false;
   await bump(tenantId, orgId, at, reason === 'complaint' ? 'complaints' : 'hardBounces', 1);
   return evaluateBreaker(tenantId, orgId, at);

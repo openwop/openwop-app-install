@@ -265,6 +265,40 @@ export async function createRule(tenantId: string, orgId: string, modelId: strin
   return rule;
 }
 
+/**
+ * CHAN-F19 follow-up B (ADR 0464 §9, user decision 2026-11-22): a rule's filter can name a
+ * person (`owner = <user id>`, as the demo seed writes, `contactId = <id>`, or a custom
+ * field). Every literal equal to one of the subject's key forms is replaced with
+ * `replacement`, so the rule is KEPT (its priority, model and history) but no longer
+ * matches that person. Written past the planning-model guard, like the other territory
+ * erasure helpers: an erasure must reach an active model too. Returns the orgs touched.
+ */
+export async function __eraseRuleLiterals(tenantId: string, forms: ReadonlySet<string>, replacement: string): Promise<Set<string>> {
+  const orgs = new Set<string>();
+  if (!tenantId || forms.size === 0) return orgs;
+  const scrub = (v: Scalar): Scalar => (typeof v === 'string' && forms.has(v) ? replacement : v);
+  const walk = (e: FilterExpr): { next: FilterExpr; hit: boolean } => {
+    if ('all' in e || 'any' in e) {
+      const kids = ('all' in e ? e.all : e.any).map(walk);
+      const hit = kids.some((k) => k.hit);
+      const list = kids.map((k) => k.next);
+      return { next: 'all' in e ? { all: list } : { any: list }, hit };
+    }
+    if (e.value === undefined) return { next: e, hit: false };
+    const value = Array.isArray(e.value) ? e.value.map(scrub) : scrub(e.value);
+    const hit = Array.isArray(e.value) ? (value as Scalar[]).some((v, i) => v !== (e.value as Scalar[])[i]) : value !== e.value;
+    return { next: hit ? { ...e, value } : e, hit };
+  };
+  for (const r of await rules.listForTenantIndexed(tenantId)) {
+    if (r.tenantId !== tenantId) continue;
+    const { next, hit } = walk(r.filter);
+    if (!hit) continue;
+    await rules.put({ ...r, filter: next });
+    orgs.add(r.orgId);
+  }
+  return orgs;
+}
+
 export async function deleteRule(tenantId: string, orgId: string, modelId: string, ruleId: string): Promise<void> {
   await requirePlanningModelId(tenantId, orgId, modelId);
   const r = await rules.get(ruleId);

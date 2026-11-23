@@ -35,7 +35,9 @@
  *    registration never stops the tick (fail-open per store).
  *    A store that ADDS `timestampField` after rows already exist must supply
  *    `deriveTimestamp` — otherwise the pre-existing rows are skipped on every
- *    tick FOREVER, and they are precisely the oldest ones (ANL-1 R2).
+ *    tick FOREVER, and they are precisely the oldest ones (ANL-1 R2). If the row
+ *    holds no instant to derive from, `stampMissingTimestamp` stamps it with the
+ *    time of first sighting instead, and it ages out from then.
  */
 
 import type { Storage } from '../storage/storage.js';
@@ -111,6 +113,16 @@ export interface KvAgeOutRegistration {
    *  this lane FOREVER — the skip is permanent, and the population it strands is
    *  exactly the oldest rows, i.e. the ones a TTL was introduced to bound. */
   deriveTimestamp?: (row: Record<string, unknown>, id: string) => string | undefined;
+  /** For a row that has neither `timestampField` nor a `deriveTimestamp` answer, write
+   *  `timestampField = now` into it (compare-and-swap, so a concurrent writer wins) and
+   *  leave it for that tick. It then ages out `ttlDays` after the sweep first saw it.
+   *
+   *  This keeps "never delete on a guess": the stamp is a time the row is known to
+   *  exist, never earlier than its real last write, so it can only age out LATER than
+   *  the truth. It is for a store whose rows predate the field and carry no other
+   *  instant, where a fixed date would be wrong for an adopter that upgraded later
+   *  (chat-widget's pre-A5 counter rows, 2026-11-22). Off by default. */
+  stampMissingTimestamp?: boolean;
   /** Review F3 — acknowledges a TENANT-INDEXED collection on this lane, muting
    *  the registration-time tripwire warn for THIS registration only. Setting it
    *  is a statement, not a free pass: the sweep deletes via the collection
@@ -148,6 +160,11 @@ const registrations = new Map<string, KvAgeOutRegistration>();
  *  (module-scope call sites re-execute under test isolation). */
 export function registerKvAgeOut(reg: KvAgeOutRegistration): void {
   if (!(reg.ttlDays > 0)) throw new Error(`kvAgeOut '${reg.id}': ttlDays must be > 0`);
+  // The stamp is a raw kv write. A tenant-indexed collection's marker is written by the
+  // collection, so refuse the combination rather than let a marker and its row disagree.
+  if (reg.stampMissingTimestamp && hostExtCollectionForPrefix(reg.prefix)?.indexed) {
+    throw new Error(`kvAgeOut '${reg.id}': stampMissingTimestamp is not supported on a tenant-indexed collection`);
+  }
   // WF-ORGINV-1 — registration-time index-free tripwire. A tenant-indexed
   // collection on this lane used to strand a `hostextidx:` marker per aged-out
   // row. The sweep now deletes via the collection (marker-aware), so this is a
@@ -184,6 +201,8 @@ const MAX_DELETES_PER_STORE_PER_TICK = 1000;
  *  tick; also directly from tests with a fixed `now`. Fail-open per store. */
 export interface KvAgeOutSweepResult {
   id: string; deleted: number; skipped: number; derived: number;
+  /** Rows given `timestampField = now` this tick (`stampMissingTimestamp`). */
+  stamped: number;
   heldSkipped: number; heldUnresolved: number; scanned: number; error?: string;
 }
 
@@ -223,12 +242,14 @@ export async function __runKvAgeOutOnce(storage: Storage, now: Date = new Date()
       let deleted = 0;
       let skipped = 0;
       let derived = 0;
+      let stamped = 0;
       let heldSkipped = 0;
       let heldUnresolved = 0;
       for (const { key, value } of rows) {
-        if (deleted >= MAX_DELETES_PER_STORE_PER_TICK) break;
+        if (deleted + stamped >= MAX_DELETES_PER_STORE_PER_TICK) break; // a stamp is a write too
         const id = key.slice(reg.prefix.length);
         let ts: number;
+        let stampNext: string | null = null;
         try {
           const parsed = JSON.parse(value) as Record<string, unknown>;
           // Review F7 — a HOST-GLOBAL store is skipped entirely: no row in it
@@ -260,8 +281,19 @@ export async function __runKvAgeOutOnce(storage: Storage, now: Date = new Date()
             const fallbackMs = typeof fallback === 'string' ? Date.parse(fallback) : NaN;
             if (Number.isFinite(fallbackMs)) { ts = fallbackMs; derived += 1; }
           }
+          // Only an ABSENT field is stamped. A present but unparseable value is left
+          // alone (skipped, as before): overwriting data we cannot read is a guess.
+          if (!Number.isFinite(ts) && reg.stampMissingTimestamp && raw === undefined) {
+            stampNext = JSON.stringify({ ...parsed, [reg.timestampField]: now.toISOString() });
+          }
         } catch {
           ts = NaN;
+        }
+        if (stampNext !== null) {
+          // CAS against the bytes just read: a concurrent writer's row wins, and is
+          // picked up on a later tick. Never deleted on this tick.
+          if ((await storage.kvCompareAndSwap(key, value, stampNext)).swapped) stamped += 1;
+          continue;
         }
         if (!Number.isFinite(ts)) { skipped += 1; continue; } // never delete on a guess
         if (ts < cutoffMs) {
@@ -276,8 +308,8 @@ export async function __runKvAgeOutOnce(storage: Storage, now: Date = new Date()
       // DEFAULT-ON deletion lane in the app. `scanned` is the field that
       // discriminates: a registration that never sees a row is a registration
       // pointing at nothing.
-      log.info('kv_age_out_swept', { id: reg.id, deleted, skipped, derived, heldSkipped, heldUnresolved, scanned: rows.length });
-      totals.push({ id: reg.id, deleted, skipped, derived, heldSkipped, heldUnresolved, scanned: rows.length });
+      log.info('kv_age_out_swept', { id: reg.id, deleted, skipped, derived, stamped, heldSkipped, heldUnresolved, scanned: rows.length });
+      totals.push({ id: reg.id, deleted, skipped, derived, stamped, heldSkipped, heldUnresolved, scanned: rows.length });
       // CONS-4 — a hold that could not be applied is itself an audit finding, so
       // it warns rather than riding along in an info line nobody alerts on.
       if (heldUnresolved > 0) {
@@ -286,7 +318,7 @@ export async function __runKvAgeOutOnce(storage: Storage, now: Date = new Date()
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       log.warn('kv_age_out_store_error', { id: reg.id, error });
-      totals.push({ id: reg.id, deleted: 0, skipped: 0, derived: 0, heldSkipped: 0, heldUnresolved: 0, scanned: 0, error });
+      totals.push({ id: reg.id, deleted: 0, skipped: 0, derived: 0, stamped: 0, heldSkipped: 0, heldUnresolved: 0, scanned: 0, error });
     }
   }
   return totals;

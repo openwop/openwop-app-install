@@ -846,6 +846,8 @@ const hydrateKey = (tenantId: string, orgId: string, collectionId: string): stri
  *  rest. Keeps provider cost at ~one embed per chunk per LIFETIME, not per process. */
 interface VecCacheRow { key: string; tenantId: string; model: string; textHash: string; vector: number[]; /** ADR 0904 D2 */ embedVersion?: string }
 const vecCache = new DurableCollection<VecCacheRow>('kb:veccache', (r) => r.key);
+// CHAN-F19 follow-up C (ADR 0464 §9) — the key holds a subject-keyed document id, the vector embeds its text; purged with the document.
+declarePiiFields('kb:veccache', ['key', 'vector'], { maskGloballyByFieldName: false });
 
 const textHash = (text: string): string => createHash('sha256').update(text).digest('hex');
 
@@ -862,6 +864,8 @@ async function purgeVecCacheForDoc(doc: KnowledgeDocument): Promise<void> {
  *  Correction vs the ADR's "prior row retained": recorded there. Cap 20/doc. */
 interface DocRevisionRow { key: string; tenantId: string; documentId: string; revision: number; textHash: string; title: string; changedAt: string }
 const docRevisions = new DurableCollection<DocRevisionRow>('kb:docrev', (r) => r.key);
+// CHAN-F19 follow-up C (ADR 0464 §9) — a subject-keyed document's id and title; purged with the document by eraseSubjectKb.
+declarePiiFields('kb:docrev', ['documentId', 'title'], { maskGloballyByFieldName: false });
 const DOC_REVISION_CAP = 20;
 
 const docRevisionPrefix = (tenantId: string, documentId: string): string => `${tenantId}:${documentId}:`;

@@ -35,6 +35,7 @@
  * the route is unauthenticated by default).
  */
 
+import { sendErrorBody } from '../middleware/errorEnvelope.js';
 import type { Express, Request, Response } from 'express';
 import { readSecretEnv } from '../host/secretEnv.js';
 import { lastRetentionSweep, listRetentionHolds, setRetentionHold, clearRetentionHold } from '../host/runRetentionSweeper.js';
@@ -68,7 +69,7 @@ function authAdmin(req: Request, res: Response): boolean {
   const expected = readSecretEnv('OPENWOP_ADMIN_TOKEN');
   if (!expected || expected.length < 16) {
     log.warn('admin route called but OPENWOP_ADMIN_TOKEN unset / too short');
-    res.status(503).json({
+    sendErrorBody(res, 503, {
       error: 'admin_disabled',
       message: 'OPENWOP_ADMIN_TOKEN must be set (>=16 chars) for admin routes to function.',
     });
@@ -76,7 +77,7 @@ function authAdmin(req: Request, res: Response): boolean {
   }
   const header = req.header('authorization');
   if (!header || !header.toLowerCase().startsWith('bearer ')) {
-    res.status(401).json({
+    sendErrorBody(res, 401, {
       error: 'unauthenticated',
       message: 'Missing Bearer admin token.',
     });
@@ -84,7 +85,7 @@ function authAdmin(req: Request, res: Response): boolean {
   }
   const token = header.slice('bearer '.length).trim();
   if (!constantTimeBearerEq(token, expected)) {
-    res.status(401).json({
+    sendErrorBody(res, 401, {
       error: 'unauthenticated',
       message: 'Admin token mismatch.',
     });
@@ -151,7 +152,7 @@ export function registerAdminRoutes(app: Express): void {
     void (async () => {
       const body = (req.body ?? {}) as { tenantId?: unknown; reason?: unknown };
       if (typeof body.tenantId !== 'string' || !body.tenantId || typeof body.reason !== 'string' || !body.reason) {
-        res.status(400).json({ error: 'validation_error', message: 'tenantId and reason are required.' });
+        sendErrorBody(res, 400, { error: 'validation_error', message: 'tenantId and reason are required.' });
         return;
       }
       await setRetentionHold(body.tenantId, body.reason);

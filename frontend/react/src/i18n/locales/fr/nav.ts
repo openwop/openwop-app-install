@@ -219,6 +219,8 @@ export const messages = {
   uiPluginsHint: 'Packs de plugins front-end isolés',
   claudeCodeLabel: 'Claude Code',
   claudeCodeHint: 'Vos appareils Claude Code associés',
+  computerUseLabel: 'Sessions de navigateur',
+  computerUseHint: 'Ce que l’agent de navigation a fait, étape par étape',
   // ADR 0874 P3 follow-up (NAV-1): the nine entries whose words used to live only in a feature catalog.
   webinarsLabel: 'Webinaires',
   webinarsHint: 'Webinaires Zoom → présence CRM',

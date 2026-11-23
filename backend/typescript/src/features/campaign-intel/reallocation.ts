@@ -30,6 +30,11 @@
  *  - ADR 1022 CP71WF-23 (corrected 2026-11-20) — the route, chat and chain lanes
  *    bind approvers the same way, through `reallocationApprovers`, so the person
  *    who proposed a plan can never approve it (the sole-admin self-approval exception aside).
+ *  - ADR 1022 CP71WF-23 (user decision 2026-11-20) — but the proposer may WITHDRAW
+ *    an open plan: a reject they cast from their own interactive session passes
+ *    `spendEligibility.ts`, and the plan then closes as `withdrawn` (who and when
+ *    recorded), not `rejected`. The route and chat lanes have no run to cancel, so
+ *    without this a mistaken plan sat for its 7-day TTL.
  *
  * @see docs/adr/0952-paid-media-operations-and-spend-control.md
  */
@@ -38,7 +43,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
 import { createLogger } from '../../observability/logger.js';
-import { createCampaignSpendApproval, getApproval, type ApprovalPolicy } from '../../host/approvalService.js';
+import { createCampaignSpendApproval, getApproval, type ApprovalPolicy, type PendingApproval } from '../../host/approvalService.js';
 import { authorizeBudgetOps, dispatchBelongsToOrg, listTenantDispatchRecords, type AdPlatform, type AdsAdapter, type UpdateBudgetResult } from '../../host/adsAdapter.js';
 import { listRecords } from '../campaign-connectors/performanceService.js';
 import { listCampaigns } from '../campaign-orchestration/campaignService.js';
@@ -78,7 +83,10 @@ export interface ApprovalBinding {
   /** The requesting run (MCP origin travels with it to the decide-time check). */
   autonomySourceRunId?: string;
 }
-export type PlanStatus = 'proposed' | 'approved' | 'applying' | 'applied' | 'partial' | 'rejected' | 'expired';
+export type PlanStatus = 'proposed' | 'approved' | 'applying' | 'applied' | 'partial' | 'rejected' | 'withdrawn' | 'expired';
+/** A plan that is finished: it never applies again, and a new proposal gets a fresh id. */
+const TERMINAL_STATUSES: ReadonlySet<PlanStatus> = new Set<PlanStatus>(['applied', 'partial', 'rejected', 'withdrawn', 'expired']);
+const isTerminal = (s: PlanStatus): s is 'applied' | 'partial' | 'rejected' | 'withdrawn' | 'expired' => TERMINAL_STATUSES.has(s);
 export interface OpResult { opIx: number; outcome: 'updated' | 'already_applied' | 'failed' | 'skipped'; error?: string; at: string }
 
 export interface ReallocationPlan {
@@ -104,6 +112,10 @@ export interface ReallocationPlan {
   requestedVia?: { protocol: 'mcp'; runId?: string };
   /** ADR 0962 D5 — the agent's note, ALREADY fenced as untrusted (never instruction). */
   externalNote?: string;
+  /** ADR 1022 CP71WF-23 (2026-11-20) — on a `withdrawn` plan, the requester who
+   *  rejected it (the approval's `decidedBy`; tombstoned on erasure) and when. */
+  withdrawnBy?: string;
+  withdrawnAt?: string;
   createdAt: string;
   expiresAt: string;
   claimedAt?: string;
@@ -123,7 +135,7 @@ async function trimPlans(tenantId: string, orgId: string): Promise<void> {
   const all = await listPlans(tenantId, orgId); // newest first
   const excess = all.length - PLAN_CAP;
   if (excess <= 0) return;
-  const terminal = all.filter((p) => p.status === 'applied' || p.status === 'partial' || p.status === 'rejected' || p.status === 'expired');
+  const terminal = all.filter((p) => isTerminal(p.status));
   for (const p of terminal.slice(-excess)) await plans.delete(p.key).catch(() => undefined);
 }
 
@@ -248,7 +260,7 @@ export async function proposeReallocation(adapter: AdsAdapter, tenantId: string,
 
   const planHash = sha(ops.map((o) => [o.platform, o.adAccountId, o.campaignId, o.fromDailyMinor, o.toDailyMinor]));
   // Idempotent per (run, planHash) while the plan is open. A FINISHED plan with the
-  // same id (applied, partial, rejected, expired) is history: a new proposal gets
+  // same id (applied, partial, rejected, withdrawn, expired) is history: a new proposal gets
   // a fresh id chained from it, never the old record back.
   let planId = `rp_${sha([tenantId, orgId, input.runId, planHash]).slice(0, 24)}`;
   for (let hop = 0; hop < 8; hop++) {
@@ -399,25 +411,25 @@ async function ensureApproval(plan: ReallocationPlan): Promise<ReallocationPlan>
 // ── Apply ────────────────────────────────────────────────────────────────────
 
 export type ApplyOutcome =
-  | { outcome: 'applied' | 'partial' | 'rejected' | 'expired'; plan: ReallocationPlan }
+  | { outcome: 'applied' | 'partial' | 'rejected' | 'withdrawn' | 'expired'; plan: ReallocationPlan }
   | { outcome: 'requires_approval'; approvalId: string; plan: ReallocationPlan }
   | { outcome: 'in_progress'; plan: ReallocationPlan }
   | { outcome: 'not_found' };
 
-async function setStatus(plan: ReallocationPlan, status: PlanStatus): Promise<ReallocationPlan> {
-  const next = { ...plan, status, version: plan.version + 1 };
+async function setStatus(plan: ReallocationPlan, status: PlanStatus, extra: Partial<Pick<ReallocationPlan, 'withdrawnBy' | 'withdrawnAt'>> = {}): Promise<ReallocationPlan> {
+  const next = { ...plan, ...extra, status, version: plan.version + 1 };
   return (await plans.compareAndSwap(plan, next)) ? next : ((await getPlan(plan.tenantId, plan.orgId, plan.planId)) ?? plan);
 }
 
 export async function applyReallocation(adapter: AdsAdapter, tenantId: string, orgId: string, planId: string, now = new Date()): Promise<ApplyOutcome> {
   let plan = await getPlan(tenantId, orgId, planId);
   if (!plan) return { outcome: 'not_found' };
-  if (plan.status === 'applied' || plan.status === 'partial' || plan.status === 'rejected' || plan.status === 'expired') return { outcome: plan.status, plan };
+  if (isTerminal(plan.status)) return { outcome: plan.status, plan };
   if (now.getTime() > new Date(plan.expiresAt).getTime()) return { outcome: 'expired', plan: await setStatus(plan, 'expired') };
   plan = await ensureApproval(plan);
   const approval = plan.approvalId ? await getApproval(plan.approvalId) : null;
   if (!approval || approval.tenantId !== tenantId) return { outcome: 'requires_approval', approvalId: plan.approvalId ?? '', plan };
-  if (approval.status === 'rejected') return { outcome: 'rejected', plan: await setStatus(plan, 'rejected') };
+  if (approval.status === 'rejected') return closeRejected(plan, approval);
   if (approval.status !== 'approved') return { outcome: 'requires_approval', approvalId: approval.approvalId, plan };
 
   // CLAIM, with a lease: a crashed apply resumes after it; a live one is not doubled.
@@ -444,6 +456,34 @@ export async function applyReallocation(adapter: AdsAdapter, tenantId: string, o
   const allOk = plan.ops.every((_, i) => plan!.results.some((r) => r.opIx === i && (r.outcome === 'updated' || r.outcome === 'already_applied')));
   const final = await setStatus(plan, allOk ? 'applied' : 'partial');
   return { outcome: allOk ? 'applied' : 'partial', plan: final };
+}
+
+/**
+ * ADR 1022 CP71WF-23 (2026-11-20) — a rejected approval closes the plan. When the
+ * decider is one of the plan's requesters, that reject could only have passed the
+ * decide-time check as the proposer's withdraw (`spendEligibility.ts`), so the plan
+ * says `withdrawn` and records who and when. Requesters are matched with the same
+ * canonicalising helper the check uses; a decider it cannot match closes as
+ * `rejected`, never as a withdrawal it cannot prove.
+ */
+async function closeRejected(plan: ReallocationPlan, approval: PendingApproval): Promise<ApplyOutcome> {
+  const by = approval.decidedBy;
+  if (by && (await isPlanRequester(plan, approval, by))) {
+    return { outcome: 'withdrawn', plan: await setStatus(plan, 'withdrawn', { withdrawnBy: by, withdrawnAt: approval.resolvedAt ?? new Date().toISOString() }) };
+  }
+  return { outcome: 'rejected', plan: await setStatus(plan, 'rejected') };
+}
+
+async function isPlanRequester(plan: ReallocationPlan, approval: PendingApproval, decidedBy: string): Promise<boolean> {
+  const { isAutonomyRequester } = await import('../../host/autonomyPolicy/index.js');
+  const requesters = new Set([
+    ...(plan.createdBy ? [plan.createdBy] : []),
+    ...(approval.submitters ?? []), ...(approval.submitterCauses ?? []),
+  ]);
+  for (const requester of requesters) {
+    if (await isAutonomyRequester({ tenantId: plan.tenantId, metadata: { actingUserId: requester } }, [decidedBy])) return true;
+  }
+  return false;
 }
 
 async function applyOp(adapter: AdsAdapter, tenantId: string, orgId: string, op: ReallocationOp, opIx: number, now: Date): Promise<OpResult> {
@@ -512,9 +552,10 @@ export async function recordRouteApply(
   }
 }
 
-/** Does the plan name the subject: its proposer, or (ADR 0962 P2) a requester on its approval binding. */
+/** Does the plan name the subject: its proposer, the requester who withdrew it, or (ADR 0962 P2) a requester on its approval binding. */
 function namesSubject(p: ReallocationPlan, forms: ReadonlySet<string>): boolean {
   if (p.createdBy && forms.has(p.createdBy)) return true;
+  if (p.withdrawnBy && forms.has(p.withdrawnBy)) return true;
   const b = p.approvalBinding;
   return !!b && (b.submitters.some((s) => forms.has(s)) || (b.submitterCauses ?? []).some((s) => forms.has(s)));
 }
@@ -525,6 +566,7 @@ function tombstonePlan(p: ReallocationPlan, forms: ReadonlySet<string>, tombston
   return {
     ...p,
     ...(p.createdBy ? { createdBy: swap(p.createdBy) } : {}),
+    ...(p.withdrawnBy ? { withdrawnBy: swap(p.withdrawnBy) } : {}),
     ...(b ? { approvalBinding: { ...b, submitters: b.submitters.map(swap), ...(b.submitterCauses ? { submitterCauses: b.submitterCauses.map(swap) } : {}) } } : {}),
   };
 }

@@ -133,6 +133,8 @@ export interface ProjectDependentCounts {
   entities?: number;
   priorityLists?: number;
   teamLedger?: number;
+  /** ADR 1099 P1 — live grants to people outside the workspace; revoked, not deleted. */
+  collaboratorGrants?: number;
 }
 
 export async function getDeletePreview(id: string): Promise<ProjectDependentCounts> {

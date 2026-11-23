@@ -19,8 +19,8 @@ import * as mediaStorage from './mediaStorage.js';
 import { IMAGE_HEADER_PREFIX_BYTES, imageDimensions, type ImageDimensions } from '../../host/imageDimensions.js';
 import { createLogger } from '../../observability/logger.js';
 import {
-  __clearSystemIndexType, afterSystemWrite, beforeSystemWrite, builtTenants, checkSystemIndex, drainSystemIndexBuilds, ensureSystemIndexBuilt,
-  indexedFamilyCount, indexedTenantTotals, indexedTotals, listIndexPage, registerStoreIndex, repairSystemIndex,
+  __clearSystemIndexType, afterSystemWrite, beforeSystemWrite, ensureSystemIndexBuilt,
+  indexedFamilyCount, indexedTenantTotals, indexedTotals, listIndexPage, registerStoreIndex,
 } from '../entities/systemIndex.js';
 
 const log = createLogger('features.media');
@@ -251,7 +251,7 @@ const tokenKey = (tenantId: string, token: string): string => `${tenantId}::${cr
 // goes through `assetStore` / `collectionStore`, which wrap it with the index's hooks
 // (intent before, sync after; an index failure never fails the write). Counter drift is
 // healed by an exact recount at each cap boundary and by the hourly drift check
-// (`repairMediaIndex`); a tenant too large to build inline reads the old tenant slice
+// (the entities upkeep sweep, ADR 1155 P3a); a tenant too large to build inline reads the old tenant slice
 // until the background build lands.
 export const MEDIA_ASSET_TYPE = 'media.asset';
 export const MEDIA_COLLECTION_TYPE = 'media.collection';
@@ -1542,29 +1542,8 @@ export async function listUsageForAsset(tenantId: string, orgId: string, assetId
     .sort((x, y) => (x.lastSeenAt < y.lastSeenAt ? 1 : -1));
 }
 
-// ── #5928 — the media indexes' upkeep (run by `mediaIndexSweep.ts`) ─────────────────
-/** The commerce catalog sweep's shape: unfinished write intents every tick (bounded;
- *  fresh ones are left to their writers), one queued background build per tick, and
- *  once per UTC HOUR, fleet-wide, a drift check of every built media tenant: a count
- *  mismatch queues a rebuild, and every org counter (count AND bytes) is recounted, so
- *  an under-count the cap-boundary recount cannot see lasts at most an hour. The intent
- *  and build queues are shared with commerce; both sweeps drain them safely (leases,
- *  claim-by-delete). */
-const mediaIndexHour = new DurableCollection<{ k: string; hour: number }>('media:index-hour', (r) => r.k);
-export async function repairMediaIndex(now = Date.now()): Promise<{ repaired: number; built: number; drifted: number }> {
-  const { repaired } = await repairSystemIndex({ limit: 100, now });
-  const builtNow = await drainSystemIndexBuilds({ limit: 1 });
-  const hour = Math.floor(now / 3_600_000);
-  const cur = await mediaIndexHour.get('hour');
-  if (cur && cur.hour >= hour) return { repaired, built: builtNow, drifted: 0 };
-  if (!(await mediaIndexHour.compareAndSwap(cur, { k: 'hour', hour }))) return { repaired, built: builtNow, drifted: 0 };
-  let drifted = 0;
-  for (const type of [MEDIA_ASSET_TYPE, MEDIA_COLLECTION_TYPE]) {
-    for await (const tenantId of builtTenants(type)) if (!(await checkSystemIndex(tenantId, type))) drifted += 1;
-  }
-  if (drifted > 0) log.warn('media_index_drift_queued', { tenants: drifted });
-  return { repaired, built: builtNow, drifted };
-}
+// The media indexes' upkeep (intent repair, queued builds, the hourly counter drift
+// check) is the entities sweep's: `features/entities/systemIndexSweep.ts` (ADR 1155 P3a).
 
 // ── Test-only reset ─────────────────────────────────────────────────────────
 export async function __resetMedia(): Promise<void> {
@@ -1573,7 +1552,6 @@ export async function __resetMedia(): Promise<void> {
   // #5928 — the index rows of what was just cleared, so no counter outlives its rows.
   await __clearSystemIndexType(MEDIA_ASSET_TYPE);
   await __clearSystemIndexType(MEDIA_COLLECTION_TYPE);
-  await mediaIndexHour.__clear();
   __forgetMediaIndexReady();
   await tokenIndex.__clear();
   await usageRefs.__clear();

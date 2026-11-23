@@ -13,6 +13,7 @@
  * everything here is reachable with the token alone.
  */
 
+import { sendErrorBody } from '../middleware/errorEnvelope.js';
 import type { Express, Request, Response } from 'express';
 import { openSseChannel } from '../host/sseChannel.js';
 import { canvasWriteAllowed, getCanvasForTenant, type CanvasRecordView } from '../host/canvasSurface.js';
@@ -65,7 +66,7 @@ async function authorizePresentRemote(token: string): Promise<{ claims: PresentR
 }
 
 const notFound = (res: Response): void => {
-  res.status(404).json({ error: 'not_found', message: 'unknown or expired present session' });
+  sendErrorBody(res, 404, { error: 'not_found', message: 'unknown or expired present session' });
 };
 
 const ACTIONS = new Set(['next', 'prev', 'goto', 'blank']);
@@ -83,13 +84,13 @@ export function registerPresentRemoteRoutes(app: Express): void {
     const { claims } = auth;
     const body = (req.body ?? {}) as { action?: unknown; index?: unknown };
     if (typeof body.action !== 'string' || !ACTIONS.has(body.action)) {
-      res.status(400).json({ error: 'validation_error', message: `action must be one of: ${[...ACTIONS].join(', ')}` });
+      sendErrorBody(res, 400, { error: 'validation_error', message: `action must be one of: ${[...ACTIONS].join(', ')}` });
       return;
     }
     const ev: PresentNavEvent = { kind: 'command', action: body.action as PresentNavEvent['action'] };
     if (body.action === 'goto') {
       if (typeof body.index !== 'number' || !Number.isInteger(body.index) || body.index < 0 || body.index > 10_000) {
-        res.status(400).json({ error: 'validation_error', message: 'goto requires an integer index' });
+        sendErrorBody(res, 400, { error: 'validation_error', message: 'goto requires an integer index' });
         return;
       }
       ev.index = body.index;
@@ -104,7 +105,7 @@ export function registerPresentRemoteRoutes(app: Express): void {
     const { claims } = auth;
     const body = (req.body ?? {}) as { current?: unknown };
     if (typeof body.current !== 'number' || !Number.isInteger(body.current) || body.current < 0 || body.current > 10_000) {
-      res.status(400).json({ error: 'validation_error', message: 'current must be an integer frame index' });
+      sendErrorBody(res, 400, { error: 'validation_error', message: 'current must be an integer frame index' });
       return;
     }
     await publishPresentNav(claims, { kind: 'position', current: body.current });

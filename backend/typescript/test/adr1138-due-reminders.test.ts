@@ -99,7 +99,13 @@ describe('ADR 1138 D4 — due reminders', () => {
     await updateCardFields(card.id, { dueAt: iso(NOW + 30 * HOUR) }); // moved: re-arms "soon"
     await sweepTenantDue(on, NOW + 4 * HOUR);
     await sweepTenantDue(on, NOW + 5 * HOUR);
-    expect((await dueInbox(on, card.id)).filter((n) => n.metadata?.state === 'soon')).toHaveLength(2);
+    // ADR 1155 D6 — the move archived the two notices about the old date; the
+    // one fresh "soon" is the only open notice left.
+    expect((await dueInbox(on, card.id)).map((n) => n.metadata?.state)).toEqual(['soon']);
+    const all = (await store.listNotifications({ tenantId: on, recipientUserId: 'user:alice', includeArchived: true }))
+      .filter((n) => n.type === 'task.due' && n.metadata?.cardId === card.id);
+    expect(all.filter((n) => n.metadata?.state === 'soon')).toHaveLength(2);
+    expect(all.filter((n) => n.status === 'archived')).toHaveLength(2);
   });
 
   it('skips finished, unassigned and far-future cards', async () => {

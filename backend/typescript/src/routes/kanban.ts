@@ -66,6 +66,10 @@ import {
   type KanbanCard,
   type KanbanCardSource,
   toKanbanWorkItemProjection,
+  listBoardCardsPage,
+  KANBAN_PAGE_DEFAULT,
+  KANBAN_PAGE_MAX,
+  type KanbanBoardPageQuery,
 } from '../host/kanbanService.js';
 import { getRosterEntry } from '../host/rosterService.js';
 import { openSseChannel } from '../host/sseChannel.js';
@@ -121,6 +125,63 @@ function rethrowCardCommandError(err: unknown): never {
   if (code === 'kanban_card_not_found') throw new OpenwopError('not_found', 'Card not found.', 404);
   if (code === 'kanban_card_conflict') throw new OpenwopError('conflict', err instanceof Error ? err.message : 'Card changed concurrently.', 409);
   throw err;
+}
+
+/** ADR 1155 D3 — the paged board read's query, or null when the caller did not ask for
+ *  a page (no `limit`): the unpaged response stays exactly as it was. Bad input is a 400. */
+function parseBoardPageQuery(req: Request): KanbanBoardPageQuery | null {
+  const q = req.query;
+  if (q.limit === undefined) return null;
+  const bad = (what: string): never => { throw new OpenwopError('validation_error', what, 400); };
+  const one = (name: string): string | undefined => {
+    const v = q[name];
+    if (v === undefined) return undefined;
+    if (typeof v !== 'string') return bad(`${name} may be given once.`);
+    return v;
+  };
+  const many = (name: string): string[] => {
+    const v = q[name];
+    const arr = v === undefined ? [] : Array.isArray(v) ? v : [v];
+    if (!arr.every((x): x is string => typeof x === 'string' && x.length > 0 && x.length <= 200)) bad(`${name} must be non-empty text.`);
+    return arr as string[];
+  };
+  const isoBound = (name: string, endOfDay: boolean): string | undefined => {
+    const v = one(name);
+    if (v === undefined) return undefined;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return `${v}T${endOfDay ? '23:59:59.999' : '00:00:00.000'}Z`;
+    const ms = Date.parse(v);
+    return Number.isFinite(ms) ? new Date(ms).toISOString() : bad(`${name} must be an ISO date.`);
+  };
+  const rawLimit = one('limit');
+  const limit = rawLimit === '' ? KANBAN_PAGE_DEFAULT : Number(rawLimit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > KANBAN_PAGE_MAX) bad(`limit must be a whole number from 1 to ${KANBAN_PAGE_MAX}.`);
+  const sort = one('sort') ?? 'order';
+  if (sort !== 'order' && sort !== 'dueAt') bad('sort must be order or dueAt.');
+  const overdueRaw = one('overdue');
+  if (overdueRaw !== undefined && overdueRaw !== 'true' && overdueRaw !== 'false') bad('overdue must be true or false.');
+  let assignee = one('assignee');
+  if (assignee === 'me') {
+    const subject = callerSubject(req);
+    assignee = subject ?? bad('assignee=me needs a signed-in caller.');
+  } else if (assignee !== undefined && (assignee.length === 0 || assignee.length > 200 || assignee === 'role:')) {
+    bad('assignee must be a user id, me, none or role:<key>.');
+  }
+  const cursor = one('cursor');
+  const columns = many('column');
+  const labels = many('label');
+  const dueFrom = isoBound('dueFrom', false);
+  const dueTo = isoBound('dueTo', true);
+  return {
+    limit,
+    sort: sort as 'order' | 'dueAt',
+    ...(cursor ? { cursor } : {}),
+    ...(columns.length ? { columns } : {}),
+    ...(labels.length ? { labels } : {}),
+    ...(dueFrom ? { dueFrom } : {}),
+    ...(dueTo ? { dueTo } : {}),
+    ...(overdueRaw === 'true' ? { overdue: true } : {}),
+    ...(assignee !== undefined ? { assignee } : {}),
+  };
 }
 
 /** The caller's RESOLVED access level for a board's owning subject, or null when
@@ -421,10 +482,16 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
       // project's), however, must not reach a non-reader via the inbox — gate those
       // on the caller's resolved read access (org + project visibility/members).
       const visible: typeof cards = [];
+      // ADR 1155 P3c-2 — one board read and one access check per board, not per card.
+      const accessByBoard = new Map<string, Promise<Awaited<ReturnType<typeof boardAccess>> | null>>();
+      const accessOf = (boardId: string) => {
+        let p = accessByBoard.get(boardId);
+        if (!p) { p = getBoard(boardId).then((board) => (board ? boardAccess(req, board) : null)); accessByBoard.set(boardId, p); }
+        return p;
+      };
       for (const card of cards) {
         if (card.assigneeId === subject) { visible.push(card); continue; } // direct assignee
-        const board = await getBoard(card.boardId);
-        const lvl = board ? await boardAccess(req, board) : null;
+        const lvl = await accessOf(card.boardId);
         if (lvl === null) { visible.push(card); continue; } // legacy (non-org) board
         if (lvl !== 'none') visible.push(card);             // readable membership/org board
       }
@@ -440,10 +507,33 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
       if (!board) {
         throw new OpenwopError('not_found', 'Board not found.', 404, { boardId: req.params.boardId });
       }
+      const pageQuery = parseBoardPageQuery(req);
+      if (!pageQuery) {
+        res.json({
+          board,
+          cards: await listCards(board.id),
+          workItems: await listWorkItemProjectionsForBoard(board.tenantId, board.id),
+        });
+        return;
+      }
+      // ADR 1155 D3 — one page. Work items ride along only for the page's cards.
+      let page;
+      try {
+        page = await listBoardCardsPage(board, pageQuery);
+      } catch (err) {
+        const code = err && typeof err === 'object' ? (err as { code?: unknown }).code : undefined;
+        if (code === 'kanban_cursor_invalid') {
+          throw new OpenwopError('validation_error', err instanceof Error ? err.message : 'Invalid cursor.', 400, { reason: 'kanban_cursor_invalid' });
+        }
+        throw err;
+      }
+      const onPage = new Set(page.cards.filter((c) => c.workItemId).map((c) => c.id));
       res.json({
         board,
-        cards: await listCards(board.id),
-        workItems: await listWorkItemProjectionsForBoard(board.tenantId, board.id),
+        cards: page.cards,
+        workItems: onPage.size === 0 ? [] : (await listWorkItemProjectionsForBoard(board.tenantId, board.id)).filter((w) => onPage.has(w.cardId)),
+        total: page.total,
+        ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
       });
     } catch (err) {
       next(err);
@@ -613,6 +703,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
         createdBy?: unknown;
         assignmentReason?: unknown;
         blockerNote?: unknown;
+        facets?: unknown;
       };
       if (typeof body.title !== 'string' || body.title.trim().length === 0) {
         throw new OpenwopError('validation_error', 'Field `title` is required and MUST be a non-empty string.', 400, {
@@ -627,20 +718,27 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
       }
       // ADR 1132 D5 — a card that launches a client's workflow needs launch authority there.
       if (typeof body.workflowId === 'string') await assertWorkflowClientAccess(req, body.workflowId, 'runs:create');
-      const card = await createCard({
-        boardId: board.id,
-        columnId,
-        title: body.title,
-        description: typeof body.description === 'string' ? body.description : undefined,
-        workflowId: typeof body.workflowId === 'string' ? body.workflowId : undefined,
-        source: parseCardSource(body.source),
-        sourceLabel: typeof body.sourceLabel === 'string' ? body.sourceLabel : undefined,
-        priority: parseCardPriority(body.priority),
-        dueAt: typeof body.dueAt === 'string' ? body.dueAt : undefined,
-        createdBy: typeof body.createdBy === 'string' ? body.createdBy : undefined,
-        assignmentReason: typeof body.assignmentReason === 'string' ? body.assignmentReason : undefined,
-        blockerNote: typeof body.blockerNote === 'string' ? body.blockerNote : undefined,
-      });
+      let card;
+      try {
+        card = await createCard({
+          boardId: board.id,
+          columnId,
+          title: body.title,
+          description: typeof body.description === 'string' ? body.description : undefined,
+          workflowId: typeof body.workflowId === 'string' ? body.workflowId : undefined,
+          source: parseCardSource(body.source),
+          sourceLabel: typeof body.sourceLabel === 'string' ? body.sourceLabel : undefined,
+          priority: parseCardPriority(body.priority),
+          dueAt: typeof body.dueAt === 'string' ? body.dueAt : undefined,
+          createdBy: typeof body.createdBy === 'string' ? body.createdBy : undefined,
+          assignmentReason: typeof body.assignmentReason === 'string' ? body.assignmentReason : undefined,
+          blockerNote: typeof body.blockerNote === 'string' ? body.blockerNote : undefined,
+          // ADR 1155 D1 — validated by the service (400 on a bad map).
+          ...(body.facets !== undefined ? { facets: body.facets as Record<string, string> } : {}),
+        });
+      } catch (err) {
+        rethrowCardCommandError(err);
+      }
       notifyBoardChanged(board.id);
       res.status(201).json(card);
     } catch (err) {
@@ -676,6 +774,8 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
         blockerNote?: unknown;
         /** ADR 0963 — apply `blockerNote` only if the card's note is still this one. */
         ifBlockerNote?: unknown;
+        /** ADR 1155 D1 — `null` clears; a key set to `null` clears that key. */
+        facets?: unknown;
       };
 
       // ADR 0049 D4 — a caller with only card-scoped (assignment) access may
@@ -719,10 +819,13 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
             source: parseCardSource(body.source),
             sourceLabel: typeof body.sourceLabel === 'string' ? body.sourceLabel : undefined,
             priority: parseCardPriority(body.priority),
-            dueAt: typeof body.dueAt === 'string' ? body.dueAt : undefined,
+            // ADR 1155 D6 — `null` clears the due date.
+            dueAt: body.dueAt === null ? null : typeof body.dueAt === 'string' ? body.dueAt : undefined,
             createdBy: typeof body.createdBy === 'string' ? body.createdBy : undefined,
             assignmentReason: typeof body.assignmentReason === 'string' ? body.assignmentReason : undefined,
             blockerNote: typeof body.blockerNote === 'string' ? body.blockerNote : undefined,
+            // ADR 1155 D1 — validated by the command (400 on a bad map).
+            ...(body.facets !== undefined ? { facets: body.facets as Record<string, string | null> | null } : {}),
           },
           // ADR 0963 (grade-code) — a release or note edit built from a stale copy
           // of the card must not clear a hold the loop wrote since (a retried

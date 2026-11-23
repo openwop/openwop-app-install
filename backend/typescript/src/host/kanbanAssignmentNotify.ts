@@ -22,6 +22,8 @@ import type { KanbanCard } from './kanbanService.js';
 const log = createLogger('host.kanban.assign');
 
 const ASSIGNED_TYPE = 'task.assigned';
+/** ADR 1138 D4 — the type the due sweep (`kanban-due-reminders/dueSweep.ts`) emits. */
+const DUE_TYPE = 'task.due';
 
 /** Deep-link the assignee to the card on their personal board's "Assigned to
  *  me" rail (ADR 0049; was the standalone `/my-work` page until 2026-06-16).
@@ -73,6 +75,25 @@ export async function withdrawAssignmentNotification(args: {
   cardId: string;
   recipientUserId: string;
 }): Promise<void> {
+  await withdrawCardNotifications(args, ASSIGNED_TYPE, 'assignment_notify_withdraw_failed');
+}
+
+/** ADR 1155 D6 — withdraw (archive) the assignee's unresolved due-date notices
+ *  (ADR 1138) for this card when its `dueAt` is cleared or changed, so a stale
+ *  "Overdue" does not outlive the date it was about. Best-effort. */
+export async function withdrawDueNotifications(args: {
+  tenantId: string;
+  cardId: string;
+  recipientUserId: string;
+}): Promise<void> {
+  await withdrawCardNotifications(args, DUE_TYPE, 'due_notify_withdraw_failed');
+}
+
+async function withdrawCardNotifications(
+  args: { tenantId: string; cardId: string; recipientUserId: string },
+  type: string,
+  failureEvent: string,
+): Promise<void> {
   const storage = __hostExtStorage();
   if (!storage) return;
   try {
@@ -84,14 +105,14 @@ export async function withdrawAssignmentNotification(args: {
     });
     const now = new Date().toISOString();
     for (const n of rows) {
-      if (n.type !== ASSIGNED_TYPE) continue;
+      if (n.type !== type) continue;
       if (n.status === 'archived') continue;
       const meta = n.metadata as { cardId?: string } | undefined;
       if (meta?.cardId !== args.cardId) continue;
       await storage.updateNotificationStatus(n.notificationId, 'archived', now);
     }
   } catch (err) {
-    // Storage hiccup — never block the assignment mutation.
-    log.debug('assignment_notify_withdraw_failed', { cardId: args.cardId, error: err instanceof Error ? err.message : String(err) });
+    // Storage hiccup — never block the card mutation.
+    log.debug(failureEvent, { cardId: args.cardId, error: err instanceof Error ? err.message : String(err) });
   }
 }

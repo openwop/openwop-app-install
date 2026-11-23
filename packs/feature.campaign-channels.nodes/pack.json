@@ -1,8 +1,8 @@
 {
   "name": "feature.campaign-channels.nodes",
-  "version": "1.19.2",
+  "version": "1.20.0",
   "kind": "node",
-  "description": "Campaign Studio channel-generation node pack. One parameterized `generate` node turns a brief's messaging kernel into a channel deliverable (landing page / ad variants / email sequence / creative briefs / social posts) \u2014 grounded in the KB (kb.rag citations) + brand voice (ctx.features.brand) via the run-scoped provider \u2014 plus a `content.quality.check` node. Drives the five channel child workflows the orchestration fans out. v1.14.0 (ADR 0945 D8): render-concepts is role:side-effect + side-effectful, so a :fork serves the recorded concepts instead of generating (and paying) again.",
+  "description": "Campaign Studio channel-generation node pack. One parameterized `generate` node turns a brief's messaging kernel into a channel deliverable (landing page / ad variants / email sequence / creative briefs / social posts) \u2014 grounded in the KB (kb.rag citations) + brand voice (ctx.features.brand) via the run-scoped provider \u2014 plus a `content.quality.check` node. Drives the five channel child workflows the orchestration fans out. v1.14.0 (ADR 0945 D8): render-concepts is role:side-effect + side-effectful, so a :fork serves the recorded concepts instead of generating (and paying) again. v1.20.0 (CMS2WF-6): the landing-page and document publish nodes key their writes on node + brief + content instead of the runId, so a replay fork reuses the draft it made; the channel chains now run them after the approval.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": [
@@ -47,16 +47,16 @@
     },
     {
       "typeId": "feature.campaign-channels.nodes.publish-landing-page",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Channel: Publish Landing Page",
-      "description": "Publishes a landing_page draft as a real DRAFT CMS page (ADR 0162) via ctx.features.cms.createDraftPage \u2014 first section \u2192 hero, rest \u2192 richText/cta. Never auto-publishes; idempotent on a deterministic pageId. Inputs: { draft, briefId? | orgId? }. Output: { page }.",
+      "description": "Publishes a landing_page draft as a real DRAFT CMS page (ADR 0162) via ctx.features.cms.createDraftPage \u2014 first section \u2192 hero, rest \u2192 richText/cta. Never auto-publishes; idempotent on a fork-stable pageId (node + brief + content, no runId \u2014 CMS2WF-6, v1.1.0), so a replay fork reuses the page. Inputs: { draft, briefId? | orgId? }. Output: { page }.",
       "category": "integration",
       "role": "action",
       "capabilities": []
     },
     {
       "typeId": "feature.campaign-channels.nodes.publish-email-sequence",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Channel: Publish Email Sequence",
       "description": "Publishes an email_sequence draft as real DRAFT email entities (ADR 0162) via ctx.features.email.createDraftCampaign \u2014 one draft template + one draft campaign per email step. Never sends; idempotent on deterministic ids. Inputs: { draft, briefId? | orgId?, stage? }. Output: { campaign }.",
       "category": "integration",
@@ -67,9 +67,9 @@
     },
     {
       "typeId": "feature.campaign-channels.nodes.publish-ad-variants",
-      "version": "1.4.0",
+      "version": "1.5.0",
       "label": "Channel: Publish Ad Copy",
-      "description": "Publishes an ad_variants draft. With an adAccountId + a connected ad platform it dispatches a REAL created-PAUSED campaign via ctx.ads (ADR 0167/0223): platform \u2208 {meta, google, tiktok, linkedin} (default meta). meta REQUIRES pageId (the Facebook Page behind object_story_spec \u2014 fails closed missing_page_id); google REQUIRES landingUrl (finalUrls \u2014 missing_landing_url) and, for a live dispatch, euPoliticalAdvertising: 'contains'|'does_not_contain' (Google's EU political-advertising declaration \u2014 the operator's attestation, never defaulted; absent \u21d2 eu_political_declaration_required); tiktok REQUIRES identityId (missing_identity_id). Optional mediaAssetId uploads a media-library asset platform-side; mediaKind \u2208 {image (default), video} picks the surface \u2014 image \u2192 Meta image_hash / TikTok image_ids; video (ADR 0411 \u00a7P3c) \u2192 Meta advideos/video_data / TikTok SINGLE_VIDEO, where dryRun previews the plan but a live video dispatch fails closed video_dispatch_live_pending (live-smoke-pending). dryRun returns the exact payload plan with zero platform calls. No account/connection \u21d2 falls back to the DRAFT 'campaign-ad-copy' document handoff (ADR 0166). Idempotent (fork-stable). Inputs: { draft, briefId? | orgId?, adAccountId?, platform?, pageId?, identityId?, mediaAssetId?, mediaKind?, euPoliticalAdvertising?, landingUrl?, campaignName?, objective?, dailyBudgetMinor?, dryRun? }. Output: { dispatched } | { preview } | { document }. Campaign-policy spend approvals suspend this node until decided; replay serves the recorded dispatch result.",
+      "description": "Publishes an ad_variants draft. With an adAccountId + a connected ad platform it dispatches a REAL created-PAUSED campaign via ctx.ads (ADR 0167/0223): platform \u2208 {meta, google, tiktok, linkedin} (default meta). meta REQUIRES pageId (the Facebook Page behind object_story_spec \u2014 fails closed missing_page_id); google REQUIRES landingUrl (finalUrls \u2014 missing_landing_url) and, for a live dispatch, euPoliticalAdvertising: 'contains'|'does_not_contain' (Google's EU political-advertising declaration \u2014 the operator's attestation, never defaulted; absent \u21d2 eu_political_declaration_required); tiktok REQUIRES identityId (missing_identity_id). Optional mediaAssetId uploads a media-library asset platform-side; mediaKind \u2208 {image (default), video} picks the surface \u2014 image \u2192 Meta image_hash / TikTok image_ids; video (ADR 0411 \u00a7P3c) \u2192 Meta advideos/video_data / TikTok SINGLE_VIDEO, where dryRun previews the plan but a live video dispatch fails closed video_dispatch_live_pending (live-smoke-pending). dryRun returns the exact payload plan with zero platform calls. No account/connection \u21d2 falls back to the DRAFT 'campaign-ad-copy' document handoff (ADR 0166). Idempotent (fork-stable): the dispatch on the briefId, the document handoff on node + brief + content (no runId \u2014 CMS2WF-6, v1.5.0). Inputs: { draft, briefId? | orgId?, adAccountId?, platform?, pageId?, identityId?, mediaAssetId?, mediaKind?, euPoliticalAdvertising?, landingUrl?, campaignName?, objective?, dailyBudgetMinor?, dryRun? }. Output: { dispatched } | { preview } | { document }. Campaign-policy spend approvals suspend this node until decided; replay serves the recorded dispatch result.",
       "category": "integration",
       "role": "action",
       "capabilities": [
@@ -78,18 +78,18 @@
     },
     {
       "typeId": "feature.campaign-channels.nodes.publish-creative-briefs",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Channel: Publish Creative Briefs",
-      "description": "Publishes a creative_briefs draft as a DRAFT 'campaign-creative-briefs' document (ADR 0166) via ctx.features.documents.createDraftDocument \u2014 Markdown, one section per brief (scene/composition/messaging). Idempotent. Inputs: { draft, briefId? | orgId? }. Output: { document }.",
+      "description": "Publishes a creative_briefs draft as a DRAFT 'campaign-creative-briefs' document (ADR 0166) via ctx.features.documents.createDraftDocument \u2014 Markdown, one section per brief (scene/composition/messaging). Idempotent on node + brief + content, no runId, so a replay fork reuses the document (CMS2WF-6, v1.1.0). Not on the creative-briefs channel chain: that chain's post-approval step is create-creative-briefs. Inputs: { draft, briefId? | orgId? }. Output: { document }.",
       "category": "integration",
       "role": "action",
       "capabilities": []
     },
     {
       "typeId": "feature.campaign-channels.nodes.publish-social-posts",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Channel: Publish Social Calendar",
-      "description": "Publishes a social_posts draft as a DRAFT 'campaign-social-calendar' document (ADR 0166) via ctx.features.documents.createDraftDocument \u2014 Markdown, posts grouped by platform with hashtags. A handoff packet (no live social dispatch \u2014 RFC-gated). Idempotent. Inputs: { draft, briefId? | orgId? }. Output: { document }.",
+      "description": "Publishes a social_posts draft as a DRAFT 'campaign-social-calendar' document (ADR 0166) via ctx.features.documents.createDraftDocument \u2014 Markdown, posts grouped by platform with hashtags. A handoff packet (no live social dispatch \u2014 RFC-gated). Idempotent on node + brief + content, no runId, so a replay fork reuses the document (CMS2WF-6, v1.1.0). Inputs: { draft, briefId? | orgId? }. Output: { document }.",
       "category": "integration",
       "role": "action",
       "capabilities": []

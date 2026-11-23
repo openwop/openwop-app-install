@@ -46,7 +46,9 @@ export const SHELL_URL = '/app-shell.html';
 export const DEFAULT_PRECACHE_MAX_KB = 1500;
 
 const WORKER_SCRIPTS = new Set(['/sw.js', '/sw-push.js']);
-const OFFLINE_KEYS = new Set(['navigations', 'precache', 'runtime', 'entitlement']);
+const OFFLINE_KEYS = new Set(['navigations', 'precache', 'runtime', 'entitlement', 'onlineOnly']);
+/** D6 `onlineOnly` — a source module, named relative to the feature's `offline.ts`. */
+const ONLINE_ONLY_PATH = /^\.\.?\/[^*?@{}#\s]+\.(?:tsx?|jsx?|mjs)$/;
 const RUNTIME_KEYS = new Set(['match', 'strategy', 'maxEntries']);
 const STRATEGIES = new Set(['swr', 'network-first']);
 const ENTITLEMENTS = new Set(['fail-closed', 'last-known']);
@@ -260,6 +262,16 @@ export function checkOfflineShape(id, offline) {
   if (offline.entitlement !== undefined && !ENTITLEMENTS.has(offline.entitlement)) {
     at(`entitlement ${JSON.stringify(offline.entitlement)} must be "fail-closed" or "last-known"`);
   }
+  if (offline.onlineOnly !== undefined) {
+    if (!Array.isArray(offline.onlineOnly) || offline.onlineOnly.length === 0) at('onlineOnly must be a non-empty array (omit it otherwise)');
+    else for (const p of offline.onlineOnly) {
+      if (typeof p !== 'string' || !ONLINE_ONLY_PATH.test(p)) {
+        at(`onlineOnly ${JSON.stringify(p)} must be a source file path relative to offline.ts, with its extension, like "../../chat/Panel.tsx"`);
+      } else if (offline.onlineOnly.filter((q) => q === p).length > 1) {
+        at(`onlineOnly ${p} is listed twice`);
+      }
+    }
+  }
   return errors;
 }
 
@@ -313,7 +325,11 @@ export async function prepareOfflineBuild({ registrySource, registryPath, import
     const mod = await importModule(file);
     const shape = checkOfflineShape(id, mod.offline);
     errors.push(...shape);
-    if (shape.length === 0) features.push({ id, dir, offline: mod.offline });
+    if (shape.length !== 0) continue;
+    features.push({ id, dir, offline: mod.offline });
+    for (const p of mod.offline.onlineOnly ?? []) {
+      if (!existsSync(resolve(dir, p))) errors.push(`${id}: onlineOnly ${p} does not exist (paths are relative to the feature's offline.ts)`);
+    }
   }
   let neverCache = [];
   try {
@@ -343,8 +359,9 @@ function sourceBytes(item) {
 }
 
 /** Static closure (and, when `dynamic`, dynamic closure) of chunk file names,
- *  with each chunk's CSS and assets, never expanding into `stop`. */
-function closure(bundle, roots, { dynamic, stop = new Set() }) {
+ *  with each chunk's CSS and assets, never expanding into `stop`. A DYNAMIC
+ *  import of a chunk in `onlineOnly` is not followed; a static one still is. */
+function closure(bundle, roots, { dynamic, stop = new Set(), onlineOnly = new Set() }) {
   const seen = new Set();
   const queue = [...roots];
   while (queue.length > 0) {
@@ -354,7 +371,7 @@ function closure(bundle, roots, { dynamic, stop = new Set() }) {
     const item = bundle[name];
     if (!item || item.type !== 'chunk') continue;
     for (const dep of item.imports) queue.push(dep);
-    if (dynamic) for (const dep of item.dynamicImports) queue.push(dep);
+    if (dynamic) for (const dep of item.dynamicImports) if (!onlineOnly.has(dep)) queue.push(dep);
     for (const css of item.viteMetadata?.importedCss ?? []) seen.add(css);
     for (const asset of item.viteMetadata?.importedAssets ?? []) seen.add(asset);
   }
@@ -367,6 +384,11 @@ function closure(bundle, roots, { dynamic, stop = new Set() }) {
  *   - per feature: every chunk holding a module under the feature's directory,
  *     closed over static AND dynamic imports (a route that `import()`s its
  *     screens must open them offline), minus the shell, plus `precache` extras.
+ *     A lazy import of a module the feature lists in `onlineOnly` is not
+ *     followed, so that chunk and whatever only it reaches stay out. A listed
+ *     module that is not in the output, is in the shell, or is still needed
+ *     offline (a static import reaches its chunk, or the chunk holds the
+ *     feature's own modules) is an error: the declaration would be a no-op.
  * Each feature's own part is budgeted in gzip kB.
  *
  * `readPublicFile(path)` returns the bytes of a `public/` file or null.
@@ -387,7 +409,26 @@ export function computePrecache({ bundle, features, budgetKb = DEFAULT_PRECACHE_
       .filter((i) => i.type === 'chunk' && !shell.has(i.fileName)
         && i.moduleIds.some((m) => m.split('/').join(sep).startsWith(prefix)))
       .map((i) => i.fileName);
-    const own = closure(bundle, roots, { dynamic: true, stop: shell });
+    const onlineOnly = new Map(); // chunk file name → the declared path that put it there
+    for (const p of offline.onlineOnly ?? []) {
+      const target = resolve(dir, p);
+      const holders = Object.values(bundle).filter((i) => i.type === 'chunk'
+        && i.moduleIds.some((m) => resolve(m.split('?')[0].split('/').join(sep)) === target));
+      if (holders.length === 0) {
+        errors.push(`${id}: onlineOnly ${p} is not in the build output (nothing imports it), so it marks nothing`);
+      }
+      for (const holder of holders) {
+        if (shell.has(holder.fileName)) errors.push(`${id}: onlineOnly ${p} is in the shell (${holder.fileName}), which is always precached`);
+        else onlineOnly.set(holder.fileName, p);
+      }
+    }
+    const own = closure(bundle, roots, { dynamic: true, stop: shell, onlineOnly: new Set(onlineOnly.keys()) });
+    for (const [name, p] of onlineOnly) {
+      if (own.has(name)) {
+        errors.push(`${id}: onlineOnly ${p} is still needed offline: its chunk ${name} is reached by a static import or holds the feature's own modules. ` +
+          'Only a lazy import() can be online-only.');
+      }
+    }
     let gzipBytes = 0;
     for (const name of own) {
       files.add(name);
@@ -401,7 +442,7 @@ export function computePrecache({ bundle, features, budgetKb = DEFAULT_PRECACHE_
       gzipBytes += gzipSync(bytes).length;
     }
     const gzipKb = Math.round(gzipBytes / 102.4) / 10;
-    sizes.push({ id, gzipKb, chunks: own.size });
+    sizes.push({ id, gzipKb, chunks: own.size, onlineOnlyChunks: onlineOnly.size });
     if (gzipKb > budgetKb) {
       errors.push(`${id}: precache is ${gzipKb} kB gzip, over the ${budgetKb} kB budget (OPENWOP_SW_PRECACHE_MAX_KB). ` +
         'Raise it in a reviewed change, or stop the closure reaching shared lazy chunks.');

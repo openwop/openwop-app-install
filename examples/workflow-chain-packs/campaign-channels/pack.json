@@ -1,8 +1,8 @@
 {
   "name": "core.openwop.workflows.campaign-channels",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "kind": "workflow-chain",
-  "description": "The five campaign channel child workflows (ADR 0157) — generate→approve DAGs the orchestration fans out over — migrated from the deprecated builtins (ADR 0472 P4). chainIds keep the original ids.",
+  "description": "The five campaign channel child workflows (ADR 0157) — generate→approve→publish DAGs the orchestration fans out over — migrated from the deprecated builtins (ADR 0472 P4). chainIds keep the original ids. v1.5.0 (user decision 2026-11-19): an approved draft is created in the real tool. Landing page → a draft CMS page, email sequence → draft email campaigns, ad variants → a PAUSED campaign when an ad account is given, else a draft ad-copy document, social posts → a draft social-calendar document. Creative briefs keep create-creative-briefs. A rejected or skipped channel creates nothing.",
   "keywords": [
     "Campaign"
   ],
@@ -12,9 +12,9 @@
   "chains": [
     {
       "chainId": "campaign-studio.channel.landing-page",
-      "version": "1.4.0",
+      "version": "1.5.0",
       "label": "Landing page",
-      "description": "Generate a campaign landing page from the brief, then approve.",
+      "description": "Generate a campaign landing page from the brief, approve it, then create it as a draft CMS page.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -63,7 +63,7 @@
             "id": "approve",
             "typeId": "core.approvalGate@1.0.0",
             "config": {
-              "prompt": "Review the generated landing page. Approve it to keep it; reject it to discard it."
+              "prompt": "Review the generated landing page. Approve it to create it as a draft page in your CMS (nothing is published); reject it to discard it."
             }
           },
           {
@@ -72,6 +72,14 @@
             "name": "Channel not enabled",
             "inputs": {
               "summary": "Skipped: this brief does not enable the landing page channel, so nothing was generated."
+            }
+          },
+          {
+            "id": "publish",
+            "typeId": "feature.campaign-channels.nodes.publish-landing-page@1.1.0",
+            "name": "Create the draft CMS page",
+            "inputs": {
+              "briefId": "{{params.briefId}}"
             }
           }
         ],
@@ -91,15 +99,27 @@
               "type": "truthy",
               "left": "skipped"
             }
+          },
+          {
+            "from": "approve",
+            "to": "publish"
+          },
+          {
+            "from": "generate.draft",
+            "to": "publish.draft",
+            "condition": {
+              "type": "falsy",
+              "left": "skipped"
+            }
           }
         ]
       }
     },
     {
       "chainId": "campaign-studio.channel.ad-variants",
-      "version": "1.4.0",
+      "version": "1.5.0",
       "label": "Ad variants",
-      "description": "Generate ad variants per platform, then approve — accept all or refine a platform set.",
+      "description": "Generate ad variants per platform, approve them, then create the campaign PAUSED on the ad platform, or a draft ad-copy document when no ad account is given (ADR 0167).",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -115,6 +135,30 @@
           "model": {
             "type": "string",
             "description": "Model id for this chain's model-calling nodes. Must be offered by `provider` in the host catalog. Set it together with `provider`."
+          },
+          "adAccountId": {
+            "type": "string",
+            "description": "The ad account to create the campaign in, PAUSED. Leave it unset to create a draft ad-copy document instead."
+          },
+          "platform": {
+            "type": "string",
+            "description": "The ad platform: meta (the default), google, tiktok or linkedin."
+          },
+          "pageId": {
+            "type": "string",
+            "description": "Meta only, and required there: the Facebook Page the ads run from."
+          },
+          "identityId": {
+            "type": "string",
+            "description": "TikTok only, and required there: the identity the ads run as."
+          },
+          "landingUrl": {
+            "type": "string",
+            "description": "The landing URL the ads link to. Required for Google. It is stamped with the brief's UTM parameters."
+          },
+          "euPoliticalAdvertising": {
+            "type": "string",
+            "description": "Google only: your declaration that the campaign does_not_contain or contains EU political advertising. Never filled in for you."
           }
         },
         "required": [
@@ -148,7 +192,7 @@
             "id": "approve",
             "typeId": "core.approvalGate@1.0.0",
             "config": {
-              "prompt": "Review the generated ad variants. Approve them to keep them; reject them to discard them.",
+              "prompt": "Review the generated ad variants. Approve them to create the campaign PAUSED in your ad account (no spend until you activate it), or a draft ad-copy document when no ad account is set; reject them to discard them.",
               "itemsFrom": "platformSets"
             }
           },
@@ -158,6 +202,20 @@
             "name": "Channel not enabled",
             "inputs": {
               "summary": "Skipped: this brief does not enable the ad variants channel, so nothing was generated."
+            }
+          },
+          {
+            "id": "publish",
+            "typeId": "feature.campaign-channels.nodes.publish-ad-variants@1.5.0",
+            "name": "Create the paused campaign or ad-copy document",
+            "inputs": {
+              "briefId": "{{params.briefId}}",
+              "adAccountId": "{{params.adAccountId}}",
+              "platform": "{{params.platform}}",
+              "pageId": "{{params.pageId}}",
+              "identityId": "{{params.identityId}}",
+              "landingUrl": "{{params.landingUrl}}",
+              "euPoliticalAdvertising": "{{params.euPoliticalAdvertising}}"
             }
           }
         ],
@@ -177,15 +235,27 @@
               "type": "truthy",
               "left": "skipped"
             }
+          },
+          {
+            "from": "approve",
+            "to": "publish"
+          },
+          {
+            "from": "generate.draft",
+            "to": "publish.draft",
+            "condition": {
+              "type": "falsy",
+              "left": "skipped"
+            }
           }
         ]
       }
     },
     {
       "chainId": "campaign-studio.channel.email-sequence",
-      "version": "1.4.0",
+      "version": "1.5.0",
       "label": "Email sequence",
-      "description": "Generate a campaign email sequence, then approve — accept all or refine specific emails.",
+      "description": "Generate a campaign email sequence, approve it, then create it as draft email campaigns (never sent).",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -234,7 +304,7 @@
             "id": "approve",
             "typeId": "core.approvalGate@1.0.0",
             "config": {
-              "prompt": "Review the generated email sequence. Approve it to keep it; reject it to discard it.",
+              "prompt": "Review the generated email sequence. Approve it to create it as draft email campaigns (nothing is sent); reject it to discard it.",
               "itemsFrom": "emails"
             }
           },
@@ -244,6 +314,14 @@
             "name": "Channel not enabled",
             "inputs": {
               "summary": "Skipped: this brief does not enable the email sequence channel, so nothing was generated."
+            }
+          },
+          {
+            "id": "publish",
+            "typeId": "feature.campaign-channels.nodes.publish-email-sequence@1.1.0",
+            "name": "Create the draft email campaigns",
+            "inputs": {
+              "briefId": "{{params.briefId}}"
             }
           }
         ],
@@ -261,6 +339,18 @@
             "to": "skipped",
             "condition": {
               "type": "truthy",
+              "left": "skipped"
+            }
+          },
+          {
+            "from": "approve",
+            "to": "publish"
+          },
+          {
+            "from": "generate.draft",
+            "to": "publish.draft",
+            "condition": {
+              "type": "falsy",
               "left": "skipped"
             }
           }
@@ -375,9 +465,9 @@
     },
     {
       "chainId": "campaign-studio.channel.social-posts",
-      "version": "1.4.0",
+      "version": "1.5.0",
       "label": "Social posts",
-      "description": "Generate social posts, then approve — accept all or refine specific posts.",
+      "description": "Generate social posts, approve them, then create a draft social-calendar document (no live posting).",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -426,7 +516,7 @@
             "id": "approve",
             "typeId": "core.approvalGate@1.0.0",
             "config": {
-              "prompt": "Review the generated social posts. Approve them to keep them; reject them to discard them.",
+              "prompt": "Review the generated social posts. Approve them to create a draft social-calendar document (nothing is posted); reject them to discard them.",
               "itemsFrom": "posts"
             }
           },
@@ -436,6 +526,14 @@
             "name": "Channel not enabled",
             "inputs": {
               "summary": "Skipped: this brief does not enable the social posts channel, so nothing was generated."
+            }
+          },
+          {
+            "id": "publish",
+            "typeId": "feature.campaign-channels.nodes.publish-social-posts@1.1.0",
+            "name": "Create the draft social calendar",
+            "inputs": {
+              "briefId": "{{params.briefId}}"
             }
           }
         ],
@@ -453,6 +551,18 @@
             "to": "skipped",
             "condition": {
               "type": "truthy",
+              "left": "skipped"
+            }
+          },
+          {
+            "from": "approve",
+            "to": "publish"
+          },
+          {
+            "from": "generate.draft",
+            "to": "publish.draft",
+            "condition": {
+              "type": "falsy",
               "left": "skipped"
             }
           }

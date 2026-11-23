@@ -17,10 +17,11 @@ import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import {
   __forgetCatalogIndexReady, catalogIndexGauge, createProduct, deleteProduct, getProduct, iterateCatalog,
-  listProductsPage, repairCatalogIndex, updateProduct, type Product,
+  listProductsPage, updateProduct, type Product,
 } from '../src/features/commerce/commerceService.js';
 import { getEntityType, getSystemEntity, type EntityRecord } from '../src/features/entities/entitiesService.js';
 import { __clearSystemIndex, indexedCount, repairSystemIndex } from '../src/features/entities/systemIndex.js';
+import { runSystemIndexUpkeep } from '../src/features/entities/systemIndexSweep.js';
 
 const TYPE = 'commerce.product';
 const ORG = 'org-catalog';
@@ -323,11 +324,11 @@ describe('ADR 1110 — fold, teardown, backfill and drift', () => {
     const [first] = familyIds(await markerIds(T), 'n');
     await storage.kvDelete(`hostext:entity:sysidx:${first}`);
     expect((await catalogIndexGauge()).driftTenants).toBe(1);
-    expect((await repairCatalogIndex(Date.UTC(2026, 10, 12))).drifted).toBe(1); // queued, not built inline
+    expect((await runSystemIndexUpkeep(Date.UTC(2026, 10, 12))).drifted).toBe(1); // queued, not built inline
     expect((await catalogIndexGauge()).queuedBuilds).toBe(1);
-    expect((await repairCatalogIndex(Date.UTC(2026, 10, 12, 0, 1))).built).toBe(1); // the next tick builds it
+    expect((await runSystemIndexUpkeep(Date.UTC(2026, 10, 12, 0, 1))).built).toBe(1); // the next tick builds it
     expect((await catalogIndexGauge()).driftTenants).toBe(0);
-    expect((await repairCatalogIndex(Date.UTC(2026, 10, 12, 0, 30))).drifted).toBe(0); // same hour: no second check
+    expect((await runSystemIndexUpkeep(Date.UTC(2026, 10, 12, 0, 30))).drifted).toBe(0); // same hour: no second check
   });
 
   it('commerce.product declares its own kernel row ceiling', async () => {

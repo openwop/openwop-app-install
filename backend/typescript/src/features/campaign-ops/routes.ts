@@ -489,7 +489,7 @@ export function registerCampaignOpsRoutes(deps: RouteDeps): void {
   // itself is read through the sharing viewer (`/shared/:token`).
   app.post('/host/openwop-app/public-campaign-approval/:token/decision', async (req, res, next) => {
     try {
-      res.json(await decideFromPortal({ token: req.params.token, ip: clientIp(req), body: req.body }));
+      res.json(await decideFromPortal({ token: req.params.token, ip: clientIp(req), body: req.body, deps: { storage: deps.storage, hostSuite: deps.hostSuite } }));
     } catch (err) { next(err); }
   });
 

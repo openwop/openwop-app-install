@@ -156,6 +156,8 @@ export async function processSuggesterQueue(classify: typeof classifyMessage = c
           tenantId: p.tenantId, projectId: p.projectId, title: v.title, text: v.summary,
           source: { kind: 'message', ref: p.messageRef, link: `/chat?conversation=${encodeURIComponent(p.conversationId)}` },
           suggestedBy: { kind: 'agent', id: DECISION_CAPTURE_FEATURE_ID },
+          // CHAN-F19 follow-up D — the summary is of this person's words.
+          ...(p.authorUserId ? { sourceAuthorUserId: p.authorUserId } : {}),
         });
       }
     } catch (err) {

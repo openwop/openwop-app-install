@@ -9,6 +9,7 @@ import { createLogger } from '../../observability/logger.js';
 import { isErasureTombstoned, tombstoneId } from '../consent/consentService.js';
 import { collectedIdentityValues, collectedIdentityForms } from './collectedEventIdentity.js';
 import type { CollectedEvent } from './collectService.js';
+import { declarePiiFields } from '../../host/dataClassification.js';
 
 export interface VisitorEventRow { key: string; tenantId: string; visitor: string; eventId: string; eventType: string; at: string }
 interface ForwardRow { key: string; tenantId: string; eventId: string; visitorHash?: string; eventType?: string; at?: string; deleted?: true; visitor?: string }
@@ -41,6 +42,8 @@ export const collectedEvents = new DurableCollection<CollectedEvent | DeletedEve
     for (const row of await reverse.list()) if (row.eventId === eventId) await deleteCollectedEvent(row.tenantId, eventId);
   },
 );
+// CHAN-F19 follow-up C (ADR 0464 §9) — the collected event payload holds the identity; eraseCdpCollectedEvents tombstones it.
+declarePiiFields('cdp:collected-event', ['payload'], { maskGloballyByFieldName: false });
 export function isLiveCollectedEvent(row: CollectedEvent | DeletedEvent): row is CollectedEvent { return !('deleted' in row); }
 function pendingReceipt(ev: CollectedEvent): Receipt {
   return { reservationId: reservationId(ev.tenantId, ev.eventId), tenantId: ev.tenantId, eventId: ev.eventId,

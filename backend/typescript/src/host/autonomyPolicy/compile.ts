@@ -50,7 +50,23 @@ function refuse(message: string, reason: string): never {
   throw new OpenwopError('validation_error', message, 400, { reason });
 }
 
+/**
+ * ADR 0924 P2a (review H1) — every `ApproverSpec` field the compiler carries.
+ * Typed as a total record over the spec's keys, so a field added to
+ * `ApproverSpec` is a compile error here until someone decides how it compiles.
+ * At run time a spec carrying any other key is REFUSED rather than dropped: a
+ * dropped `perParty` is how a two-party spec once compiled to a bare count.
+ */
+export const COMPILED_APPROVER_FIELDS: Readonly<Record<keyof ApproverSpec, true>> = {
+  roleRefs: true, groupRefs: true, subjectRefs: true, clientApprover: true, requiredApprovals: true,
+  rejectionPolicy: true, perParty: true, delegation: true, sla: true, escalateTo: true,
+};
+
 export function compileApproverSpec(spec: ApproverSpec, opts: { actionClass: ActionClass; lane: ApprovalLane }): CompiledApprovers {
+  const uncarried = Object.keys(spec).filter((k) => !Object.prototype.hasOwnProperty.call(COMPILED_APPROVER_FIELDS, k));
+  if (uncarried.length > 0) {
+    refuse(`The approval for ${opts.actionClass} sets ${uncarried.join(', ')}, which this host cannot carry onto an approval.`, 'autonomy_field_not_carried');
+  }
   const roleRefs = [...new Set(spec.roleRefs ?? [])];
   const groupRefs = [...new Set(spec.groupRefs ?? [])];
   const subjectRefs = [...new Set(spec.subjectRefs ?? [])];
@@ -65,6 +81,11 @@ export function compileApproverSpec(spec: ApproverSpec, opts: { actionClass: Act
   }
   if (spec.perParty && opts.lane === 'interrupt') {
     refuse(`A per-party quorum needs the change-set approval lane, not an in-run gate (${opts.actionClass}).`, 'autonomy_per_party_unsupported');
+  }
+  // Review § 3.1: under a per-party quorum any reject from an eligible voter
+  // rejects; `majority` has no meaning across two parties.
+  if (spec.perParty && spec.rejectionPolicy === 'majority') {
+    refuse(`A per-party quorum rejects on any eligible reject; majority is not available (${opts.actionClass}).`, 'autonomy_per_party_majority');
   }
   const interruptData: CompiledInterruptApprovers = {
     ...(roleRefs.length ? { approverRoleRefs: roleRefs } : {}),
@@ -84,6 +105,10 @@ export function compileApproverSpec(spec: ApproverSpec, opts: { actionClass: Act
     ...(spec.sla && Object.keys(spec.sla).length ? { sla: { ...spec.sla } } : {}),
     ...(spec.escalateTo ? { escalateTo: { roleRefs: [...spec.escalateTo.roleRefs] } } : {}),
     ...(spec.delegation === 'none' ? { allowDelegation: false } : {}),
+    // ADR 0924 P2a (H1) — carried, never dropped. `refs` is implied by the party
+    // (validate.ts pins client ⇔ clientApprover, agency ⇔ roleRefs).
+    ...(spec.perParty?.length ? { perParty: spec.perParty.map((p) => ({ party: p.party, min: p.min })) } : {}),
+    ...(spec.clientApprover ? { clientApprover: true as const } : {}),
   };
   return { interruptData, approvalPolicy };
 }

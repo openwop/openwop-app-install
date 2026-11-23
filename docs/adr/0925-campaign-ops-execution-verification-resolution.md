@@ -242,7 +242,14 @@ ordinary RFC 0013 chain packs; nothing new on the wire.
       adapter. Is that enough evidence for the demo, or should P0 also run one
       case over HTTP? Proposed: the fault wrapper for the demo; HTTP with the
       first external adapter.
-- [ ] **Q2** Drift check frequency: daily proposed. Per client?
+- [x] **Q2** Drift check frequency: daily proposed. Per client?
+      > **DECIDED (user, 2026-11-19):** daily by default, settable per client to
+      > `daily`, `weekly` or `off` (`ClientAccount.driftCheck`). On-demand runs
+      > at most once per client per 10 minutes, on the shared counter, failing
+      > closed. Only the latest confirmed change per asset is checked, so the cost
+      > scales with assets, not job history (architecture review
+      > `docs/steward/adr-0924-0925-p2-architecture-review.md` § 3.4, M4). Built in
+      > 0925 P2a; not started.
 - [ ] No `/architect` pass has been run on this ADR.
 
 ## Implementation record

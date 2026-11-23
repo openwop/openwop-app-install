@@ -196,7 +196,8 @@ export async function getOverview(orgId: string): Promise<{ funnel: Array<{ plat
  *  approval. Amounts are minor units of each ad account's currency (the plan
  *  carries no currency — the platforms report budgets per account). */
 export interface ReallocationOpDto { platform: string; adAccountId: string; campaignId: string; campaignName?: string; fromDailyMinor: number | null; toDailyMinor: number }
-export type ReallocationStatus = 'proposed' | 'approved' | 'applying' | 'applied' | 'partial' | 'rejected' | 'expired';
+/** `withdrawn` (ADR 1022 CP71WF-23, 2026-11-20): the person who proposed it took it back. */
+export type ReallocationStatus = 'proposed' | 'approved' | 'applying' | 'applied' | 'partial' | 'rejected' | 'withdrawn' | 'expired';
 export interface ReallocationPlanDto {
   planId: string;
   source: { kind: 'optimizeBudget' | 'agent' | 'route' };
@@ -208,7 +209,7 @@ export interface ReallocationPlanDto {
   createdAt: string;
   expiresAt: string;
 }
-export type ApplyReallocationOutcome = 'applied' | 'partial' | 'rejected' | 'expired' | 'requires_approval' | 'in_progress';
+export type ApplyReallocationOutcome = 'applied' | 'partial' | 'rejected' | 'withdrawn' | 'expired' | 'requires_approval' | 'in_progress';
 export async function listReallocations(orgId: string): Promise<ReallocationPlanDto[]> {
   const r = await asJson<{ plans: ReallocationPlanDto[] }>(await fetch(`${base}/reallocations?orgId=${encodeURIComponent(orgId)}`, fetchOpts({ headers: authedHeaders() })), 'reallocations');
   return r.plans;

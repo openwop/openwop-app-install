@@ -161,6 +161,11 @@ pluggable-engine intent of the ADR is satisfied by the surface port itself.
 | 3 — Conversations-rail message FTS (debounced, self-hides on 404) | ✅ | `ConversationsRail.tsx`/`chatSessionsClient.ts` + i18n ×4 | `npm run build` gate green |
 | 4 — optional `ctx.chatSearch` op + node pack | ⏸ deferred-by-design | — | conditional on a use-case |
 
+> **CORRECTED 2026-11-22 (grade-tests `TST-OAL-3`):** the Phase 1 row describes the
+> `db.search` engine that ADR 0997 deleted. `conversation-search-engine.test.ts` now holds
+> 12 cases against the message store, not 11 against `db.search`. The row is kept as the
+> record of what Phase 1 shipped; see the ADR 0997 note above for what replaced it.
+
 **Architect findings applied:** the ADR 0043 READ-visibility predicate was extracted
 to `host/conversationVisibility.ts` so the feature gates results through the EXACT
 same rule as the chat routes (no authz-drift copy). Every hit is post-filtered to the

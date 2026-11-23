@@ -27,7 +27,7 @@ import { getJob } from './schedulingService.js';
 import { resolveTenantWorkflow } from './resolveLaunchDefinition.js';
 import { resolveEffectiveAccess } from './accessControlService.js';
 import { isEligibleApprover, consumeVoteIdentity, policyApproverRefs } from './approverResolution.js';
-import { appendDecision, tallyDecisions, evaluateQuorumTally, readRejectionPolicy } from './reviewDecisionLedger.js';
+import { appendDecision, tallyDecisions, evaluateQuorumTally, readRejectionPolicy, listGateDecisions, dropDecision, type ReviewDecision } from './reviewDecisionLedger.js';
 import { emitReviewUpdatedSignal } from '../notifications/notify.js';
 import { resumeRunsAwaitingApproval } from './autonomyPolicy/waiters.js';
 import { createLogger } from '../observability/logger.js';
@@ -121,6 +121,60 @@ export interface ApprovalDecisionCtx {
   expectedChangeSetHash?: string;
 }
 
+/**
+ * ADR 0924 P2a (review C1/H2) — the lane a vote arrived on, which is what fixes
+ * its party. The member decide routes (`claimApproval` / `rejectApproval`, and
+ * through them `/reviews`) are always `agency`; only the campaign-ops client
+ * portal passes `client`, after its own per-use link checks. No request body
+ * reaches this value.
+ */
+export type VoteLane =
+  | { party: 'agency' }
+  | { party: 'client'; approverId: string; sentBy: string };
+
+const AGENCY_LANE: VoteLane = { party: 'agency' };
+
+/** The decision context the dispatch table sees: the caller's ctx plus the lane. */
+export type DispatchCtx = ApprovalDecisionCtx & { lane?: VoteLane };
+
+/**
+ * ADR 0924 P2a — per-kind vote hooks, registered by the kind's owner at boot
+ * (the handler-hook discipline: core never imports a feature).
+ */
+export interface ApprovalVoteHooks {
+  /** Review C2 — runs on EVERY vote, before the vote is recorded or counted,
+   *  including a vote that does not complete a quorum. Throws to refuse. */
+  voteCheck?: (approval: PendingApproval, ctx: ApprovalDecisionCtx, outcome: 'approved' | 'rejected', lane: VoteLane) => Promise<void>;
+  /** Review H3 — at completion, which EARLIER counted votes no longer hold.
+   *  Each one returned is dropped from the ledger and audited; the row stays
+   *  pending if the quorum is then no longer met. */
+  staleVotes?: (approval: PendingApproval, votes: ReviewDecision[]) => Promise<Array<{ vote: ReviewDecision; reason: string }>>;
+  /** Review H4 — the per-row SLA expiry, through the kind's own reject.
+   *  Returns true when this call closed the row. */
+  expire?: (approval: PendingApproval) => Promise<boolean>;
+  /** The kind accepts votes on the `client` lane at all. */
+  acceptsClientVotes?: true;
+}
+
+const voteHooks = new Map<string, ApprovalVoteHooks>();
+
+export function registerApprovalVoteHooks(kind: string, hooks: ApprovalVoteHooks): void {
+  voteHooks.set(kind, hooks);
+}
+
+const hooksOf = (a: PendingApproval): ApprovalVoteHooks | undefined => voteHooks.get(a.kind ?? 'run-proposal');
+
+/**
+ * ADR 0924 P2a (review H4) — expire a pending row through its kind when the
+ * kind registered an expiry. `no_kind_expiry` leaves the caller's own expiry
+ * path in charge, unchanged.
+ */
+export async function expireApprovalThroughKind(approval: PendingApproval): Promise<'closed' | 'unchanged' | 'no_kind_expiry'> {
+  const expire = hooksOf(approval)?.expire;
+  if (!expire) return 'no_kind_expiry';
+  return (await expire(approval)) ? 'closed' : 'unchanged';
+}
+
 export interface ApprovalDecisionResult {
   approvalId: string;
   /** `pending` (ADR 0070) ⇒ a quorum vote was recorded but the gate is not yet
@@ -149,12 +203,17 @@ export interface ApprovalDecisionResult {
  * `review:decision` ledger (keyed by approvalId). Returns `finalize` only when
  * THIS outcome's threshold is met — so the caller's existing single-decision
  * finalize (run start / reject) runs exactly once, gated by the same CAS. Absent
- * policy ⇒ `finalize` immediately (the legacy path is byte-unchanged).
+ * policy ⇒ `finalize` immediately (the legacy path is byte-unchanged). That
+ * includes a client-lane vote on a non-quorum change set (the ADR 0924 P1
+ * portal, gated by the kind's `voteCheck` in `castApprovalVote`); the party
+ * checks below apply to quorum rows only.
  */
 async function evaluateQuorum(
+  deps: ApprovalDecisionDeps,
   ctx: ApprovalDecisionCtx,
   approval: PendingApproval,
   outcome: 'approved' | 'rejected',
+  lane: VoteLane,
 ): Promise<{ decision: 'finalize' } | { decision: 'pending'; progress: { requiredApprovals: number; approvals: number; rejections: number } }> {
   const required = approval.policy && approval.policy.requiredApprovals > 1 ? approval.policy.requiredApprovals : 0;
   if (required === 0) return { decision: 'finalize' }; // not a quorum approval — unchanged
@@ -162,6 +221,24 @@ async function evaluateQuorum(
   // Identity is the authenticated caller — never anonymous for a quorum vote.
   const reviewerRef = ctx.decidedBy;
   if (!reviewerRef) throw new OpenwopError('forbidden', 'A quorum approval requires an authenticated approver.', 403, { approvalId: approval.approvalId });
+
+  // ADR 0924 P2a (H1/H2) — on a QUORUM row, a per-party row admits only the
+  // parties it lists, and a client vote counts only on a per-party row that
+  // names the client. This check sits below the `required === 0` return above
+  // ON PURPOSE: a non-quorum row (no policy, or requiredApprovals ≤ 1) keeps the
+  // ADR 0924 P1 portal path, where one client vote finalizes alone. It reaches
+  // here only through `castApprovalVote`, which first requires the kind's
+  // `acceptsClientVotes` and runs its `voteCheck` (link, hash, currency).
+  const perParty = approval.policy?.perParty;
+  if ((perParty && !perParty.some((p) => p.party === lane.party)) || (!perParty && lane.party === 'client')) {
+    throw new OpenwopError('forbidden', 'This approval does not take a vote from this party.', 403, { approvalId: approval.approvalId, reason: 'not_a_party' });
+  }
+  if (lane.party === 'client') {
+    // The client lane's authority is the link, checked by the portal and by the
+    // kind's `voteCheck` before this point; the member eligibility below does not
+    // apply to someone who is not a member.
+    return recordAndTally(deps, ctx, approval, outcome, lane, { countAs: reviewerRef }, required);
+  }
 
   // Eligibility: an explicit approver list, else the approvals:respond scope.
   // INTENTIONAL DIVERGENCE from the runtime-interrupt path
@@ -197,29 +274,68 @@ async function evaluateQuorum(
   const identity = openGate
     ? { countAs: reviewerRef }
     : await consumeVoteIdentity(reviewerRef, gateRefs, gateCtx, ctx.actedFor);
+  return recordAndTally(deps, ctx, approval, outcome, lane, identity, required);
+}
 
-  // Record (dedup per consumed identity) + tally the durable ledger.
+type QuorumStep = { decision: 'finalize' } | { decision: 'pending'; progress: { requiredApprovals: number; approvals: number; rejections: number } };
+
+/** Record one vote (dedup per consumed identity), tally, and decide. Shared by
+ *  both lanes so the client vote lands in the SAME ledger and the SAME threshold
+ *  function as a member vote (review C1). */
+async function recordAndTally(
+  deps: ApprovalDecisionDeps,
+  ctx: ApprovalDecisionCtx,
+  approval: PendingApproval,
+  outcome: 'approved' | 'rejected',
+  lane: VoteLane,
+  identity: { countAs: string; actedBy?: string },
+  required: number,
+): Promise<QuorumStep> {
+  const perParty = approval.policy?.perParty;
   await appendDecision({
     gateId: approval.approvalId,
     reviewerRef: identity.countAs,
-    ...('actedBy' in identity && identity.actedBy ? { actedBy: identity.actedBy } : {}),
+    ...(identity.actedBy ? { actedBy: identity.actedBy } : {}),
     tenantId: approval.tenantId, // ADR 0464 — tenant-scope the row for subject erasure.
     outcome,
+    // ADR 0924 P2a (H2) — the party comes from the lane, never from the body or the ref.
+    ...(perParty ? { party: lane.party } : {}),
     ...(ctx.note ? { reason: ctx.note } : {}),
     decidedAt: new Date().toISOString(),
   });
-  const tally = await tallyDecisions(approval.approvalId);
-  const progress = { requiredApprovals: required, approvals: tally.accepts.length, rejections: tally.rejects.length };
-
   // Single source of truth for the threshold + rejection math (ADR 0070), shared
   // with the runtime-interrupt path. Finalize only when THIS vote's outcome is the
   // one the tally now resolves to (a claim never starts the run on a reject-won
   // gate, and vice-versa).
-  const verdict = evaluateQuorumTally(tally, {
+  const policy = {
     requiredApprovals: required,
     // ADR 0600 §6 — the shared READER (coerce, never refuse; see its docblock).
     rejectionPolicy: readRejectionPolicy(approval.policy?.rejectionPolicy),
-  });
+    ...(perParty ? { perParty } : {}),
+  };
+  let tally = await tallyDecisions(approval.approvalId);
+  let verdict = evaluateQuorumTally(tally, policy);
+
+  // ADR 0924 P2a (review H3) — completing a quorum re-checks every EARLIER vote
+  // live. A vote whose voter has since lost the right to cast it is dropped and
+  // audited; if the quorum is then no longer met the row stays pending.
+  const staleVotes = hooksOf(approval)?.staleVotes;
+  if (outcome === 'approved' && verdict === 'accept' && staleVotes) {
+    const earlier = (await listGateDecisions(approval.approvalId))
+      .filter((d) => d.outcome !== 'rejected' && (d.keyRef ?? d.reviewerRef) !== identity.countAs);
+    const stale = await staleVotes(approval, earlier);
+    for (const s of stale) {
+      await dropDecision(s.vote);
+      auditDecision(deps, ctx, 'approval.vote-dropped', `approval:${approval.approvalId}`, {
+        ...baseAuditPayload(approval), voter: s.vote.reviewerRef, ...(s.vote.party ? { party: s.vote.party } : {}), reason: s.reason,
+      });
+    }
+    if (stale.length > 0) {
+      tally = await tallyDecisions(approval.approvalId);
+      verdict = evaluateQuorumTally(tally, policy);
+    }
+  }
+  const progress = { requiredApprovals: required, approvals: tally.accepts.length, rejections: tally.rejects.length };
   if ((outcome === 'approved' && verdict === 'accept') || (outcome === 'rejected' && verdict === 'reject')) {
     return { decision: 'finalize' };
   }
@@ -299,7 +415,7 @@ export type FeatureApprovalHandler = (
   tenantId: string,
   approvalId: string,
   outcome: 'approved' | 'rejected',
-  opts: { decidedByUserId?: string; note?: string; isSuperadmin?: boolean; expectedDefinitionHash?: string; expectedChangeSetHash?: string; expectedContentHash?: string },
+  opts: { decidedByUserId?: string; note?: string; isSuperadmin?: boolean; expectedDefinitionHash?: string; expectedChangeSetHash?: string; expectedContentHash?: string; clientVoter?: { approverId: string; sentBy: string } },
 ) => Promise<{ approval: PendingApproval; changed: boolean } | null>;
 
 /** One feature kind's decision recipe — everything the shared dispatcher needs to
@@ -314,7 +430,7 @@ export interface FeatureKindDispatch {
   /** Extra handler opts derived from the decision context —
    *  commerce-listing-publish threads `isSuperadmin`; composed-workflow
    *  threads `expectedDefinitionHash` (ADR 0473). */
-  handlerOpts?: (ctx: ApprovalDecisionCtx) => { isSuperadmin?: boolean; expectedDefinitionHash?: string; expectedChangeSetHash?: string; expectedContentHash?: string };
+  handlerOpts?: (ctx: DispatchCtx) => { isSuperadmin?: boolean; expectedDefinitionHash?: string; expectedChangeSetHash?: string; expectedContentHash?: string; clientVoter?: { approverId: string; sentBy: string } };
   /** Extra result fields echoed to the caller (pageId / strategyId / the
    *  composed-workflow runId). Receives the DECIDED row (post-handler), so
    *  fields the handler attaches (`runId`) are visible. */
@@ -408,7 +524,12 @@ const KIND_DISPATCH = {
     getHandler: getCampaignChangeSetApprovalHandler,
     notComposedLabel: 'Campaign operations',
     audit: (a, o) => ({ action: o === 'approved' ? 'campaign-ops.change-set.approved' : 'campaign-ops.change-set.rejected', resource: `campaign-change-set:${a.changeSetId}`, payload: { ...baseAuditPayload(a), orgId: a.orgId, changeSetHash: a.changeSetHash } }),
-    handlerOpts: (ctx) => (ctx.expectedChangeSetHash !== undefined ? { expectedChangeSetHash: ctx.expectedChangeSetHash } : {}),
+    // ADR 0924 P2a — the finalizing vote's lane reaches the handler, so a client
+    // finalize records who the change is written under (the link's sender).
+    handlerOpts: (ctx) => ({
+      ...(ctx.expectedChangeSetHash !== undefined ? { expectedChangeSetHash: ctx.expectedChangeSetHash } : {}),
+      ...(ctx.lane?.party === 'client' ? { clientVoter: { approverId: ctx.lane.approverId, sentBy: ctx.lane.sentBy } } : {}),
+    }),
     result: (a) => ({ changeSetId: a.changeSetId }),
   },
   // ADR 0959 D7 — playbook-rollout: the campaign-playbooks handler re-plans, checks the
@@ -529,7 +650,7 @@ export function kindHasRejectSideEffects(kind: string | undefined): boolean {
 
 async function dispatchFeatureDecision(
   deps: ApprovalDecisionDeps,
-  ctx: ApprovalDecisionCtx,
+  ctx: DispatchCtx,
   approval: PendingApproval,
   outcome: 'approved' | 'rejected',
   dispatch: FeatureKindDispatch,
@@ -575,30 +696,70 @@ async function resumeAwaitingRunsSafely(tenantId: string, approvalId: string, ou
   }
 }
 
+/**
+ * ADR 0924 P2a (review C1) — the ONE host entry point for a vote on a
+ * PendingApproval, whatever lane it arrived on. The member decide routes reach it
+ * through `claimApproval` / `rejectApproval` (always the `agency` lane); the
+ * campaign-ops client portal calls it with the `client` lane. Every vote runs, in
+ * order: the kind owner's eligibility (members only), the kind's per-vote check
+ * (review C2 — on EVERY vote, including one that does not complete a quorum),
+ * then the shared ledger and threshold; only the vote that completes the gate
+ * dispatches the kind's finalize, exactly once, behind its CAS.
+ */
+export async function castApprovalVote(
+  deps: ApprovalDecisionDeps,
+  ctx: ApprovalDecisionCtx,
+  approvalId: string,
+  outcome: 'approved' | 'rejected',
+  lane: VoteLane,
+): Promise<ApprovalDecisionResult> {
+  const approval = await loadPending(ctx.tenantId, approvalId);
+  const hooks = hooksOf(approval);
+  if (lane.party === 'client') {
+    if (!hooks?.acceptsClientVotes) {
+      throw new OpenwopError('forbidden', 'This approval does not take a client vote.', 403, { approvalId, reason: 'not_a_party' });
+    }
+  } else {
+    // KTFULL-B2 — the kind's OWNER states who may decide; enforced BEFORE any
+    // vote records or handler dispatches (403, never a silent resolve). (KTFULL-B2
+    // on the reject lane too: an ineligible second identity must not be able to
+    // BLOCK a publication either.)
+    await assertApprovalEligibility(ctx.tenantId, ctx.decidedBy, approval, {
+      isOperator: ctx.decidedByWildcardOperator === true,
+      isPersonalOwner: ctx.decidedByPersonalOwner === true,
+      ...(ctx.decidedBySpellings ? { spellings: ctx.decidedBySpellings } : {}),
+      ...(ctx.decidedByHumanSession ? { humanSession: true } : {}),
+      outcome,
+    });
+  }
+  if (hooks?.voteCheck) await hooks.voteCheck(approval, ctx, outcome, lane);
+
+  // ADR 0070 — multi-approver gate: a claim or reject is a VOTE. Until the policy
+  // is met the approval stays pending (no handler dispatch / run start); only the
+  // vote that meets it falls through to the single-decision finalize.
+  const quorum = await evaluateQuorum(deps, ctx, approval, outcome, lane);
+  if (quorum.decision === 'pending') {
+    return announceReview(ctx.tenantId, { approvalId: approval.approvalId, status: 'pending', policy: quorum.progress });
+  }
+  const dispatchCtx: DispatchCtx = { ...ctx, lane };
+  return outcome === 'approved' ? finalizeClaim(deps, dispatchCtx, approval) : finalizeReject(deps, dispatchCtx, approval);
+}
+
 export async function claimApproval(
   deps: ApprovalDecisionDeps,
   ctx: ApprovalDecisionCtx,
   approvalId: string,
 ): Promise<ApprovalDecisionResult> {
-  const { tenantId, decidedBy, note } = ctx;
-  const approval = await loadPending(tenantId, approvalId);
-  // KTFULL-B2 — the kind's OWNER states who may decide; enforced BEFORE any
-  // vote records or handler dispatches (403, never a silent resolve).
-  await assertApprovalEligibility(tenantId, decidedBy, approval, {
-    isOperator: ctx.decidedByWildcardOperator === true,
-    isPersonalOwner: ctx.decidedByPersonalOwner === true,
-    ...(ctx.decidedBySpellings ? { spellings: ctx.decidedBySpellings } : {}),
-    ...(ctx.decidedByHumanSession ? { humanSession: true } : {}),
-    outcome: 'approved',
-  });
+  return castApprovalVote(deps, ctx, approvalId, 'approved', AGENCY_LANE);
+}
 
-  // ADR 0070 — multi-approver gate: a claim is a VOTE. Until quorum is met the
-  // approval stays pending (no handler dispatch / run start); only the vote that
-  // meets quorum falls through to the single-decision finalize below.
-  const quorum = await evaluateQuorum(ctx, approval, 'approved');
-  if (quorum.decision === 'pending') {
-    return announceReview(tenantId, { approvalId: approval.approvalId, status: 'pending', policy: quorum.progress });
-  }
+/** The claim's finalize, once the vote (if any) has met the gate. */
+async function finalizeClaim(
+  deps: ApprovalDecisionDeps,
+  ctx: DispatchCtx,
+  approval: PendingApproval,
+): Promise<ApprovalDecisionResult> {
+  const { tenantId, decidedBy, note } = ctx;
 
   // APPR-1 — every feature kind (content-publish, contact-merge, the strategy /
   // PM / environments / commerce-listing / field-sales gates) resolves through
@@ -831,24 +992,16 @@ export async function rejectApproval(
   ctx: ApprovalDecisionCtx,
   approvalId: string,
 ): Promise<ApprovalDecisionResult> {
-  const { tenantId, decidedBy, note } = ctx;
-  const approval = await loadPending(tenantId, approvalId);
-  // KTFULL-B2 — same owner-stated eligibility on the reject lane (an ineligible
-  // second identity must not be able to BLOCK a publication either).
-  await assertApprovalEligibility(tenantId, ctx.decidedBy, approval, {
-    isOperator: ctx.decidedByWildcardOperator === true,
-    isPersonalOwner: ctx.decidedByPersonalOwner === true,
-    ...(ctx.decidedBySpellings ? { spellings: ctx.decidedBySpellings } : {}),
-    ...(ctx.decidedByHumanSession ? { humanSession: true } : {}),
-    outcome: 'rejected',
-  });
+  return castApprovalVote(deps, ctx, approvalId, 'rejected', AGENCY_LANE);
+}
 
-  // ADR 0070 — multi-approver gate: a reject is a VOTE; the gate only fails once
-  // the rejection policy is met.
-  const quorum = await evaluateQuorum(ctx, approval, 'rejected');
-  if (quorum.decision === 'pending') {
-    return announceReview(tenantId, { approvalId: approval.approvalId, status: 'pending', policy: quorum.progress });
-  }
+/** The reject's finalize, once the vote (if any) has met the rejection policy. */
+async function finalizeReject(
+  deps: ApprovalDecisionDeps,
+  ctx: DispatchCtx,
+  approval: PendingApproval,
+): Promise<ApprovalDecisionResult> {
+  const { tenantId, decidedBy, note } = ctx;
 
   // APPR-1 — every feature kind resolves through the ONE dispatch table: the
   // reject IS that kind's decline (page unpublish, merge decline, strategy /

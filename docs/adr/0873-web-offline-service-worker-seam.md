@@ -1,6 +1,6 @@
 # ADR 0873 — Web offline: one generated service worker, declared per feature, network-first
 
-Status: Accepted (P1, P2, D12 and D13 implemented; P3 not started)
+Status: Accepted (P1, P2, D12, D13 and the D6 `onlineOnly` amendment implemented; P3 not started)
 
 Date: 2026-10-11
 
@@ -76,6 +76,9 @@ offline?: {
   runtime?: { match: string; strategy: 'swr' | 'network-first'; maxEntries: number }[];
   /** D12. Absent = 'fail-closed' (the default). */
   entitlement?: 'fail-closed' | 'last-known';
+  /** D6 amendment (2026-11-22). Lazily imported modules that need the network
+   *  anyway; their chunks stay out of the precache. */
+  onlineOnly?: string[];
 }
 ```
 
@@ -195,6 +198,46 @@ so every rule below holds for every feature by construction.
     `OPENWOP_SW_PRECACHE_MAX_KB`, gzip, default 1500. Book AI's areas are about
     400 kB gzip. Raising the budget is a visible, reviewed change; silently
     precaching half the app is not.
+> **Amendment (2026-11-22, Book AI proposal P45) — `onlineOnly`: a lazy import
+> the closure does not follow.** The closure follows every `import()`, so a
+> feature that lazy-loads a shared surface which needs the network anyway pays
+> for it offline. MEASURED by Book AI at `8dc26629`: its Guide lazy-loads the
+> host's `EmbeddedChatPanel` (ADR 1040) and the Author Suite's closure went from
+> 1,671 to 2,686 kB gzip. Moving the panel to the entry was not an option
+> (`HOST_ENTRY_SHARE_CAP` is 1,024 B and it measured 1,110 B).
+>
+> A declaration may now list such modules:
+>
+> ```ts
+> /** Source files, relative to this offline.ts, with their extension. */
+> onlineOnly?: string[];   // e.g. ['../../chat/EmbeddedChatPanel.tsx']
+> ```
+>
+> - **What it does.** `computePrecache` finds the chunk that holds each listed
+>   module and does not follow a DYNAMIC import into it. That chunk, and whatever
+>   only it reaches, stay out of the feature's precache and out of its budget.
+>   A chunk another path still reaches stays in. The mark is per feature: another
+>   declaring feature that reaches the same chunk still precaches it.
+> - **Why a list in the declaration and not an `import()` comment.** D1 says the
+>   seam is data and the generator is the only place behaviour lives. A comment
+>   marker would put offline rules in feature code, would need a source scan the
+>   build does not otherwise do, and bundlers drop comments they do not own.
+> - **It refuses a mark that would be a no-op**, each by name, failing the build:
+>   a path that does not exist (config time); a module no chunk holds; a module in
+>   the shell; and a module still needed offline, because a static import reaches
+>   its chunk or the bundler put it in a chunk with the feature's own modules.
+>   The last one matters most: a silently ignored mark would look like a saving.
+> - **What the user gets offline.** The `import()` of an online-only chunk fails
+>   with no network. Nothing in the host turns that into a notice: the failure
+>   reaches Vite's `vite:preloadError`, and `main.tsx` reloads the tab once for
+>   it. So a feature must render an online-only surface only while online
+>   (`navigator.onLine`, or its own reachability check) and show its own offline
+>   state otherwise. Not measured in a browser here; Book AI's FU-21 owns that
+>   check for the Guide.
+> - **Witness.** `scripts/__tests__/offlineEngine.test.ts`, the `onlineOnly`
+>   block and the shape and `prepareOfflineBuild` cases. No in-tree feature
+>   declares `onlineOnly`, so no real build output changes with this.
+
 - **Hashed assets.** Files under `/assets/` are immutable by name, so the worker
   serves them cache-first from **any retained version**.
 - **Retention.** On activate it keeps the **current and previous** versions and purges
@@ -526,6 +569,7 @@ Not measured in a browser yet.
 | Phase | What landed | Witness |
 |---|---|---|
 | **D13** (2026-10-18) | `parseLegacyCachePurge` + `sw/legacy-purge.js`; the Vite plugin reads `VITE_SW_LEGACY_CACHE_PURGE` at config time and passes it to every `generateServiceWorker` call | `scripts/__tests__/offlineEngine.test.ts` (D13 block: unset is byte-identical with and without a table; parse and refusals; the worker RUN with open tabs deletes exactly the listed caches and reloads each tab once, a second activation reloads nobody, a browser without legacy caches is never reloaded, the engine's caches survive) |
+| **D6 `onlineOnly`** (2026-11-22, P45) | `FeatureOffline.onlineOnly`; `checkOfflineShape` (relative source paths with an extension, no duplicates); `prepareOfflineBuild` refuses a path that does not exist; `computePrecache` skips dynamic imports into the listed modules' chunks and refuses a mark that is absent from the output, in the shell, or still needed offline; the build log names how many chunks a feature left out | `scripts/__tests__/offlineEngine.test.ts` (`onlineOnly` block: the unmarked cost, the reduced closure, the budget on the reduced closure, per-feature scope, four refusals; eight shape refusals; the config-time missing-path refusal) |
 
 ## Open questions
 

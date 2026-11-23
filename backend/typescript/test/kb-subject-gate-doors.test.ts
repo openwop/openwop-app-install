@@ -43,6 +43,8 @@ import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { PREAUTHORIZED_CALLER } from '../src/host/subjectAccess.js';
+/** Issue 6109 — a comments read as an org member (internal threads included). */
+const MEMBER_READ = { ...PREAUTHORIZED_CALLER, audience: 'member' as const };
 import { eraseSubject } from '../src/host/subjectErasure.js';
 import { getAgentProfile, upsertAgentProfile } from '../src/host/agentProfileService.js';
 import { createRosterEntry } from '../src/host/rosterService.js';
@@ -243,23 +245,23 @@ describe('BLOCKER 2 — the doors that turn a user-supplied collectionId into a 
     });
 
     // --- too open: the intruder sees nothing, through every by-id lane too.
-    expect(await listThread(tenantId, orgId, 'kb_collection', collectionId, { subject: intruder })).toBeNull();
-    expect(await getComment(tenantId, orgId, comment.commentId, { subject: intruder })).toBeNull();
+    expect(await listThread(tenantId, orgId, 'kb_collection', collectionId, { subject: intruder, audience: 'member' })).toBeNull();
+    expect(await getComment(tenantId, orgId, comment.commentId, { subject: intruder, audience: 'member' })).toBeNull();
     expect(await updateComment(tenantId, orgId, comment.commentId, { id: intruder }, { status: 'resolved' }, { subject: intruder })).toBeNull();
     expect(await deleteComment(tenantId, orgId, comment.commentId, { userId: intruder, isAdmin: false }, { subject: intruder })).toBe(false);
 
     // No oracle: a comment the intruder cannot see and a comment that does not exist
     // answer IDENTICALLY. Before D1's ordering rule, `updateComment` threw 403 here
     // ("exists, not yours") and a ghost id returned null — a usable existence probe.
-    expect(await getComment(tenantId, orgId, 'cmt:does-not-exist', { subject: intruder })).toBeNull();
+    expect(await getComment(tenantId, orgId, 'cmt:does-not-exist', { subject: intruder, audience: 'member' })).toBeNull();
     expect(await updateComment(tenantId, orgId, 'cmt:does-not-exist', { id: intruder }, { status: 'resolved' }, { subject: intruder })).toBeNull();
 
     // --- too closed (the CMWF-2 direction): the bound MEMBER still works.
-    expect((await listThread(tenantId, orgId, 'kb_collection', collectionId, { subject: member }))?.length).toBe(1);
-    expect(await getComment(tenantId, orgId, comment.commentId, { subject: member })).not.toBeNull();
+    expect((await listThread(tenantId, orgId, 'kb_collection', collectionId, { subject: member, audience: 'member' }))?.length).toBe(1);
+    expect(await getComment(tenantId, orgId, comment.commentId, { subject: member, audience: 'member' })).not.toBeNull();
 
     // --- moderation: an org admin who is NOT a project member keeps the delete.
-    expect(await deleteComment(tenantId, orgId, comment.commentId, { userId: 'someone-else', isAdmin: true }, PREAUTHORIZED_CALLER)).toBe(true);
+    expect(await deleteComment(tenantId, orgId, comment.commentId, { userId: 'someone-else', isAdmin: true }, MEMBER_READ)).toBe(true);
   });
 
   /**

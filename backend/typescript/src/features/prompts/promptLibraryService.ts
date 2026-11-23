@@ -24,6 +24,7 @@ import { semverCompare, type PromptKind, type PromptTemplate } from '../../host/
 import { getPromptsHostConfig } from '../../host/promptHostConfig.js';
 import { subjectKeyForms, ERASED } from '../../host/subjectErasureRedaction.js';
 import type { SubjectEraseReport } from '../../host/subjectErasure.js';
+import { declarePiiFields } from '../../host/dataClassification.js';
 
 export type PromptVisibility = 'private' | 'org' | 'shared';
 
@@ -79,6 +80,8 @@ const bodies = new DurableCollection<EntryBodyVersion>(
   undefined,
   (b) => b.tenantId,
 );
+// CHAN-F19 follow-up C (ADR 0464 §9) — a private prompt body; deleted with the subject's private entry by eraseSubjectPromptEntries.
+declarePiiFields('prompts:entry-version', ['text', 'variables'], { maskGloballyByFieldName: false });
 
 const MAX_NAME = 200;
 const MAX_DESC = 2_000;

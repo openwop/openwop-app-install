@@ -75,6 +75,17 @@ tool-allowlist** so publishing is chat-driven (ADR 0058) — no new UI, no paral
 | Draft / unsent only | `createDraftPage` never publishes; `createDraftCampaign` never sends | Fail-safe: AI-generated content needs a human gate before going live; honours each feature's own published/send boundary. |
 | Tenant isolation | The write methods take `tenantId` from `scope` (closure-baked), only `orgId` from args | The cross-tenant guard — a run can never write into another tenant. Matches every existing write surface (`documents`, `campaign-orchestration`). |
 | Replay/fork idempotency | Deterministic ids keyed on `runId:nodeId` — CMS via `createPage`'s `pageId` short-circuit; email via new optional `templateId`/`campaignId` short-circuits | A re-run or `:fork` from before the node reuses the existing entity instead of duplicating it (the `feature.documents.nodes` idempotency precedent). Nodes are `role:"action"`. |
+
+> **CORRECTED 2026-11-19 (CMS2WF-6 / CCH-FORK-1) — the idempotency row above was
+> false for a `:fork`.** A fork mints a new runId, so a key built on `runId:nodeId`
+> is a different key, and the fork made a second draft page (`createPage`
+> auto-suffixes the slug, so nothing refused it). The email node was fixed first,
+> by ADR 0655 D7 (EMWF-10: node + brief). The landing-page node and the three ADR
+> 0166 document nodes now key on `<nodeId>:<briefId>:<hash of what is written>`
+> (`publishIdemBase`, node pack 1.20.0): a fork or retry of the same approved
+> draft reuses the entity, and a different approved draft of the same brief gets
+> its own. Witnesses: the `CCH-FORK-1` cases in `campaign-channels-publish.test.ts`
+> and `campaign-channels-publish-docs.test.ts`, which were `it.fails` until now.
 | Email sequence → entities | One template + one campaign **per step** (not one campaign over the first template) | The `Campaign` model has a single `templateId`; per-step avoids orphaning steps 2..N and keeps each independently sendable. |
 | `createdBy` provenance | `scope.runId` (not `args.createdBy`) | Attribution is stamped by the run, not forgeable by a node arg. |
 | Node vs. surface | The channel→entity **mapping** lives in the publish node; the **write** lives in the surface | The mapping is campaign-channel-specific (draft shapes are ADR 0157's); the write is generic CMS/email. Clean seam. |
@@ -112,6 +123,26 @@ through the existing CMS/email pages).
    is the ADR 0058 pattern; a button could be added later but isn't the seam.
 
 ## Consequences
+
+> **CORRECTED 2026-11-19 (user decision: "Yes, create drafts") — publishing now
+> follows approval IN THE CHANNEL CHAINS, not only in chat.** Until this date the
+> publish nodes were agent tools wired into no chain (`WF-EM-16`), so approving a
+> channel draft in a campaign run kept the draft and created nothing. The five
+> `campaign-studio.channel.*` chains (`core.openwop.workflows.campaign-channels`
+> 1.5.0) are now generate → approve → create, with the create step on the approve
+> leg only: a rejected `core.approvalGate` fails (RFC 0223) and a skipped channel
+> never reaches the gate. Landing page → `publish-landing-page` (a draft CMS page),
+> email sequence → `publish-email-sequence` (draft campaigns, never sent), ad
+> variants → `publish-ad-variants` (a PAUSED campaign when the run sets an ad
+> account, else the ADR 0166 draft document; ADR 0167), social posts →
+> `publish-social-posts` (a draft document). Creative briefs keep
+> `create-creative-briefs` (ADR 1020 D14), which already creates the managed briefs
+> after the approval; `publish-creative-briefs` is not added beside it, so the
+> briefs are not created twice. Consequence: through the publish nodes' existing
+> `nodeFeatureRequirements` declarations, the landing-page chain now requires `cms`,
+> the email chain `email` and the social chain `documents` (optional for ad
+> variants, whose document handoff is its fallback). That is expected. Witness:
+> `campaign-channels-publish-after-approval.test.ts`.
 
 - A campaign's drafts become real CMS pages + email campaigns in one chat turn — closing
   the ADR 0157/0158 last mile without a new surface.

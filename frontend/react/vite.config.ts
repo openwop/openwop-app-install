@@ -248,7 +248,8 @@ export default defineConfig(({ mode }) => {
               },
             });
             for (const s of result.sizes) {
-              console.log(`[sw] ${s.id}: precache ${s.gzipKb} kB gzip over ${s.chunks} files (budget ${budgetKb} kB)`);
+              const skipped = s.onlineOnlyChunks > 0 ? `, ${s.onlineOnlyChunks} online-only chunk(s) left out` : '';
+              console.log(`[sw] ${s.id}: precache ${s.gzipKb} kB gzip over ${s.chunks} files (budget ${budgetKb} kB)${skipped}`);
             }
             if (result.errors.length > 0) this.error(`[sw] ADR 0873 precache refused:\n  - ${result.errors.join('\n  - ')}`);
             const table = buildOfflineTable({ features: offlineFeatures, neverCache, precache: result.precache, version: result.version });

@@ -42,6 +42,16 @@ approve **only when** all of these hold:
    keys and agent identities never get the escape.
 2. **An admin:** the decider holds an admin management scope in this workspace.
 3. **Not a quorum gate:** the gate is not a quorum gate (ADR 0899). Quorum rules are unchanged.
+
+   > **CORRECTION (2026-11-19, user decision, ADR 0924 Q4):** one quorum case is
+   > allowed. Under the campaign-ops `client_and_agency` policy (ADR 0924 P2b), a
+   > sole agency approver may cast the **agency** vote on a change they proposed.
+   > Conditions: their own signed-in session (condition 1), never for a change
+   > that arrived via MCP (condition 4), and audited as `sole_admin` (D2). The
+   > client's vote is the independent second person, so the two-person rule still
+   > holds for the change as a whole. No other quorum gate gets this escape, and
+   > no policy or preset can widen it. Built in ADR 0924 P2b; ADR 0942 D10.2
+   > carries the matching note.
 4. **Not over MCP:** the run does not carry the MCP origin (ADR 0942 D10.3), and the vote does not
    arrive over the MCP lane. D10.3's "never unattended over MCP" floor is untouched.
 5. **Not a branch fork:** the run is not a branch fork under `forkPosture:'attended'` (D10.4).

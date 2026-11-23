@@ -9,6 +9,7 @@
 import { createHash } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import type { ChannelLane } from '../connections/messagingOutbound.js';
+import { declarePiiFields } from '../../host/dataClassification.js';
 
 export const laneKeyOf = (lane: ChannelLane): string => (lane.kind === 'relay' ? `relay:${lane.relayId}` : `conn:${lane.connectionId}`);
 const sha = (s: string): string => createHash('sha256').update(s).digest('hex');
@@ -163,6 +164,8 @@ export const threadKeyOf = (laneKey: string, chatId: string, ownerUserId: string
  *  or branch them, and keeps them out of conversation search). Keyed by session. */
 interface ConversationMarker { key: string; tenantId: string; conversationId: string; threadKey: string }
 const conversationMarkers = new DurableCollection<ConversationMarker>('channel-ingress:conversation', (m) => m.key, undefined, (m) => m.tenantId);
+// CHAN-F19 follow-up C (ADR 0464 §9) — pseudonymous: a thread hash and the subject's chat; deleted with the subject's thread by eraseChannelIngressSubject.
+declarePiiFields('channel-ingress:conversation', ['conversationId', 'threadKey'], { maskGloballyByFieldName: false });
 export async function markChannelConversation(tenantId: string, conversationId: string, threadKey: string): Promise<void> {
   const { key } = await readCompound(conversationMarkers, [tenantId, conversationId]);
   await conversationMarkers.put({ key, tenantId, conversationId, threadKey });

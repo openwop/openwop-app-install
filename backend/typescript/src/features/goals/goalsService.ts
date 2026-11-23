@@ -27,6 +27,7 @@ import {
   type GoalState,
   type GoalVerdict,
 } from './types.js';
+import { declarePiiFields } from '../../host/dataClassification.js';
 
 // KT-D1 (account-deletion cascade): the tenant lives NESTED at `owner.tenant`,
 // invisible to the generic purge's top-level-`tenantId` probe — `tenantOf`
@@ -37,6 +38,8 @@ const goals = new DurableCollection<GoalRow>(
   undefined,
   (g) => g.owner.tenant,
 );
+// CHAN-F19 follow-up C (ADR 0464 §9) — the owner principal and the free-text objective; eraseGoalsForSubject deletes the subject's goals.
+declarePiiFields('goals', ['owner.principal', 'objective'], { maskGloballyByFieldName: false });
 
 const nowIso = (): string => new Date().toISOString();
 

@@ -26,6 +26,13 @@ import { subjectKeyForms } from './subjectErasureRedaction.js';
 
 export type DecisionOutcome = 'approved' | 'rejected' | 'override_approved';
 
+/** ADR 0924 P2a (review H2) — the party a vote was cast for on a per-party
+ *  quorum row. Assigned by the host from the LANE the vote arrived on (the
+ *  member decide routes write `agency`, the client portal writes `client`);
+ *  no request body sets it, and it is never read back from the spelling of
+ *  `reviewerRef` (erasure rewrites that to `[erased]`). */
+export type VoteParty = 'agency' | 'client';
+
 /** ADR 0464 — the sentinel an anonymized subject identifier / redacted free-text
  *  field is replaced with. Shared with the approvals redactor registry. */
 export const ERASED_REF = '[erased]';
@@ -56,6 +63,9 @@ export interface ReviewDecision {
    *  `reviewerRef` exactly as before). See `keyOf` + `eraseReviewDecisionsForSubject`. */
   keyRef?: string;
   outcome: DecisionOutcome;
+  /** ADR 0924 P2a (H2) — set on every vote of a per-party quorum row. Erasure
+   *  spreads the row, so it keeps this field. */
+  party?: VoteParty;
   reason?: string;
   decidedAt: string;
 }
@@ -86,6 +96,10 @@ export interface DecisionTally {
   accepts: string[];
   /** reviewerRefs that rejected. */
   rejects: string[];
+  /** ADR 0924 P2a — the accepts again, by the party recorded ON the vote. A
+   *  vote with no `party` (every row of a non-per-party gate, and legacy rows)
+   *  counts toward neither party. */
+  acceptsByParty?: Record<VoteParty, string[]>;
 }
 
 /** Rejection semantics for a quorum gate (ADR 0070). `any` (the default) — a
@@ -184,6 +198,10 @@ export function readRejectionPolicy(value: unknown): RejectionPolicy {
 export interface QuorumPolicy {
   requiredApprovals: number;
   rejectionPolicy?: RejectionPolicy;
+  /** ADR 0924 P2a / ADR 0942 D9 (as corrected 2026-10-19) — per-party minimums.
+   *  Present ⇒ quorum also needs `min` accepts recorded for EACH listed party,
+   *  so two agency votes can never stand in for "one client and one agency". */
+  perParty?: ReadonlyArray<{ party: VoteParty; min: number }>;
 }
 
 /** The verdict for a gate from its durable tally: `accept` (quorum met),
@@ -205,7 +223,12 @@ export type QuorumVerdict = 'accept' | 'reject' | 'pending';
  */
 export function evaluateQuorumTally(tally: DecisionTally, policy: QuorumPolicy): QuorumVerdict {
   const required = policy.requiredApprovals;
-  if (tally.accepts.length >= required) return 'accept';
+  // ADR 0924 P2a (review H1) — a per-party gate is met only when every listed
+  // party has its own minimum. The bare count alone is the hazard ADR 0942 D9's
+  // 2026-10-19 correction forbids.
+  const partiesMet = !policy.perParty
+    || policy.perParty.every((p) => (tally.acceptsByParty?.[p.party]?.length ?? 0) >= p.min);
+  if (tally.accepts.length >= required && partiesMet) return 'accept';
   const rejectThreshold = policy.rejectionPolicy === 'majority' ? Math.floor(required / 2) + 1 : 1;
   if (tally.rejects.length >= rejectThreshold) return 'reject';
   return 'pending';
@@ -216,11 +239,28 @@ export async function tallyDecisions(gateId: string): Promise<DecisionTally> {
   const rows = await decisions.listByPrefix(`${gateId}:`);
   const accepts: string[] = [];
   const rejects: string[] = [];
+  const acceptsByParty: Record<VoteParty, string[]> = { agency: [], client: [] };
   for (const r of rows) {
     if (r.outcome === 'rejected') rejects.push(r.reviewerRef);
-    else accepts.push(r.reviewerRef); // approved | override_approved
+    else {
+      accepts.push(r.reviewerRef); // approved | override_approved
+      if (r.party === 'agency' || r.party === 'client') acceptsByParty[r.party].push(r.reviewerRef);
+    }
   }
-  return { accepts, rejects };
+  return { accepts, rejects, acceptsByParty };
+}
+
+/** ADR 0924 P2a (review H3) — a gate's recorded votes, for the re-check at
+ *  completion. */
+export async function listGateDecisions(gateId: string): Promise<ReviewDecision[]> {
+  return decisions.listByPrefix(`${gateId}:`);
+}
+
+/** ADR 0924 P2a (review H3) — drop ONE recorded vote that no longer holds (its
+ *  voter lost eligibility between their vote and completion). Deleted at its
+ *  real key, so an erasure-anonymized row is found too. */
+export async function dropDecision(d: ReviewDecision): Promise<void> {
+  await decisions.delete(keyOf(d));
 }
 
 /** Remove a gate's decisions once it has resolved (the ledger is per-gate-lifetime).

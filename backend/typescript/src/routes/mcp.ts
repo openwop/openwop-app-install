@@ -26,7 +26,7 @@ import { dispatchCurrent } from '../host/mcpCurrentCodec.js';
 import { MCP_ERR_UNSUPPORTED_VERSION, MCP_PROTOCOL_VERSION_HEADER, MCP_SUPPORTED_VERSIONS, selectMcpCodec } from '../host/mcpProfile.js';
 import { parseRequest, rpcError, RPC_INTERNAL_ERROR } from '../host/mcpJsonRpc.js';
 import { enforceMcpPrincipalRateLimit } from '../middleware/rateLimit.js';
-import { sendError } from '../middleware/errorEnvelope.js';
+import { sendError, sendErrorBody } from '../middleware/errorEnvelope.js';
 import { vendorPath } from '../middleware/protocolVersion.js';
 import { anonymousActorAdvertised } from '../host/anonymousActor.js';
 import { mcpCallerFor } from '../host/mcpCaller.js';
@@ -110,7 +110,7 @@ async function handleMcpRequest(req: Request, res: Response, deps: Deps): Promis
       // the ADR's audit requirement is about MCP DECISIONS, which presuppose a
       // principal. Every branch below has one and is audited.
       log.warn('mcp_unauthenticated_rejected', { path: req.path });
-      res.status(401).json({ error: 'unauthorized', message: 'MCP requires an authenticated principal.' });
+      sendErrorBody(res, 401, { error: 'unauthorized', message: 'MCP requires an authenticated principal.' });
       return;
     }
     // RFC 0153 §E (H43, MEASURED on prod 2026-08-17): "an anonymous MCP

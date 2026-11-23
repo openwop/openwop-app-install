@@ -151,15 +151,41 @@ let MUTEX_ALLOWLIST: ReadonlySet<string> = HOST_MUTEX_ALLOWLIST;
 let DECLARED_MUTEX_CALLERS: readonly string[] = [];
 beforeAll(async () => {
   const declared = (await collectFeatureRatchetDeclarations())
+    // TST-OAD-1 pins the IN-TREE half only. An adopter package (`adopter/features/<x>`)
+    // declares through the same ADR 1031 P2 seam, and its `ratchetDeclarations.ts` IS its
+    // reviewed list, reviewed in the adopter's own repo. Pinning it here would mean an
+    // adopter could pass only by editing this upstream file, which is the exact coupling
+    // ADR 1031 P2 removed. Adopter entries still enter MUTEX_ALLOWLIST, so the route ban
+    // and the no-ghost (stale) case below hold for them too.
     .flatMap((d) => (d.declarations.fireOnceMutexCallers ?? []).map((f) => `${d.srcRel}/${f}`));
-  DECLARED_MUTEX_CALLERS = [...declared].sort();
+  DECLARED_MUTEX_CALLERS = declared.filter((r) => !isAdopterPath(r)).sort();
   MUTEX_ALLOWLIST = new Set([...HOST_MUTEX_ALLOWLIST, ...declared]);
 });
 
-/** Owner decision TST-OAD-1 (2026-11-18): the feature-declared half of the allowlist is
- *  pinned here, so it is NO-GROWTH like the host list. A feature's `fireOnceMutexCallers`
- *  entry still lives in its package, but it cannot land without an edit to this list,
- *  i.e. a reviewed change to this tripwire. MEASURED at 0ca7f76944: no feature declares one. */
+/** ADR 1031 — an adopter package lives under `src/adopter/`, which the bundle builder
+ *  refuses to ship, so upstream never authors (or reviews) anything there. */
+function isAdopterPath(rel: string): boolean {
+  return rel.startsWith('adopter/');
+}
+
+/** Owner decision TST-OAD-1 (2026-11-18): the IN-TREE feature-declared half of the
+ *  allowlist is pinned here, so it is NO-GROWTH like the host list. A first-party
+ *  feature's `fireOnceMutexCallers` entry still lives in its package, but it cannot land
+ *  without an edit to this list, i.e. a reviewed change to this tripwire. MEASURED at
+ *  0ca7f76944: no first-party feature declares one.
+ *
+ *  Scope correction (2026-11-22, found by the KickTodo adopter's v0.17.0 sync gate): the
+ *  pin was measured in this repo, where no adopter exists, and it also caught adopter
+ *  declarations, so `kicktodo-metrics/verifierSampleDaemon.ts` (declared via ADR 1031 P2)
+ *  turned every adopter gate red with no adopter-side fix. Adopter declarations are now
+ *  excluded from this pin; see `isAdopterPath`.
+ *
+ *  Sabotage witnesses (each must turn this file red):
+ *   - declare `fireOnceMutexCallers: ['x.ts']` in any `src/features/<f>/ratchetDeclarations.ts`
+ *     → this pin names `features/<f>/x.ts`;
+ *   - add `storage.claimOnce(` to an undeclared in-tree module → "only the allowlisted
+ *     daemons call the fire-once mutex" names it;
+ *   - an ADOPTER declaration for a file that does not call the mutex → the no-ghost case. */
 const REVIEWED_DECLARED_MUTEX_CALLERS: readonly string[] = [];
 
 describe('ADR 0549 — idempotency lane separation', () => {
@@ -188,11 +214,12 @@ describe('ADR 0549 — idempotency lane separation', () => {
     expect(unexpected).toEqual([]);
   });
 
-  it('feature-declared mutex callers are pinned (they cannot grow without an edit here)', () => {
+  it('in-tree feature-declared mutex callers are pinned (they cannot grow without an edit here)', () => {
     expect(
       DECLARED_MUTEX_CALLERS,
-      'a feature package declared a new fireOnceMutexCallers entry. Add it to ' +
-        'REVIEWED_DECLARED_MUTEX_CALLERS in this file with the reason in review (TST-OAD-1).',
+      'an in-tree feature package declared a new fireOnceMutexCallers entry. Add it to ' +
+        'REVIEWED_DECLARED_MUTEX_CALLERS in this file with the reason in review (TST-OAD-1). ' +
+        'Adopter (src/adopter/) declarations are not pinned here.',
     ).toEqual(REVIEWED_DECLARED_MUTEX_CALLERS);
   });
 

@@ -17,6 +17,7 @@ import { registerEntitiesAgentTools } from './agentTools.js';
 import { registerEntitiesErasure } from './erasure.js';
 import { registerEntityContentResolvers } from './publicRead.js';
 import { buildEntitiesSurface } from './surface.js';
+import { startSystemIndexSweep } from './systemIndexSweep.js';
 
 export const entitiesFeature: BackendFeature = {
   id: 'entities',
@@ -33,6 +34,7 @@ export const entitiesFeature: BackendFeature = {
     // emit crawler HTML + JSON-LD for referenced entity content (features never
     // import each other; the registry mediates).
     registerEntityContentResolvers();
+    startSystemIndexSweep(); // ADR 1155 P3a — the one upkeep sweep for every declared index
     // ADR 0847 D2 — a project's entities namespace goes with the project (the ADR 0839
     // D2 seam: purged BEFORE the project row, a throw keeps the project). Counted in
     // the project's delete preview.

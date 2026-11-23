@@ -13,6 +13,11 @@
  * holds 'a refresh that never settles…') is removed; the in-request await
  * loses its `SHELL_REFRESH_AWAIT_MS` deadline (the BOUNDED-wait case) or
  * stops awaiting (the IN-REQUEST case); the default TTL is not 60 s.
+ * #5840 (between TTL refreshes the cached shell's own bundle is HEAD-checked):
+ * red when a bundle that answers `text/html` does not force a refresh, the forced
+ * refresh is not cache-busted (`cb=`), the check runs more often than every
+ * `SHELL_BUNDLE_CHECK_MS` or a live bundle forces a refresh, an unreachable
+ * bundle check forces one, or the check stops running at all.
  * Honest ceiling: the bounded-wait case measures a real ~1 s deadline.
  */
 import http from 'node:http';
@@ -121,7 +126,8 @@ describe('ADR 0384 — shell-from-URL', () => {
     process.env.OPENWOP_SPA_SHELL_URL = SHELL_URL;
     process.env.OPENWOP_SPA_SHELL_TTL_S = '1';
     expect((await humanGet('/')).body).toContain('SHELL v1');
-    shellStatus = 500; // origin breaks
+    shellStatus = 500; // origin breaks — and serves an HTML error page, so a
+    shellBody = '<!doctype html><html><body>HOSTING 500 PAGE</body></html>'; // cached 5xx would show
     lapseTtl(); // TTL expires
     const stale = await humanGet('/'); // the refresh runs (awaited) and fails
     expect(shellHits).toBe(2);
@@ -133,14 +139,19 @@ describe('ADR 0384 — shell-from-URL', () => {
   it('first fetch failure yields an honest 404 (no last-good to fall back to)', async () => {
     process.env.OPENWOP_SPA_SHELL_URL = SHELL_URL;
     shellStatus = 500;
-    expect((await humanGet('/')).status).toBe(404);
+    const res = await humanGet('/');
+    expect(res.status).toBe(404);
+    expect(shellHits, 'the 404 follows a real fetch, not an unconfigured shell').toBe(1);
+    expect(res.body).not.toContain('SHELL v1'); // the 5xx body was not served
   });
 
   it('never caches a non-HTML body (error page defense)', async () => {
     process.env.OPENWOP_SPA_SHELL_URL = SHELL_URL;
-    shellBody = '{"error":"not_found"}';
+    shellBody = '{"hostingErrorPage":"json-not-html"}';
     const res = await humanGet('/p/x');
     expect(res.status).toBe(404); // rejected → no shell → honest 404
+    expect(shellHits, 'the body was fetched and refused, not never asked for').toBe(1);
+    expect(res.body).not.toContain('hostingErrorPage');
   });
 });
 
@@ -318,6 +329,7 @@ describe('ADR 0384 — a starved refresh must not wedge the cache (2026-08-08)',
     assetsDrop = true;
     advance(11_000);
     expect((await humanGet('/')).body).toContain('SHELL v1');
+    expect(assetHits, 'the bundle check ran (and could not reach the origin)').toBe(1);
     expect(shellHits).toBe(1);
   });
 });

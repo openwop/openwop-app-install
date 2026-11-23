@@ -113,6 +113,7 @@ describe('ADR 0873 D1 — the declaration shape is checked strictly', () => {
     expect(checkOfflineShape('books', {
       navigations: ['/books'], precache: ['/bookai/mark.svg'],
       runtime: [{ match: '/bookai/fonts/**', strategy: 'swr', maxEntries: 20 }], entitlement: 'last-known',
+      onlineOnly: ['../../chat/EmbeddedChatPanel.tsx', './Heavy.ts'],
     })).toEqual([]);
   });
 
@@ -128,6 +129,14 @@ describe('ADR 0873 D1 — the declaration shape is checked strictly', () => {
     [{ navigations: ['/books'], runtime: [{ match: '/x/**', strategy: 'swr', maxEntries: 0 }] }, 'maxEntries'],
     [{ navigations: ['/books'], entitlement: 'always' }, 'entitlement'],
     [{ navigations: ['/books'], fetch: () => null }, 'unknown key'],
+    [{ navigations: ['/books'], onlineOnly: [] }, 'non-empty'],
+    [{ navigations: ['/books'], onlineOnly: 'chat/Panel.tsx' }, 'non-empty array'],
+    [{ navigations: ['/books'], onlineOnly: ['chat/Panel.tsx'] }, 'relative to offline.ts'],
+    [{ navigations: ['/books'], onlineOnly: ['/abs/chat/Panel.tsx'] }, 'relative to offline.ts'],
+    [{ navigations: ['/books'], onlineOnly: ['../../chat/Panel.js?x'] }, 'relative to offline.ts'],
+    [{ navigations: ['/books'], onlineOnly: ['../../chat/Panel'] }, 'with its extension'],
+    [{ navigations: ['/books'], onlineOnly: ['../../chat/*.tsx'] }, 'relative to offline.ts'],
+    [{ navigations: ['/books'], onlineOnly: ['./A.tsx', './A.tsx'] }, 'listed twice'],
   ])('refuses %j', (offline, message) => {
     expect(checkOfflineShape('f', offline).join('\n')).toContain(message);
   });
@@ -206,6 +215,21 @@ describe('ADR 0873 — prepareOfflineBuild reads only what the composed registry
     })).rejects.toThrow(/cannot read the D4 hosting config/);
   });
 
+  it('onlineOnly: a path that exists beside the declaration passes; a missing one fails the build by name', async () => {
+    const { root, registryPath } = fixtureRepo(true);
+    mkdirSync(join(root, 'src', 'chat'), { recursive: true });
+    writeFileSync(join(root, 'src', 'chat', 'Panel.tsx'), '');
+    const withOnlineOnly = (onlineOnly: string[]) => prepareOfflineBuild({
+      registrySource: "import { booksFeature } from './books/routes.js';\n", registryPath,
+      importModule: async () => ({ offline: { navigations: ['/books'], onlineOnly } }),
+      hostingConfigPath: join(root, 'firebase.json'), startUrl: '/books',
+    });
+    const ok = await withOnlineOnly(['../../chat/Panel.tsx']);
+    expect(ok.features[0]!.offline.onlineOnly).toEqual(['../../chat/Panel.tsx']);
+    await expect(withOnlineOnly(['../../chat/Panel.tsx', '../../chat/Gone.tsx']))
+      .rejects.toThrow(/books: onlineOnly \.\.\/\.\.\/chat\/Gone\.tsx does not exist/);
+  });
+
   it('fails the build on the default start_url "/" once anything declares', async () => {
     const { root, registryPath } = fixtureRepo(true);
     await expect(prepareOfflineBuild({
@@ -276,6 +300,93 @@ describe('ADR 0873 D6 — the precache is the shell plus each feature\'s full ch
     changed['index.html'] = { type: 'asset', fileName: 'index.html', source: '<html>rebranded</html>' };
     expect(computePrecache({ bundle: changed, features: [BOOKS], readPublicFile }).version).not.toBe(a);
     expect(computePrecache({ bundle: fixtureBundle(), features: [BOOKS], readPublicFile }).version).toBe(a);
+  });
+});
+
+describe('ADR 0873 D6 — onlineOnly keeps a lazy chunk that needs the network out of the precache', () => {
+  // Books-C lazily imports the editor (must open offline) and a chat panel (needs
+  // the network anyway). The panel statically imports its own runtime and lazily
+  // a picker; both are reachable only through the panel.
+  function chatBundle(): Record<string, BundleItem> {
+    const b = fixtureBundle();
+    b['assets/Books-C.js']!.dynamicImports = ['assets/Editor-E.js', 'assets/Chat-P.js'];
+    b['assets/Chat-P.js'] = chunk('assets/Chat-P.js', {
+      moduleIds: ['/app/src/chat/Panel.tsx?v=1', '/app/src/chat/feed.ts'],
+      imports: ['assets/vendor-B.js', 'assets/shared-D.js', 'assets/chatRuntime-R.js'], dynamicImports: ['assets/Picker-Q.js'],
+      viteMetadata: { importedCss: new Set(['assets/Chat-P.css']), importedAssets: new Set() },
+    });
+    b['assets/Chat-P.css'] = { type: 'asset', fileName: 'assets/Chat-P.css', source: '.c{}' };
+    b['assets/chatRuntime-R.js'] = chunk('assets/chatRuntime-R.js', {
+      // Poorly compressible, so the gzip sizes differ by whole kB, not by rounding.
+      code: Array.from({ length: 3000 }, (_, i) => ((i * 2654435761) >>> 0).toString(36)).join(''),
+    });
+    b['assets/Picker-Q.js'] = chunk('assets/Picker-Q.js');
+    return b;
+  }
+  const withOnlineOnly = (onlineOnly: string[]) => ({ ...BOOKS, offline: { ...BOOKS.offline, onlineOnly } });
+  const CHAT = ['/assets/Chat-P.css', '/assets/Chat-P.js', '/assets/Picker-Q.js', '/assets/chatRuntime-R.js'];
+
+  it('without the mark the whole chat graph is precached (the cost being removed)', () => {
+    const r = computePrecache({ bundle: chatBundle(), features: [BOOKS], readPublicFile });
+    expect(r.errors).toEqual([]);
+    for (const f of CHAT) expect(r.precache).toContain(f);
+    expect(r.sizes[0]).toMatchObject({ chunks: 8, onlineOnlyChunks: 0 });
+  });
+
+  it('with the mark the chunk and what only it reaches are left out; the other lazy import and shared chunks stay', () => {
+    const r = computePrecache({ bundle: chatBundle(), features: [withOnlineOnly(['../../chat/Panel.tsx'])], readPublicFile });
+    expect(r.errors).toEqual([]);
+    expect(r.precache).toEqual([
+      SHELL_URL,
+      '/assets/Books-C.css', '/assets/Books-C.js', '/assets/Editor-E.js',
+      '/assets/index-A.css', '/assets/index-A.js', '/assets/shared-D.js', '/assets/vendor-B.js',
+      '/bookai/mark.svg',
+    ]);
+    expect(r.sizes[0]).toMatchObject({ chunks: 4, onlineOnlyChunks: 1 });
+  });
+
+  it('the budget counts the reduced closure, and the version follows it', () => {
+    const full = computePrecache({ bundle: chatBundle(), features: [BOOKS], readPublicFile });
+    const cut = computePrecache({ bundle: chatBundle(), features: [withOnlineOnly(['../../chat/Panel.tsx'])], readPublicFile });
+    expect(cut.sizes[0]!.gzipKb).toBeLessThan(full.sizes[0]!.gzipKb);
+    const between = (cut.sizes[0]!.gzipKb + full.sizes[0]!.gzipKb) / 2;
+    expect(computePrecache({ bundle: chatBundle(), features: [BOOKS], readPublicFile, budgetKb: between }).errors.join()).toContain('over the');
+    expect(computePrecache({ bundle: chatBundle(), features: [withOnlineOnly(['../../chat/Panel.tsx'])], readPublicFile, budgetKb: between }).errors).toEqual([]);
+    expect(cut.version).not.toBe(full.version);
+  });
+
+  it('a mark applies only to the feature that declares it', () => {
+    const b = chatBundle();
+    b['assets/Crm-X.js']!.dynamicImports = ['assets/Chat-P.js'];
+    const crm = { id: 'crm', dir: '/app/src/features/crm', offline: { navigations: ['/crm'] } };
+    const r = computePrecache({ bundle: b, features: [withOnlineOnly(['../../chat/Panel.tsx']), crm], readPublicFile });
+    expect(r.errors).toEqual([]);
+    for (const f of CHAT) expect(r.precache).toContain(f);
+    expect(r.sizes.map((s) => [s.id, s.onlineOnlyChunks])).toEqual([['books', 1], ['crm', 0]]);
+  });
+
+  it('refuses a marked module that no chunk holds', () => {
+    const r = computePrecache({ bundle: chatBundle(), features: [withOnlineOnly(['../../chat/Missing.tsx'])], readPublicFile });
+    expect(r.errors.join()).toContain('books: onlineOnly ../../chat/Missing.tsx is not in the build output');
+  });
+
+  it('refuses a marked module that a static import still reaches', () => {
+    const b = chatBundle();
+    b['assets/Books-C.js']!.imports = [...b['assets/Books-C.js']!.imports!, 'assets/Chat-P.js'];
+    const r = computePrecache({ bundle: b, features: [withOnlineOnly(['../../chat/Panel.tsx'])], readPublicFile });
+    expect(r.errors.join()).toContain('onlineOnly ../../chat/Panel.tsx is still needed offline: its chunk assets/Chat-P.js');
+  });
+
+  it('refuses a marked module that shares a chunk with the feature\'s own modules', () => {
+    const b = chatBundle();
+    b['assets/Chat-P.js']!.moduleIds = [...b['assets/Chat-P.js']!.moduleIds!, '/app/src/features/books/Guide.tsx'];
+    const r = computePrecache({ bundle: b, features: [withOnlineOnly(['../../chat/Panel.tsx'])], readPublicFile });
+    expect(r.errors.join()).toContain('still needed offline');
+  });
+
+  it('refuses a marked module that is in the shell', () => {
+    const r = computePrecache({ bundle: chatBundle(), features: [withOnlineOnly(['../../main.tsx'])], readPublicFile });
+    expect(r.errors.join()).toContain('onlineOnly ../../main.tsx is in the shell (assets/index-A.js)');
   });
 });
 

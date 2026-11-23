@@ -332,9 +332,9 @@
       "digest": "2bb2c0379f8f187fb7e9eeb93e971404dc0aa8ddd3c77e2824859513fa9d9ed8"
     },
     "feature.campaign-channels.nodes": {
-      "version": "1.19.2",
+      "version": "1.20.0",
       "files": 4,
-      "digest": "a156dd9f3cc2cab7a85096527336990622b6d85bc900546c8b4b16a0a13598e4"
+      "digest": "dc5732a0ff30233144d68791ce2a9e3c51234f2ea6b1bccc83460aa758ba94ff"
     },
     "feature.campaign-connectors.nodes": {
       "version": "1.7.0",

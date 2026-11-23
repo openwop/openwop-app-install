@@ -15,16 +15,20 @@
  * @see docs/adr/0282-dynamic-sales-maps.md §3
  */
 
+import { createHash } from 'node:crypto';
 import { DurableCollection } from '../../../host/hostExtPersistence.js';
+import { registerKvAgeOut } from '../../../host/kvAgeOut.js';
 import { OpenwopError } from '../../../types.js';
 import { cleanString } from '../../../host/boundedStrings.js';
 import { validateGeocode } from './rowGuards.js';
 
 export interface GeocodeResult {
-  cacheKey: string; // `${tenantId}:${orgId}:${normalizedAddress}`
+  cacheKey: string; // `g2|…|h:<sha256(normalized address)>` (see `cacheKey`)
   tenantId: string;
   orgId: string;
-  address: string;
+  /** Present only on rows written before CHAN-F19 follow-up B (2026-11-22), which held the
+   *  raw address. New rows never store it; those legacy rows age out (`CACHE_TTL_DAYS`). */
+  address?: string;
   lat: number;
   lng: number;
   source: 'manual' | 'provider';
@@ -34,20 +38,32 @@ export interface GeocodeResult {
 const MAX_ADDRESS = 300;
 const MAX_PER_ORG = 50000; // hard cap; LRU eviction keeps the org under it
 const EVICT_BATCH = 500; // when at the cap, drop this many oldest entries to make room
-const PROVIDER_TTL_MS = 365 * 24 * 60 * 60 * 1000; // provider results re-verify yearly; MANUAL coords never expire (MAP-DATA-4)
+const PROVIDER_TTL_MS = 365 * 24 * 60 * 60 * 1000; // provider results re-verify yearly (MAP-DATA-4)
 const geocodes = new DurableCollection<GeocodeResult>('sales-maps:geocode', (g) => g.cacheKey, validateGeocode, (g) => g.tenantId);
+
+/**
+ * CHAN-F19 follow-up B (ADR 0464 §9, user decision 2026-11-22). A posted address can be a
+ * person's, and no row names whose it is, so no DSAR could match it. So the cache holds no
+ * address: the key carries a hash, the row no raw field, and EVERY row (manual ones too,
+ * which used to be kept forever) ages out `CACHE_TTL_DAYS` after its last write. That bound
+ * also removes the legacy rows that still hold a raw address, with no migration.
+ */
+export const CACHE_TTL_DAYS = 90;
+registerKvAgeOut({ id: 'sales-maps:geocode', prefix: 'hostext:sales-maps:geocode:', ttlDays: CACHE_TTL_DAYS, timestampField: 'at', acceptIndexed: true });
 
 const nowIso = (): string => new Date().toISOString();
 const isStale = (g: GeocodeResult): boolean => g.source === 'provider' && Date.now() - Date.parse(g.at) > PROVIDER_TTL_MS;
 const normalize = (address: string): string => address.trim().toLowerCase().replace(/\s+/g, ' ');
+const addressHash = (address: string): string => `h:${createHash('sha256').update(normalize(address)).digest('hex')}`;
 // tenantId folded into the key (DEAL-DATA — defense-in-depth) so a cross-tenant
 // orgId collision can never clobber another tenant's cached point.
 // ADR 1034 D11 — LENGTH-PREFIXED. The old `${tenantId}:${orgId}:${address}` was ambiguous,
 // because tenant ids contain `:` (`org:acme`): tenant `a:b` + org `c` and tenant `a` + org
-// `b:c` wrote the same key. Legacy rows are re-keyed by the `rekey-geocode-cache` app
-// migration.
+// `b:c` wrote the same key.
+// CHAN-F19 follow-up B — `g2`: the address segment is a hash. A `g1` row (raw address) is
+// never read again (a cache miss costs nothing: no provider ships) and ages out.
 export const cacheKey = (tenantId: string, orgId: string, address: string): string =>
-  `g1|${tenantId.length}|${tenantId}|${orgId.length}|${orgId}|${normalize(address)}`;
+  `g2|${tenantId.length}|${tenantId}|${orgId.length}|${orgId}|${addressHash(address)}`;
 
 function assertLatLng(lat: unknown, lng: unknown): { lat: number; lng: number } {
   if (typeof lat !== 'number' || !Number.isFinite(lat) || Math.abs(lat) > 90) throw new OpenwopError('validation_error', '`lat` must be a number within ±90.', 400, { field: 'lat' });
@@ -67,7 +83,7 @@ async function evictIfAtCap(tenantId: string, orgId: string): Promise<void> {
 
 /** Resolve (and cache) an address to a point. Manual lat/lng and cache hits need no
  *  provider; a genuine miss requires a configured BYOK geocoding Connection. */
-export async function geocode(tenantId: string, orgId: string, input: { address?: unknown; lat?: unknown; lng?: unknown }): Promise<GeocodeResult> {
+export async function geocode(tenantId: string, orgId: string, input: { address?: unknown; lat?: unknown; lng?: unknown }): Promise<GeocodeResult & { address: string }> {
   const address = cleanString(input.address, MAX_ADDRESS, '');
   if (!address) throw new OpenwopError('validation_error', '`address` is required.', 400, { field: 'address' });
   const key = cacheKey(tenantId, orgId, address);
@@ -82,21 +98,22 @@ export async function geocode(tenantId: string, orgId: string, input: { address?
       throw new OpenwopError('conflict', 'This address cannot be cached for this organization.', 409, { field: 'address' });
     }
     if (!prior) await evictIfAtCap(tenantId, orgId); // a NEW key grows the cache
-    const result: GeocodeResult = { cacheKey: key, tenantId, orgId, address, lat, lng, source: 'manual', at: nowIso() };
+    const result: GeocodeResult = { cacheKey: key, tenantId, orgId, lat, lng, source: 'manual', at: nowIso() };
     await geocodes.put(result);
-    return result;
+    return { ...result, address }; // the caller's own input, echoed, never stored
   }
 
   // (2) cache hit — a STALE provider entry (past its TTL) is dropped + re-resolved.
   const cached = await geocodes.get(key);
   if (cached && cached.tenantId === tenantId && cached.orgId === orgId) {
-    if (!isStale(cached)) return cached;
+    if (!isStale(cached)) return { ...cached, address };
     await geocodes.delete(key); // expired provider result → fall through to (3)
   }
 
   // (3) miss → BYOK geocoding Connection (ADR 0024). Not fabricated: absent a
-  // configured provider this fails LOUD, honoring the capability-honesty rule.
-  throw new OpenwopError('capability_not_provided', 'No geocoding provider is configured. Add a geocoding Connection, or supply explicit lat/lng.', 503, { address });
+  // configured provider this fails LOUD, honoring the capability-honesty rule. The
+  // address is not echoed into the error details (logs and error envelopes keep them).
+  throw new OpenwopError('capability_not_provided', 'No geocoding provider is configured. Add a geocoding Connection, or supply explicit lat/lng.', 503, {});
 }
 
 /**
@@ -107,9 +124,12 @@ export async function geocode(tenantId: string, orgId: string, input: { address?
 export async function rekeyLegacyGeocodes(): Promise<number> {
   let rekeyed = 0;
   for (const g of await geocodes.list()) {
+    if (!g.address) continue; // a `g2` row: already keyed by its hash
     const key = cacheKey(g.tenantId, g.orgId, g.address);
     if (g.cacheKey === key) continue;
-    if (await geocodes.putIfAbsent({ ...g, cacheKey: key })) rekeyed += 1;
+    // CHAN-F19 follow-up B — the moved row drops the raw address (the key now hashes it).
+    const { address: _raw, ...rest } = g;
+    if (await geocodes.putIfAbsent({ ...rest, cacheKey: key })) rekeyed += 1;
     await geocodes.compareAndDelete(g);
   }
   return rekeyed;

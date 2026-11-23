@@ -122,8 +122,8 @@ describe.skipIf(!available)('#6133 — the LISTEN connection on a real Postgres'
   }, 60_000);
 
   it('a connection the network ends CLEANLY (FIN, no error from the server) is recycled, and delivery resumes', async () => {
-    // This is the production shape. A terminated backend surfaces as an 'error',
-    // which the old code already handled; a socket closed by an idle cut may not.
+    // A socket closed by an idle cut. node-pg reports this as an 'error' too, so
+    // the old code already survived it; it is kept as a regression guard.
     const got: string[] = [];
     await viaProxy!.subscribe('issue6133-fin', (p) => got.push(p));
     expect(await heardWithin(peer!, 'issue6133-fin', got, 'before-fin', 5_000), 'no delivery through the proxy even before the cut').toBe(true);

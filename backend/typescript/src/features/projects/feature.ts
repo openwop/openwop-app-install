@@ -24,6 +24,7 @@ import { registerProjectsAgentTools } from './agentTools.js';
 import { registerProjectsRoutes } from './routes.js';
 import { ADDRESSABLE_PROJECT_ROLES, getProject, listProjects, projectRoleOf, resolveProjectAccess, registerProjectsErasure } from './projectsService.js';
 import { registerPrivateProjectProbe } from '../../host/runProjectAccess.js';
+import { PROJECTS_CLIENT_PORTAL_TOGGLE, registerProjectClientPortal } from './clientPortal.js';
 
 export const projectsFeature: BackendFeature = {
   id: 'projects',
@@ -32,6 +33,7 @@ export const projectsFeature: BackendFeature = {
     registerProjectsAgentTools(); // XCH-HOLE-2 (Wave 4) — openwop:projects.list (ADR 0308 seam)
     registerMemoryProposalLifecycle(); // ADR 1092 D2 — proposals' eraser and project-delete cascade
     registerProjectsErasure(); // D2 (chat-first port) — DSAR anonymizes a member's ref in place
+    registerProjectClientPortal(); // ADR 1099 D3 — the `project` grant kind behind `projects.client-portal`
 
     // ADR 0054 § Correction (2026-06-16) — the `project-collab` toggle is RETIRED;
     // the collaborative surfaces (members / visibility / chat) are now always-on.
@@ -84,4 +86,18 @@ export const projectsFeature: BackendFeature = {
   // No `toggleDefault` — always-on. The collaborative surfaces (members /
   // visibility / chat, ADR 0054) are also always-on as of 2026-06-16 (§ Correction
   // in registerRoutes); WRITE stays org-scoped, READ honors project visibility.
+  //
+  // ADR 1099 D3 — the one sub-toggle: inviting outside parties (a client, a
+  // builder) to one project. Its only consumer is the `project` grant kind's
+  // surface (`clientPortal.ts`), which checks it on every invite, grant and use.
+  extraToggleDefaults: [{
+    id: PROJECTS_CLIENT_PORTAL_TOGGLE,
+    label: 'Project client access',
+    description:
+      'Invite people outside your workspace, such as a client or a builder, to one project. They sign in with their own account, see only that project, and only for as long as you grant. You can take access back at any time.',
+    category: 'Productivity',
+    status: 'off',
+    bucketUnit: 'tenant',
+    salt: 'projects-client-portal',
+  }],
 };

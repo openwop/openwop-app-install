@@ -29,7 +29,10 @@ import {
 } from './collabClient.js';
 
 type TFn = ReturnType<typeof useTranslation>['t'];
-const kindKey = (kind: string): string => (kind === 'creative-brief' ? 'kindCreativeBrief' : kind === 'campaign' ? 'kindCampaign' : 'kindOther');
+const KIND_KEYS: Record<string, string> = { 'creative-brief': 'kindCreativeBrief', campaign: 'kindCampaign', project: 'kindProject' };
+const kindKey = (kind: string): string => KIND_KEYS[kind] ?? 'kindOther';
+/** ADR 1099 P1 — a project's status, as the firm set it. */
+const PROJECT_STATUSES = new Set(['planning', 'active', 'paused', 'done', 'archived']);
 
 export function CollabHomePage(): JSX.Element {
   const { t } = useTranslation('collab');
@@ -80,6 +83,17 @@ function ResourceBody({ view, t }: { view: GrantView; t: TFn }): JSX.Element {
         <dd className="u-m-0 u-flex u-flex-wrap u-gap-2">
           {channels.length ? channels.map((c) => <span key={c} className="chip chip--muted">{c}</span>) : t('none')}
         </dd>
+      </dl>
+    );
+  }
+  if (r.kind === 'project') {
+    // ADR 1099 P1 — the project's name is the page title; its status is all a
+    // grant shows until the firm chooses more (P3).
+    const status = typeof r.status === 'string' && PROJECT_STATUSES.has(r.status) ? r.status : null;
+    return (
+      <dl className="u-grid u-gap-2 u-m-0">
+        <dt className="u-text-muted u-fs-13">{t('projectStatus')}</dt>
+        <dd className="u-m-0">{status ? <span className="chip chip--muted">{t(`projectStatus_${status}`)}</span> : t('none')}</dd>
       </dl>
     );
   }

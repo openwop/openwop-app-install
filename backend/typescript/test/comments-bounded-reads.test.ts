@@ -36,6 +36,8 @@ import {
   type Comment,
 } from '../src/features/comments/commentsService.js';
 import { PREAUTHORIZED_CALLER } from '../src/host/subjectAccess.js';
+/** Issue 6109 — a comments read as an org member (internal threads included). */
+const MEMBER_READ = { ...PREAUTHORIZED_CALLER, audience: 'member' as const };
 
 /** ADR 0659 D1 — `listThread` now answers `null` when the target is absent OR invisible.
  *  Every fixture here creates a real resource and is not testing that gate, so a null is
@@ -120,7 +122,7 @@ describe('CMNT-3 — comment reads are tenant-bounded', () => {
     await warmTenantIndex();
 
     const prefixes = await recordListPrefixes(async () => {
-      expect((await listThreadOrFail(T, 'o1', 'cms_page', pageId, PREAUTHORIZED_CALLER)).length).toBe(2);
+      expect((await listThreadOrFail(T, 'o1', 'cms_page', pageId, MEMBER_READ)).length).toBe(2);
     });
 
     expect(prefixes.length, 'the probe must have captured kvList calls').toBeGreaterThan(0);
@@ -136,7 +138,7 @@ describe('CMNT-3 — comment reads are tenant-bounded', () => {
     await warmTenantIndex();
 
     const prefixes = await recordListPrefixes(async () => {
-      expect(await deleteComment(T, 'o1', rootId, { userId: 'A', isAdmin: false }, PREAUTHORIZED_CALLER)).toBe(true);
+      expect(await deleteComment(T, 'o1', rootId, { userId: 'A', isAdmin: false }, MEMBER_READ)).toBe(true);
     });
 
     expect(prefixes.length).toBeGreaterThan(0);
@@ -161,11 +163,11 @@ describe('CMNT-3 — comment reads are tenant-bounded', () => {
     // the tenant index is a bounded SCAN, so an absent marker means an absent row.
     const mine = await seedThread(T);
     const theirs = await seedThread(OTHER);
-    expect((await listThreadOrFail(T, 'o1', 'cms_page', mine.pageId, PREAUTHORIZED_CALLER)).length).toBe(2);
+    expect((await listThreadOrFail(T, 'o1', 'cms_page', mine.pageId, MEMBER_READ)).length).toBe(2);
     // ADR 0659 D1 — another tenant's page is not merely an empty thread here, it is a
     // uniform not-found: the resolver never finds the target in THIS tenant.
-    expect(await listThread(T, 'o1', 'cms_page', theirs.pageId, PREAUTHORIZED_CALLER)).toBeNull();
-    expect((await listThreadOrFail(OTHER, 'o1', 'cms_page', theirs.pageId, PREAUTHORIZED_CALLER)).length).toBe(2);
+    expect(await listThread(T, 'o1', 'cms_page', theirs.pageId, MEMBER_READ)).toBeNull();
+    expect((await listThreadOrFail(OTHER, 'o1', 'cms_page', theirs.pageId, MEMBER_READ)).length).toBe(2);
   });
 
   it('an unscoped read fails closed rather than falling back to a full scan — and never reaches a resolver', async () => {
@@ -174,7 +176,7 @@ describe('CMNT-3 — comment reads are tenant-bounded', () => {
     // the target resolver, which would otherwise hand an empty tenantId to another
     // feature's store (this assertion caught exactly that regression).
     const readCalls = await recordStorageCalls(async () => {
-      expect(await listThread('', 'o1', 'cms_page', 'anything', PREAUTHORIZED_CALLER)).toBeNull();
+      expect(await listThread('', 'o1', 'cms_page', 'anything', MEMBER_READ)).toBeNull();
     });
     expect(readCalls, 'an unscoped listThread must touch NO storage — not a resolver, not the index').toEqual([]);
     const eraseCalls = await recordStorageCalls(async () => {

@@ -49,14 +49,18 @@ const anonAutoWriteSession = new DurableCollection<WidgetAnonAutoWriteSession>('
 // governance lane; this one bounds the rows whether or not an operator opted in. Every
 // counter's decision window is one day or one visitor session, and an active session
 // refreshes `updatedAt` on each turn, so two days loses nothing a live visitor needs.
-// Rows written before A5 carry no `updatedAt` and are skipped (never deleted on a guess).
+// Rows written before A5 (2026-07-22 here; later for an adopter that upgraded later) carry
+// no `updatedAt`, and no `tenantId` for the purger below, so nothing ever removed them.
+// User decision 2026-11-22: erase them. The sweep stamps `updatedAt = now` the first time
+// it sees one (`stampMissingTimestamp`) and the 2-day TTL deletes it after that: never
+// sooner than its real last write, and correct whenever the upgrade happened.
 for (const [id, ns] of [
   ['chatwidget:session', 'chatwidget:session'],
   ['chatwidget:day', 'chatwidget:day'],
   ['chatwidget:anonwrite:day', 'chatwidget:anonwrite:day'],
   ['chatwidget:anonautowrite:session', 'chatwidget:anonautowrite:session'],
 ] as const) {
-  registerKvAgeOut({ id, prefix: `hostext:${ns}:`, ttlDays: 2, timestampField: 'updatedAt' });
+  registerKvAgeOut({ id, prefix: `hostext:${ns}:`, ttlDays: 2, timestampField: 'updatedAt', stampMissingTimestamp: true });
 }
 
 /** A day bucket (`YYYY-MM-DD`) normalized to an ISO instant for the retention

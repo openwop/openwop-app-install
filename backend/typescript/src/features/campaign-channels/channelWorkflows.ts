@@ -1,8 +1,12 @@
 /**
  * The five channel child workflows (ADR 0157 Phase 2), each
- *   generate(channel) → approve (HITL)
+ *   generate(channel) → approve (HITL) → create the approved draft in the real tool
  * and skipped without an approval when the brief does not enable the channel
- * (ADR 1020 D3: the edge is `falsy(skipped)`).
+ * (ADR 1020 D3: the edge is `falsy(skipped)`). The post-approval step is
+ * `create_briefs` for creative_briefs (ADR 1020 D14) and `publish` for the other
+ * four (user decision 2026-11-19, ADR 0162 correction): a draft CMS page, draft
+ * email campaigns, a PAUSED ad campaign or a draft ad-copy document, and a draft
+ * social-calendar document. A rejected gate fails, so neither step runs.
  *
  * The workflows ARE the `campaign-channels` chain pack
  * (`examples/workflow-chain-packs/campaign-channels/pack.json`), registered
@@ -24,27 +28,22 @@ import type { ChainBackedRoleMap } from '../../host/chainBackedWorkflows.js';
 /** The five channels, in fan-out order. */
 const CHANNELS = ['landing_page', 'ad_variants', 'email_sequence', 'creative_briefs', 'social_posts'] as const;
 
-/** Each channel chain's output roles: the draft is secondary and the approval
- *  primary; on the skip branch (the brief does not enable the channel) the no-op
- *  terminal is primary, so a skipped run still has an output saying why. The two
- *  branches are exclusive. `registerLegacyDefsChainBacked` restores exactly these
- *  (and clears any other). */
+/** Each channel chain's output roles: the draft and the approval are secondary,
+ *  and the post-approval step is primary: what it created (the briefs, the page,
+ *  the campaigns, the document) is what the run card shows. On the skip branch
+ *  (the brief does not enable the channel) the no-op terminal is primary, so a
+ *  skipped run still has an output saying why. The two branches are exclusive.
+ *  `registerLegacyDefsChainBacked` restores exactly these (and clears any other). */
 export const CHANNEL_WORKFLOWS: ReadonlyArray<ChainBackedRoleMap> = CHANNELS.map((channel) => ({
   workflowId: `campaign-studio.channel.${channel.replace(/_/g, '-')}`,
-  nodes: channel === 'creative_briefs'
-    // ADR 1020 D14 — creative_briefs ends on creating the approved briefs: that
-    // step's summary (how many, and where) is what the run card shows.
-    ? [
-      { nodeId: 'generate', outputRole: 'secondary' },
-      { nodeId: 'approve', outputRole: 'secondary' },
-      { nodeId: 'create_briefs', outputRole: 'primary' },
-      { nodeId: 'skipped', outputRole: 'primary' },
-    ]
-    : [
-      { nodeId: 'generate', outputRole: 'secondary' },
-      { nodeId: 'approve', outputRole: 'primary' },
-      { nodeId: 'skipped', outputRole: 'primary' },
-    ],
+  nodes: [
+    { nodeId: 'generate', outputRole: 'secondary' },
+    { nodeId: 'approve', outputRole: 'secondary' },
+    // ADR 1020 D14 — creative_briefs creates its managed briefs; the other four
+    // publish the approved draft (ADR 0162 correction, 2026-11-19).
+    { nodeId: channel === 'creative_briefs' ? 'create_briefs' : 'publish', outputRole: 'primary' },
+    { nodeId: 'skipped', outputRole: 'primary' },
+  ],
 }));
 
 /** The stable workflow ids the orchestration (ADR 0158) dispatches. */

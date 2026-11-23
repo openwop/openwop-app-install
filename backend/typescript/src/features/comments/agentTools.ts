@@ -70,7 +70,7 @@ export function registerCommentsAgentTools(): void {
       // EMPTY without an acting user (CLAUDE.md). `null` = target absent OR invisible;
       // the note names no resource, so this is not an existence oracle for a model.
       const actor = scope.actingUserId;
-      const rows = await listThread(scope.tenantId, r.orgId, rt as ResourceType, resourceId, actor ? { subject: actor, principal: actor, toggle: { userId: actor } } : { subject: undefined });
+      const rows = await listThread(scope.tenantId, r.orgId, rt as ResourceType, resourceId, actor ? { subject: actor, principal: actor, toggle: { userId: actor }, audience: 'member' } : { subject: undefined });
       if (rows === null) return toolEmpty({ comments: [], note: 'That resource is not available in this organization.' });
       return toolOk({ comments: rows.map(project) });
     },

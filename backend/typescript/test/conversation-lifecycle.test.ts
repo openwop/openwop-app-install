@@ -23,6 +23,8 @@ import { claimExchange } from '../src/host/conversationExchangeIdem.js';
 import { saveLedger, getLedger } from '../src/features/intent-ledger/ledgerStore.js';
 import { createComment, listThread } from '../src/features/comments/commentsService.js';
 import { PREAUTHORIZED_CALLER } from '../src/host/subjectAccess.js';
+/** Issue 6109 — a comments read as an org member (internal threads included). */
+const MEMBER_READ = { ...PREAUTHORIZED_CALLER, audience: 'member' as const };
 
 /** ADR 0659 D1 — `listThread` now answers `null` when the target is absent OR invisible.
  *  Every fixture here creates a real resource and is not testing that gate, so a null is
@@ -110,7 +112,7 @@ describe('conversation deletion cleans sidecars (ADR 0288 P2)', () => {
     expect(await getLedger(T, keeper.sessionId)).not.toBeNull();
     // ADR 0659 D1 — the conversation is gone, so its thread does not resolve at all.
     // Stronger than the old empty-list assertion: it proves the TARGET died, not just the rows.
-    expect(await listThread(T, 'org-1', 'chat_message', `${doomed.sessionId}#msg-doomed-1`, PREAUTHORIZED_CALLER)).toBeNull();
-    expect(await listThreadOrFail(T, 'org-1', 'chat_message', `${keeper.sessionId}#msg-keeper-1`, PREAUTHORIZED_CALLER)).toHaveLength(1);
+    expect(await listThread(T, 'org-1', 'chat_message', `${doomed.sessionId}#msg-doomed-1`, MEMBER_READ)).toBeNull();
+    expect(await listThreadOrFail(T, 'org-1', 'chat_message', `${keeper.sessionId}#msg-keeper-1`, MEMBER_READ)).toHaveLength(1);
   });
 });

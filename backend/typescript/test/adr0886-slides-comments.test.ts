@@ -22,6 +22,8 @@ import { createCanvasForTenant, updateCanvasForTenant } from '../src/host/canvas
 import { fireCanvasDeleted } from '../src/host/canvasLifecycle.js';
 import { __targetFeatureIds, listThread } from '../src/features/comments/commentsService.js';
 import { PREAUTHORIZED_CALLER } from '../src/host/subjectAccess.js';
+/** Issue 6109 — a comments read as an org member (internal threads included). */
+const MEMBER_READ = { ...PREAUTHORIZED_CALLER, audience: 'member' as const };
 
 let BASE: string;
 let server: http.Server;
@@ -137,10 +139,10 @@ describe('ADR 0886 D5 — canvas_slides comment threads', () => {
     // directly (the canvas row stays) so the read below still resolves its
     // target and the zero is the prune, not a 404.
     expect((await w.owner.post(w.C, { resourceType: 'canvas_slides', resourceId: w.canvasId, body: 'b' })).status).toBe(201);
-    expect(await listThread(w.tenantId, w.orgId, 'canvas_slides', `${w.canvasId}#cover`, PREAUTHORIZED_CALLER)).toHaveLength(1);
+    expect(await listThread(w.tenantId, w.orgId, 'canvas_slides', `${w.canvasId}#cover`, MEMBER_READ)).toHaveLength(1);
     await fireCanvasDeleted({ tenantId: w.tenantId, canvasId: w.canvasId, canvasTypeId: 'canvas.slides' });
-    expect(await listThread(w.tenantId, w.orgId, 'canvas_slides', `${w.canvasId}#cover`, PREAUTHORIZED_CALLER)).toHaveLength(0);
-    expect(await listThread(w.tenantId, w.orgId, 'canvas_slides', w.canvasId, PREAUTHORIZED_CALLER)).toHaveLength(0);
+    expect(await listThread(w.tenantId, w.orgId, 'canvas_slides', `${w.canvasId}#cover`, MEMBER_READ)).toHaveLength(0);
+    expect(await listThread(w.tenantId, w.orgId, 'canvas_slides', w.canvasId, MEMBER_READ)).toHaveLength(0);
   });
 });
 

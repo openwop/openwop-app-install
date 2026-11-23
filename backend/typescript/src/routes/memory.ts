@@ -30,6 +30,7 @@
  * through `toMemoryEntry` (the stored `owner` stamp is host-internal).
  */
 
+import { sendErrorBody } from '../middleware/errorEnvelope.js';
 import type { Express } from 'express';
 import { getMemoryEntry, listMemoryEntries, removeMemoryEntry, toMemoryEntry, MEMORY_DEMO_REF } from '../host/inMemorySurfaces.js';
 import { assertMemoryRefAccess, tenantMemoryAccess } from '../host/memoryRefAccess.js';
@@ -85,7 +86,7 @@ export function registerMemoryRoutes(app: Express): void {
       const found = await getMemoryEntry(tenantId, memoryRef, req.params.memoryId);
       const entry = found && (!ledger || ledger.admits(found)) ? found : null;
       if (!entry) {
-        res.status(404).json({ error: 'not_found', message: 'memory entry not found' });
+        sendErrorBody(res, 404, { error: 'not_found', message: 'memory entry not found' });
         return;
       }
       res.status(200).json({ memoryRef, entry: toMemoryEntry(entry) });
@@ -105,13 +106,13 @@ export function registerMemoryRoutes(app: Express): void {
         await ledger.assertMayDelete();
         const target = await getMemoryEntry(tenantId, memoryRef, req.params.memoryId);
         if (!target || !ledger.admits(target)) {
-          res.status(404).json({ error: 'not_found', message: 'memory entry not found' });
+          sendErrorBody(res, 404, { error: 'not_found', message: 'memory entry not found' });
           return;
         }
       }
       const removed = await removeMemoryEntry(tenantId, memoryRef, req.params.memoryId);
       if (!removed) {
-        res.status(404).json({ error: 'not_found', message: 'memory entry not found' });
+        sendErrorBody(res, 404, { error: 'not_found', message: 'memory entry not found' });
         return;
       }
       res.status(200).json({ memoryRef, memoryId: req.params.memoryId, removed: true });

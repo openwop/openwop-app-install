@@ -77,7 +77,9 @@ export function buildCommentsSurface(scope: BundleScope): FeatureSurface {
   // ADR 0881 D1/D2 — on this lane every spelling is the run owner's principal
   // (`actingUserId` is stamped as `req.userId ?? principalId`, the conversation's own
   // owner spelling), and entitlement asks with the same id `resolveFeatureAccess` uses.
-  const caller: CommentCaller = viewer ? { subject: viewer, principal: viewer, toggle: { userId: viewer } } : { subject: undefined };
+  // Issue 6109 — `requireOrg` checks the viewer's org scope before every read, so a
+  // viewer is a member; with no viewer the read is refused anyway.
+  const caller: CommentCaller = viewer ? { subject: viewer, principal: viewer, toggle: { userId: viewer }, audience: 'member' } : { subject: undefined };
   // ADR 0617 D1a — a comment event emitted from inside a run carries its origin, so the
   // dispatcher refuses to start a second run of the very workflow that is executing.
   const origin: HostEventOrigin | undefined = scope.runId

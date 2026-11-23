@@ -6,19 +6,23 @@
  * the pool, LISTENs and fans each notification to its channel's handlers.
  *
  * Why this is its own module. The listener used to re-establish itself only on an
- * `'error'`. A connection that ENDS cleanly (an idle cut, a proxy closing the
- * socket) emits `'end'` and no `'error'`, so the old code kept the dead client as
- * "listening" forever. Every NOTIFY was then lost while the SSE heartbeats, which
+ * `'error'`, and a connection that goes silently half-open (the network drops it
+ * with no FIN and no RST) emits nothing at all. The old code kept that dead client
+ * as "listening" forever. Every NOTIFY was then lost while the SSE heartbeats, which
  * are local timers, kept flowing. Measured on openwop-dev 2026-11-19: a certify cut
  * ~3 h into a revision's life got 0 frames on /host/events, and every host-event
- * row failed (#6133).
+ * row failed (#6133). A killed backend and a clean FIN both reach node-pg as an
+ * `'error'`, so the old code survived those; only the half-open case reproduces
+ * the bug (`issue6133-pubsub-listener-postgres-live.test.ts`). In production a
+ * `ping-timeout` recycle fired 26 min after boot and delivery resumed within 1 s.
  *
- * Three guards, each sufficient alone:
+ * The guards:
+ *   - A self-ping, the one that fixes #6133. Every `pingIntervalMs`, a NOTIFY on
+ *     the reserved logical channel goes out through the POOL. The listener must
+ *     see it within `pingTimeoutMs`, or the connection is recycled even though it
+ *     reported nothing.
  *   - `'end'` is treated exactly like `'error'`: drop the client and re-listen.
- *   - A self-ping. Every `pingIntervalMs`, a NOTIFY on the reserved logical
- *     channel goes out through the POOL. The listener must see it within
- *     `pingTimeoutMs`, or the connection is recycled even though it reported
- *     nothing. This catches a socket that is silently half-open.
+ *     Defensive; no observed failure needed it.
  *   - Every recycle is logged with a running counter, so a deploy can see how
  *     often it happens.
  *

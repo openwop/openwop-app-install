@@ -447,3 +447,54 @@ does the step themselves. A hosted-provider adapter has no take-over
    an input. A test types a known secret and shows it is absent from the model input,
    the session projection and the run's event log.
 
+
+### P3b — the trajectory viewer and the Connect-a-browser card (D7, D8)
+
+- **Where it lives.** D8 says "the run page". The run page (`/runs/:runId`) is an
+  ADMIN-tier route, and the person who opened a browser session is usually a
+  member, so the viewer is the `computer-use` feature's own pages instead:
+  `/computer-use` (a workspace's sessions) and `/computer-use/sessions/:id?org=`
+  (one trajectory). The nav entry carries `featureId: 'computer-use'`, so it stays
+  hidden until the P6 flip. A waiting session points at the Inbox (ADR 1125),
+  where its approval or take-over card is answered, not at the run page.
+- **What it shows.** Each step is host words: the action kind, its tier, who
+  decided it (automatic, a person, a standing grant), and the site's host and path.
+  The executor's step label is page-derived, so it is a fenced, labelled note
+  ("Page label (from the site, not verified)"), never the heading.
+- **What it never shows.** The read projection now drops every URL's query string
+  and fragment (`shownUrl`: origin plus path; a non-web or unparsable URL is
+  omitted). A query or fragment can carry what the person typed, a search box or a
+  token in a redirect. Field values were already never stored. The approval card
+  keeps the full target URL, because the approval's digest binds it (0894
+  addendum 2); only the trajectory read is shortened.
+- **The same rule outside the projection.** `shownUrl` is one module
+  (`computer-use/shownUrl.ts`) used by the read routes AND by the service. Before
+  P3b, an off-allowlist navigation logged the full URL and stored it in the
+  session error (`origin_denied:<url>`). The projection returns that error, so a
+  query string reached the viewer through it. Both now carry origin and path only.
+- **The sign-in step stores no credential.** It records the kind, the host the
+  browser reported, the executor's field label, the answering interrupt id and a
+  time. The host never receives what the person typed in their own window: the
+  executor protocol has no value field, and its validator drops unknown element
+  fields.
+- **Connect a browser.** A session that ended `browser_not_connected` shows a card
+  saying to open the desktop app or run the companion in browser mode, with a link
+  to pairing when the pairing feature is on. Pairing still lives under Claude Code
+  until decision 5 moves it, before P6.
+- **The sign-in is a step.** When the opener continues a take-over,
+  `completeTakeover` records a `credential` step decided by a person (with the
+  answering interrupt id) at the host the browser reported. The viewer renders it
+  as host text ("The person signed in themselves on <host>"). The host never
+  knows what was typed, so there is nothing to leave out.
+- **The one write** is Stop (the existing `abort` route, `runs:cancel`), behind a
+  confirm, shown only while the session is live.
+- **Deferred:** screenshots as media assets (D8). No executor stores one yet; the
+  viewer adds them when P4 does.
+- **Tests:** `adr1136-p3b-projection` proves a known typed value (in the start
+  URL, a step URL, the pending URL and a fragment) is absent from
+  `projectSession` AND from the real `GET …/sessions/:id` and list responses, and
+  that the sign-in step carries only its host. The frontend `sessionPage` test
+  proves the same value is absent from the rendered page's text and HTML even when
+  a URL arrives carrying it, and that the sign-in step reads as host text. It also
+  covers host words, the fenced label, the Inbox pointer, the connect card, Stop
+  only while live, and a 404.

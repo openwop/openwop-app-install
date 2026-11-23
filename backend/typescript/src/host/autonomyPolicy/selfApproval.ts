@@ -102,6 +102,17 @@ export type SoleAdminVerdict =
 const NON_PERSON_PREFIX = /^(agent|bearer|apikey|workload|service|system):/i;
 
 /**
+ * Is this vote cast by a person in their own interactive session? `humanSession`
+ * comes from the decide route's auth Subject (`isHumanSignInSubject`); the voter
+ * must also not be a delegated key or a non-person subject spelling. Shared by the
+ * sole-admin escape and the reallocation proposer's withdraw (ADR 1022 CP71WF-23,
+ * corrected 2026-11-20), so an agent or MCP principal can use neither.
+ */
+export function isInteractivePersonVote(voter: string, humanSession: boolean): boolean {
+  return humanSession && !isDelegatedSubject(voter) && !NON_PERSON_PREFIX.test(voter);
+}
+
+/**
  * Is this the Subject of a person who signed in interactively? Read only from the
  * Subject the auth middleware minted for `req.principal` (`requestSubjectV2`), never
  * from a request field or header: the app's own session, or an OIDC / SAML sign-in.
@@ -132,7 +143,7 @@ export async function soleAdminSelfApproval(q: SoleAdminQuestion): Promise<SoleA
 }
 
 async function decideSoleAdmin(q: SoleAdminQuestion): Promise<SoleAdminVerdict> {
-  if (!q.humanSession || isDelegatedSubject(q.voter) || NON_PERSON_PREFIX.test(q.voter)) return { allowed: false, why: 'not_a_person' };
+  if (!isInteractivePersonVote(q.voter, q.humanSession)) return { allowed: false, why: 'not_a_person' };
   if (q.quorum) return { allowed: false, why: 'quorum' };
   for (const run of q.runs) {
     const { floors } = runAutonomyOf(run);

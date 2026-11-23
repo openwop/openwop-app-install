@@ -42,6 +42,19 @@ check "...read from predict.json (what it would run), not its whole-lane selecte
 ls "$T"/ledger/compare-frontend.before-*.tsv >/dev/null 2>&1 && ! grep -q '^old$' "$T/ledger/compare-frontend.tsv" && head -1 "$T/ledger/compare-frontend.tsv" | grep -q 'basis$'
 check "...and an older log (no basis column) is set aside, not mixed in" $?
 
+# The fork's side is its must-run files from predict.json, never its audit draw: here the
+# fork selected a, b, c, but c is only an audit (run false, audit true).
+fork2="$T/fork2"; mkdir -p "$fork2"; cp "$fork/selected.txt" "$fork2/"
+printf '{"decisions":{"%s/a.test.ts":{"run":true},"%s/b.test.ts":{"run":true},"%s/c.test.ts":{"run":false,"audit":true}}}' "$ROOT" "$ROOT" "$ROOT" > "$fork2/predict.json"
+TRACEGATE_PACKAGE_CLI="node $T/good.cjs" TRACEGATE_PACKAGE_LEDGER="$T/ledger" bash "$SCRIPT" shadow-compare frontend "$fork2" >/dev/null 2>&1
+[ "$(last 5)" = 2 ] && [ "$(last 7)" = 0 ] && [ "$(last 9)" = yes ] && [ "$(last 11)" = predict ]
+check "the fork's side is its must-run files (predict.json), not its audit draw" $? "$(tail -1 "$T/ledger/compare-frontend.tsv")"
+[ "$(tail -2 "$T/ledger/compare-frontend.tsv" | head -1 | cut -f11)" = selected ]
+check "...and selected.txt only when the fork wrote no decisions (fork_basis = selected)" $? "$(tail -2 "$T/ledger/compare-frontend.tsv")"
+d="$(ls -t "$T"/ledger/compare-frontend-diff/*.json 2>/dev/null | head -1)"
+[ "$(ls "$T"/ledger/compare-frontend-diff/ | wc -l | tr -d ' ')" = 2 ] && node -e 'const j=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));process.exit(j.onlyFork.length===0&&j.onlyPackage.join()==="d.test.ts"?0:1)' "$d"
+check "...and each row that differs keeps which files, repo-relative (here only the package's d)" $? "$(cat "$d" 2>/dev/null)"
+
 shadow "$T/bad.cjs"; rc=$?
 check "a package that exits non-zero leaves the gate green (exit 0)" "$rc"
 [ "$(last 3)" = error-3 ] && grep -q "ignored" "$T/out.txt"
@@ -60,9 +73,12 @@ check "no fork selection: skipped, exit 0" $?
 # A package that writes REPO-RELATIVE paths is compared on the same footing as the fork's
 # absolute ones (both are normalised), so a format difference can't read as 0 overlap.
 printf "require('fs').writeFileSync(process.argv[process.argv.indexOf('--run') + 1] + '/selected.txt', 'a.test.ts\\\\nb.test.ts\\\\nc.test.ts\\\\n');\n" > "$T/relative.cjs"
+ndiff="$(ls "$T"/ledger/compare-frontend-diff/ | wc -l | tr -d " ")"
 shadow "$T/relative.cjs"; rc=$?
 [ "$rc" = 0 ] && [ "$(last 3)" = ok ] && [ "$(last 7)" = 0 ] && [ "$(last 8)" = 0 ] && [ "$(last 9)" = yes ]
 check "a relative selection matches the fork's absolute one (0 only-fork, 0 only-package)" $? "$(tail -1 "$T/ledger/compare-frontend.tsv")"
+[ "$(ls "$T"/ledger/compare-frontend-diff/ | wc -l | tr -d " ")" = "$ndiff" ]
+check "...and a row with no difference keeps no diff file" $?
 
 # Not installed: a checkout whose root node_modules predates P1a. The step must not reach
 # for npx (a network fetch inside the gate); a fake npx on PATH fails the case if called.
@@ -105,6 +121,46 @@ check "record: a lease the broker stops exits 75 and says so" $? "rc=$rc $(cat "
 record 2; rc=$?
 [ "$rc" = 2 ] && [ ! -e "$T/run.json" ] && grep -q "never runs outside a lease" "$T/out.txt"
 check "record: no lease, no recording (exit 2, nothing run)" $? "rc=$rc $(cat "$T/out.txt")"
+
+# The daemon's package recording (ADR 1028 P1): the package reuses no footprint older than
+# 72 h and nothing else records for it, so the nightly window re-records it. The daemon's
+# functions are sourced with checkout_work and the gate check stubbed, against a fake
+# work tree whose tracegate-package.sh logs how it was called and exits $FAKE_RECORD_EXIT.
+daemon_record() { # daemon_record <DAEMON_YIELD> [record exit] → prints the due lanes, then logs
+  ( work="$T/work"; mkdir -p "$work/scripts"
+    printf '#!/usr/bin/env bash\necho "$* lease=${TRACEGATE_PACKAGE_NO_LEASE:-} ledger=$TRACEGATE_PACKAGE_LEDGER" >> "%s/calls.txt"\nexit "${FAKE_RECORD_EXIT:-0}"\n' "$T" > "$work/scripts/tracegate-package.sh"
+    [ -d "$work/.git" ] || { git -C "$work" init -q && git -C "$work" -c user.name=t -c user.email=t@localhost commit -q --allow-empty -m t; }
+    export OPENWOP_DAEMON_SOURCE_ONLY=1 OPENWOP_TRACEGATE_LEDGER="$T/dledger" OPENWOP_TRACEGATE_WORK="$work" \
+      TRACEGATE_PACKAGE_LEDGER="$T/pledger" OPENWOP_TRACEGATE_STDOUT_IS_LOG=1 FAKE_RECORD_EXIT="${2:-0}"
+    . "$ROOT/scripts/tracegate-daemon.sh"
+    checkout_work() { :; }; gate_live() { return 1; }; say() { echo "$*" >> "$T/say.txt"; }
+    DAEMON_YIELD="$1"
+    package_record_due && echo "due:$PKG_DUE" && package_record ) 2>&1
+}
+rm -rf "$T/pledger" "$T/calls.txt" "$T/say.txt"
+out="$(daemon_record broker)"
+[ "$out" = "due: frontend" ] && grep -q '^record frontend lease=1 ledger='"$T"'/pledger$' "$T/calls.txt" && [ -s "$T/pledger/record-frontend.last" ] \
+  && [ "$(cut -f3,4 "$T/pledger/record.tsv")" = "$(printf 'frontend\t0')" ]
+check "daemon: a lane never recorded is due, recorded inside the tick's lease, stamped and logged" $? "$out $(cat "$T/calls.txt" "$T/say.txt" 2>/dev/null)"
+out="$(daemon_record broker)"
+[ -z "$out" ] && [ "$(wc -l < "$T/calls.txt" | tr -d ' ')" = 1 ]
+check "daemon: a lane recorded within 20 h is not due again" $? "$out"
+echo $(( $(date +%s) - 72001 )) > "$T/pledger/record-frontend.last"
+out="$(daemon_record legacy)"
+[ "$out" = "due: frontend" ] && [ "$(wc -l < "$T/calls.txt" | tr -d ' ')" = 1 ] && grep -q "needs this tick's broker lease" "$T/say.txt"
+check "daemon: a tick without a broker lease records nothing" $? "$out $(cat "$T/say.txt")"
+out="$(daemon_record broker 75)"; before="$(cat "$T/pledger/record-frontend.last")"
+[ "$(( $(date +%s) - before ))" -ge 72000 ] && [ "$(tail -1 "$T/pledger/record.tsv" | cut -f4)" = 75 ]
+check "daemon: a stopped recording is logged and NOT stamped, so it is due next tick" $? "$(tail -1 "$T/pledger/record.tsv")"
+out="$(daemon_record broker 75)"; n0="$(wc -l < "$T/calls.txt" | tr -d ' ')"
+[ "$out" = "due: frontend" ]
+check "daemon: a run the broker stopped (75) is not a failure, so it stays due" $? "$out"
+daemon_record broker 1 >/dev/null; daemon_record broker 1 >/dev/null; n1="$(wc -l < "$T/calls.txt" | tr -d ' ')"
+out="$(daemon_record broker 1)"; n2="$(wc -l < "$T/calls.txt" | tr -d ' ')"
+[ $((n1 - n0)) = 2 ] && [ -z "$out" ] && [ "$n2" = "$n1" ] && grep -q "failed 2 time(s) in 20 h" "$T/say.txt"
+check "daemon: after 2 failures in 20 h a lane is not tried again (no whole lane every 20 min)" $? "n0=$n0 n1=$n1 n2=$n2 out=$out"
+grep -q 'elif .*-le 5 \] && package_record_due; then' "$ROOT/scripts/tracegate-daemon.sh"
+check "daemon: the recording is in the nightly window, after the nightly" $?
 
 # Sabotage witness: the same hang with the alarm removed is NOT bounded. The watchdog
 # here stops it at 6 s; reaching the watchdog is the expected (red) outcome.

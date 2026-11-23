@@ -1,6 +1,9 @@
 # ADR 1054 — Webinars: one client per webinar, writes need write authority, an unconfirmed registrant is queued
 
-Status: Accepted (implemented on `feat/fl2-86-webinars-org-truth`; flips to implemented on merge)
+Status: implemented (merged to main by #5571 as `3d5da98a0a`, 2026-11-09)
+
+> **CORRECTED 2026-11-22 (grade-tests `TST-OAK-3`):** this line said "flips to implemented
+> on merge". #5571 merged, and the flip never happened until now.
 
 > Commit ids in the implementation record are after the rebase onto `origin/main` (2026-11-04);
 > the graders graded the pre-rebase heads `4b8184c01` (first), `5fabe20c9` and `c58bae506` (closing).

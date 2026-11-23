@@ -53,7 +53,7 @@ export declare function computePrecache(args: {
   features: OfflineFeature[];
   budgetKb?: number;
   readPublicFile: (path: string) => Uint8Array | null;
-}): { precache: string[]; version: string; sizes: { id: string; gzipKb: number; chunks: number }[]; errors: string[] };
+}): { precache: string[]; version: string; sizes: { id: string; gzipKb: number; chunks: number; onlineOnlyChunks: number }[]; errors: string[] };
 export declare function buildOfflineTable(args: {
   features: OfflineFeature[];
   neverCache: NeverCacheRule[];

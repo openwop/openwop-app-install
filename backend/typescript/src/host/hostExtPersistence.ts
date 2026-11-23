@@ -889,6 +889,14 @@ export class DurableCollection<T> {
     if (!this.tenantOf) return;
     const storage = requireStorage();
     if ((await storage.kvGet(this.backfillKey)) !== null) return; // already backfilled
+    // A verified index (ADR 0866) already has a marker for every row: the reconcile
+    // pass that verified it wrote each missing one. Scanning the whole collection here
+    // would only rewrite identical markers, on whatever read comes first (ADR 1155 P0
+    // measured 25,000 writes on one board GET), so record the backfill as done instead.
+    if (await this.tenantIndexVerified()) {
+      await storage.kvSet(this.backfillKey, '1');
+      return;
+    }
     for (const item of await this.list()) {
       // ADR 0872 D3 — a row with no tenant yet (a legacy row its owner stamps
       // later) gets no marker; the reconcile pass keeps the index unverified

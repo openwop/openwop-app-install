@@ -32,6 +32,14 @@ export const NODE_ACTION_CLASSES: Readonly<Record<string, ActionClassEntry>> = O
   'feature.campaign-brief.nodes.generate-angles': { class: 'creative.generate', why: 'Model-generated creative angles; a draft.' },
   'feature.campaign-channels.nodes.generate': { class: 'creative.generate', why: 'Generates one channel\'s drafts.' },
   'feature.campaign-channels.nodes.create-creative-briefs': { class: 'none', why: 'ADR 1020 D14: creates the APPROVED creative_briefs draft as managed briefs on the Creative Briefs page, after the approval; nothing leaves the host and nothing is charged.' },
+  // ADR 0162 correction (CMS2WF-6): each channel chain now ends in its publish
+  // node, after the channel approval. Three create DRAFTS inside the host; the
+  // ads one creates a real PAUSED campaign through ctx.ads.publishAd, whose
+  // chokepoint gates it as ads.publish (adsAdapter.ts evaluateSpendGate).
+  'feature.campaign-channels.nodes.publish-landing-page': { class: 'none', why: 'ADR 0162: creates the approved landing page as a DRAFT CMS page (ctx.features.cms.createDraftPage); never publishes it, so nothing leaves the host. Going live is the CMS publish, which has its own gate.' },
+  'feature.campaign-channels.nodes.publish-email-sequence': { class: 'none', why: 'ADR 0162: creates the approved sequence as DRAFT email templates and a DRAFT campaign (ctx.features.email.createDraftCampaign); never sends. Sending is email.campaign-send at the send chokepoint.' },
+  'feature.campaign-channels.nodes.publish-social-posts': { class: 'none', why: 'ADR 0166: writes the approved posts into a DRAFT social-calendar document (ctx.features.documents.createDraftDocument), a handoff packet; no live social dispatch.' },
+  'feature.campaign-channels.nodes.publish-ad-variants': { class: 'ads.publish', why: 'ADR 0167/0223: with an ad account connected, creates a real campaign on the ad platform, PAUSED, through ctx.ads.publishAd, which the adsAdapter gates as ads.publish. Going live is ads.launch, a separate gate.' },
   'feature.production.nodes.plan-generate': { class: 'creative.generate', why: 'Generates the production plan from the merged channels.' },
   // ── external effects ──
   'core.openwop.integration.email-send': { class: 'email.campaign-send', why: 'Sends marketing email from a journey step.' },

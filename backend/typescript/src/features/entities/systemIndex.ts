@@ -163,6 +163,11 @@ export function registerStoreIndex<R>(typeName: string, decl: StoreIndexDecl<R>)
   });
 }
 
+/** Every type with a declared index: the one upkeep sweep checks each (ADR 1155 P3a). */
+export function registeredIndexTypes(): string[] {
+  return [...decls.keys()];
+}
+
 /** A weight is a finite whole number ≥ 0; anything else counts as 0 (never NaN in a sum). */
 const weightOfRow = (w: number): number => (Number.isFinite(w) && w > 0 ? Math.floor(w) : 0);
 
@@ -307,6 +312,15 @@ export async function syncRow(tenantId: string, typeName: string, entityId: stri
   }
   log.warn('system_index_sync_unsettled', { type: typeName, passes: SYNC_PASSES });
   return true; // the intent stays; the repair sweep finishes it
+}
+
+/** Re-derive one row's markers from its stored row now, even with no write pending: for
+ *  a reader that found a marker disagreeing with its row (ADR 1155 P3c-1). Forced, so a
+ *  marker whose projection is wrong while the manifest agrees is rewritten too. */
+export async function resyncSystemRow(tenantId: string, typeName: string, entityId: string): Promise<boolean> {
+  if (!decls.has(typeName)) return false;
+  await markDirty(tenantId, typeName, entityId);
+  return syncRow(tenantId, typeName, entityId, { force: true });
 }
 
 /** A pass whose lease expired stops before writing: a newer holder owns the row. */

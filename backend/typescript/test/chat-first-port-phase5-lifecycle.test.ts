@@ -33,6 +33,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence, DurableCollection } from '../src/host/hostExtPersistence.js';
 import { purgeRetained } from '../src/host/retentionPurger.js';
+import { __listKvAgeOutForTest, __runKvAgeOutOnce } from '../src/host/kvAgeOut.js';
 import { checkWidgetTurn } from '../src/features/chat-widget/capsTracker.js';
 import type { WidgetConfig } from '../src/features/chat-widget/widgetService.js';
 import { eraseSubjectProjects } from '../src/features/projects/projectsService.js';
@@ -89,6 +90,25 @@ describe('A5 — chat-widget abuse-counter retention', () => {
     expect((await checkWidgetTurn(widget, 'sess-1', '2026-07-21')).allowed).toBe(true);
     const row = await sessCol().get('wZ:sess-1');
     expect(row).toMatchObject({ turns: 1, tenantId: 'tZ', updatedAt: '2026-07-21T00:00:00.000Z' });
+  });
+
+  // User decision 2026-11-22: erase the pre-A5 rows (no updatedAt, no tenantId), which no
+  // lane could see. The age-out stamps them on first sighting and deletes them 2 days on.
+  it('a pre-A5 counter row (no updatedAt, no tenantId) is stamped, then aged out', async () => {
+    const regs = __listKvAgeOutForTest().filter((r) => r.id.startsWith('chatwidget:'));
+    expect(regs.map((r) => r.id).sort()).toEqual(['chatwidget:anonautowrite:session', 'chatwidget:anonwrite:day', 'chatwidget:day', 'chatwidget:session']);
+    for (const r of regs) expect(r, r.id).toMatchObject({ stampMissingTimestamp: true, timestampField: 'updatedAt', ttlDays: 2 });
+
+    const storage = await openStorage('memory://');
+    initHostExtPersistence(storage);
+    await storage.kvSet('hostext:chatwidget:session:w:legacy', JSON.stringify({ sKey: 'w:legacy', turns: 4 }));
+    await storage.kvSet('hostext:chatwidget:day:w:2026-07-01', JSON.stringify({ dKey: 'w:2026-07-01', sessions: 7 }));
+    const t0 = new Date(now);
+    await __runKvAgeOutOnce(storage, t0);
+    expect(JSON.parse((await storage.kvGet('hostext:chatwidget:session:w:legacy'))!)).toMatchObject({ turns: 4, updatedAt: t0.toISOString() });
+    await __runKvAgeOutOnce(storage, new Date(now + 3 * DAY));
+    expect(await storage.kvGet('hostext:chatwidget:session:w:legacy')).toBeNull();
+    expect(await storage.kvGet('hostext:chatwidget:day:w:2026-07-01')).toBeNull();
   });
 });
 

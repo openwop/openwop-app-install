@@ -130,6 +130,11 @@ describe('ADR 1136 P3a — the host-run loop hands a credential step to the pers
     // The answer is spent: it cannot resume a later take-over.
     const row = (await getSession(T, v.sessionId))!;
     expect(row.consumedApprovals).toContain('itr-a');
+    // ADR 1136 P3b — the person's sign-in is on the trajectory: a credential step
+    // decided by a person, at the reported host, carrying no typed text.
+    const signedIn = row.steps.find((st) => st.action.kind === 'credential');
+    expect(signedIn).toMatchObject({ decidedBy: 'human', approvalInterruptId: 'itr-a', action: { url: ORIGIN } });
+    expect(JSON.stringify(row.steps)).not.toContain('model-would-type-this');
   });
 
   it('stop ends the session from any run the opener acts in', async () => {

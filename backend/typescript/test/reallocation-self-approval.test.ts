@@ -18,10 +18,12 @@
  *   - a different admin on the client approves; a non-requester without an
  *     approver role on the client is refused (`autonomy_not_eligible`), so the
  *     named approvers are enforced, not only the requester list;
- *   - a reject by the proposer is REFUSED too. This is the existing rule for a
- *     row that names approvers (ADR 0942 D10.2, "in either direction"; the
- *     sole-admin exception is approve-only). Before the fix the proposer could reject;
- *     another admin still can;
+ *   - a reject by the proposer WITHOUT their own interactive session is refused
+ *     (ADR 0942 D10.2, "in either direction"); another admin still rejects, and
+ *     the plan then closes as `rejected`, not `withdrawn`;
+ *   - CORRECTED 2026-11-20 (ADR 1022 CP71WF-23, user decision): the proposer MAY
+ *     withdraw their own plan, see the "proposer withdraw" block below and its own
+ *     header for what it pins and what goes red without it;
  *   - the sole-admin self-approval ADR: the client org's only admin, voting in their own session, may
  *     approve their own plan, and the audit chain records `sole_admin`; the same
  *     vote without a session stays refused.
@@ -52,7 +54,7 @@ import { upsertFromPrincipal } from '../src/features/users/usersService.js';
 import { createBrief } from '../src/features/campaign-brief/briefService.js';
 import { finalizeFromBrief } from '../src/features/campaign-orchestration/campaignService.js';
 import { importCsv } from '../src/features/campaign-connectors/performanceService.js';
-import { getApproval } from '../src/host/approvalService.js';
+import { createCampaignSpendApproval, getApproval } from '../src/host/approvalService.js';
 import { claimApproval, rejectApproval } from '../src/host/approvalDecision.js';
 import { listChain } from '../src/host/auditChainService.js';
 import { createAgentToolProvider } from '../src/host/agentToolProvider.js';
@@ -130,8 +132,15 @@ async function post<T = Record<string, unknown>>(cookie: string, path: string, b
 }
 const decide = (tenantId: string, approvalId: string, decidedBy: string, humanSession = false) =>
   claimApproval({ storage, hostSuite }, { tenantId, decidedBy, ...(humanSession ? { decidedByHumanSession: true } : {}) }, approvalId);
-const reject = (tenantId: string, approvalId: string, decidedBy: string) =>
-  rejectApproval({ storage, hostSuite }, { tenantId, decidedBy }, approvalId);
+const reject = (tenantId: string, approvalId: string, decidedBy: string, humanSession = false, wildcardOperator = false) =>
+  rejectApproval({ storage, hostSuite }, {
+    tenantId, decidedBy,
+    ...(humanSession ? { decidedByHumanSession: true } : {}),
+    ...(wildcardOperator ? { decidedByWildcardOperator: true } : {}),
+  }, approvalId);
+/** Close a plan through the page's apply route (the lane that reconciles a decided approval onto the plan). */
+const applyPlan = (cookie: string, orgId: string, planId: string) =>
+  post<{ outcome: string; plan?: { status?: string; withdrawnBy?: string; withdrawnAt?: string } }>(cookie, `/host/openwop-app/campaign-intel/reallocations/${encodeURIComponent(planId)}/apply`, { orgId });
 
 /** One dispatched Meta + Google campaign under `orgId`, with live budgets and performance. */
 async function seedClientCampaigns(tenantId: string, orgId: string, tag: string): Promise<void> {
@@ -145,15 +154,18 @@ async function seedClientCampaigns(tenantId: string, orgId: string, tag: string)
   await importCsv(tenantId, orgId, PERFORMANCE_CSV);
 }
 
-/** Propose through the chat tool; returns the approval id. */
-async function chatPropose(tenantId: string, actingUserId: string, orgId: string, runId: string): Promise<string> {
+/** Propose through the chat tool; returns the plan and approval ids. */
+async function chatProposePlan(tenantId: string, actingUserId: string, orgId: string, runId: string): Promise<{ planId: string; approvalId: string }> {
   const out = await createAgentToolProvider({ tenantId, actingUserId, runId }).executeTool({ name: CAMPAIGN_INTEL_PROPOSE_REALLOCATION_TOOL_ID, input: { orgId } });
   expect(out.isError, out.content).toBeFalsy();
-  const body = JSON.parse(out.content) as { outcome: string; approvalId?: string };
+  const body = JSON.parse(out.content) as { outcome: string; planId?: string; approvalId?: string };
   expect(body.outcome, out.content).toBe('proposed');
-  if (!body.approvalId) throw new Error(`no approval: ${out.content}`);
-  return body.approvalId;
+  if (!body.approvalId || !body.planId) throw new Error(`no plan or approval: ${out.content}`);
+  return { planId: body.planId, approvalId: body.approvalId };
 }
+/** Propose through the chat tool; returns the approval id. */
+const chatPropose = async (tenantId: string, actingUserId: string, orgId: string, runId: string): Promise<string> =>
+  (await chatProposePlan(tenantId, actingUserId, orgId, runId)).approvalId;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -237,12 +249,96 @@ describe('ADR 1022 CP71WF-23 — a reallocation proposer cannot approve their ow
     expect((await getApproval(approvalId))?.status).toBe('approved');
   });
 
-  it('a reject by the proposer is refused as well (named-approver rule, either direction); another admin rejects', async () => {
-    const approvalId = await chatPropose(TENANT, operatorUserId, orgA, 'chat-turn-rsa-2');
+  it('a reject by the proposer outside their own session is refused; another admin rejects, and the plan closes rejected (not withdrawn)', async () => {
+    const { planId, approvalId } = await chatProposePlan(TENANT, operatorUserId, orgA, 'chat-turn-rsa-2');
     await expect(reject(TENANT, approvalId, operatorUserId)).rejects.toMatchObject(REFUSED);
     expect((await getApproval(approvalId))?.status).toBe('pending');
     await reject(TENANT, approvalId, approverUserId);
     expect((await getApproval(approvalId))?.status).toBe('rejected');
+    const closed = await applyPlan(operator, orgA, planId);
+    expect(closed.status, JSON.stringify(closed.body)).toBe(200);
+    expect(closed.body.outcome).toBe('rejected');
+    expect(closed.body.plan?.status).toBe('rejected');
+    expect(closed.body.plan?.withdrawnBy).toBeUndefined();
+  });
+});
+
+/**
+ * ADR 1022 CP71WF-23 — CORRECTED 2026-11-20 (user decision): the person who
+ * proposed a reallocation plan may WITHDRAW it while it is open.
+ *
+ * Why it exists: the base fix made every reallocation approval name approvers and
+ * list the proposer as a submitter, so `spendEligibility.ts` refused the proposer
+ * in BOTH directions. Its documented escape ("a requester who wants to stop the
+ * spend cancels the run") does not exist for a plan proposed from the route or the
+ * chat tool, which have no run, so a mistaken plan sat for PLAN_TTL_MS (7 days).
+ * Precedent: ADR 1024 D3.4 ("separation of duties binds approve only; a submitter
+ * may withdraw", `approvalService.ts`) and the agent-deployments requester withdraw.
+ *
+ * What it pins:
+ *   - the proposer's reject from their own interactive session passes, the
+ *     approval is rejected, and the plan closes as `withdrawn` with `withdrawnBy`
+ *     and `withdrawnAt`; no budget is written;
+ *   - the same reject without a session, or on the wildcard-operator lane, is
+ *     still refused (`autonomy_self_approval_refused`): an agent, an API key or an
+ *     MCP principal never withdraws;
+ *   - the proposer still cannot APPROVE, also from their own session;
+ *   - the exception is reallocation-only: the same proposer's reject of a
+ *     campaign-spend row with another `spendKind` (a budget set) is refused.
+ *   (A non-proposer's reject, unchanged, is the last case of the block above.)
+ *
+ * Red witnesses (DESIGNED, NOT YET RUN — the authoring session was barred from
+ * every test runner; run each before citing this file):
+ *   - remove the `reallocationWithdraw` early return in `spendEligibility.ts`: the
+ *     withdraw case is refused and goes red;
+ *   - drop the `spendKind === 'reallocation'` condition: the budget-row case
+ *     passes the reject and goes red;
+ *   - drop the `humanSession` / `isOperator` conditions: the no-session and
+ *     wildcard-operator cases go red;
+ *   - make `closeRejected` (`reallocation.ts`) always close as `rejected`: the
+ *     plan-status assertion of the withdraw case goes red.
+ */
+describe('ADR 1022 CP71WF-23 (2026-11-20) — the proposer may withdraw their own reallocation plan', () => {
+  it('the proposer withdraws from their own session: approval rejected, plan withdrawn, who and when recorded', async () => {
+    const { planId, approvalId } = await chatProposePlan(TENANT, operatorUserId, orgA, 'chat-turn-rsa-withdraw');
+    const writesBefore = fake.writes.length;
+    await reject(TENANT, approvalId, operatorUserId, true);
+    const decided = await getApproval(approvalId);
+    expect(decided).toMatchObject({ status: 'rejected', decidedBy: operatorUserId });
+
+    const closed = await applyPlan(operator, orgA, planId);
+    expect(closed.status, JSON.stringify(closed.body)).toBe(200);
+    expect(closed.body.outcome).toBe('withdrawn');
+    expect(closed.body.plan).toMatchObject({ status: 'withdrawn', withdrawnBy: operatorUserId });
+    expect(Number.isNaN(Date.parse(closed.body.plan?.withdrawnAt ?? ''))).toBe(false);
+    expect(fake.writes.length).toBe(writesBefore);
+    // Terminal: a second apply reports the same outcome and changes nothing.
+    expect((await applyPlan(operator, orgA, planId)).body.outcome).toBe('withdrawn');
+  });
+
+  it('the proposer\'s withdraw outside an interactive session, or on the wildcard-operator lane, is refused', async () => {
+    const approvalId = await chatPropose(TENANT, operatorUserId, orgA, 'chat-turn-rsa-withdraw-nosession');
+    await expect(reject(TENANT, approvalId, operatorUserId)).rejects.toMatchObject(REFUSED);
+    await expect(reject(TENANT, approvalId, operatorUserId, true, true)).rejects.toMatchObject(REFUSED);
+    expect((await getApproval(approvalId))?.status).toBe('pending');
+  });
+
+  it('the proposer still cannot approve their own plan, also from their own session', async () => {
+    const approvalId = await chatPropose(TENANT, operatorUserId, orgA, 'chat-turn-rsa-withdraw-approve');
+    await expect(decide(TENANT, approvalId, operatorUserId, true)).rejects.toMatchObject(REFUSED);
+    expect((await getApproval(approvalId))?.status).toBe('pending');
+  });
+
+  it('the exception is reallocation-only: the requester\'s reject of a budget-set spend row is refused', async () => {
+    const template = await getApproval(await chatPropose(TENANT, operatorUserId, orgA, 'chat-turn-rsa-withdraw-template'));
+    if (!template?.policy) throw new Error('the reallocation approval names no policy');
+    const budgetRow = await createCampaignSpendApproval({
+      tenantId: TENANT, spendKind: 'budget', platform: 'meta', adAccountId: 'act_1', platformCampaignId: 'm-a',
+      dailyBudgetMinor: 9000, spendIdemKey: `budget:rsa-withdraw:${randomBytes(4).toString('hex')}`, proposal: 'Set the daily budget to 9000.',
+      policy: template.policy, orgId: orgA, submitters: [operatorUserId],
+    });
+    await expect(reject(TENANT, budgetRow.approvalId, operatorUserId, true)).rejects.toMatchObject(REFUSED);
+    expect((await getApproval(budgetRow.approvalId))?.status).toBe('pending');
   });
 });
 

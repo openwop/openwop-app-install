@@ -37,8 +37,9 @@ import { takeShared } from '../../host/sharedRateLimit.js';
 import { getChangeSet, diffOf } from './changeSetService.js';
 import { getClient } from './clientService.js';
 import { getRequest } from './requestService.js';
-import { agencyStandInRefusal, auditOps, changeSetApprovalIdOf, decideChangeSetAsClient } from './approval.js';
+import { agencyStandInRefusal, auditOps, changeSetApprovalIdOf, clientApproverSubject } from './approval.js';
 import { getApproval } from '../../host/approvalService.js';
+import { castApprovalVote, type ApprovalDecisionDeps } from '../../host/approvalDecision.js';
 import {
   checkGrantLink, createLinkOnlyCollaborator, getCollaborator, grantAccess, grantLinkResourceId, listCollaborators,
   purgeCollaboratorsForOrg, revokeGrant, setCollaboratorStatus, type ExternalCollaborator,
@@ -219,6 +220,34 @@ export async function revokeApprover(tenantId: string, client: ClientAccount, ap
   return next;
 }
 
+/** ADR 0924 P2a (review H4) — a change set whose review expired drops every
+ *  link it has (the sharing rows, the grants behind them, the records). */
+export async function revokeLinksForChangeSet(tenantId: string, orgId: string, changeSetId: string): Promise<number> {
+  const rows = await linkRecordsFor(tenantId, orgId, (r) => r.changeSetId === changeSetId);
+  for (const r of rows) await dropLink(r);
+  return rows.length;
+}
+
+/**
+ * ADR 0924 P2a (review H3) — does a client vote cast earlier still stand? The
+ * approver must still be an active link-only collaborator, and the CURRENT link
+ * of the (change set, approver) pair must still pass the one per-use grant check
+ * (live, unexpired, `decide`). Any doubt is `false`: the vote is dropped and the
+ * client votes again.
+ */
+export async function clientVoteStillLive(tenantId: string, orgId: string, changeSetId: string, approverId: string): Promise<boolean> {
+  const approver = await getApproverRow(tenantId, orgId, approverId);
+  if (!approver || approver.status !== 'active') return false;
+  const record = await approvalLinks.get(`${tenantId}::${orgId}::${changeSetId}::${approverId}`);
+  if (!record || record.tenantId !== tenantId || record.orgId !== orgId || !record.grantId) return false;
+  try {
+    const use = await checkGrantLink({ tenantId, orgId, resourceId: approvalResourceIdOf(changeSetId, record.grantId), action: 'decide', target: { kind: CHANGE_SET_GRANT_KIND, id: changeSetId } });
+    return isApprover(use.collaborator) && use.collaborator.collaboratorId === approverId;
+  } catch {
+    return false;
+  }
+}
+
 /** ADR 0921 Q2 — archiving a client revokes every approver link it has. */
 export async function revokeAllLinksForClient(tenantId: string, orgId: string): Promise<number> {
   const rows = await linkRecordsFor(tenantId, orgId, () => true);
@@ -275,7 +304,10 @@ export async function sendApprovalLinks(input: { tenantId: string; client: Clien
   // Whoever sends the link holds it, so they must be someone who could approve
   // for the agency: a client approval is never weaker than an agency one.
   const approval = await getApproval(changeSetApprovalIdOf(tenantId, changeSetId));
-  const refusal = await agencyStandInRefusal(tenantId, orgId, sentBy, approval?.changeSetProposedBy);
+  if (!approval || approval.tenantId !== tenantId || approval.status !== 'pending') {
+    throw new OpenwopError('validation_error', 'Send this change for review first.', 409, { reason: 'not_in_review', status: cs.status });
+  }
+  const refusal = await agencyStandInRefusal(tenantId, orgId, sentBy, approval);
   if (refusal === 'separation-of-duties') {
     throw new OpenwopError('forbidden', 'You asked for this change, so someone else has to send it to the client.', 403, { reason: 'separation-of-duties' });
   }
@@ -393,7 +425,7 @@ const ipKey = (ip: string): string => createHash('sha256').update(ip).digest('he
  * superseded, wrong hash) is the same 404; a stale package is 409 `package_stale`.
  * Limits are the shared counters, failing CLOSED (ADR 0934 D2: this decides).
  */
-export async function decideFromPortal(input: { token: string; ip: string; body: unknown }): Promise<{ status: 'approved' | 'rejected' }> {
+export async function decideFromPortal(input: { token: string; ip: string; body: unknown; deps: ApprovalDecisionDeps }): Promise<{ status: 'approved' | 'rejected' | 'pending' }> {
   const body = (input.body ?? {}) as { action?: unknown; expectedChangeSetHash?: unknown; comment?: unknown };
   const ipTake = await takeShared({ scope: 'campaign-ops.portal.ip', key: ipKey(input.ip || 'unknown'), limit: 60, windowS: 600, failure: 'closed' });
   const tokenTake = ipTake.allowed
@@ -421,21 +453,29 @@ export async function decideFromPortal(input: { token: string; ip: string; body:
   const cs = await getChangeSet(tenantId, orgId, ctx.changeSetId);
   if (!cs || typeof body.expectedChangeSetHash !== 'string' || body.expectedChangeSetHash !== cs.hash) throw notFound();
 
+  // ADR 0924 P2a (review C1) — the client's vote enters the SAME host vote
+  // entry as a member's, on the `client` lane: the kind's per-vote checks, the
+  // shared ledger and threshold, and the one finalize. The lane, and so the
+  // party, is fixed here from the link, never from the body.
   try {
-    const out = await decideChangeSetAsClient(tenantId, changeSetApprovalIdOf(tenantId, ctx.changeSetId), action === 'approve' ? 'approved' : 'rejected', {
-      approverId: ctx.approver.approverId,
-      sentBy: ctx.record.sentBy,
+    const out = await castApprovalVote(input.deps, {
+      tenantId,
+      decidedBy: clientApproverSubject(ctx.approver.approverId),
       expectedChangeSetHash: cs.hash,
       ...(comment ? { note: comment } : {}),
+    }, changeSetApprovalIdOf(tenantId, ctx.changeSetId), action === 'approve' ? 'approved' : 'rejected', {
+      party: 'client', approverId: ctx.approver.approverId, sentBy: ctx.record.sentBy,
     });
-    if (!out) throw notFound();
-    if (!out.changed) throw notFound(); // decided by someone else in the meantime
-    return { status: out.approval.status === 'approved' ? 'approved' : 'rejected' };
+    return { status: out.status };
   } catch (err) {
-    if (err instanceof OpenwopError && err.code === 'conflict') {
-      const reason = (err.details as { reason?: string } | undefined)?.reason;
-      if (reason === 'request_changed' || reason === 'asset_changed' || reason === 'sender_unavailable') throw stalePackage();
-      if (reason === 'change_set_mismatch') throw notFound();
+    if (err instanceof OpenwopError) {
+      const details = err.details as { reason?: string; status?: string } | undefined;
+      const reason = details?.reason;
+      if (err.code === 'conflict' && (reason === 'request_changed' || reason === 'asset_changed' || reason === 'sender_unavailable')) throw stalePackage();
+      // Decided by someone else in the meantime, a hash that moved, a vote this
+      // row does not take: the same 404 as every other refusal a holder can probe.
+      if (err.code === 'not_found' || err.code === 'forbidden' || err.code === 'forbidden_scope') throw notFound();
+      if (err.code === 'conflict' && (reason === 'change_set_mismatch' || details?.status !== undefined)) throw notFound();
     }
     throw err;
   }

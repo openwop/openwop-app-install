@@ -14,15 +14,30 @@
  * > v0.15.0): a requester who is the only admin able to decide may APPROVE, checked
  * > below via `soleAdminSelfApproval`. A reject by a requester is still refused.
  *
+ * > CORRECTED 2026-11-20 (ADR 1022 CP71WF-23, user decision 2026-11-20): "a
+ * > requester who wants to stop the spend cancels the run" has no run to cancel for
+ * > an ADR 0952 reallocation plan proposed from the Campaign Intelligence route or
+ * > the Analyst's chat tool, so a mistaken plan sat for its 7-day TTL. One more
+ * > narrow exception: on a `campaign-spend` row whose `spendKind` is
+ * > `'reallocation'`, a requester may REJECT (withdraw) when they are a person
+ * > voting in their own interactive session (`isInteractivePersonVote`, never the
+ * > wildcard operator lane, a delegated key, an agent or an MCP principal). The
+ * > precedent is ADR 1024 D3.4 (`approvalService.ts`, "separation of duties binds
+ * > approve only; a submitter may withdraw") and the agent-deployments requester
+ * > withdraw. Approve is unchanged; every other campaign-spend row (launch,
+ * > budget, publish, audience) still refuses a requester's reject. The plan
+ * > records the withdrawal (`status: 'withdrawn'`, `withdrawnBy`, `withdrawnAt`,
+ * > `campaign-intel/reallocation.ts`).
+ *
  * Rows WITHOUT policy approver refs (the pre-0942 governance threshold, any
  * non-campaign spend) keep today's behaviour: no check here.
  */
 import { OpenwopError } from '../../types.js';
-import { registerApprovalEligibility } from '../approvalService.js';
+import { registerApprovalEligibility, type ApprovalEligibilityCheck, type PendingApproval } from '../approvalService.js';
 import { isEligibleApprover } from '../approverResolution.js';
 import { canonicalDecider } from '../delegatedSubject.js';
 import type { Storage } from '../../storage/storage.js';
-import { isAutonomyRequester, soleAdminSelfApproval } from './selfApproval.js';
+import { isAutonomyRequester, isInteractivePersonVote, soleAdminSelfApproval } from './selfApproval.js';
 import { policyApproverRefs } from '../approverResolution.js';
 import { approvalWaiterRunIds } from './waiters.js';
 
@@ -40,6 +55,16 @@ export function registerAutonomySpendEligibility(storage: Pick<Storage, 'getRun'
  */
 export function registerAutonomyPolicyRowEligibility(kind: string, storage: Pick<Storage, 'getRun'>): void {
   registerApprovalEligibility(kind, policyRowEligibility(storage, false));
+}
+
+/** A requester's reject that is a withdrawal of their own reallocation plan (see the
+ *  2026-11-20 correction above). An absent `outcome` is the stricter `approved`. */
+function reallocationWithdraw(approval: PendingApproval, voter: string, opts: Parameters<ApprovalEligibilityCheck>[3]): boolean {
+  return approval.kind === 'campaign-spend'
+    && approval.spendKind === 'reallocation'
+    && opts?.outcome === 'rejected'
+    && opts.isOperator !== true
+    && isInteractivePersonVote(voter, opts.humanSession === true);
 }
 
 function policyRowEligibility(storage: Pick<Storage, 'getRun'>, required: boolean): Parameters<typeof registerApprovalEligibility>[1] {
@@ -90,6 +115,10 @@ function policyRowEligibility(storage: Pick<Storage, 'getRun'>, required: boolea
       });
       if (verdict.allowed) requested = false;
     }
+    // ADR 1022 CP71WF-23 (corrected 2026-11-20) — the reallocation proposer may
+    // withdraw their own plan. Not an approver decision, so the approver-role check
+    // below does not apply: the proposer needs no approver role to take it back.
+    if (requested && !unreadableWaiter && reallocationWithdraw(approval, voterId, opts)) return;
     if (requested) {
       throw new OpenwopError('forbidden_scope', 'You requested this spend, so someone else has to decide it.', 403, { reason: 'autonomy_self_approval_refused' });
     }

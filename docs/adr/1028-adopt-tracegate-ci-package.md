@@ -69,6 +69,48 @@ package's own modules at the pinned version.
 | P3 | The same for the backend lane, after its own 20 compared gates. | backend selection | proposed |
 | P4 | Retire `scripts/tracegate.mjs`, the recorder, the i18n tracker and the vendored copies. `tracegate-daemon.sh` keeps its open-PR pre-gating (Gaps), calling the package. | none by itself | proposed |
 
+> **CORRECTED 2026-11-23 (P1 exit, the compare's fork side): the fork's side included its
+> audit draw, so a superset test against it measured nothing.** The first row after the
+> nightly re-record (939756f11) read fork 85, package 5, 80 only the fork runs. The fork's
+> `reasons-*.tsv` for that head shows 13 must-run files (12 `opaque subprocess input`, 1
+> `forkRepoint.ts` read). The other 72 were the enforce-mode random audit, which
+> `selected.txt` includes. `shadow-compare` now reads the fork's must-run files from its
+> `predict.json` (`fork_basis = predict`), just as it reads the package's. It falls back to
+> `selected.txt` only when the fork wrote no decisions. For each row that differs, it keeps
+> the files in `compare-<lane>-diff/<at>-<head>.json`, so the P1 exit's "or the differences
+> are explained" can be checked file by file. The log gained a column, so the earlier rows
+> are set aside as `compare-frontend.before-2026-11-23.tsv` and kept. The P1 exit counts
+> only rows with `basis = predict` and `fork_basis = predict` in which the package selected
+> fewer than all files. An expected difference to explain: the fork treats any test that
+> starts a subprocess as opaque and always runs it. The package records what each spawn
+> ran, so it can reuse such a test. Witness: `test-tracegate-package-shadow.sh` (the
+> fork-side cases; reading `selected.txt` again reddens 3).
+
+> **CORRECTED 2026-11-23 (P1 exit, a third time): a recording expires, so the daemon now
+> re-records the package nightly.** MEASURED on `compare-frontend.tsv`: of the 24 rows
+> after 2026-11-18, 1 had the package selecting fewer than all files. Every row on
+> 2026-11-23 selected all of them, under 0.10.4. This time the cause was not the lockfile.
+> The package's `reasons-*.tsv` put 1,315 of 1,332 files at `footprint older than 72 h
+> (time-dependent tests)` and 17 at `no footprint`. The 2026-11-17 19:18 recording was the
+> last one, nothing re-recorded, and the package reuses no footprint older than 72 h. A
+> one-off recording therefore runs out before 20 gates can count: at about 7 frontend gates
+> a day, the count needs 3 days. `tracegate-daemon.sh` now re-records each lane in
+> `OPENWOP_PACKAGE_RECORD_LANES` (default `frontend`) once every 20 h, inside the 01:00–05:59
+> local window and after the nightly. It runs inside the tick's daemon lease, so any gate,
+> train or deploy stops it. A tick with no lease records nothing. It logs each run to
+> `<ledger>/tracegate-package/record.tsv` (lane, exit code, seconds). A stopped run is not
+> stamped and runs again on the next tick. After 2 failures in 20 h (a run the broker stopped
+> doesn't count), a lane waits out the 20 h, so a broken recording never runs a whole lane
+> every 20 min (`OPENWOP_PACKAGE_RECORD_MAX_FAILS`). This only helps on a machine where the daemon
+> is installed (`scripts/tracegate-daemon.sh install`). Witness:
+> `test-tracegate-package-shadow.sh` (the `daemon:` cases). COST, MEASURED on this Mac (2026-11-23 at
+> 665374ef2, nice 10 under the daemon lease, with one 1-worker lane alongside): 388 s wall
+> for one frontend recording (vitest 357 s, ingest 13 s), giving 1,328 footprints with 0.1%
+> of modules unmapped. That is about 6.5 min a night. The 4 builder files that start the
+> backend contract helper need backend dependencies (`tsx`). The daemon's work tree
+> installs those; a bare worktree with only the frontend installed does not, and records
+> those 4 as red.
+
 > **CORRECTED 2026-11-18 (P1 exit, again) — 44 more compared gates counted for nothing,
 > and the pin moves to `tracegate-ci@0.10.4`.** MEASURED on `compare-frontend.tsv`: all 44
 > `basis = predict` rows after the 2026-11-11 recording had the package selecting every
