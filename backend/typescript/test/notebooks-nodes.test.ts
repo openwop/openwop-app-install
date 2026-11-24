@@ -23,7 +23,6 @@
  */
 
 import { describe, expect, it } from 'vitest';
-// @ts-expect-error — untyped .mjs pack module (loaded the way the runtime does)
 import * as pack from '../../../packs/feature.notebooks.nodes/index.mjs';
 
 /** A mock `ctx.features.notebooks` whose `ask` returns canned data keyed by the
@@ -59,11 +58,11 @@ describe('feature.notebooks.nodes', () => {
     });
     const out = await pack.ask(ctxFor(mock.surface, { notebookId: 'nb-1', query: 'what do whales eat' }));
     expect(out.status).toBe('success');
-    expect(out.outputs.augmentedPrompt).toBe('Knowledge: whales eat krill.\n\nQuestion: what do whales eat');
+    expect(out.outputs?.augmentedPrompt).toBe('Knowledge: whales eat krill.\n\nQuestion: what do whales eat');
     // citations deduped by documentId even within one surface call's payload
-    expect(out.outputs.citations).toHaveLength(1);
-    expect(out.outputs.citations[0].documentId).toBe('d1');
-    expect(out.outputs.contexts).toHaveLength(1);
+    expect(out.outputs?.citations).toHaveLength(1);
+    expect(out.outputs?.citations[0]?.documentId).toBe('d1');
+    expect(out.outputs?.contexts).toHaveLength(1);
   });
 
   it('ask fans out per query and MERGES (concat prompts, dedupe citations, concat contexts)', async () => {
@@ -74,11 +73,11 @@ describe('feature.notebooks.nodes', () => {
     const out = await pack.ask(ctxFor(mock.surface, { notebookId: 'nb-1', queries: ['q1', 'q2'] }));
     expect(out.status).toBe('success');
     // both prompt blocks concatenated, in query order, as separate paragraphs
-    expect(out.outputs.augmentedPrompt).toBe('block-1\n\nblock-2');
+    expect(out.outputs?.augmentedPrompt).toBe('block-1\n\nblock-2');
     // d1 (seen in both queries) appears once; d2 once → 2 total
-    expect(out.outputs.citations.map((c: { documentId: string }) => c.documentId).sort()).toEqual(['d1', 'd2']);
+    expect(out.outputs?.citations.map((c: { documentId: string }) => c.documentId).sort()).toEqual(['d1', 'd2']);
     // contexts concatenated across queries (no dedup — they are raw hits)
-    expect(out.outputs.contexts).toEqual([{ documentId: 'd1' }, { documentId: 'd2' }]);
+    expect(out.outputs?.contexts).toEqual([{ documentId: 'd1' }, { documentId: 'd2' }]);
     // one surface ask per query
     expect(mock.calls.filter((c) => c.method === 'ask').map((c) => c.query)).toEqual(['q1', 'q2']);
   });
@@ -87,8 +86,8 @@ describe('feature.notebooks.nodes', () => {
     const mock = mockNotebooks({});
     const out = await pack.search(ctxFor(mock.surface, { notebookId: 'nb-1', query: 'whales' }));
     expect(out.status).toBe('success');
-    expect(out.outputs.hits).toHaveLength(1);
-    expect(out.outputs.hits[0].documentId).toBe('d1');
+    expect(out.outputs?.hits).toHaveLength(1);
+    expect(out.outputs?.hits[0]?.documentId).toBe('d1');
     expect(mock.calls).toEqual([{ method: 'searchNotebook', notebookId: 'nb-1', query: 'whales' }]);
   });
 
@@ -115,7 +114,7 @@ describe('feature.notebooks.nodes — review fixes', () => {
       notebookId: 'nb-1', sourceId: 's-1', systemPrompt: 'Summarize this.',
     }));
     expect(out.status).toBe('success');
-    expect(out.outputs.messages).toEqual([
+    expect(out.outputs?.messages).toEqual([
       { role: 'system', content: 'Summarize this.' },
       { role: 'user', content: 'the source body' },
     ]);
@@ -125,7 +124,7 @@ describe('feature.notebooks.nodes — review fixes', () => {
     const out = await pack.readSource(ctxFor(notebooksWithText('the source body'), {
       notebookId: 'nb-1', sourceId: 's-1',
     }));
-    expect(out.outputs.messages).toEqual([{ role: 'user', content: 'the source body' }]);
+    expect(out.outputs?.messages).toEqual([{ role: 'user', content: 'the source body' }]);
   });
 
   it('write-transformation writes WHERE THE NOTEBOOK IS, and refuses an input that names another owner (ADR 1103 D5)', async () => {
@@ -139,8 +138,8 @@ describe('feature.notebooks.nodes — review fixes', () => {
       { runId: 'r1', nodeId: 'write', inputs: { notebookId: 'nb-1', title: 'X', kind: 'notebook-summary', content: 'body', ...extra }, features: { documents: docs, notebooks } },
     );
     // Control: agreeing (or absent) legacy inputs write to the notebook's own org + owner.
-    expect((await write({ orgId: 'o1', ownerSubject: { kind: 'project', id: 'nb-1' } })).outputs.written).toBe(true);
-    expect((await write({})).outputs.written).toBe(true);
+    expect((await write({ orgId: 'o1', ownerSubject: { kind: 'project', id: 'nb-1' } })).outputs?.written).toBe(true);
+    expect((await write({})).outputs?.written).toBe(true);
     expect(created.map((c) => [c.orgId, c.ownerSubject])).toEqual([
       ['o1', { kind: 'project', id: 'nb-1' }],
       ['o1', { kind: 'project', id: 'nb-1' }],
@@ -165,7 +164,7 @@ describe('feature.notebooks.nodes — MCP write nodes (ADR 0087 OQ-1)', () => {
     expect(declined.outputs).toEqual({ created: false, declined: true });
     expect(seen).toEqual([]);
     const accepted = await pack.mcpCreateNote({ ...ctxBase, inputs: { notebookId: 'n', content: 'x', decision: 'accept' } });
-    expect(accepted.outputs.created).toBe(true);
+    expect(accepted.outputs?.created).toBe(true);
     expect(seen).toEqual([{ notebookId: 'n', content: 'x' }]);
   });
 });

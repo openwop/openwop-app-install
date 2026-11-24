@@ -75,6 +75,37 @@ export interface ToolApprovalRecord {
   grain?: ToolApprovalGrain;
   /** The lane of the latest ask. `channel` ⇒ only the `call` grain may be chosen. */
   lane?: ToolApprovalLane;
+  /** ADR 1156 D2 — the wire message id of the agent turn whose call raised the latest
+   *  ask: the chat card for that turn is this row. Refreshed with each ask. */
+  askId?: string;
+  /** ADR 1156 D3 — the tool's own plain description of the held call (`describeApproval`),
+   *  scrubbed and capped. Lives exactly as long as `requestedInput`: cleared on decision. */
+  requestedLines?: ApprovalLine[];
+}
+
+/** ADR 1156 D3 — one line of a tool's description of a held call. `group` lets a tool
+ *  gather lines under a heading (one frame of a board, one record). */
+export interface ApprovalLine { text: string; group?: string }
+
+/** ADR 1156 D3 — caps on a tool's description: enough for a change of dozens of lines. */
+export const REQUESTED_LINES_MAX = 200;
+export const REQUESTED_LINE_MAX_CHARS = 600;
+const REQUESTED_GROUP_MAX_CHARS = 120;
+
+/** Scrub and cap a tool's description of a held call. Not an array of usable lines
+ *  (a describer that misbehaved) ⇒ undefined, and the card falls back to the arguments. */
+export function boundApprovalLines(lines: unknown): ApprovalLine[] | undefined {
+  if (!Array.isArray(lines)) return undefined;
+  const out: ApprovalLine[] = [];
+  for (const l of lines) {
+    if (out.length >= REQUESTED_LINES_MAX) break;
+    const raw = typeof l === 'string' ? { text: l } : l && typeof l === 'object' ? (l as { text?: unknown; group?: unknown }) : undefined;
+    if (!raw || typeof raw.text !== 'string' || !raw.text.trim()) continue;
+    const text = scrubSecretShaped(raw.text.trim()).slice(0, REQUESTED_LINE_MAX_CHARS);
+    const group = typeof raw.group === 'string' && raw.group.trim() ? scrubSecretShaped(raw.group.trim()).slice(0, REQUESTED_GROUP_MAX_CHARS) : undefined;
+    out.push(group ? { text, group } : { text });
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 /** Cap on the stored arguments (ADR 0834 D6) — enough to show what was asked, bounded. */
@@ -127,6 +158,7 @@ const now = (): string => new Date().toISOString();
 const withoutInput = (r: ToolApprovalRecord): ToolApprovalRecord => {
   const out = { ...r };
   delete out.requestedInput;
+  delete out.requestedLines;
   return out;
 };
 
@@ -162,11 +194,22 @@ export function summarizeRequestedInput(input: Record<string, unknown> | undefin
   return displayInput(input).text;
 }
 
+/** What recording an ask did (ADR 1156): `pending` ⇒ the row now waits on this ask (its
+ *  card is the turn named by `askId`); `replacedAskId` ⇒ an earlier card's ask was
+ *  overtaken (a one-call approval or a call-grain denial for OTHER arguments);
+ *  `kept` ⇒ an earlier decision stands (no new card). */
+export type RecordToolApprovalResult =
+  | { status: 'pending'; requestedAt: string; replacedAskId?: string }
+  | { status: 'kept' };
+
 /** Record that a tool call is awaiting approval.
  *  - no row ⇒ a `pending` row;
  *  - `pending` ⇒ arguments + `requestedAt` refreshed, origin raised (never lowered);
  *  - `approved` for a LOWER origin than this ask ⇒ re-opened as `pending` (escalation);
- *  - otherwise (approved for this origin, or denied) ⇒ kept verbatim.
+ *  - a one-call approval, or (ADR 1156 D6) a call-grain denial, for OTHER arguments ⇒
+ *    re-opened as `pending`: it answered a different question;
+ *  - otherwise (approved for this origin, or denied for these arguments or tool-wide) ⇒
+ *    kept verbatim.
  *  Every write is a compare-and-swap against the row it read (FW2-CD-2), retried a
  *  bounded number of times, so a concurrent approve cannot be overwritten by a stale
  *  re-ask and two first asks cannot lose an escalation. */
@@ -174,15 +217,18 @@ export async function recordToolApprovalRequested(
   tenantId: string,
   conversationId: string,
   toolName: string,
-  ask: { origin?: ApprovalOrigin; input?: Record<string, unknown>; lane?: ToolApprovalLane } = {},
-): Promise<void> {
+  ask: { origin?: ApprovalOrigin; input?: Record<string, unknown>; lane?: ToolApprovalLane; askId?: string; lines?: ApprovalLine[] } = {},
+): Promise<RecordToolApprovalResult> {
   const origin: ApprovalOrigin = ask.origin ?? 'baseline';
   const display = displayInput(ask.input);
+  const lines = boundApprovalLines(ask.lines);
   const shown = {
     inputDigest: toolInputDigest(ask.input),
     ...(display.text ? { requestedInput: display.text } : {}),
     ...(display.complete ? {} : { inputTruncated: true }),
     lane: ask.lane ?? 'app',
+    ...(ask.askId ? { askId: ask.askId } : {}),
+    ...(lines ? { requestedLines: lines } : {}),
   };
   for (let attempt = 0; attempt < CAS_ATTEMPTS; attempt++) {
     const existing = await ledger.get(key(tenantId, conversationId, toolName));
@@ -195,15 +241,20 @@ export async function recordToolApprovalRequested(
     if (!existing || isExpiredAsk(existing)) next = fresh();
     else if (existing.status === 'pending') {
       const raised: ApprovalOrigin = rank(existing.origin) >= rank(origin) ? (existing.origin ?? 'baseline') : origin;
-      const { inputTruncated: _t, inputDigest: _d, lane: _l, ...rest } = withoutInput(existing);
+      const { inputTruncated: _t, inputDigest: _d, lane: _l, askId: _a, ...rest } = withoutInput(existing);
       next = { ...rest, origin: raised, requestedAt: now(), ...shown };
     } else if (existing.status === 'approved' && rank(existing.origin) < rank(origin)) next = fresh();
     // FW2-D1 — a one-call approval covers the arguments it was shown, nothing else: an ask
-    // with different arguments is a new question.
-    else if (existing.status === 'approved' && existing.grain === 'call' && existing.inputDigest !== shown.inputDigest) next = fresh();
+    // with different arguments is a new question. ADR 1156 D6 — so does a call-grain denial.
+    else if (existing.grain === 'call' && existing.inputDigest !== shown.inputDigest) next = fresh();
     else next = null; // approved for this origin (or higher), or denied — keep the decision verbatim.
-    if (next === null) return;
-    if (await ledger.compareAndSwap(existing, next)) return;
+    if (next === null) return { status: 'kept' };
+    if (await ledger.compareAndSwap(existing, next)) {
+      // The card of the ask this one overtook: a pending ask from another turn, or an
+      // unused decision about other arguments.
+      const replaced = existing && existing.askId && existing.askId !== ask.askId && !isExpiredAsk(existing) ? existing.askId : undefined;
+      return { status: 'pending', requestedAt: next.requestedAt, ...(replaced ? { replacedAskId: replaced } : {}) };
+    }
   }
   throw new Error(`approval ledger contention: ${toolName}`);
 }
@@ -218,7 +269,8 @@ export type ResolveToolApprovalResult =
  *  a compare-and-swap against the row read, so a re-ask that lands between the read and
  *  the write is refused (`approval_changed`), never silently approved. Clears the
  *  displayed arguments; KEEPS `inputDigest` (a `call` approval is checked against it).
- *  FW2-D1: `grain` defaults to `call`; `conversation` is refused for a `channel` ask
+ *  FW2-D1: an approval's `grain` defaults to `call`, a denial's to `conversation` (ADR
+ *  1156 D6: a `call` denial covers only the arguments shown); `conversation` is refused for a `channel` ask
  *  (`grain_not_allowed`), and for a row whose arguments were not all shown. */
 export async function resolveToolApproval(
   tenantId: string,
@@ -227,8 +279,11 @@ export async function resolveToolApproval(
   decision: 'approved' | 'denied',
   resolvedBy: string,
   expectedRequestedAt?: string,
-  grain: ToolApprovalGrain = 'call',
+  grainAsked?: ToolApprovalGrain,
 ): Promise<ResolveToolApprovalResult> {
+  // An approval defaults to this one call (FW2-D1). A denial defaults to the tool
+  // (what the composer dialog's Deny has always meant); the chat card denies `call`.
+  const grain: ToolApprovalGrain = grainAsked ?? (decision === 'approved' ? 'call' : 'conversation');
   const existing = await ledger.get(key(tenantId, conversationId, toolName));
   if (!existing || existing.status !== 'pending') return { ok: false, reason: 'no_pending_approval' };
   if (expectedRequestedAt !== undefined && existing.requestedAt !== expectedRequestedAt) return { ok: false, reason: 'approval_changed' };
@@ -239,9 +294,10 @@ export async function resolveToolApproval(
     return { ok: false, reason: 'approval_expired' };
   }
   if (decision === 'approved' && grain === 'conversation' && existing.lane === 'channel') return { ok: false, reason: 'grain_not_allowed' };
+  // ADR 1156 D6 — a denial has a grain too: `call` covers the arguments shown (the row
+  // keeps their digest), `conversation` blocks the tool (the composer dialog's Deny).
   const updated: ToolApprovalRecord = {
-    ...withoutInput(existing), status: decision, resolvedAt: now(), resolvedBy,
-    ...(decision === 'approved' ? { grain } : {}),
+    ...withoutInput(existing), status: decision, resolvedAt: now(), resolvedBy, grain,
   };
   if (!(await ledger.compareAndSwap(existing, updated))) return { ok: false, reason: 'approval_changed' };
   return { ok: true, record: updated };
@@ -328,7 +384,9 @@ export function approvedToolSets(approvals: readonly ToolApprovalRecord[]): { ap
  *  turn's approvals are the rows it CLAIMED, answered per call (the CHAN-F2 fix for the
  *  scope gate folding every row, claimed or not). */
 export function scopeFoldRows(approvals: readonly ToolApprovalRecord[], channelTurn: boolean): ToolApprovalRecord[] {
-  return approvals.filter((a) => a.status === 'denied' || (!channelTurn && a.status === 'approved' && a.grain !== 'call'));
+  // ADR 1156 D6 — a call-grain denial covers one set of arguments; folding it would remove
+  // the tool. It is answered per call by `ApprovalGrant.declined` instead.
+  return approvals.filter((a) => a.grain !== 'call' && (a.status === 'denied' || (!channelTurn && a.status === 'approved')));
 }
 
 /** FW2-D1 — the per-call answer to "is there an approval for THIS call?", shared by every
@@ -344,11 +402,18 @@ export function scopeFoldRows(approvals: readonly ToolApprovalRecord[], channelT
 export interface ApprovalGrant {
   check(toolName: string, origin: ApprovalOrigin | undefined, input: Record<string, unknown> | undefined, callKey: string): boolean;
   spent(): ToolApprovalRecord[];
+  /** ADR 1156 D5 — the call each spent row let through (`callKey` as passed to `check`). */
+  spentCalls?(): Array<{ row: ToolApprovalRecord; callKey: string }>;
+  /** ADR 1156 D6 — has the person declined exactly this call (a call-grain denial whose
+   *  digest matches)? The gate then refuses it at once instead of holding it again. */
+  declined?(toolName: string, input: Record<string, unknown> | undefined): boolean;
 }
 export function makeApprovalGrant(rows: readonly ToolApprovalRecord[], opts: { singleUse: boolean; requireDigest: boolean }): ApprovalGrant {
   // CHAN-F17 — an expired one-call channel approval answers nothing (the owner approves again).
   const approved = rows.filter((r) => r.status === 'approved' && !isExpired(r));
+  const callDenials = rows.filter((r) => r.status === 'denied' && r.grain === 'call' && r.inputDigest !== undefined);
   const used = new Set<ToolApprovalRecord>();
+  const usedBy = new Map<ToolApprovalRecord, string>();
   // The row chosen for each call, chosen ONCE, so the scope gate and the firewall asking
   // about the same call agree and spend one row. (The ledger holds one row per tool per
   // conversation, so there is at most one candidate.)
@@ -365,13 +430,20 @@ export function makeApprovalGrant(rows: readonly ToolApprovalRecord[], opts: { s
           return !opts.requireDigest;
         });
         row = usable[0] ?? null;
-        if (row && (opts.singleUse || row.grain === 'call')) used.add(row);
+        if (row && (opts.singleUse || row.grain === 'call')) { used.add(row); usedBy.set(row, callKey); }
         chosen.set(k, row);
       }
       if (row === null) return false;
       return origin !== 'policy' || row.origin === 'policy';
     },
     spent: () => [...used],
+    spentCalls: () => [...usedBy].map(([row, callKey]) => ({ row, callKey })),
+    declined(toolName, input) {
+      const mine = callDenials.filter((r) => r.toolName === toolName);
+      if (mine.length === 0) return false;
+      const digest = toolInputDigest(input);
+      return mine.some((r) => r.inputDigest === digest);
+    },
   };
 }
 

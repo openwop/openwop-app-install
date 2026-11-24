@@ -32,6 +32,10 @@
  * the alert count, severity word, runbook path, per-instance chip, window chip,
  * sample count, ratio formatting, overflow chip, queue-source label, and the
  * why-not chip.
+ *
+ * TST-OAI-2 (2026-11-22, user decision): the empty card is also chosen when the
+ * unjudged rows are a mix of `empty` and `not_projectable`, the fresh-instance
+ * shape. Red when the `not_projectable` half of that choice is dropped.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, within } from '@testing-library/react';
@@ -186,6 +190,24 @@ describe('ADR 0556 P2 — SLO panel states', () => {
     expect(sloPanel().queryByText(en.sloStateHealthy)).toBeNull();
     // And it is NOT the collector-off card — one is fixed with an env var, the
     // other by waiting for traffic.
+    expect(sloPanel().queryByText(en.sloCollectorOffTitle)).toBeNull();
+  });
+
+  it('EMPTY on a fresh instance: unmeasured rows beside unmeasurable ones still read "Nothing measured yet" (TST-OAI-2)', async () => {
+    // The realistic first-boot projection: the catalog's projectable rows have no
+    // samples yet, and its not-projectable rows never will. None of them is being
+    // judged, so the panel must not render a table that reads as a verdict.
+    api.getSloSummary.mockResolvedValue(summary({
+      rows: [
+        sloRow({ id: 'W1', state: 'empty', observed: null, sampleCount: 0 }),
+        sloRow({ id: 'C2', state: 'not_projectable', observed: null, reason: 'needs an obligation age no counter carries' }),
+      ],
+    }));
+    renderHub();
+    await settled();
+    expect(sloPanel().queryAllByText(en.sloEmptyTitle)).toHaveLength(1);
+    expect(sloPanel().queryByText(en.sloStateNotProjectable)).toBeNull();
+    expect(sloPanel().queryByText(en.sloNoAlerts)).toBeNull();
     expect(sloPanel().queryByText(en.sloCollectorOffTitle)).toBeNull();
   });
 

@@ -80,7 +80,7 @@ import { dispatchSpeechMiniMax, dispatchSpeechOpenAI, dispatchSpeechGoogle, disp
 import { storeMediaAsset, resolveMediaAsset, type MediaAiOrigin } from '../host/inMemorySurfaces.js';
 import { AUDIO_TRANSCRIPTION_SYSTEM_PROMPT, AUDIO_TRANSCRIPTION_USER_PROMPT } from './mediaTranscriptionPrompts.js';
 import { emitCost } from '../observability/costEmitter.js';
-import { classifyProviderOutcome, recordProviderCall } from '../observability/metricSeams.js';
+import { classifyProviderOutcome, recordEffectBlocked, recordProviderCall } from '../observability/metricSeams.js';
 import { checkMediaBudget, recordMediaUsage } from './mediaBudget.js';
 import { getStreamAudioResolver } from './streamAudio.js';
 import { buildProviderUsagePayloadFromTokens, type ProviderUsagePayload } from '../providers/usageEmitter.js';
@@ -136,6 +136,12 @@ let lastCacheKeyForTests: LastCacheKey | null = null;
 export function __lastInvocationCacheKeyForTests(): LastCacheKey | null {
   return lastCacheKeyForTests;
 }
+/** Test-only — the v1 (`spec/v1/replay.md` §E) provider key of the most recent
+ *  BYOK callAI, so a test can seed a pre-P3 record without re-deriving it. */
+let lastLegacyProviderKeyForTests: string | null = null;
+export function __lastLegacyProviderKeyForTests(): string | null {
+  return lastLegacyProviderKeyForTests;
+}
 import { createLogger } from '../observability/logger.js';
 // RFC 0030 §A reasoning-directive synthesis lifted to @openwop/openwop@^1.1.3.
 // The byte-identical helper at host/envelopeDirective.ts is now a type-only
@@ -144,7 +150,7 @@ import { createLogger } from '../observability/logger.js';
 // follow-up commit).
 import { buildReasoningDirective } from '@openwop/openwop';
 import { resolveEnvelopeReasoning } from '../host/envelopeReasoningConfig.js';
-import { assertEffectAllowed } from '../host/runEffectContext.js';
+import { assertEffectAllowed, ReplayEffectError } from '../host/runEffectContext.js';
 import { getEnvelopeReliabilityConfig } from '../host/envelopeReliabilityConfig.js';
 import { classifyProviderRefusal, describeProviderRefusal, providerRetryBackoffMs, sleepMs, PROVIDER_ERROR_RETRY_REASON } from './providerRefusalRetry.js';
 import { sanitizeFreeText } from '../byok/textRedaction.js';
@@ -799,6 +805,22 @@ function decodeAiToolCallResult(v: Record<string, unknown>): AiToolCallResult | 
   return out;
 }
 
+function replayInvocationSourceMissing(scope: { runId: string; nodeId: string }): ReplayEffectError {
+  // Owner decision (#6206, 2026-11-23): this refusal sends the same operator
+  // signals as runEffectContext.assertEffectAllowed (the openwop.effect.blocked
+  // counter alerts fire on, and a span attribute), but not its log text: that
+  // says a node is missing from sideEffects.ts, and here the RECORD is missing.
+  log.warn('ADR 1002: replay fork has no recorded AI invocation; provider dispatch refused', {
+    runId: scope.runId, nodeId: scope.nodeId, effectKind: 'network-egress',
+  });
+  trace.getActiveSpan()?.setAttribute('openwop.replay_effect_blocked', 'network-egress');
+  recordEffectBlocked('network-egress');
+  return new ReplayEffectError(
+    'Replay fork: no matching recorded AI invocation is available; provider dispatch is suppressed.',
+    'network-egress',
+  );
+}
+
 /**
  * ADR 1002 — record a model call to the invocation log, and serve it from the
  * log ONLY on the replay lane (`scope.replayInvocationsFromRunId`).
@@ -810,13 +832,14 @@ function decodeAiToolCallResult(v: Record<string, unknown>): AiToolCallResult | 
  * The executor's `beginNodeActivity` rewinds the ordinal to 0 whenever a node
  * re-enters at the same attempt (B1), so a loop that revisits a node with an
  * identical request computes the SAME identity. A live read would serve the
- * first visit's answer to the second. A retry is a new `attempt`, so it is a
- * different key and calls live on both lanes.
+ * first visit's answer to the second. A retry is a new `attempt`, so it uses a
+ * different key: live calls dispatch again; replay requires that attempt's
+ * recorded result or refuses the source miss before provider dispatch.
  *
  * On the replay lane: the fork's own record (an earlier pass of this fork),
  * then the source run's record under the source identity (`runId` is in the
  * preimage, so it is recomputed), copied under the fork's key so a fork of a
- * fork replays from its parent. A miss dispatches live.
+ * fork replays from its parent. A replay miss fails closed before dispatch.
  */
 async function viaReplayLane<T extends object>(
   scope: AdapterScope,
@@ -832,24 +855,32 @@ async function viaReplayLane<T extends object>(
   const cacheKey: InvocationRecordKey = { runId: scope.runId, nodeId: scope.nodeId, attempt: scope.attempt, invocationId: identityFor(scope.runId) };
   lastReplayLaneKeyForTests = cacheKey;
   // No installed backend (a bare adapter outside a booted host) means nothing to
-  // record or serve: the call behaves exactly as it did before ADR 1002.
+  // record or serve: live calls keep their old behavior; replay fails closed.
   let invocationLog: ReturnType<typeof getInvocationLog> | null;
   try { invocationLog = getInvocationLog(); } catch { invocationLog = null; }
-  if (!invocationLog) return (await live()).result;
+  if (!invocationLog) {
+    if (scope.replayInvocationsFromRunId) throw replayInvocationSourceMissing(scope);
+    return (await live()).result;
+  }
   const llmCacheKey = llmKey ? storedLlmCacheKey(llmKey) : undefined;
   const llmOpts = llmCacheKey ? { llmCacheKey } : undefined;
 
   const sourceRunId = scope.replayInvocationsFromRunId;
   if (sourceRunId) {
-    let recorded: unknown = await invocationLog.get(cacheKey);
-    if (!recorded) {
-      const sourceRecordKey = { ...cacheKey, runId: sourceRunId, invocationId: identityFor(sourceRunId) };
-      recorded = await invocationLog.get(sourceRecordKey);
-      // RFC 0260 §C.3 (ADR 1142 D8) — as in `callAI`: a recipe-2 source record
-      // is served only on an equal key, and the copy carries its key verbatim.
-      const sourceLlmKey = recorded ? await invocationLog.llmCacheKey(sourceRecordKey) : null;
-      if (recorded && llmKey && !recipe2Matches(sourceLlmKey, llmKey)) recorded = null;
-      if (isRecordObject(recorded) && recordTenantOf(recorded) === scope.tenantId) await invocationLog.put(cacheKey, recorded, sourceLlmKey ? { llmCacheKey: sourceLlmKey } : undefined).catch(() => undefined);
+    let recorded: unknown;
+    try {
+      recorded = await invocationLog.get(cacheKey);
+      if (!recorded) {
+        const sourceRecordKey = { ...cacheKey, runId: sourceRunId, invocationId: identityFor(sourceRunId) };
+        recorded = await invocationLog.get(sourceRecordKey);
+        // RFC 0260 §C.3 (ADR 1142 D8) — as in `callAI`: a recipe-2 source record
+        // is served only on an equal key, and the copy carries its key verbatim.
+        const sourceLlmKey = recorded ? await invocationLog.llmCacheKey(sourceRecordKey) : null;
+        if (recorded && llmKey && !recipe2Matches(sourceLlmKey, llmKey)) recorded = null;
+        if (isRecordObject(recorded) && recordTenantOf(recorded) === scope.tenantId) await invocationLog.put(cacheKey, recorded, sourceLlmKey ? { llmCacheKey: sourceLlmKey } : undefined).catch(() => undefined);
+      }
+    } catch {
+      throw replayInvocationSourceMissing(scope);
     }
     // ADR 1002 — a record never crosses a tenant. The tenant is in the identity
     // preimage, so another tenant's record cannot be addressed; this is the
@@ -878,6 +909,8 @@ async function viaReplayLane<T extends object>(
       }
       return result;
     }
+    // A missing or recipe-mismatched source is not authority to call a provider.
+    throw replayInvocationSourceMissing(scope);
   }
 
   let out: { result: T; usage?: ProviderUsagePayload };
@@ -889,7 +922,7 @@ async function viaReplayLane<T extends object>(
     throw err;
   }
   // Best-effort: the call already succeeded and was already metered, so a lost
-  // write must not fail it. Its replay then dispatches live, as before ADR 1002.
+  // write must not fail it. A later replay without the record fails closed.
   // Scrubbed like the failure envelopes (SR-1), and stamped with the tenant the
   // replay read checks.
   const record: ReplayLaneRecord<T> = stripSecretsFromPersisted({ ...out.result, ...(out.usage ? { providerUsage: out.usage } : {}), tenantId: scope.tenantId });
@@ -994,7 +1027,13 @@ async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallRe
     invocationId,
   };
   lastCacheKeyForTests = { ...cacheKey, providerKey, logicalInvocationOrdinal };
-  const invocationLog = getInvocationLog();
+  let invocationLog: ReturnType<typeof getInvocationLog>;
+  try {
+    invocationLog = getInvocationLog();
+  } catch (err) {
+    if (scope.replayInvocationsFromRunId) throw replayInvocationSourceMissing(scope);
+    throw err;
+  }
 
   // Read order, and why it is this order:
   //
@@ -1015,89 +1054,112 @@ async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallRe
   // identity being STABLE, which is the spec's own second branch: the retry
   // "either short-circuits (cache hit) or hits [the provider's] own idempotency
   // cache via the injected header".
-  let cached = (await invocationLog.get(cacheKey)) as InvocationRecord | null;
-  if (!cached) {
+  let mockProgramPending = false;
+  let cached: InvocationRecord | null = null;
+  try {
+    cached = (await invocationLog.get(cacheKey)) as InvocationRecord | null;
+    // Computed once: read for this run (step 2) and, on a replay fork, for the
+    // SOURCE run, whose pre-P3 records live under the same v1 key (#6156).
     const legacyProviderKey = legacyProviderKeyV1({
-      provider: req.provider,
-      model: req.model,
-      messages: req.messages,
-      systemPrompt: req.systemPrompt ?? null,
-      temperature: req.temperature ?? null,
-      maxTokens: req.maxTokens ?? 4096,
-      stopSequences: req.stopSequences ?? null,
-      responseSchema: req.responseSchema ?? null,
-      credentialRefHashed,
-    });
-    cached = (await invocationLog.get({ ...cacheKey, invocationId: legacyProviderKey })) as InvocationRecord | null;
-  }
-  if (!cached) {
-    const prior = (await invocationLog.latest({
-      runId: scope.runId,
-      nodeId: scope.nodeId,
-      invocationId,
-    })) as InvocationRecord | null;
-    if (prior && !isFailureEnvelope(prior)) cached = prior;
-  }
-  // ADR 0326 P3b — replay-mode fork fallback: the fork's fresh runId has no
-  // recorded invocations, so a deterministic replay reads the SOURCE run's
-  // record for the same (nodeId, attempt, providerKey). Failure envelopes
-  // replay identically through the re-throw below.
-  // RFC 0041 §B / host-sample-test-seams.md §5 — a PENDING mock program for
-  // this node is a deliberate divergence injection: the replay's dispatch MUST
-  // reach the mock (its next entry is the staged refusal/valid the divergence
-  // detector compares against), so the source-run invocation fallback is
-  // skipped. Only the `mock` provider and only while an entry remains — every
-  // other provider, and mock without a staged entry, replays deterministically.
-  // ADR 0967 — a fixture node's run-scoped script is that run's own input, not
-  // an injection, so it does not hold the replay off the recorded invocation.
-  const mockProgramPending = req.provider === 'mock' && hasPendingDivergenceProgram(scope.nodeId, scope.runId);
-  if (!cached && scope.replayInvocationsFromRunId && !mockProgramPending) {
-    // ADR 0549 P3 — `runId` is IN the §B preimage, so the source run's record
-    // sits under a DIFFERENT identity. Recompute it rather than swapping the
-    // `runId` field and leaving a stale identity that could never match. (This
-    // fallback is the host's deliberate RFC 0140 replay extension: a replay
-    // reads the recorded outcome instead of re-firing the effect. It is not
-    // Layer-2 dedup surviving a fork, which `idempotency.md` says it must not.)
-    const sourceInvocationId = logicalInvocationId({
-      tenantId: scope.tenantId,
-      runId: scope.replayInvocationsFromRunId,
-      nodeId: scope.nodeId,
-      logicalInvocationOrdinal,
-      providerKey,
-    });
-    const sourceRecordKey = { ...cacheKey, runId: scope.replayInvocationsFromRunId, invocationId: sourceInvocationId };
-    cached = (await invocationLog.get(sourceRecordKey)) as InvocationRecord | null;
-    // RFC 0260 §C.3 (ADR 1142 D8) — a source record names the recipe it was keyed
-    // by. One keyed by recipe 2 is served only to an invocation whose recipe-2
-    // key equals it, whatever this host advertises now; one with no key was
-    // recorded under RFC 0041's recipe and keeps that matching. The copy below
-    // carries the SOURCE key verbatim, never a recomputed one.
-    const sourceLlmKey = cached ? await invocationLog.llmCacheKey(sourceRecordKey) : null;
-    if (cached && !recipe2Matches(sourceLlmKey, llmKeyInputs)) {
-      log.info('replay source record keyed by a different recipe-2 key; dispatching live', { runId: scope.runId, nodeId: scope.nodeId });
-      cached = null;
+        provider: req.provider,
+        model: req.model,
+        messages: req.messages,
+        systemPrompt: req.systemPrompt ?? null,
+        temperature: req.temperature ?? null,
+        maxTokens: req.maxTokens ?? 4096,
+        stopSequences: req.stopSequences ?? null,
+        responseSchema: req.responseSchema ?? null,
+        credentialRefHashed,
+      });
+    lastLegacyProviderKeyForTests = legacyProviderKey;
+    if (!cached) {
+      cached = (await invocationLog.get({ ...cacheKey, invocationId: legacyProviderKey })) as InvocationRecord | null;
     }
-    // Copy-on-read: land the parent's record under THIS run's key so the
-    // fork's log is self-contained — a fork-of-a-fork replays from its
-    // immediate parent instead of live-dispatching (the fallback only ever
-    // reaches ONE level up). Best-effort like the failure-record write.
-    if (cached) await invocationLog.put(cacheKey, cached, sourceLlmKey ? { llmCacheKey: sourceLlmKey } : undefined).catch(() => undefined);
-    // RFC 0041 §C — the replay's OBSERVABLE sequence must be byte-equivalent
-    // to the source's (modulo per-event volatiles). A live dispatch emits
-    // `provider.usage`; a cache-hit replay must too, and regenerating it
-    // would mint a fresh traceId that breaks equivalence — so re-emit the
-    // SOURCE run's payload verbatim (the RFC 0140 shape: replay the record,
-    // never re-fire the work). Best-effort like the live emit.
-    if (cached && !isFailureEnvelope(cached) && scope.emit) {
-      try {
-        const { getEventLog } = await import('../executor/eventLog.js');
-        const sourceEvents = await getEventLog().list(scope.replayInvocationsFromRunId);
-        const usage = sourceEvents.find((e) => e.type === 'provider.usage' && e.nodeId === scope.nodeId);
-        if (usage) await scope.emit('provider.usage', usage.payload);
-      } catch (err) {
-        log.warn('replay provider.usage re-emit failed', { err: err instanceof Error ? err.message : String(err) });
+    if (!cached) {
+      const prior = (await invocationLog.latest({
+        runId: scope.runId,
+        nodeId: scope.nodeId,
+        invocationId,
+      })) as InvocationRecord | null;
+      if (prior && !isFailureEnvelope(prior)) cached = prior;
+    }
+    // ADR 0326 P3b — replay-mode fork fallback: the fork's fresh runId has no
+    // recorded invocations, so a deterministic replay reads the SOURCE run's
+    // record for the same (nodeId, attempt, providerKey). Failure envelopes
+    // replay identically through the re-throw below.
+    // RFC 0041 §B / host-sample-test-seams.md §5 — a PENDING mock program for
+    // this node is a deliberate divergence injection: the replay's dispatch MUST
+    // reach the mock (its next entry is the staged refusal/valid the divergence
+    // detector compares against), so the source-run invocation fallback is
+    // skipped. Only the `mock` provider and only while an entry remains — every
+    // other provider, and mock without a staged entry, replays deterministically.
+    // ADR 0967 — a fixture node's run-scoped script is that run's own input, not
+    // an injection, so it does not hold the replay off the recorded invocation.
+    mockProgramPending = req.provider === 'mock' && hasPendingDivergenceProgram(scope.nodeId, scope.runId);
+    if (!cached && scope.replayInvocationsFromRunId && !mockProgramPending) {
+      // ADR 0549 P3 — `runId` is IN the §B preimage, so the source run's record
+      // sits under a DIFFERENT identity. Recompute it rather than swapping the
+      // `runId` field and leaving a stale identity that could never match. (This
+      // fallback is the host's deliberate RFC 0140 replay extension: a replay
+      // reads the recorded outcome instead of re-firing the effect. It is not
+      // Layer-2 dedup surviving a fork, which `idempotency.md` says it must not.)
+      const sourceInvocationId = logicalInvocationId({
+        tenantId: scope.tenantId,
+        runId: scope.replayInvocationsFromRunId,
+        nodeId: scope.nodeId,
+        logicalInvocationOrdinal,
+        providerKey,
+      });
+      let sourceRecordKey = { ...cacheKey, runId: scope.replayInvocationsFromRunId, invocationId: sourceInvocationId };
+      cached = (await invocationLog.get(sourceRecordKey)) as InvocationRecord | null;
+      // spec/v1/replay.md §E dual-read applies to the SOURCE run too: a run
+      // recorded before P3 keyed its records by the v1 provider key, so without
+      // this read every fork of such a run would refuse as "source missing".
+      if (!cached) {
+        const legacySourceKey = { ...cacheKey, runId: scope.replayInvocationsFromRunId, invocationId: legacyProviderKey };
+        cached = (await invocationLog.get(legacySourceKey)) as InvocationRecord | null;
+        if (cached) sourceRecordKey = legacySourceKey;
+      }
+      // RFC 0260 §C.3 (ADR 1142 D8) — a source record names the recipe it was keyed
+      // by. One keyed by recipe 2 is served only to an invocation whose recipe-2
+      // key equals it, whatever this host advertises now; one with no key was
+      // recorded under RFC 0041's recipe and keeps that matching. The copy below
+      // carries the SOURCE key verbatim, never a recomputed one.
+      const sourceLlmKey = cached ? await invocationLog.llmCacheKey(sourceRecordKey) : null;
+      if (cached && !recipe2Matches(sourceLlmKey, llmKeyInputs)) {
+        log.info('replay source record keyed by a different recipe-2 key; refusing unrecorded dispatch', { runId: scope.runId, nodeId: scope.nodeId });
+        cached = null;
+      }
+      // Copy-on-read: land the parent's record under THIS run's key so the
+      // fork's log is self-contained — a fork-of-a-fork replays from its
+      // immediate parent instead of live-dispatching (the fallback only ever
+      // reaches ONE level up). Best-effort like the failure-record write.
+      if (cached) await invocationLog.put(cacheKey, cached, sourceLlmKey ? { llmCacheKey: sourceLlmKey } : undefined).catch(() => undefined);
+      // RFC 0041 §C — the replay's OBSERVABLE sequence must be byte-equivalent
+      // to the source's (modulo per-event volatiles). A live dispatch emits
+      // `provider.usage`; a cache-hit replay must too, and regenerating it
+      // would mint a fresh traceId that breaks equivalence — so re-emit the
+      // SOURCE run's payload verbatim (the RFC 0140 shape: replay the record,
+      // never re-fire the work). Best-effort like the live emit.
+      if (cached && !isFailureEnvelope(cached) && scope.emit) {
+        try {
+          const { getEventLog } = await import('../executor/eventLog.js');
+          const sourceEvents = await getEventLog().list(scope.replayInvocationsFromRunId);
+          const usage = sourceEvents.find((e) => e.type === 'provider.usage' && e.nodeId === scope.nodeId);
+          if (usage) await scope.emit('provider.usage', usage.payload);
+        } catch (err) {
+          log.warn('replay provider.usage re-emit failed', { err: err instanceof Error ? err.message : String(err) });
+        }
       }
     }
+  } catch (err) {
+    if (scope.replayInvocationsFromRunId) {
+      // Still refuse (a fork must never fall through to a live call), but say why:
+      // a storage outage is not "no matching recorded invocation" (#6156).
+      log.warn('replay invocation-log read failed; refusing unrecorded dispatch', { runId: scope.runId, nodeId: scope.nodeId, err: err instanceof Error ? err.message : String(err) });
+      throw replayInvocationSourceMissing(scope);
+    }
+    throw err;
   }
   // ADR 0326 P3a — a recorded FAILED attempt replays as the SAME failure, in
   // the SAME class family (GC-CHAT-3): a provider failure re-throws the
@@ -1115,6 +1177,10 @@ async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallRe
     });
     return { ...cached, credentialRefHashed };
   }
+
+  // Only the existing local mock-program divergence injection may bypass a
+  // source miss. It never authorizes dispatch to an external provider.
+  if (scope.replayInvocationsFromRunId && !mockProgramPending) throw replayInvocationSourceMissing(scope);
 
   // ADR 0079 §Phase 4 — stream the plain reply's token deltas onto the run event
   // log as canonical `output.chunk` events, so a surface tailing this run's

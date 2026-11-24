@@ -77,6 +77,7 @@ export const messages = {
   exportChainPackTitle: 'Exporter sous forme de manifeste workflow-chain-pack (soumettre via le flux de PR du registre)',
   exportChainPackNoVersion: "Impossible d'exporter ce pack de chaîne : la version installée de {{types}} est inconnue, et une chaîne publiée doit indiquer des versions de nœud exactes. Vérifiez que ces types de nœud sont installés sur cet hôte, rechargez, puis réessayez.",
   exportChainPackCatalogUnavailable: 'Export impossible pour l’instant : le catalogue de nœuds ne s’est pas chargé depuis cet hôte, donc les versions des nœuds ne peuvent pas être fixées. Vérifiez votre connexion, puis réessayez.',
+  exportChainPackFidelity: "Cet export ne peut pas conserver tous les détails de ce workflow. Utilisez Exporter pour conserver le JSON complet du workflow ; votre workflow n’a pas changé.",
   publishToRegistry: 'Publier dans le registre…',
   publishToRegistryTitle: 'Publier ce flux de travail comme pack de chaîne sur packs.openwop.dev (vous guide à travers le flux de soumission par PR)',
   import: 'Importer',

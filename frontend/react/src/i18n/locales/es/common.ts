@@ -100,4 +100,9 @@ export const messages = {
   comboboxResultsMore_other: "Más de {{count}} coincidencias; escribe para acotar",
   // Issue 5911 — a workflow the caller's own list does not name (shared by several areas).
   workflowUnnamed: 'Flujo de trabajo sin nombre',
+  // Shared tenancy completion notice; no blind retry or settlement claim.
+  // Mutation failure copy never prints raw errors or promises rollback/retry.
+  workspaceChangeNotAllowed: 'No se permitió completar este cambio de espacio de trabajo. Es posible que ya se haya creado o cambiado un espacio de trabajo. Vuelve a cargar esta página y revisa tus espacios de trabajo antes de intentarlo de nuevo.',
+  workspaceChangeCouldNotFinish: 'Esta página no pudo finalizar el cambio de espacio de trabajo. Es posible que ya se haya creado o cambiado un espacio de trabajo. Vuelve a cargar esta página y revisa tus espacios de trabajo antes de intentarlo de nuevo.',
+  workspaceChangeNeedsRefresh: "Es posible que el cambio de espacio de trabajo ya se haya completado. Esta página no pudo terminar de actualizarse. Vuelve a cargar esta página y revisa tus espacios de trabajo antes de intentarlo de nuevo.",
 } as const;

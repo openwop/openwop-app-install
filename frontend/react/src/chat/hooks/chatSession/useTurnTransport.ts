@@ -99,8 +99,22 @@ export function useTurnTransport(
   const clarifyAsksRef = useRef<Map<string, { askId: string; data: unknown }>>(new Map());
   const clarifyAnsweredRef = useRef<Set<string>>(new Set());
   const clarifySkippedRef = useRef<Set<string>>(new Set());
+  // ADR 1156 — held-call cards by canonical message id, and their outcomes by
+  // `askId\u0000toolName` (same re-stamp-on-rebuild shape as the asks above).
+  const heldCallsRef = useRef<Map<string, Array<{ askId: string; toolName: string; requestedAt: string }>>>(new Map());
+  const heldOutcomesRef = useRef<Map<string, { outcome: 'ran' | 'refused' | 'superseded'; reason?: string }>>(new Map());
   const absorbClarification = (state: ClarificationState | undefined): void => {
     if (!state) return;
+    for (const h of state.held ?? []) {
+      const id = conversationMessageId(h.askId);
+      const list = (heldCallsRef.current.get(id) ?? []).filter((x) => x.toolName !== h.toolName);
+      boundIdSet(heldCallsRef.current);
+      heldCallsRef.current.set(id, [...list, h]);
+    }
+    for (const st of state.settled ?? []) {
+      boundIdSet(heldOutcomesRef.current);
+      heldOutcomesRef.current.set(`${st.askId}\u0000${st.toolName}`, { outcome: st.outcome, ...(st.reason ? { reason: st.reason } : {}) });
+    }
     for (const a of state.asks) clarifyAsksRef.current.set(conversationMessageId(a.askId), a);
     for (const id of state.answered) clarifyAnsweredRef.current.add(id);
     for (const id of state.skippedTurns) clarifySkippedRef.current.add(conversationMessageId(id));
@@ -200,6 +214,8 @@ export function useTurnTransport(
       const ask = role === 'assistant' ? clarifyAsksRef.current.get(base.id) : undefined;
       if (ask) meta.clarificationAsk = { ...ask, ...(clarifyAnsweredRef.current.has(ask.askId) ? { answered: true } : {}) };
       if (role === 'user' && clarifySkippedRef.current.has(base.id)) meta.clarificationSkipped = true;
+      const held = role === 'assistant' ? heldCallsRef.current.get(base.id) : undefined;
+      if (held) meta.heldCalls = held.map((h) => ({ ...h, ...heldOutcomesRef.current.get(`${h.askId}\u0000${h.toolName}`) }));
       const toolEvents = role === 'assistant' ? toolEventsRef.current.get(base.id) : undefined;
       return {
         ...base, role,

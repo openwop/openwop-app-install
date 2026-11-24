@@ -17,13 +17,20 @@
  * removed, the `managed:` sentinel dropped (re-probed wave 117).
  * 2026-11-09: the StrictMode mount case goes red when the step-focus effect skips
  * its first run with a flag instead of comparing with the last focused step.
+ *
+ * TST-OAH-3 (2026-11-22, user decision): the signed-out managed path. Red when the
+ * provider is not stashed before sign-in, sign-in is not started, the resume effect
+ * does not complete with the `managed:` sentinel, leaves the stash behind, or
+ * accepts a stashed id that is not a managed provider.
  */
 import { StrictMode } from 'react';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (k: string) => k }) }));
-vi.mock('../../auth/useAuth.js', () => ({ useAuth: () => ({ user: { uid: 'u1' }, signIn: vi.fn() }) }));
+// Signed in by default; the TST-OAH-3 cases sign out (or return from the redirect).
+const auth = vi.hoisted(() => ({ user: { uid: 'u1' } as { uid: string } | null, google: vi.fn() }));
+vi.mock('../../auth/useAuth.js', () => ({ useAuth: () => ({ user: auth.user, signIn: { google: auth.google } }) }));
 vi.mock('../BYOKStepper.js', () => ({ BYOKStepper: ({ current }: { current: string }) => <h2>step:{current}</h2> }));
 
 type P = { id: string; managed?: boolean; subscription?: boolean; models: Array<{ id: string; recommended?: boolean }> };
@@ -32,7 +39,9 @@ const managed: P = { id: 'demo', managed: true, models: [{ id: 'demo-model' }] }
 const copilot: P = { id: 'copilot', subscription: true, models: [] };
 
 vi.mock('../ProviderGrid.js', () => ({
-  TryItFreeCard: () => null,
+  TryItFreeCard: ({ onPick }: { onPick: (p: P) => void }) => (
+    <button type="button" onClick={() => onPick(managed)}>try-free</button>
+  ),
   ProviderGrid: ({ onPick }: { onPick: (p: P) => void }) => (
     <div>
       <button type="button" onClick={() => onPick(openai)}>pick-openai</button>
@@ -62,8 +71,10 @@ vi.mock('../KeyEntry.js', () => ({
 }));
 
 import { BYOKWizard } from '../BYOKWizard.js';
+import { PROVIDERS } from '../lib/providers.js';
 
-afterEach(() => cleanup());
+const PENDING = 'openwop-app.byok.pendingManaged';
+afterEach(() => { cleanup(); auth.user = { uid: 'u1' }; auth.google.mockReset(); localStorage.removeItem(PENDING); });
 
 describe('BYOKWizard flow (pinned before the C1 refresh)', () => {
   it('provider → model (recommended pre-selected) → key → complete, with Back', async () => {
@@ -141,5 +152,42 @@ describe('BYOKWizard flow (pinned before the C1 refresh)', () => {
     // Literals, not the imported constants: the binding the host accepts is exactly this.
     expect(onComplete).toHaveBeenCalledWith({ provider: 'copilot', model: 'default', credentialRef: 'subscription:github.copilot' });
     expect(screen.queryByText('step:model')).toBeNull();
+  });
+});
+
+// TST-OAH-3 (2026-11-22, user decision): the signed-out "Try it free" path had no case.
+describe('BYOKWizard — the managed path for a signed-out visitor', () => {
+  it('stashes the picked provider and starts sign-in, completing nothing yet', async () => {
+    auth.user = null;
+    const onComplete = vi.fn();
+    render(<BYOKWizard onComplete={onComplete} />);
+    fireEvent.click(screen.getByText('try-free'));
+    await vi.waitFor(() => expect(auth.google).toHaveBeenCalledTimes(1));
+    expect(localStorage.getItem(PENDING)).toBe('demo');
+    // A signed-out visitor has no session to bind a managed ref to.
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
+  it('after the redirect, a signed-in mount resumes it: completes with `managed:<id>` and clears the stash', async () => {
+    const real = PROVIDERS.find((p) => p.managed && p.models.length > 0);
+    expect(real, 'the catalog ships a managed provider with a model').toBeTruthy();
+    localStorage.setItem(PENDING, real!.id);
+    const onComplete = vi.fn();
+    render(<BYOKWizard onComplete={onComplete} />);
+    await vi.waitFor(() => expect(onComplete).toHaveBeenCalledTimes(1));
+    expect(onComplete).toHaveBeenCalledWith({ provider: real!.id, model: real!.models[0]!.id, credentialRef: `managed:${real!.id}` });
+    // Cleared, so the next visit to the wizard does not complete on its own again.
+    expect(localStorage.getItem(PENDING)).toBeNull();
+    expect(auth.google).not.toHaveBeenCalled();
+  });
+
+  it('a stashed id that is not a managed provider is cleared and completes nothing', async () => {
+    const byok = PROVIDERS.find((p) => !p.managed);
+    expect(byok).toBeTruthy();
+    localStorage.setItem(PENDING, byok!.id);
+    const onComplete = vi.fn();
+    render(<BYOKWizard onComplete={onComplete} />);
+    await vi.waitFor(() => expect(localStorage.getItem(PENDING)).toBeNull());
+    expect(onComplete).not.toHaveBeenCalled();
   });
 });

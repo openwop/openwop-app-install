@@ -1730,6 +1730,10 @@ export function expandChain(authoredChain: WorkflowChain, opts: ExpandOptions = 
   const nodes = chain.dag.nodes.map((n) => ({
     nodeId: rewrite(n.id),
     typeId: n.typeId,
+    // Layout only (owner decision D1a, #6156). `name` is NOT carried: definitionHash
+    // keeps it, so carrying it would re-hash every named chain (the 44 tmpl.* GOLDEN
+    // pins and ~30 packs' head revisions). `position` is stripped by withoutLayout.
+    ...(n.position !== undefined ? { position: { ...n.position } } : {}),
     ...(n.config
       ? {
           config: (deferred

@@ -38,17 +38,18 @@ import { IconButton } from '../ui/IconButton.js';
 import { AlertIcon, ClockIcon, ColumnsIcon, DotsIcon, PencilIcon, TrashIcon, WorkflowIcon, ZapIcon } from '../ui/icons/index.js';
 import { KanbanBoardView, type CardMovePosition, type CardPatch, type NewCardInput } from './KanbanBoardView.js';
 import { BoardReviewsSection } from './BoardReviewsSection.js';
+import { ColumnShowMore } from './ColumnShowMore.js';
+import { loadBoardForView, loadMoreInColumn, mergeById, type ColumnPaging } from './boardPaging.js';
 import { AssignedColumn } from './AssignedColumn.js';
 import { CreateBoardModal } from './CreateBoardModal.js';
 import { Modal } from '../ui/Modal.js';
-import { TextField } from '../ui/Field.js';
+import { SelectField, TextField } from '../ui/Field.js';
 import {
   createBoard,
   createCard,
   deleteBoard,
   patchBoard,
   deleteCard,
-  getBoard,
   getPersonalBoard,
   listAssignedToMe,
   claimCard,
@@ -152,6 +153,16 @@ function RenameBoardModal({ current, onClose, onSubmit }: {
   );
 }
 
+/** ADR 1155 D1 — a facet key, as the server checks it. */
+const FACET_KEY = /^[a-z][a-z0-9_-]{0,31}$/;
+
+/** A card's facets after a regroup patch: a key set to `null` is removed. */
+function regroupedFacets(current: Record<string, string> | undefined, patch: Record<string, string | null>): Record<string, string> {
+  const next = { ...(current ?? {}) };
+  for (const [k, v] of Object.entries(patch)) { if (v === null) delete next[k]; else next[k] = v; }
+  return next;
+}
+
 export function KanbanPage(): JSX.Element {
   const { t } = useTranslation('kanban');
   // Every board has its own URL (`/boards/:boardId`, routing-correction wave);
@@ -163,6 +174,11 @@ export function KanbanPage(): JSX.Element {
   const [activeBoard, setActiveBoard] = useState<KanbanBoard | null>(null);
   const [cards, setCards] = useState<KanbanCard[]>([]);
   const [workItems, setWorkItems] = useState<KanbanWorkItem[]>([]);
+  // ADR 1155 D7 — per-column paging for a board too large to load whole (null: whole).
+  const [paging, setPaging] = useState<ColumnPaging | null>(null);
+  const [loadingMore, setLoadingMore] = useState<ReadonlySet<string>>(new Set());
+  // How many cards each column shows, so a refresh after an edit keeps them.
+  const shownRef = useRef<{ boardId: string; perColumn: Record<string, number> } | null>(null);
   const [startingWorkItemIds, setStartingWorkItemIds] = useState<Set<string>>(new Set());
   const workItemsByCardId = useMemo(
     () => new Map(workItems.map((workItem) => [workItem.cardId, workItem] as const)),
@@ -198,8 +214,10 @@ export function KanbanPage(): JSX.Element {
   const [claimBusyId, setClaimBusyId] = useState<string | null>(null);
   // A notification deep-links here as `/boards?card=<id>` (was `/my-work?card=`),
   // highlighting + scrolling that card in the rail.
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const highlightCardId = params.get('card');
+  // ADR 1155 D7 — the viewer's grouping rides the URL (`?groupBy=`, empty = none),
+  // so a grouped view can be shared; absent, the board's default applies.
 
   const refreshAssigned = useCallback(async () => {
     try {
@@ -233,10 +251,12 @@ export function KanbanPage(): JSX.Element {
       // `workItems` is an additive board-read field. Treat an older host or
       // embed that has not adopted it yet as an empty projection rather than
       // breaking the reusable board shell.
-      const { board, cards: c, workItems: nextWorkItems = [] } = await getBoard(boardId);
-      setActiveBoard(board);
-      setCards(c);
-      setWorkItems(nextWorkItems);
+      const keep = shownRef.current?.boardId === boardId ? shownRef.current.perColumn : {};
+      const loaded = await loadBoardForView(boardId, keep);
+      setActiveBoard(loaded.board);
+      setCards(loaded.cards);
+      setWorkItems(loaded.workItems);
+      setPaging(loaded.paging);
     } catch (err) {
       setError((() => { const c = classifyHttpError(err); return `${c.title} — ${c.detail}`; })());
     }
@@ -267,7 +287,43 @@ export function KanbanPage(): JSX.Element {
     setActiveBoard(null);
     setCards([]);
     setWorkItems([]);
+    setPaging(null);
   }, [boardId, openBoard]);
+
+  useEffect(() => {
+    if (!activeBoard) { shownRef.current = null; return; }
+    const perColumn: Record<string, number> = {};
+    for (const c of cards) perColumn[c.columnId] = (perColumn[c.columnId] ?? 0) + 1;
+    shownRef.current = { boardId: activeBoard.id, perColumn };
+  }, [activeBoard, cards]);
+
+  const onShowMore = useCallback(async (columnId: string) => {
+    const cursor = paging?.[columnId]?.nextCursor;
+    if (!activeBoard || !cursor) return;
+    setLoadingMore((cur) => new Set([...cur, columnId]));
+    try {
+      const more = await loadMoreInColumn(activeBoard.id, columnId, cursor);
+      setCards((cur) => mergeById(cur, more.cards, (c) => c.id));
+      setWorkItems((cur) => mergeById(cur, more.workItems, (w) => w.workItemId));
+      setPaging((p) => (p ? { ...p, [columnId]: { total: more.total, ...(more.nextCursor ? { nextCursor: more.nextCursor } : {}) } } : p));
+    } catch (err) {
+      setError((() => { const c = classifyHttpError(err); return `${c.title} — ${c.detail}`; })());
+    } finally {
+      setLoadingMore((cur) => { const next = new Set(cur); next.delete(columnId); return next; });
+    }
+  }, [activeBoard, paging]);
+
+  // ADR 1155 D7 — the facet keys on this board's cards, and the grouping in force.
+  const groupKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const c of cards) for (const k of Object.keys(c.facets ?? {})) keys.add(k);
+    if (activeBoard?.groupBy) keys.add(activeBoard.groupBy);
+    return [...keys].sort();
+  }, [cards, activeBoard]);
+  const urlGroupBy = params.get('groupBy');
+  const groupBy = urlGroupBy !== null
+    ? (urlGroupBy === '' || FACET_KEY.test(urlGroupBy) ? urlGroupBy : '')
+    : (activeBoard?.groupBy ?? '');
 
   // The bare `/boards` redirects (replace) to a concrete board so the page
   // never greets with an empty shell (decision-first: show the work, not a
@@ -478,7 +534,9 @@ export function KanbanPage(): JSX.Element {
     }
   };
 
-  const onMoveCard = async (cardId: string, toColumnId: string, position?: CardMovePosition) => {
+  /** `facets` (ADR 1155 D7): a swimlane drop sets the group-by facet in the same write
+   *  as the move, through the same route, permission check and CAS as a facet edit. */
+  const onMoveCard = async (cardId: string, toColumnId: string, position?: CardMovePosition, facets?: Record<string, string | null>) => {
     if (!activeBoard) return;
     const card = cards.find((c) => c.id === cardId);
     // BLD-4: guard against a second drag of the same card before its PATCH
@@ -493,12 +551,13 @@ export function KanbanPage(): JSX.Element {
     // The shared board owns an in-lane optimistic rank. Do not replace its
     // local list with a parent array that has no rank change yet; cross-lane
     // moves still mirror immediately for the surrounding board chrome.
-    if (card?.columnId !== toColumnId) {
-      setCards((cs) => cs.map((c) => (c.id === cardId ? { ...c, columnId: toColumnId } : c)));
+    if (card?.columnId !== toColumnId || facets) {
+      setCards((cs) => cs.map((c) => (c.id === cardId ? { ...c, columnId: toColumnId, ...(facets ? { facets: regroupedFacets(c.facets, facets) } : {}) } : c)));
     }
     try {
       const { triggeredRunId } = await patchCard(cardId, {
         columnId: toColumnId,
+        ...(facets ? { facets } : {}),
         ...(position?.beforeCardId ? { beforeCardId: position.beforeCardId } : {}),
         ...(position?.afterCardId ? { afterCardId: position.afterCardId } : {}),
       });
@@ -511,7 +570,7 @@ export function KanbanPage(): JSX.Element {
       // BLD-3: revert ONLY the moved card against the *current* state via a
       // functional update — restoring a stale whole-list snapshot would clobber
       // any concurrent refetch/update that landed during the round-trip.
-      if (prevCard && prevCard.columnId !== toColumnId) {
+      if (prevCard && (prevCard.columnId !== toColumnId || facets)) {
         setCards((cs) => cs.map((c) => (c.id === cardId ? prevCard : c)));
       }
       // An in-lane position optimistic update lives only in the shared board;
@@ -660,6 +719,19 @@ export function KanbanPage(): JSX.Element {
               )
             ) : null}
             <span className="board-head-spacer" />
+            {groupKeys.length > 0 ? (
+              <SelectField
+                label={t('groupByLabel')}
+                value={groupBy}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setParams((p) => { const next = new URLSearchParams(p); next.set('groupBy', value); return next; }, { replace: true });
+                }}
+              >
+                <option value="">{t('groupByNone')}</option>
+                {groupKeys.map((key) => <option key={key} value={key}>{key}</option>)}
+              </SelectField>
+            ) : null}
             <BoardMenu onRename={() => void onRenameBoard()} onDuplicate={() => void onDuplicateBoard()} onDelete={() => void onDeleteBoard()} />
           </div>
 
@@ -682,6 +754,17 @@ export function KanbanPage(): JSX.Element {
             workItemsByCardId={workItemsByCardId}
             onRunWorkItem={(workItemId) => void onRunWorkItem(workItemId)}
             startingWorkItemIds={startingWorkItemIds}
+            groupBy={groupBy || undefined}
+            onRegroupCard={(cardId, toColumnId, facets, position) => void onMoveCard(cardId, toColumnId, position, facets)}
+            columnFooter={paging ? (col, colCards) => (
+              <ColumnShowMore
+                shown={colCards.length}
+                total={paging[col.id]?.total ?? colCards.length}
+                hasMore={Boolean(paging[col.id]?.nextCursor)}
+                loading={loadingMore.has(col.id)}
+                onMore={() => void onShowMore(col.id)}
+              />
+            ) : undefined}
             onDeleteCards={(cardIds) => {
               void (async () => {
                 // ONE count-confirm for the whole batch — the per-card handler's

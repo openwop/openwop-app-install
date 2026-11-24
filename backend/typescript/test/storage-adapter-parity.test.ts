@@ -38,10 +38,14 @@
  * BEFORE the backfill runs, so the backfill cannot mask it), the late-failure
  * `status != 'delivered'` guard, the open-interrupt filter.
  *
- * Ceilings (recorded, `TST-OAP-1`/`-2`): every `PG_MEM_INCOMPAT` postgres half
- * returns early and REPORTS AS PASSED; those halves run against a real Postgres
- * only in the testcontainers twin (`ci:full`). The reassign scaffolding exclusion
- * is a cross-file double guard (the SQL `NOT LIKE` here and the prefix list in
+ * `TST-OAP-1` (closed 2026-11-24, user decision): every `PG_MEM_INCOMPAT` postgres
+ * half used to `return` early and REPORT AS PASSED, so 12 green cases asserted
+ * nothing and the reporter could not tell. They are now `it.for` cases whose
+ * postgres half calls `ctx.skip()`, so they report as SKIPPED. They run against a
+ * real Postgres only in the testcontainers twin (`ci:full`).
+ *
+ * Ceiling (recorded, `TST-OAP-2`): the reassign scaffolding exclusion is a
+ * cross-file double guard (the SQL `NOT LIKE` here and the prefix list in
  * `storage/tenantMigration.ts`), so no one-edit probe can red it.
  *
  * Postgres backend is exercised via `pg-mem` (in-memory Postgres
@@ -157,8 +161,9 @@ function S(name: BackendName): Storage {
  *  Postgres (via testcontainers or live Cloud SQL) would exercise
  *  these — the parity harness is set up for that future drop-in.
  *
- *  Affected tests are listed here; each one's postgres half returns early
- *  through `trackedSkipPgMem`, its sqlite half still runs. The set is the
+ *  Affected tests are listed here; each one's postgres half is SKIPPED
+ *  (`ctx.skip()`, reported as skipped, never as passed) through
+ *  `trackedSkipPgMem`, its sqlite half still runs. The set is the
  *  whole list (no count is kept here, so none can go stale). */
 const PG_MEM_INCOMPAT = new Set<string>([
   'appendEvent assigns +1 per call (impl-defined offset)',
@@ -251,8 +256,8 @@ describe('Storage parity: runs lifecycle', () => {
     expect(await s.getDispatchOutbox(run.runId)).toBeNull();
   });
 
-  it.each(backendNames)('%s: dispatch outbox claim → reschedule → complete', async (name) => {
-    if (trackedSkipPgMem(name, 'dispatch outbox claim → reschedule → complete')) return;
+  it.for(backendNames)('%s: dispatch outbox claim → reschedule → complete', async (name, ctx) => {
+    if (trackedSkipPgMem(name, 'dispatch outbox claim → reschedule → complete')) return ctx.skip();
     const s = S(name);
     const run = mkRun(`parity-outbox-claim-${name}`);
     await s.insertRun(run, { dispatchOutbox: { nextAttemptAt: 1_000 } });
@@ -374,8 +379,8 @@ describe('Storage parity: runs lifecycle', () => {
 });
 
 describe('Storage parity: events monotonic sequence', () => {
-  it.each(backendNames)('%s: appendEvent assigns +1 per call (impl-defined offset)', async (name) => {
-    if (trackedSkipPgMem(name, 'appendEvent assigns +1 per call (impl-defined offset)')) return;
+  it.for(backendNames)('%s: appendEvent assigns +1 per call (impl-defined offset)', async (name, ctx) => {
+    if (trackedSkipPgMem(name, 'appendEvent assigns +1 per call (impl-defined offset)')) return ctx.skip();
     const s = S(name);
     const run = mkRun(`event-seq-${name}`);
     await s.insertRun(run);
@@ -389,8 +394,8 @@ describe('Storage parity: events monotonic sequence', () => {
     expect(e1.sequence).toBeGreaterThanOrEqual(0);
   });
 
-  it.each(backendNames)('%s: listEvents returns sequence-ordered events', async (name) => {
-    if (trackedSkipPgMem(name, 'listEvents returns sequence-ordered events')) return;
+  it.for(backendNames)('%s: listEvents returns sequence-ordered events', async (name, ctx) => {
+    if (trackedSkipPgMem(name, 'listEvents returns sequence-ordered events')) return ctx.skip();
     const s = S(name);
     const run = mkRun(`event-list-${name}`);
     await s.insertRun(run);
@@ -403,8 +408,8 @@ describe('Storage parity: events monotonic sequence', () => {
     expect(events[0]?.sequence ?? Number.MAX_SAFE_INTEGER).toBeLessThan(events[1]?.sequence ?? -1);
   });
 
-  it.each(backendNames)('%s: findFirstEventByPayload finds the first matching event', async (name) => {
-    if (trackedSkipPgMem(name, 'findFirstEventByPayload finds the first matching event')) return;
+  it.for(backendNames)('%s: findFirstEventByPayload finds the first matching event', async (name, ctx) => {
+    if (trackedSkipPgMem(name, 'findFirstEventByPayload finds the first matching event')) return ctx.skip();
     const s = S(name);
     const run = mkRun(`event-find-${name}`);
     await s.insertRun(run);
@@ -424,8 +429,8 @@ describe('Storage parity: events monotonic sequence', () => {
     await expect(s.findFirstEventByPayload(run.runId, 'artifact.created', "x') OR 1=1 --", 'a-1')).rejects.toThrow(/invalid payload key/);
   });
 
-  it.each(backendNames)('%s: getMaxSequence increases monotonically per append', async (name) => {
-    if (trackedSkipPgMem(name, 'getMaxSequence increases monotonically per append')) return;
+  it.for(backendNames)('%s: getMaxSequence increases monotonically per append', async (name, ctx) => {
+    if (trackedSkipPgMem(name, 'getMaxSequence increases monotonically per append')) return ctx.skip();
     const s = S(name);
     const run = mkRun(`event-max-${name}`);
     await s.insertRun(run);
@@ -482,8 +487,8 @@ describe('Storage parity: interrupts', () => {
 });
 
 describe('Storage parity: idempotency claim', () => {
-  it.each(backendNames)('%s: first call claims; second returns existing', async (name) => {
-    if (trackedSkipPgMem(name, 'first call claims; second returns existing')) return;
+  it.for(backendNames)('%s: first call claims; second returns existing', async (name, ctx) => {
+    if (trackedSkipPgMem(name, 'first call claims; second returns existing')) return ctx.skip();
     const s = S(name);
     const key = `idem-${name}-${Math.random().toString(36).slice(2)}`;
     const first = await s.claimOnce(key, baseTime);
@@ -494,8 +499,8 @@ describe('Storage parity: idempotency claim', () => {
     expect(second.existing?.key).toBe(key);
   });
 
-  it.each(backendNames)('%s: putOnce upgrades the pending placeholder', async (name) => {
-    if (trackedSkipPgMem(name, 'putOnce upgrades the pending placeholder')) return;
+  it.for(backendNames)('%s: putOnce upgrades the pending placeholder', async (name, ctx) => {
+    if (trackedSkipPgMem(name, 'putOnce upgrades the pending placeholder')) return ctx.skip();
     const s = S(name);
     const key = `idem-upgrade-${name}-${Math.random().toString(36).slice(2)}`;
     await s.claimOnce(key, baseTime);
@@ -533,8 +538,8 @@ describe('Storage parity: chat-session title claim (ADR 1019 D2)', () => {
 });
 
 describe('Storage parity: webhooks', () => {
-  it.each(backendNames)('%s: insertWebhook → getWebhook round-trips', async (name) => {
-    if (trackedSkipPgMem(name, 'insertWebhook → getWebhook round-trips')) return;
+  it.for(backendNames)('%s: insertWebhook → getWebhook round-trips', async (name, ctx) => {
+    if (trackedSkipPgMem(name, 'insertWebhook → getWebhook round-trips')) return ctx.skip();
     const s = S(name);
     const wh = mkWebhook(`${name}-1`);
     await s.insertWebhook(wh);
@@ -543,8 +548,8 @@ describe('Storage parity: webhooks', () => {
     expect(got?.events).toEqual(wh.events);
   });
 
-  it.each(backendNames)('%s: deleteWebhook removes the row', async (name) => {
-    if (trackedSkipPgMem(name, 'deleteWebhook removes the row')) return;
+  it.for(backendNames)('%s: deleteWebhook removes the row', async (name, ctx) => {
+    if (trackedSkipPgMem(name, 'deleteWebhook removes the row')) return ctx.skip();
     const s = S(name);
     const wh = mkWebhook(`${name}-delete`);
     await s.insertWebhook(wh);
@@ -556,8 +561,8 @@ describe('Storage parity: webhooks', () => {
   // subscription kept POSTing to the withdrawn URL and starved live
   // subscriptions (MEASURED in production: 1,600 failed attempts to one dead
   // receiver in 20 min, after its subscriptions were deleted).
-  it.each(backendNames)('%s: deleteWebhook drops that subscription’s PENDING deliveries only', async (name) => {
-    if (trackedSkipPgMem(name, 'deleteWebhook drops pending deliveries')) return;
+  it.for(backendNames)('%s: deleteWebhook drops that subscription’s PENDING deliveries only', async (name, ctx) => {
+    if (trackedSkipPgMem(name, 'deleteWebhook drops pending deliveries')) return ctx.skip();
     const s = S(name);
     const gone = mkWebhook(`${name}-gone`);
     const kept = mkWebhook(`${name}-kept`);
@@ -719,8 +724,8 @@ describe('Storage parity: audit append', () => {
 });
 
 describe('Storage parity: tenant hard delete cascade', () => {
-  it.each(backendNames)('%s: deleteAllTenantData cascades runs + events + interrupts + secrets', async (name) => {
-    if (trackedSkipPgMem(name, 'deleteAllTenantData cascades runs + events + interrupts + secrets')) return;
+  it.for(backendNames)('%s: deleteAllTenantData cascades runs + events + interrupts + secrets', async (name, ctx) => {
+    if (trackedSkipPgMem(name, 'deleteAllTenantData cascades runs + events + interrupts + secrets')) return ctx.skip();
     const s = S(name);
     const T = `del-tenant-${name}-${Math.random().toString(36).slice(2)}`;
     const r1 = mkRun(`del-1-${name}`, { tenantId: T });
@@ -786,8 +791,8 @@ describe('Storage parity: tenant reassign (anon → user migration)', () => {
   // ADR 1114 (#5868) — retiring a finished step's requests, the same on both adapters:
   // one interrupt's row stamped and read, metadata merged; non-request, archived and
   // already-stamped rows untouched; a run end stamps the rest; a repeat is a no-op.
-  it.each(backendNames)('%s: resolveRequestNotifications stamps only open request rows', async (name) => {
-    if (trackedSkipPgMem(name, 'resolveRequestNotifications stamps only open request rows')) return;
+  it.for(backendNames)('%s: resolveRequestNotifications stamps only open request rows', async (name, ctx) => {
+    if (trackedSkipPgMem(name, 'resolveRequestNotifications stamps only open request rows')) return ctx.skip();
     const s = S(name);
     const t = `rr-${name}-${Math.random().toString(36).slice(2)}`;
     const base = { tenantId: t, type: 'openwop-app.workflow.approval-needed', priority: 'high' as const, status: 'unread' as const, title: 't', message: 'm', createdAt: new Date().toISOString(), runId: 'run-1' };

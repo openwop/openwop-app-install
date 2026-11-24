@@ -87,6 +87,8 @@ export interface ConversationViewProps {
   onResolveInterrupt: (messageId: string, value: unknown, nodeId?: string) => Promise<void>;
   /** ADR 1001 D7 — see MessageFeed.onAnswerClarification. */
   onAnswerClarification?: (askId: string, data: unknown, answers: unknown) => Promise<void>;
+  /** ADR 1156 — see MessageFeed.heldCallHost. */
+  heldCallHost?: { sessionId: string; onContinue: (text: string) => void };
   onRegenerate: (messageId: string) => void;
   /** Optional since ADR 0195 D3b — multi-party surfaces suppress the private
    *  feedback thumbs (reactions are the public affordance there). */
@@ -209,7 +211,7 @@ export function ConversationView(props: ConversationViewProps): JSX.Element {
   const {
     messages, tenantId, error, isSending, onPickSuggestion,
     onSend, onCancel, supportsAudioInput, supportsImageInput, supportsPdfInput, agentEntries,
-    onResolveInterrupt, onAnswerClarification, onRegenerate, onFeedback, onReconfigureBYOK, onBranchFrom,
+    onResolveInterrupt, onAnswerClarification, heldCallHost, onRegenerate, onFeedback, onReconfigureBYOK, onBranchFrom,
     hasOlderMessages, isLoadingEarlier, onLoadEarlier, isHydrating = false, progress, footerSlot,
     renderEmptyState, composerModifiers, voiceAgentId, voiceConversationId, voiceBoardActive, onVoiceSpeakingAgent, draftKey, commentsContext, onLiveTranscript, onReloadConversation,
     composerPlaceholder, composerReadOnlyReason, mentionEntries, authorDirectory, viewerSubjectRef, messageActions,
@@ -274,6 +276,7 @@ export function ConversationView(props: ConversationViewProps): JSX.Element {
           tenantId={tenantId}
           onResolveInterrupt={onResolveInterrupt}
           {...(onAnswerClarification ? { onAnswerClarification } : {})}
+          {...(heldCallHost ? { heldCallHost } : {})}
           onOpenWorkflowProgress={onOpenWorkflowProgress}
           focusedWorkflowMessageId={focusedWorkflowMessageId}
           onRegenerate={onRegenerate}

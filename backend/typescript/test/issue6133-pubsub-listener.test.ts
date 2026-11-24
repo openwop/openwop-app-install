@@ -11,7 +11,7 @@
  */
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createPubSubListener, LISTENER_PING_CHANNEL, type ListenClient } from '../src/storage/postgres/pubsubListener.js';
+import { createPubSubListener, LISTENER_PING_CHANNEL, type ListenClient, type ListenerLog } from '../src/storage/postgres/pubsubListener.js';
 
 const CH = 'openwop_host_ext';
 
@@ -27,10 +27,10 @@ class FakeClient extends EventEmitter implements ListenClient {
   deliver(c: string, p: string): void { this.emit('notification', { channel: CH, payload: JSON.stringify({ c, p }) }); }
 }
 
-const silentLog = { info: () => undefined, warn: () => undefined };
+const silentLog: ListenerLog = { info: () => undefined, warn: () => undefined };
 
 /** A harness: every connect() hands out a new FakeClient; notify() echoes to the live one unless muted. */
-function harness(opts: { failFirst?: number } = {}) {
+function harness(opts: { failFirst?: number; log?: ListenerLog } = {}) {
   const clients: FakeClient[] = [];
   let failures = opts.failFirst ?? 0;
   let muted = false;
@@ -43,7 +43,7 @@ function harness(opts: { failFirst?: number } = {}) {
       live()?.deliver(c, p);
     },
     physicalChannel: CH,
-    log: silentLog,
+    log: opts.log ?? silentLog,
     pingIntervalMs: 60_000,
     pingTimeoutMs: 10_000,
     retryMs: 1_000,
@@ -130,6 +130,20 @@ describe('#6133 — pub/sub listener recovery', () => {
     expect(h.listener.state().listening).toBe(true);
     h.live()!.deliver('host-events', 'after-outage');
     expect(got).toEqual(['after-outage']);
+  });
+
+  it('each recycle logs a fixed reasonCode a probe can count (the `reason` beside it is hashed)', async () => {
+    const warned: Array<Record<string, unknown> | undefined> = [];
+    const h = harness({ log: { info: () => undefined, warn: (_m, f) => { warned.push(f); } } });
+    await h.listener.subscribe('host-events', () => undefined);
+    h.mute(true);
+    await vi.advanceTimersByTimeAsync(60_000 + 10_000); // ping out, then timeout
+    h.mute(false);
+    await vi.advanceTimersByTimeAsync(1_000);
+    h.live()!.emit('error', new Error('Connection terminated unexpectedly'));
+    await vi.advanceTimersByTimeAsync(1_000);
+    h.live()!.emit('end');
+    expect(warned.map((f) => f?.reasonCode)).toEqual(['pubsub_listener_ping_timeout', 'pubsub_listener_error', 'pubsub_listener_end']);
   });
 
   it('close stops every timer and releases the client', async () => {

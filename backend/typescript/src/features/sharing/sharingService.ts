@@ -814,7 +814,28 @@ export type ShareMintAccess =
 /** ADR 0924 D5 — types only their owning feature may mint, on the visitor lane.
  *  A member-lane mint of a client approval link would hand a member a decision
  *  token written under someone else's authority (security review, 2026-10-19). */
-const SYSTEM_MINT_ONLY: ReadonlySet<ResourceType> = new Set(['campaign_approval', 'client_report']);
+//
+// CORRECTED 2026-11-24 (security fix): the set held only the two ADR 0924/0957
+// types, but EVERY type whose legitimate mint is the visitor lane is a token
+// written under someone else's authority, or one that bypasses the route that
+// owns it. A member-lane mint of any of them is refused (uniform 404):
+//  - sign_request    — the per-signer e-sign token; holding it IS signing as
+//                      the external signer (crm/signService.ts).
+//  - booking_manage  — the booker's manage token; holding it acts as the booker
+//                      (crm/bookingService.ts).
+//  - collab_invite   — the invite is minted only by the host:members:manage
+//                      invite routes with a 7-day single-use window; a member
+//                      mint would re-issue it around that gate and that window.
+//  - commerce_order  — the buyer's receipt, minted on payment. It grants no
+//                      action, but no member path mints it, and a member mint
+//                      would publish a buyer's order on the member's terms.
+// `commerce_quote` is NOT here: a member sharing a sent quote is the product
+// (commerceClient `createQuoteShareLink`). The frontend's `SYSTEM_TYPES`
+// (SharingPage.tsx) must match; `sharing-system-mint-only.test.ts` holds both
+// that and every visitor-lane mint site in `src/` to this set.
+export const SYSTEM_MINT_ONLY: ReadonlySet<ResourceType> = new Set([
+  'campaign_approval', 'client_report', 'sign_request', 'booking_manage', 'collab_invite', 'commerce_order',
+]);
 
 async function assertMintAccess(resourceType: ResourceType, tenantId: string, actor: string, resourceId: string, access: ShareMintAccess): Promise<void> {
   if (access.lane !== 'visitor' && SYSTEM_MINT_ONLY.has(resourceType)) throw notFound(resourceId);
@@ -1033,6 +1054,10 @@ async function publisherVerdict(
 /** Test affordance — drop the memo (never routed). Tests that want to witness
  *  the 30 s bound advance the clock instead. */
 export function __resetPublisherVerdictsForTests(): void { publisherVerdicts.clear(); }
+/** Test seam: the mint gate alone (no resource lookup), so a refusal can be told
+ *  apart from a missing resource (`sharing-system-mint-only.test.ts`). */
+export const __assertMintAccessForTests = (resourceType: ResourceType, tenantId: string, actor: string, resourceId: string, access: ShareMintAccess): Promise<void> =>
+  assertMintAccess(resourceType, tenantId, actor, resourceId, access);
 
 /** ADR 0887 (architect H4) — the operator escape hatch: `report` logs the would-be
  *  refusal and serves. Default `enforce`. */

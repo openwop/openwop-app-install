@@ -86,7 +86,10 @@ if (durationsArg) {
 
 // ---------------------------------------------------------------- AST helpers
 const CASE_ROOTS = new Set(['it', 'test']);
-const MODIFIERS = new Set(['skip', 'todo', 'only', 'skipIf', 'runIf', 'fails', 'each', 'concurrent', 'sequential', 'fixme', 'slow']);
+// `for` (vitest's `it.for(rows)(title, (row, ctx) => …)`) is a case like `each`.
+// It was missing, so every `it.for` case was invisible to the census
+// (TST-OAP-1, 2026-11-24: storage-adapter-parity's 12 pg-mem cases).
+const MODIFIERS = new Set(['skip', 'todo', 'only', 'skipIf', 'runIf', 'fails', 'each', 'for', 'concurrent', 'sequential', 'fixme', 'slow']);
 const WEAK = new Set(['toBeDefined', 'toBeTruthy', 'not.toBeNull', 'not.toBeUndefined', 'toBeInstanceOf', 'not.toBeFalsy', 'not.toThrow']);
 const MOCK = new Set(['toHaveBeenCalled', 'toHaveBeenCalledWith', 'toHaveBeenCalledTimes', 'toHaveBeenLastCalledWith', 'toHaveBeenNthCalledWith', 'toBeCalled', 'toBeCalledWith', 'toBeCalledTimes']);
 const SNAP = new Set(['toMatchSnapshot', 'toMatchInlineSnapshot', 'toMatchFileSnapshot', 'toHaveScreenshot']);

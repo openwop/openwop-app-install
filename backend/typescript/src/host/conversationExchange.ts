@@ -42,7 +42,7 @@ import { claimExchange, commitExchange, releaseExchange } from './conversationEx
 import { checkDeepInvestigationBudget } from './runBudgetService.js';
 import { getAgentProfile } from './agentProfileService.js';
 import { createLogger } from '../observability/logger.js';
-import { runConversationAgentToolTurn, conversationToolTurnEligible, applyGroupRoomScaffoldNotice, isNarrowChannelRun } from './conversationToolLoop.js';
+import { runConversationAgentToolTurn, conversationToolTurnEligible, applyGroupRoomScaffoldNotice, isNarrowChannelRun, type HeldCallAsk, type SettledApproval } from './conversationToolLoop.js';
 import type { AgentEvent } from './agentDispatch.js';
 import type { ContentPart } from '../providers/dispatch.js';
 import type { ProviderPolicyResolver } from './index.js';
@@ -56,6 +56,7 @@ import { resolvePersonaNames } from './agentIdentity.js';
 import { loadTurns, loadClarificationState } from './exchange/loadTurns.js';
 import { prepareChatAnswer, readClarificationAnswer } from './exchange/chatAnswer.js';
 import { CLARIFICATION_ANSWERED_EVENT, CLARIFICATION_REQUESTED_EVENT, type ChatClarificationAsk } from './clarificationChat.js';
+import { TOOL_APPROVAL_REQUESTED_EVENT, TOOL_APPROVAL_SETTLED_EVENT } from './heldCallCard.js';
 import { applyCouncilTurn, councilTurnOf, gateRosterOf } from './exchange/councilTurn.js';
 import { dispatchReply, turnsToMessages, resolveModelProvenance, type ByokBudgetNotice, type DeepRunBudgetNotice, type ExchangeNotice } from './exchange/dispatchTurn.js';
 import { recordTurnAttribution, type ServedModel } from './turnAttribution.js';
@@ -723,6 +724,9 @@ export async function handleConversationResolve(
     let served: ServedModel | undefined;
     // ADR 1001 D7 — the tool turn ended on a question card.
     let clarificationAsk: ChatClarificationAsk | undefined;
+    // ADR 1156 — the turn's held-call cards, and what became of earlier cards' approvals.
+    let heldCalls: readonly HeldCallAsk[] = [];
+    let settledApprovals: readonly SettledApproval[] = [];
     try {
       // ADR 0089 — tool-bearing agent: run the observe→act loop. A `null` return
       // (managed tier / non-tool provider / no resolvable tool / missing key)
@@ -767,6 +771,8 @@ export async function handleConversationResolve(
           }
           runDispatches = toolTurn.runDispatches ?? [];
           clarificationAsk = toolTurn.clarificationAsk;
+          heldCalls = toolTurn.heldCalls ?? [];
+          settledApprovals = toolTurn.settledApprovals ?? [];
           toolText = toolTurn.text;
           served = toolTurn.served;
           // The tool path has no token streaming (callAIWithTools is non-stream);
@@ -869,6 +875,21 @@ export async function handleConversationResolve(
       await log.append({
         runId: interrupt.runId, nodeId: interrupt.nodeId, type: CLARIFICATION_REQUESTED_EVENT,
         payload: stripSecretsFromPersisted({ conversationId, askId: agentTurn.messageId, ...clarificationAsk }),
+      });
+    }
+    // ADR 1156 D5/D2 — earlier cards' outcomes, then this turn's held calls. Awaited for
+    // the same reason as the ask above; a missing record only costs the card (the ledger
+    // row and the composer control still hold the ask).
+    for (const st of settledApprovals) {
+      await log.append({
+        runId: interrupt.runId, nodeId: interrupt.nodeId, type: TOOL_APPROVAL_SETTLED_EVENT,
+        payload: stripSecretsFromPersisted({ conversationId, ...st }),
+      });
+    }
+    for (const h of noContribution ? [] : heldCalls) {
+      await log.append({
+        runId: interrupt.runId, nodeId: interrupt.nodeId, type: TOOL_APPROVAL_REQUESTED_EVENT,
+        payload: stripSecretsFromPersisted({ conversationId, askId: agentTurn.messageId, toolName: h.toolName, requestedAt: h.requestedAt }),
       });
     }
     mirrorTurnToChannel(interrupt.runId, { messageId: userTurn.messageId, role: 'user', content: userText, timestamp: new Date(userTurn.ts).toISOString() });

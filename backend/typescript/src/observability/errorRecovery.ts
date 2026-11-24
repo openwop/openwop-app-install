@@ -20,7 +20,7 @@
  * fragments; keep it in BE logs.
  */
 
-import { AiProviderError } from '../aiProviders/aiProvidersHost.js';
+import { AiProviderError, type AiProviderErrorCode } from '../aiProviders/aiProvidersHost.js';
 import { isStreamIncompleteError } from '../providers/dispatch.js';
 
 export type ErrorCategory =
@@ -322,6 +322,30 @@ function classifyNativeError(err: Error): ClassifiedError | null {
     return { category: 'network', action: 'retry', userMessage: 'Network error reaching the upstream provider. Check connectivity.' };
   }
   return null;
+}
+
+/** Host refusals whose message names the cause, and the cap that keeps it one line. */
+const STATED_REFUSAL_CODES: ReadonlySet<string> = new Set(['conflict', 'not_found', 'validation_error']);
+const STATED_REFUSAL_MAX = 200;
+
+/**
+ * Classify a run's terminal failure from the `{code, message}` pair the executor
+ * records. A node that refuses with `conflict`, `not_found` or `validation_error`
+ * (an `OpenwopError` thrown on a missing input, say) already says what is wrong,
+ * so its message is the user message: the generic arm's "Check the server logs"
+ * gave the run's owner nothing to act on. Every other code classifies as before.
+ * The caller scrubs secrets from `message` first.
+ */
+export function classifyTerminalFailure(error: { code: string; message: string }): ClassifiedError {
+  const stated = error.message.replace(/\s+/g, ' ').trim();
+  if (STATED_REFUSAL_CODES.has(error.code) && stated) {
+    return {
+      category: 'config',
+      action: 'abort',
+      userMessage: stated.length > STATED_REFUSAL_MAX ? `${stated.slice(0, STATED_REFUSAL_MAX - 1)}\u2026` : stated,
+    };
+  }
+  return classifyDispatchError(new AiProviderError(error.code as AiProviderErrorCode, error.message));
 }
 
 /**

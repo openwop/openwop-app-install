@@ -51,7 +51,6 @@ import {
   dispatchManagedToolsRound,
   getManagedProviderStatuses,
   isManagedCredentialRef,
-  ManagedProviderError,
   managedProviderIdFromRef,
 } from '../src/providers/managedProvider.js';
 import type { Storage } from '../src/storage/storage.js';
@@ -529,15 +528,6 @@ describe('getManagedProviderStatuses — readiness probe', () => {
     const statuses = await getManagedProviderStatuses();
     // providers.json advertises exactly one managed tier today.
     expect(statuses.map((s) => s.providerId)).toEqual(['openwop-free']);
-  });
-});
-
-describe('ManagedProviderError', () => {
-  it('carries an error code on the instance', () => {
-    const err = new ManagedProviderError('sign_in_required', 'sign in');
-    expect(err).toBeInstanceOf(Error);
-    expect(err.code).toBe('sign_in_required');
-    expect(err.message).toBe('sign in');
   });
 });
 

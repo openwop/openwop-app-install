@@ -20,6 +20,10 @@
  * sabotage: the off branch rendered as "no cap" or as usage, the box not
  * disabling the input, the box ignored on save, and each seed/clear rule above
  * re-measured against the full PUT body of the unlimited save.
+ *
+ * TST-OAI-3 (2026-11-22, user decision): a stored `videoJobs: 'unlimited'`
+ * override seeds the box CHECKED. Red when `loadMedia` stops seeding
+ * `videoUnlimited` from the override, or seeds the number from it instead.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
@@ -51,12 +55,15 @@ const MEDIA: MediaBudgetResponse = {
 
 interface Put { url: string; method: string; body: unknown }
 let puts: Put[] = [];
+// The GET answer; a case may swap it before rendering (reset in stubFetch).
+let media: MediaBudgetResponse = MEDIA;
 
 const jsonRes = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
 function stubFetch(): void {
   puts = [];
+  media = MEDIA;
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
     const u = String(url);
     const method = (init?.method ?? 'GET').toUpperCase();
@@ -66,7 +73,7 @@ function stubFetch(): void {
         puts.push({ url: u, method, body });
         return jsonRes({ override: body, budgets: MEDIA.budgets });
       }
-      return jsonRes(MEDIA);
+      return jsonRes(media);
     }
     if (u === `${GOV}/policy`) return jsonRes(POLICY);
     // byok-chat-budget, egress-rules, anything else: genuinely not permitted → silent.
@@ -127,6 +134,20 @@ describe('ADR 1051 D3 — video: 0 is off, uncapped is explicit', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save media budgets' }));
     await waitFor(() => expect(puts).toHaveLength(1));
     // Only video changes: tts and images keep their seeded override, stt stays cleared.
+    expect(puts[0]).toEqual({ url: `${GOV}/media-budget`, method: 'PUT', body: { ttsChars: 1234, sttBytes: null, images: 7, videoJobs: 'unlimited' } });
+  });
+
+  it('a STORED unlimited re-opens checked, with the number disabled, and an untouched save keeps it (TST-OAI-3)', async () => {
+    // Without this seed, a re-opened panel would show the box unchecked and a
+    // plain Save would PUT `videoJobs: null`, silently clearing the operator's choice.
+    media = { ...MEDIA, budgets: { ...MEDIA.budgets, video: 'unlimited' }, override: { ...MEDIA.override, videoJobs: 'unlimited' } };
+    render(<GovernancePanel />);
+    await waitFor(() => expect(screen.getByText('Media generation budgets')).toBeTruthy());
+    expect(input('No cap on video for this workspace').checked).toBe(true);
+    expect(input('Video units per day (this workspace)').disabled).toBe(true);
+    expect(input('Video units per day (this workspace)').value).toBe('');
+    fireEvent.click(screen.getByRole('button', { name: 'Save media budgets' }));
+    await waitFor(() => expect(puts).toHaveLength(1));
     expect(puts[0]).toEqual({ url: `${GOV}/media-budget`, method: 'PUT', body: { ttsChars: 1234, sttBytes: null, images: 7, videoJobs: 'unlimited' } });
   });
 });

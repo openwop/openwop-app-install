@@ -167,6 +167,16 @@ export const messages = {
   bulkClear: 'Effacer',
   deleteCardsConfirm_one: 'Supprimer {{count}} carte ?',
   deleteCardsConfirm_other: 'Supprimer {{count}} cartes ?',
+  // ADR 1155 D7 — a paged column's footer
+  showMoreCards: 'Afficher plus ({{shown}} sur {{total}})',
+  loadingMoreCards: 'Chargement…',
+  // ADR 1155 D7 — swimlanes
+  laneNone: 'Sans valeur',
+  laneAria_one: '{{lane}}, {{count}} carte',
+  laneAria_other: '{{lane}}, {{count}} cartes',
+  laneColumn: '{{column}} dans {{lane}}',
+  groupByLabel: 'Grouper par',
+  groupByNone: 'Aucun regroupement',
   // Card sources
   sourceHuman: 'D’un humain',
   sourceDiscord: 'Discord simulé',

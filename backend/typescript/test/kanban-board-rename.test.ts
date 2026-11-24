@@ -61,10 +61,10 @@ describe('board rename — PATCH boards/:boardId', () => {
 
   it('rejects other fields, and an empty name', async () => {
     const id = await create('Keep');
-    // Only `name` is mutable — owner/column rebinding is rejected.
+    // Only `name` and `groupBy` (ADR 1155 D7) are mutable — owner/column rebinding is rejected.
     const rejected = await patch(id, { name: 'X', rosterId: 'ros_evil' });
     expect(rejected.status).toBe(400);
-    expect(rejected.body).toMatchObject({ error: 'validation_error', message: 'Only `name` is mutable on a board.' });
+    expect(rejected.body).toMatchObject({ error: 'validation_error', message: 'Only `name` and `groupBy` are mutable on a board.', details: { fields: ['rosterId'] } });
 
     const empty = await patch(id, { name: '  ' });
     expect(empty.status).toBe(400);

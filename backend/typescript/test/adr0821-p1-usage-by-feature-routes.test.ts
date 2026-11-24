@@ -12,6 +12,15 @@
  * Tracker TST-BUL-3. Sabotage-witnessed (w62): red when the superadmin check is
  * dropped, the per-feature tenant count stops counting tenants, the `day` format
  * check is skipped, or the rollup stops returning `managedByFeature`.
+ *
+ * Midnight-safe (2026-11-23): `DAY` used to be read at module load while the
+ * rows were stamped with the clock in `beforeAll`, after the app boot (MEASURED
+ * 2026-11-24: ~0.6 s later), so a run across 00:00 UTC asked for a day the rows
+ * were not in. The rows are now stamped with one `AT` and `DAY` is derived from
+ * it; the default-day case brackets the request with the day before and after
+ * it; a fixed-day boundary case shows the explicit-day read never consults the
+ * clock. Witnessed: the old file under a clock shift that puts 00:00 UTC in that
+ * gap reddens 2 of 3 cases, and this file stays 4/4 under the same shift.
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -26,7 +35,13 @@ let BASE: string;
 const OPERATOR = 'user:op-0821';
 const CUSTOMER = 't-cust-0821';
 const OTHER = 't-other-0821';
-const DAY = new Date().toISOString().slice(0, 10);
+const utcDay = (d: Date) => d.toISOString().slice(0, 10);
+// One instant for every row this file writes; set in beforeAll, read by every case.
+let AT: Date;
+let DAY = '';
+// A fixed day, far from today, with a row stamped at its last millisecond.
+const EDGE_DAY = '2026-01-01';
+const EDGE_TENANT = 't-edge-0821';
 
 async function login(email: string, tenantId: string): Promise<string> {
   const res = await fetch(`${BASE}/host/openwop-app/test/login`, {
@@ -59,9 +74,12 @@ beforeAll(async () => {
   }
   operator = await login('op@host.test', OPERATOR);
   customer = await login('cust@acme.test', CUSTOMER);
-  await recordFeatureSpend({ tenantId: CUSTOMER, featureId: 'chat', inputTokens: 100, outputTokens: 40 });
-  await recordFeatureSpend({ tenantId: CUSTOMER, featureId: 'chat-widget', inputTokens: 10, outputTokens: 5 });
-  await recordFeatureSpend({ tenantId: OTHER, featureId: 'chat', inputTokens: 1, outputTokens: 1 });
+  AT = new Date();
+  DAY = utcDay(AT);
+  await recordFeatureSpend({ tenantId: CUSTOMER, featureId: 'chat', inputTokens: 100, outputTokens: 40, at: AT });
+  await recordFeatureSpend({ tenantId: CUSTOMER, featureId: 'chat-widget', inputTokens: 10, outputTokens: 5, at: AT });
+  await recordFeatureSpend({ tenantId: OTHER, featureId: 'chat', inputTokens: 1, outputTokens: 1, at: AT });
+  await recordFeatureSpend({ tenantId: EDGE_TENANT, featureId: 'cms', inputTokens: 7, outputTokens: 0, at: new Date(`${EDGE_DAY}T23:59:59.999Z`) });
 });
 
 afterAll(async () => {
@@ -90,12 +108,28 @@ describe('GET billing/admin/usage-by-feature — the operator read', () => {
   });
 
   it('defaults to today, and rejects a malformed day', async () => {
-    expect(((await (await get(operator, path())).json()) as { day: string }).day).toBe(DAY);
+    // "Today" is the server's clock at the request, so bracket the request: a run
+    // across 00:00 UTC may see either side, never anything else.
+    const before = utcDay(new Date());
+    const served = ((await (await get(operator, path())).json()) as { day: string }).day;
+    const after = utcDay(new Date());
+    expect([before, after]).toContain(served);
     const bad = await get(operator, path('yesterday'));
     expect(bad.status).toBe(400);
     const badBody = await bad.json() as { error?: string; details?: { field?: string } };
     expect(badBody.error).toBe('validation_error');
     expect(badBody.details?.field).toBe('day');
+  });
+
+  it('an explicit day reads that UTC day\'s rows, whatever the clock says (the midnight boundary)', async () => {
+    // The row was stamped at EDGE_DAY's last millisecond: it belongs to EDGE_DAY,
+    // not the next day, and a read for either day is decided by `day`, not by now.
+    const edge = await (await get(operator, path(EDGE_DAY))).json() as { day: string; features: Array<{ featureId: string; tenants: number; inputTokens: number }> };
+    expect(edge.day).toBe(EDGE_DAY);
+    expect(edge.features).toEqual([expect.objectContaining({ featureId: 'cms', tenants: 1, inputTokens: 7 })]);
+    const next = await (await get(operator, path('2026-01-02'))).json() as { day: string; features: unknown[] };
+    expect(next.day).toBe('2026-01-02');
+    expect(next.features).toEqual([]);
   });
 });
 

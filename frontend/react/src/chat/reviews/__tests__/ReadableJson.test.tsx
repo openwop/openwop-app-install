@@ -31,6 +31,11 @@
  * guard on the 64-hex `contentHash` fixture, so only breaking both reds); markdown
  * not rendered, or plain multi-line text rendered as markdown; the inert link or
  * image override removed; "All saved fields" dropped or missing the checksum.
+ *
+ * TST-OAU-2 (2026-11-22, user decision): each half of both double guards now has
+ * a single-rule fixture of its own: a non-hex `recordKey`, a `sha256:` value under
+ * a plain key, a one-line `markdown`, and multi-line markdown under a plain key.
+ * Breaking any one rule alone reds its case.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup, within } from '@testing-library/react';
@@ -168,6 +173,48 @@ describe('issue 5844 — an approval artifact reads as a document, not a data du
     expect(face.querySelectorAll('img')).toHaveLength(0);
     // The link reads as its text plus its URL, the image as its bracketed alt text.
     expect(face.querySelector('p')?.textContent).toBe('See the site (https://example.test/x) [pixel]');
+  });
+
+  // TST-OAU-2 (2026-11-22, user decision): one fixture per rule. The gate fixture
+  // above satisfies both halves of each double guard; each of these satisfies one.
+  const faceAndDetails = (container: HTMLElement): { face: string; details: string } => {
+    const root = container.querySelector('.readable-json-root')!;
+    const details = root.querySelectorAll('details');
+    expect(details).toHaveLength(1);
+    const all = details[0]!.textContent ?? '';
+    return { face: (root.textContent ?? '').replace(all, ''), details: all };
+  };
+
+  it('a record key leaves the face by its KEY alone (a value that is not hex)', () => {
+    const { container } = show({ title: 'Kitchen', recordKey: 'rk-1' });
+    const { face, details } = faceAndDetails(container);
+    expect(face).toContain('Kitchen');
+    expect(face).not.toContain('rk-1');
+    expect(details).toContain('rk-1');
+  });
+
+  it('a checksum leaves the face by its VALUE alone (a key that names nothing machine)', () => {
+    const ref = 'sha256:' + 'b'.repeat(64);
+    const { container } = show({ title: 'Kitchen', ref });
+    const { face, details } = faceAndDetails(container);
+    expect(face).toContain('Kitchen');
+    expect(face).not.toContain(ref);
+    expect(details).toContain(ref);
+  });
+
+  it('a `markdown` key renders by its KEY alone (one line, no block structure)', () => {
+    const { container } = show({ markdown: 'Just **one** line.' });
+    const prose = container.querySelectorAll('.readable-json__prose');
+    expect(prose).toHaveLength(1);
+    expect(prose[0]!.querySelector('strong')?.textContent).toBe('one');
+  });
+
+  it('multi-line markdown renders by its STRUCTURE alone (a key that names nothing markdown)', () => {
+    const { container } = show({ summary: '## Who buys it\n\n- the household' });
+    const prose = container.querySelectorAll('.readable-json__prose');
+    expect(prose).toHaveLength(1);
+    expect(prose[0]!.querySelector('h2')?.textContent).toBe('Who buys it');
+    expect(prose[0]!.querySelector('li')?.textContent).toBe('the household');
   });
 
   it('plain multi-line text keeps the text path', () => {

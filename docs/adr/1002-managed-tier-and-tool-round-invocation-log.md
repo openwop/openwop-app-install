@@ -66,6 +66,81 @@ On the replay lane the read order is:
 2. the source run's record, under the source run's identity, recomputed
    because `runId` is in the preimage.
 
+> **PROPOSED CORRECTION 2026-11-18 — explicit replay source misses do not authorize model dispatch (2967).**
+> D2's “a miss calls live” policy and the corresponding D4/Consequences text
+> below were deliberate historical behavior, not an omitted test assertion.
+> The e7284 safety candidate instead throws the genuine host
+> `ReplayEffectError` with `replay_source_missing` before provider dispatch
+> when an explicit replay source lacks a matching semantic invocation. Deleted,
+> erased and changed-request records therefore produce zero fresh calls and
+> no new provider record. Matching undeleted source records retain positive
+> serving/copy/usage checks; the source recipe and semantic key are not weakened.
+>
+> The historical real-agent unrecorded-tool witness also relied on one fresh
+> model round because it supplied NO model source. With miss suppression it
+> correctly stops earlier, so that setup no longer reaches D4's tool guard.
+> Proposed setup correction: the SAME real agent/adapter records its actual
+> first model round; a fixture-owned observer then throws before the loop
+> receives it, producing an explicitly FAILED direct-node setup with no card
+> or tool record. Replay serves that real model result and reaches the actual
+> unrecorded-tool guard. The typed failure, `retryable:false`, zero-card and
+> zero-new-provider-call oracles remain; they are not relaxed.
+>
+> Root's immutable 2955 characterization remains baseline 26 PASS versus
+> e7284 candidate 22 PASS / 4 FAIL. This note and the revised 26-case fixture are
+> source proposals, not adopted or native-qualified results. Their distinct
+> adapter/tool setup does not prove completed workflow/node-outcome replay,
+> HTTP admission, registry version selection, full gate or deployed behavior.
+> The separate unchanged 2905 completed-upgrade oracle is unaffected.
+
+### Correction adopted — explicit-source adapter safety (2026-11-18)
+
+Status: Accepted for this bounded host correction. Implementation is private;
+the current exact-tree gate, merge, deployment and served regression are pending.
+The proposal and its historical qualification above remain recorded as written.
+This adoption record supersedes their proposed/unqualified status only for the
+adapter safety and corresponding fixture migration described here.
+
+An explicit replay source is never permission to make an unrecorded external
+model call. Missing invocation storage, a missing or recipe-mismatched source,
+and a source-read failure refuse with the existing sanitized ReplayEffectError
+(`replay_source_missing`, network-egress). Across managed plain, managed tools
+and BYOK tools, a new replay attempt requires its matching record or refuses.
+BYOK plain retains its existing retry-stable lookup of a successful own-run record
+before source lookup; this correction does not establish exact-attempt fidelity
+for that path. Ordinary live retries and explicit branch execution retain their
+dispatch behavior. Matching records retain their existing
+tenant checks, copy-on-read, source recipe and usage replay. The existing staged
+local mock divergence program remains the narrow local test seam; it does not
+authorize external-provider dispatch.
+
+The three historical model-live-on-miss assertions for deletion, erasure and
+changed requests are migrated to typed refusal, zero provider calls and no new
+provider record. The separate missing-tool case uses a genuine recorded model
+round from an explicitly failed direct-node producer so that replay still reaches
+the real missing-tool boundary. It preserves the nonretryable failure and zero
+card/tool/provider-write assertions. No whole-node outcome oracle is weakened.
+
+The private e7284 adapter body passed the public-adapter19 and fresh-process
+missing-log1 cases in2932. Independent one-mechanism removals in2935 made the
+actual refusal/read-error assertions fail, and exact restoration passed. The
+revised26-case legacy suite passed in3019, its unsafe adapter had three meaningful
+failures, and exact restoration passed26 with clean process teardown. Earlier
+2955 baseline26 versus original candidate22/4 remains preserved. These receipts
+qualify their exact diagnostic compositions, not this new six-path release tree.
+The new helper location changes only two import specifiers at the same depth.
+
+This change reuses the existing AI adapter, invocation log and ReplayEffectError;
+it adds no route, wire field, capability, error code, registry version or node
+role policy. It does not adopt the private manifest role floor or claim published
+LLM Phase4/whole-terminal replay conformance. Issue86's completed-upgrade outcome,
+mixed ordinal/refusal semantics, normal HTTP admission and served behavior remain
+open. The broader architectural contract must be resolved separately rather than
+calling a safe refusal a faithful completed replay.
+
+The D2/D4/Consequences text below records the historical live-on-miss decision;
+the explicit-source safety correction above takes precedence for current code.
+
 A source hit is copied under the fork's own key, like `callAI`'s
 copy-on-read, so a fork of a fork replays from its parent. A miss calls live.
 That covers both a node the source never reached and a request that diverged.

@@ -21,15 +21,30 @@
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import type * as WorkspaceClient from '../../client/workspaceClient.js';
+import { t } from 'i18next';
 
 const createAndEnterWorkspace = vi.fn<typeof WorkspaceClient.createAndEnterWorkspace>();
-vi.mock('../../client/workspaceClient.js', () => ({
+// Legacy reachability/error wiring isolation ONLY. Actual event/completion
+// ownership is exercised by WorkspaceCreateSection.authCompletion.test.tsx.
+vi.mock('../../client/workspaceClient.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../client/workspaceClient.js')>()),
   createAndEnterWorkspace: (name: string) => createAndEnterWorkspace(name),
+  completeWorkspaceTransition: (_result: WorkspaceClient.WorkspaceMutationResult, actions: WorkspaceClient.CompletionActions) => {
+    if (!actions.isCallerCurrent()) return 'caller-retired' as const;
+    actions.beforeAction?.();
+    actions.action();
+    return 'completed' as const;
+  },
 }));
 
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({ t: (k: string) => k }),
-}));
+vi.mock('react-i18next', async () => {
+  const actual = await import('i18next');
+  return { useTranslation: () => ({ t: (k: string) => {
+    if (k === 'common:workspaceChangeCouldNotFinish') return actual.t('common:workspaceChangeCouldNotFinish');
+    if (k === 'common:workspaceChangeNotAllowed') return actual.t('common:workspaceChangeNotAllowed');
+    return k;
+  } }) };
+});
 
 import { WorkspaceCreateSection } from '../WorkspaceCreateSection.js';
 
@@ -58,8 +73,15 @@ describe('WS-DISC — workspace creation is reachable from the orgs page', () =>
     fireEvent.change(screen.getByLabelText('newWorkspaceAriaLabel'), { target: { value: 'Acme' } });
     fireEvent.click(screen.getByRole('button', { name: 'createWorkspace' }));
 
-    // The server's reason, surfaced. Not a generic shrug, and NOT silence.
-    await waitFor(() => expect(screen.getByText('Workspace limit reached.')).toBeTruthy());
+    // Reviewed C2 policy correction: arbitrary Error.message is not trusted UI copy.
+    // Preserve failure visibility/no-refresh and strengthen it with raw-text absence.
+    const expected = t('common:workspaceChangeCouldNotFinish');
+    expect(expected).not.toBe('workspaceChangeCouldNotFinish');
+    expect(expected).not.toBe('common:workspaceChangeCouldNotFinish');
+    await waitFor(() => expect(screen.getByText(expected)).toBeTruthy());
+    expect(screen.queryByText('Workspace limit reached.')).toBeNull();
+    expect(document.body.textContent).not.toContain('Workspace limit reached.');
+    expect((screen.getByLabelText('newWorkspaceAriaLabel') as HTMLInputElement).value).toBe('Acme');
     // And the refresh must NOT run — reloading on failure would hide the message
     // the user needs to read.
     expect(onCreated).not.toHaveBeenCalled();

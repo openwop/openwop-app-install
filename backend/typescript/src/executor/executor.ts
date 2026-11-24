@@ -81,9 +81,9 @@ import type {
 } from './types.js';
 import type { RunRecord } from '../types.js';
 import type { ProviderPolicyResolver } from '../host/index.js';
-import { createAiProvidersAdapter, AiProviderError, type AiProviderErrorCode } from '../aiProviders/aiProvidersHost.js';
+import { createAiProvidersAdapter, AiProviderError } from '../aiProviders/aiProvidersHost.js';
 import { createSandboxRunner } from '../host/sandboxAdapter.js';
-import { classifyDispatchError } from '../observability/errorRecovery.js';
+import { classifyTerminalFailure } from '../observability/errorRecovery.js';
 import { isSideEffectingNode, indexSourceOutcomes, ExecutionOrdinals, type SourceOutcomeIndex } from './sideEffects.js';
 import {
   classifyRunTrigger,
@@ -340,9 +340,12 @@ export async function emitTerminalFailure(input: {
   // `_errorObject` schema (`additionalProperties: true`); old consumers
   // ignore the new fields. See `observability/errorRecovery.ts` for the
   // classifier authoritative source.
-  const classified = classifyDispatchError(
-    new AiProviderError(input.error.code as AiProviderErrorCode, input.error.message),
-  );
+  // A stated refusal's message becomes the user message (`classifyTerminalFailure`),
+  // so scrub it first: the notice and the dead-letter reason read it unredacted.
+  const classified = classifyTerminalFailure({
+    code: input.error.code,
+    message: stripSecretsFromPersisted(stripKnownRunSecrets(input.error.message)),
+  });
   const enrichedError = {
     ...input.error,
     category: classified.category,
@@ -1386,6 +1389,9 @@ async function runOneNodeBody(input: {
       // ADR 0531 joins this allowlist: the effect-guard backstop's
       // `replay_source_missing` must reach the node-failure event as itself,
       // matching the ADR 0341 fast path's code for the same invariant.
+      // `OpenwopError` joins it too: its code is the host's closed union, and a node
+      // that refuses with one (`conflict` on a missing input) must reach `run.failed`
+      // as that refusal, not as `internal_error`.
       // ADR 0585 P0b — a lost lease is NOT a node failure and must not be
       // recorded as one. Recording it would give the run a `node.failed` event
       // written by an instance that no longer owns it, and on the failure path
@@ -1395,6 +1401,7 @@ async function runOneNodeBody(input: {
       if (err instanceof LeaseLostError) throw err;
       const code =
         err instanceof AiProviderError || err instanceof McpError || err instanceof ReplayEffectError || err instanceof CredentialGateError
+          || err instanceof OpenwopError
           ? err.code
           : 'internal_error';
       // RFC 0248 §B.5 (ADR 0966) — a refused `ctx.callAI` retry policy names its

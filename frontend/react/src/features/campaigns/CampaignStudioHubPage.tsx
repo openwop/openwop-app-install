@@ -45,7 +45,7 @@ export function CampaignStudioHubPage(): JSX.Element {
   const activeRoute = routes.find((r) => tabIdOf(r) === active);
 
   return (
-    <section className="u-grid u-gap-4" data-walkthrough="campaign-studio.page">
+    <section className="campaign-studio-hub u-grid u-gap-4" data-walkthrough="campaign-studio.page">
       <PageHeader eyebrow={t('eyebrow')} title={t('title')} lede={t('lede')} />
 
       {routes.length === 0 ? (

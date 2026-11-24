@@ -36,6 +36,7 @@ import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { interruptFormDefect } from '../src/host/interruptFormRules.js';
+import { A2UI_CATALOG, A2UI_CATALOG_VERSION } from './helpers/interruptFormCatalog.js';
 import { buildAssistantSurface } from '../src/features/assistant/surface.js';
 import { __resetAssistantStore, listPendingActions } from '../src/features/assistant/assistantService.js';
 
@@ -44,8 +45,9 @@ const answers = (values: Record<string, unknown>): { answers: Array<{ id: string
   answers: Object.entries(values).map(([id, answer]) => ({ id, answer })),
 });
 
-const CATALOG_VERSION = '0.9.1';
-const CATALOG = new Set(['heading', 'text', 'field.text', 'field.date', 'field.select', 'field.checkbox', 'action.button']);
+// TST-OAS-3: derived from `schemas/v2/interrupt-form.schema.json`, no longer hand-copied.
+const CATALOG_VERSION = A2UI_CATALOG_VERSION;
+const CATALOG = A2UI_CATALOG;
 
 describe('Assistant calendar.reschedule A2UI clarification (ADR 0051 §3/§5)', () => {
   let nodes: (typeof import('../../../packs/feature.assistant.nodes/index.mjs'))['nodes'];

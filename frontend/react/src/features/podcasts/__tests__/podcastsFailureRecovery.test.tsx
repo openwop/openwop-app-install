@@ -39,6 +39,10 @@
  * ADR 1115 D10 (`PODUX93R-3`): a cohort episode that landed is announced BY NAME by
  * the transition effect, and the generic "Finished" line is said only when the cohort
  * settled by vanishing (deleted), never both for one event.
+ *
+ * TST-OAY-1 (2026-11-22, user decision): the "landed" check counts only the cohort's
+ * own episodes. A vanished cohort beside an unrelated `done` episode is the input
+ * that tells them apart, and dropping the cohort-membership conjunct reds it.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { PodcastEpisode, PodcastShow } from '../podcastsClient.js';
@@ -232,6 +236,21 @@ describe('PODU-3/-4 — the generation poll gives up HONESTLY and offers a way o
     // ADR 1115 D10 (`PODUX93R-3`) — no episode of the cohort is left to be announced
     // by name, so the generic line is the ONLY thing that says the wait is over.
     listEpisodes.mockResolvedValue([]);
+    fireEvent.click(screen.getByRole('button', { name: /check again/i }));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.queryByText(/we stopped checking after about/i)).toBeNull();
+    expect(announceSpy).toHaveBeenCalledWith(expect.stringMatching(/finished/i));
+    expect(announceSpy).not.toHaveBeenCalledWith(expect.stringMatching(/is ready/i));
+  });
+
+  it('TST-OAY-1 — a VANISHED cohort beside an UNRELATED finished episode still says "Finished"', async () => {
+    await mountStudioAndExhaustPoll();
+    expect(screen.getByText(/we stopped checking after about/i)).toBeTruthy();
+    // ep1 (the cohort) was deleted; ep2 arrived already `done`, so the transition
+    // effect never names it. Only the generic line says the wait is over. A
+    // "landed" check that ignored cohort membership would read ep2 as the landing
+    // and stay silent.
+    listEpisodes.mockResolvedValue([EPISODE({ id: 'ep2', title: 'Episode Two', status: 'done', runId: 'run-2' })]);
     fireEvent.click(screen.getByRole('button', { name: /check again/i }));
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
     expect(screen.queryByText(/we stopped checking after about/i)).toBeNull();

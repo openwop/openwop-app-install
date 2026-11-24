@@ -264,6 +264,8 @@ function TabSessionImpl({
   // the standalone ChatSidebar's controls (same hook). The deck tab has no ChatHeader, so
   // the model switcher folds into the same modifier group below.
   const approvalContinueRef = useRef<((text: string) => void) | null>(null);
+  // ADR 1156 — the held-call card's Continue: the same submit as the approvals dialog's.
+  const heldCallHost = useMemo(() => ({ sessionId: session.id, onContinue: (text: string) => approvalContinueRef.current?.(text) }), [session.id]);
   const { composerModifiers, modelSwitcher, getSubmitExtras, selectedModel } = useComposerModifiers({
     sessionId, supportsWebSearch, supportsTools, activeProvider: config.provider,
     // ADR 0834 D6 — re-read pending tool approvals after each turn; the approvals
@@ -576,6 +578,7 @@ function TabSessionImpl({
         composerModifiers={tabComposerModifiers}
         onResolveInterrupt={resolveInterrupt}
         onAnswerClarification={answerClarification}
+        heldCallHost={heldCallHost}
         onRegenerate={onRegenerate}
         onBranchFrom={(fromSeq) => { void onBranchFrom(fromSeq); }}
         {...(isMultiParty ? { messageActions: channelMessageActions } : { onFeedback: setFeedback })}

@@ -30,6 +30,10 @@
  * VOX2-F3); a walkie session answers a caller other than its opener (M5);
  * `/held-approvals/resolve` stops asking `approvals:respond` (M4); walkie erasure
  * deletes rows of another subject.
+ *
+ * A7 / TST-OAG-2 (2026-11-22, user decision): `/tool-call` honours `userApproved`
+ * only for a session minted with a bound human. Red when the route's
+ * `Boolean(resolved.userId)` guard is dropped (the user-less case runs the tool).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -39,7 +43,10 @@ import { saveConfig, __clearToggleStore } from '../src/host/featureToggles/servi
 import { voiceFeature } from '../src/features/voice/feature.js';
 import { setSecret } from '../src/byok/secretResolver.js';
 import { setRealtimeConfig } from '../src/features/voice/realtime/config.js';
-import { issueRealtimeSession } from '../src/features/voice/realtime/sessionRegistry.js';
+import { issueRealtimeSession, resolveRealtimeSession } from '../src/features/voice/realtime/sessionRegistry.js';
+import { registerFeatureAgentTool } from '../src/host/agentToolProvider.js';
+import { getAgentRegistry } from '../src/executor/agentRegistry.js';
+import { __clearAgentIdentityCache } from '../src/host/agentIdentity.js';
 import { handleSidebandEvent, type SidebandSession } from '../src/features/voice/realtime/openaiSideband.js';
 import { issueApiKey, revokeApiKey, setTenantKeyPolicy } from '../src/features/developer-keys/apiKeyService.js';
 import { invalidateTenantKeyPolicyCache } from '../src/features/developer-keys/tenantKeyPolicyCache.js';
@@ -169,6 +176,61 @@ describe('D2 — a host-issued realtime session answers only its opener', () => 
     const res = await asAdmin('POST', `${RT}/tool-call`, { sessionId: id, name: 'anything' });
     expect(res.status).toBe(403);
     expect(((await res.json()) as { message?: string }).message).toBe('A valid realtime session (from POST /session) is required.');
+  });
+});
+
+// TST-OAG-2 (2026-11-22, user decision): the route honours `userApproved` only for a
+// session with a BOUND human. This was a source substring in voice-approval-oneshot;
+// here it is driven over HTTP. Both sessions answer the same caller (same subject);
+// they differ only in whether a userId was bound at mint.
+describe('A7 — a user-less session cannot self-approve over /tool-call', () => {
+  const AGENT = 'adr0893.oag2-voice';
+  const SENSITIVE = 'openwop:feature.code-exec.nodes.run';
+  const executed: string[] = [];
+  let subject = '';
+  beforeAll(async () => {
+    // A recorder under the real id (last registration wins, this file's process only),
+    // so the control sees EXECUTION rather than inferring it from a verdict.
+    registerFeatureAgentTool({
+      contentTrust: 'trusted', effect: 'write',
+      def: { name: SENSITIVE, description: 'TST-OAG-2 recorder', inputSchema: { type: 'object' } },
+      run: async () => { executed.push(SENSITIVE); return { content: 'ran' }; },
+    });
+    getAgentRegistry().register({
+      agentId: AGENT, persona: 'Voice', modelClass: 'chat', systemPrompt: 'v',
+      toolAllowlist: [SENSITIVE], packName: 'test.adr0893', packVersion: '0.0.1',
+    });
+    __clearAgentIdentityCache();
+    // The admin bearer's subject, read off a session it minted over HTTP.
+    await setSecret('rt-gemini-oag2', 'gk-test', { tenantId: 'default' });
+    await setRealtimeConfig('default', { provider: 'gemini-live', credentialRef: 'rt-gemini-oag2' });
+    try {
+      const mint = await asAdmin('POST', `${RT}/session`, {});
+      expect(mint.status).toBe(200);
+      const { hostSessionId } = (await mint.json()) as { hostSessionId: string };
+      subject = (await resolveRealtimeSession(hostSessionId, 'default'))?.subject ?? '';
+    } finally {
+      await setRealtimeConfig('default', { provider: 'off' });
+    }
+    expect(subject).not.toBe('');
+  });
+  const toolCall = (sessionId: string) =>
+    asAdmin('POST', `${RT}/tool-call`, { sessionId, callId: 'c-oag2', name: SENSITIVE, arguments: {}, userApproved: true });
+
+  it('with no bound userId, `userApproved: true` leaves a SENSITIVE tool held, and nothing runs', async () => {
+    executed.length = 0;
+    const res = await toolCall(issueRealtimeSession('default', AGENT, { subject }));
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { callId: string; status: string })).toMatchObject({ callId: 'c-oag2', status: 'requires_approval' });
+    expect(executed).toEqual([]);
+  });
+
+  it('control: the same call on a session with a bound human is approved and runs once', async () => {
+    executed.length = 0;
+    const res = await toolCall(issueRealtimeSession('default', AGENT, { subject, userId: 'u-oag2' }));
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { status: string }).status).toBe('ok');
+    expect(executed).toEqual([SENSITIVE]);
   });
 });
 

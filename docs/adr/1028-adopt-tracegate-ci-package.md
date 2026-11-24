@@ -69,6 +69,18 @@ package's own modules at the pinned version.
 | P3 | The same for the backend lane, after its own 20 compared gates. | backend selection | proposed |
 | P4 | Retire `scripts/tracegate.mjs`, the recorder, the i18n tracker and the vendored copies. `tracegate-daemon.sh` keeps its open-PR pre-gating (Gaps), calling the package. | none by itself | proposed |
 
+> **CORRECTED 2026-11-23 (P1 exit, a package hole): the pin moves to `tracegate-ci@0.10.6`.**
+> MEASURED on the first row of the corrected compare (5a484d49a: fork 14 must-run, package
+> 6, 8 only the fork runs). `compare-frontend-diff/` listed all 8, and every one starts a
+> process: `gates.test.ts` runs `node scripts/check-*.mjs`, for example. The package's
+> recorder noticed only `git`, so it would have reused these tests after a script they run
+> changed. That would have been a miss, not an explained difference. The fork's `opaque
+> subprocess input` was right. In 0.10.6, any `child_process` call from repo code marks the
+> footprint `subprocess`, and the test is reused only at the commit it was recorded on. A
+> spawn made only by tooling in `node_modules` doesn't count. A footprint recorded before
+> 0.10.6 has no answer and is treated as opaque, so the package selects the whole lane until
+> one re-record. Rows recorded under 0.10.4 don't count toward the P1 exit.
+
 > **CORRECTED 2026-11-23 (P1 exit, the compare's fork side): the fork's side included its
 > audit draw, so a superset test against it measured nothing.** The first row after the
 > nightly re-record (939756f11) read fork 85, package 5, 80 only the fork runs. The fork's

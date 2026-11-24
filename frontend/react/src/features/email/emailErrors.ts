@@ -13,7 +13,16 @@ export class EmailApiError extends Error {
   }
 }
 
-/** A definitive "this does not exist here": a 404, or the canonical `not_found` code. */
+/**
+ * A definitive "this does not exist here": a 404.
+ *
+ * TST-OAR-1 (user decision 2026-11-22): this used to also accept
+ * `code === 'not_found'`. Every email route that sends that code sends it with a
+ * 404 (`routes.ts` "Template not found.", "Template version not found."), so the
+ * code half never decided anything and no test could witness it. It is dropped.
+ * If a route ever sends `not_found` with another status, add it back with a
+ * fixture copied from that route's real body.
+ */
 export function isEmailNotFound(e: unknown): boolean {
-  return e instanceof EmailApiError && (e.status === 404 || e.code === 'not_found');
+  return e instanceof EmailApiError && e.status === 404;
 }

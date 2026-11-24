@@ -74,7 +74,7 @@ function token(sub: string): string {
   const input = `${encode({ alg: 'RS256', kid: 'scope-key', typ: 'JWT' })}.${encode({ iss: issuer, aud: 'seed-scope-test', sub, iat: now, exp: now + 300 })}`;
   return `${input}.${createSign('sha256').update(input).sign(privateKey).toString('base64url')}`;
 }
-interface ReplyBody { active?: string; workspaceId?: string; dryRun?: boolean; summary?: { created?: number; errors?: number }; details?: { reason?: string }; error?: string }
+interface ReplyBody { active?: string; personal?: string; selectionToken?: string; workspaceId?: string; dryRun?: boolean; summary?: { created?: number; errors?: number }; details?: { reason?: string }; error?: string }
 interface Reply { status: number; body: ReplyBody; contentType: string }
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -86,6 +86,8 @@ function readBody(value: unknown): ReplyBody {
   const num = (v: unknown): number | undefined => typeof v === 'number' ? v : undefined;
   const body: ReplyBody = {};
   const active = str(value.active); if (active !== undefined) body.active = active;
+  const personal = str(value.personal); if (personal !== undefined) body.personal = personal;
+  const selectionToken = str(value.selectionToken); if (selectionToken !== undefined) body.selectionToken = selectionToken;
   const workspaceId = str(value.workspaceId); if (workspaceId !== undefined) body.workspaceId = workspaceId;
   const error = str(value.error); if (error !== undefined) body.error = error;
   if (typeof value.dryRun === 'boolean') body.dryRun = value.dryRun;
@@ -95,10 +97,10 @@ function readBody(value: unknown): ReplyBody {
 }
 function caller(bearer: string, useCookie = true) {
   let cookie = '';
-  return async (path: string, body?: Record<string, unknown>, accept?: string): Promise<Reply> => {
+  return async (path: string, body?: Record<string, unknown>, accept?: string, extra: Record<string, string> = {}): Promise<Reply> => {
     const response = await fetch(`${base}${H}${path}`, {
       method: body ? 'POST' : 'GET',
-      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json', ...(accept ? { accept } : {}), ...(useCookie && cookie ? { cookie } : {}) },
+      headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json', ...(accept ? { accept } : {}), ...(useCookie && cookie ? { cookie } : {}), ...extra },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
     for (const header of response.headers.getSetCookie()) {
@@ -227,5 +229,87 @@ describe('seed workspace assertion before effects', () => {
     const refusal = await owner('/example-data/provision-demo', { expectedTenantId: 'ws:foreign' });
     expect(refusal.status).toBe(403);
     expect(refusal.body.error).toBe('forbidden');
+  });
+});
+
+/**
+ * ADR 1158 — a request sent straight to the backend host (no `/api` cookie) carries the
+ * active workspace on the selection token the same-origin workspace list hands out. The
+ * bearer lane takes it in place of the cookie's selection and runs the same membership
+ * check; the guard above is unchanged.
+ *
+ * Sabotage-witnessed: dropping the token read in `auth.ts` reds the first case (409);
+ * skipping `isWorkspaceMember` for a token's selection reds the non-member case (200);
+ * writing the token's selection into the cookie reds the "cookie unchanged" assertion.
+ * Not binding the token to the personal tenant reds only the direct reader assertions:
+ * over the route a borrowed token is ALSO refused by the membership check (a recorded
+ * double guard — with the binding gone, the route assertions alone stay green).
+ */
+describe('ADR 1158 — the direct stream carries the active workspace', () => {
+  const SEL = 'x-openwop-workspace-selection';
+  async function sharedWorkspace(sub: string) {
+    const bearer = token(sub);
+    const owner = caller(bearer);
+    const listed = await owner('/me/workspaces');
+    const home = listed.body.active;
+    if (!home) throw new Error('Personal host workspace is missing');
+    expect(listed.body.selectionToken, 'no token while the personal workspace is active').toBeUndefined();
+    const ws = (await owner('/workspaces', { name: `Direct stream ${sub}` })).body.workspaceId;
+    if (!ws) throw new Error('Shared workspace was not created');
+    expect((await owner(`/workspaces/${encodeURIComponent(ws)}/switch`, {})).status).toBe(200);
+    const now = await owner('/me/workspaces');
+    expect(now.body.active).toBe(ws);
+    if (!now.body.selectionToken) throw new Error('No selection token for the active shared workspace');
+    return { bearer, owner, home, ws, selectionToken: now.body.selectionToken };
+  }
+
+  it('a member\'s direct run and clear land in the active workspace; a wrong assertion is still 409; the cookie is not changed', async () => {
+    const { bearer, home, ws, selectionToken } = await sharedWorkspace('direct-owner');
+    const direct = caller(bearer); // its OWN cookie jar: the direct host's cookie, never switched
+    const withSel = { [SEL]: selectionToken };
+    const ran = await direct('/example-data/run', { steps: ['demo-walkthroughs'], expectedTenantId: ws }, 'application/x-ndjson', withSel);
+    expect(ran.status).toBe(200);
+    expect(await getOwned(ws, tour)).toMatchObject({ workflowId: tour });
+    expect(await getOwned(home, tour)).toBeNull();
+    // The guard is unchanged: the token selects the workspace, the assertion must still match it.
+    const wrong = await direct('/example-data/clear', { steps: ['demo-walkthroughs'], expectedTenantId: home }, 'application/x-ndjson', withSel);
+    expect(wrong.status).toBe(409);
+    expect(wrong.body.details?.reason).toBe('example_data_workspace_mismatch');
+    expect(await getOwned(ws, tour)).toMatchObject({ workflowId: tour });
+    const cleared = await direct('/example-data/clear', { steps: ['demo-walkthroughs'], expectedTenantId: ws }, 'application/x-ndjson', withSel);
+    expect(cleared.status).toBe(200);
+    expect(await getOwned(ws, tour)).toBeNull();
+    // The token is per request: the direct host's cookie still names the personal workspace.
+    expect((await direct('/me/workspaces')).body.active).toBe(home);
+  });
+
+  it('a token is only the selection of the person it was minted for: another person, a tampered token and a non-member are refused', async () => {
+    const a = await sharedWorkspace('direct-member');
+    const otherBearer = token('direct-outsider');
+    const outsider = caller(otherBearer, false);
+    const outsiderPersonal = (await outsider('/me/workspaces')).body.personal;
+    if (!outsiderPersonal) throw new Error('Outsider has no personal workspace');
+    const body = { steps: ['demo-walkthroughs'], expectedTenantId: a.ws };
+    // Another person presenting the member's token: bound to the member's identity, so ignored.
+    const borrowed = await outsider('/example-data/run', body, 'application/x-ndjson', { [SEL]: a.selectionToken });
+    expect(borrowed.status).toBe(409);
+    // A tampered signature: ignored.
+    const tampered = `${a.selectionToken.slice(0, -2)}xx`;
+    expect((await caller(a.bearer, false)('/example-data/run', body, 'application/x-ndjson', { [SEL]: tampered })).status).toBe(409);
+    // A validly signed selection of a workspace the caller is NOT a member of: the
+    // membership check refuses it, exactly as for a stale cookie.
+    const { mintWorkspaceSelection, readWorkspaceSelection } = await import('../src/host/workspaceSelectionToken.js');
+    // The identity binding, witnessed on its own: over the route the membership check
+    // below ALSO refuses a borrowed token (a recorded double guard), so the reader is
+    // asked directly. Minted for one personal tenant, it reads as nothing for another.
+    expect(readWorkspaceSelection(a.selectionToken, a.home)).toBe(a.ws);
+    expect(readWorkspaceSelection(a.selectionToken, outsiderPersonal)).toBeUndefined();
+    expect(readWorkspaceSelection(tampered, a.home)).toBeUndefined();
+    const forged = mintWorkspaceSelection(outsiderPersonal, a.ws);
+    const nonMember = await outsider('/example-data/run', body, 'application/x-ndjson', { [SEL]: forged });
+    expect(nonMember.status).toBe(409);
+    expect(nonMember.body.details?.reason).toBe('example_data_workspace_mismatch');
+    expect(await getOwned(a.ws, tour)).toBeNull();
+    expect(await getOwned(outsiderPersonal, tour)).toBeNull();
   });
 });

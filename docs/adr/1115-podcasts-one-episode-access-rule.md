@@ -391,6 +391,18 @@ does not unpublish anything automatically.
 |---|---|---|
 | P1 backend | D1, D2, D3, D5, D6, D8, D9; agent tools | `podcasts-episode-access.test.ts` (new), multi-person `org:` tenant, demo mode off: cross-org run read and write refused; a write-less runner refused; actorless and sub-workflow-child runs refused `podcast_run_needs_person`; private-notebook non-member refused at retry / publish / unpublish / delete (404) and filtered from the `list` tool; unprovisioned project and notebooks-off refused at the door; retry 409s (published, live run) and NOT for an absent run; two concurrent retries start one run; publish 409 without audio and allowed for a seeded episode with audio and no run; route-started run carries the actor and `personalTenant`; `mixClips` muxes stored clips only; clips replace clears stale audio; the erasure test. Updated: `podcasts.test.ts`, `notebooks-podcasts-agent-tools.test.ts`, `adr0390-podcast-distribution.test.ts`, `adr0390-podcast-prerender.test.ts`, `podcasts-writer-replay.test.ts`, `subject-erasure-feature-stores.test.ts`, the eraser manifest test, `feature-dependency-parity.test.ts` (the new edge) |
 | P2 packs | D2 node half, D4, D6, D7; version bumps, steward manifest, pins | `podcasts-generation-pipeline.test.ts`: private notebook → `podcast_notebook_unavailable`; empty notebook → `podcast_content_empty`; deleted profile fails before `callAI`; a refusal after `outline` stops `transcript` before `callAI`; refused `mixClips` fails `mix` typed while the codec degrade still succeeds; `errorCode` reaches the row. Fixtures: `pack-surface-arg-parity.json` |
+
+> **CORRECTED 2026-11-22 (TST-OAL-1, grade-tests; user decision):** two witnesses
+> this row names did not exist in `podcasts-generation-pipeline.test.ts`.
+> - **"refused `mixClips` fails `mix` typed while the codec degrade still succeeds"**:
+>   it is now real. The real surface can't reach the refusal there, because the
+>   clips write just before it re-resolves the same access and refuses first. So the
+>   case replaces only the surface's `mixClips`. It drives the `refused` branch and
+>   the bare `url: ''` degrade through the real node.
+> - **"deleted profile fails before `callAI`"**: it is still not witnessed. What
+>   exists is `synthesize`'s `podcast_no_cast_voice` ("the deleted-profile path"),
+>   which runs after the model calls. `selectContent`'s `podcast_profile_missing`
+>   refusal (a reportable refusal that writes the row) has no node-side case.
 | P3 frontend | D10 | Studio tests: error copy by code, playlist advance, regenerate / publish gating, announce, draft-show chip, notebooks-off notice, `canWrite` unknown |
 | Docs | | `FEATURES.md` podcasts rows, `docs/steward/LLM-EXCHANGE-AUDIT.md` podcasts row, the tracker row, the grade record's closing grades |
 

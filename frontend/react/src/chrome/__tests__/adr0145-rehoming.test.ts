@@ -32,6 +32,19 @@ const RETIRED_TOGGLES = new Set<string>(['models', 'context-economy', 'run-input
 /** Ids that DO register a toggle default (enough for the models hub assertion below). */
 const REGISTERED_TOGGLES = new Set(['campaign-intel', 'campaign-brief', 'campaign-connectors', 'campaign-orchestration', 'evals', 'model-router', 'scheduled-agent-chats', 'chat-widget']);
 import { visibleHubRoutes, tabIdOf } from '../hubProjection.js';
+import { ADOPTER_FRONTEND_FEATURES } from '../../features/adopterFeatures.js';
+
+/**
+ * ADR 1031 scope — the IA this file pins is openwop-app's OWN manifest. An adopter
+ * repo composes its features from `src/adopter/features/` into the same FEATURES
+ * array, and may claim a path on purpose (KickTodo's `kicktodo-engagement` claims
+ * `/leaderboard` at site tier and pins that ownership in its own chromeOwnership
+ * test). Asserting "evals is the only claimant" over the composed array made this
+ * case red in every such adopter for a decision upstream does not own. The in-tree
+ * set is empty-adopter openwop-app exactly, so nothing upstream is loosened.
+ */
+const ADOPTER_IDS = new Set(ADOPTER_FRONTEND_FEATURES.map((f) => f.id));
+const IN_TREE = FEATURES.filter((r) => !r.ownerFeatureId || !ADOPTER_IDS.has(r.ownerFeatureId));
 
 const byPath = (p: string) => FEATURES.find((r) => r.path === p);
 
@@ -48,9 +61,13 @@ const byPath = (p: string) => FEATURES.find((r) => r.path === p);
  * reachable for deep links" — and passed, because `find` returned the `evals` entry,
  * while the router renders `kicktodo-engagement`'s gamification page. A green test,
  * named for reachability, asserting it of a route that is not reachable.
+ *
+ * (Historical: KickTodo left this repo in ADR 1031 P3, so `evals` is now the only
+ * `/leaderboard` claimant and `KNOWN_PATH_COLLISIONS` is empty, TST-OAR-2. `resolves`
+ * still models the site-first rule, which any future site-tier claimant would hit.)
  */
 const resolves = (p: string) =>
-  FEATURES.find((r) => r.tier === 'site' && r.path === p) ?? FEATURES.find((r) => r.path === p);
+  IN_TREE.find((r) => r.tier === 'site' && r.path === p) ?? IN_TREE.find((r) => r.path === p);
 const all = (): boolean => true;
 
 describe('ADR 0145 — Models console', () => {
@@ -89,7 +106,7 @@ describe('ADR 0145 — Models console', () => {
   // left the repo (ADR 1031 P3), that file is not here, and the evals entry is the
   // only `/leaderboard` claimant. ADR 0145's "routes stay reachable" holds for it again.
   it('keeps /leaderboard reachable for deep links: it resolves to the evals page', () => {
-    expect(FEATURES.filter((r) => r.path === '/leaderboard').map((r) => r.ownerFeatureId)).toEqual(['evals']);
+    expect(IN_TREE.filter((r) => r.path === '/leaderboard').map((r) => r.ownerFeatureId)).toEqual(['evals']);
     expect(resolves('/leaderboard')?.ownerFeatureId).toBe('evals');
     expect(resolves('/leaderboard')?.tier).toBe('admin');
   });

@@ -18,6 +18,7 @@
  * CORS spec — credentials only matter on the actual request).
  */
 
+import { WORKSPACE_SELECTION_HEADER } from '../host/workspaceSelectionToken.js';
 import type { RequestHandler } from 'express';
 import { ACT_AS_HEADER } from '../host/accessControlService.js';
 import { VERSION_RESPONSE_HEADER } from './protocolVersion.js';
@@ -162,6 +163,9 @@ export const HOST_REQUEST_HEADERS: readonly string[] = [
   // follows automatically. A literal here would silently stop admitting the
   // header the readers actually check — the same drift, one layer over.
   ACT_AS_HEADER,
+  // ADR 1158 — the active-workspace selection a direct-to-host request carries
+  // (the streamed example-data writes). Derived for the same reason as above.
+  WORKSPACE_SELECTION_HEADER,
   // `OpenWOP-Version` — THE PROTOCOL NEGOTIATION HEADER, and its omission was a
   // live cross-origin outage, not a theoretical one.
   //

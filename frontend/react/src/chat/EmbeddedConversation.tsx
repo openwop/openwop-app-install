@@ -249,6 +249,13 @@ function EmbeddedSession({
     });
   }, [send, cancel, reset, config, runWorkflowMention, agentEntries, activeAgents, beforeSend, session.id, session.conversationRunId]);
 
+  // ADR 1156 — a persisted embed's held calls get their card in the feed (the ledger is
+  // keyed by its session id); an ephemeral one has no ledger row, so no card.
+  const heldCallHost = useMemo(
+    () => (persisted ? { sessionId: session.id, onContinue: (text: string) => { void onUserSubmit(text); } } : undefined),
+    [persisted, session.id, onUserSubmit],
+  );
+
   const lastStop = useRef(stopSignal);
   useEffect(() => {
     if (stopSignal === undefined || stopSignal === lastStop.current) return;
@@ -303,6 +310,7 @@ function EmbeddedSession({
         supportsPdfInput={supportsPdfInput}
         onResolveInterrupt={resolveInterrupt}
         onAnswerClarification={answerClarification}
+        {...(heldCallHost ? { heldCallHost } : {})}
         onRegenerate={onRegenerate}
         onFeedback={setFeedback}
         onReconfigureBYOK={onReconfigureBYOK}

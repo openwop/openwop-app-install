@@ -48,6 +48,27 @@ upgrade is neither: list it in `breakingConfig`.
 
 ## Version log
 
+### v0.20.0 — 2026-11-24
+
+- **Required stop:** no. **Rolling-safe:** yes.
+- **Schema:** sqlite 54 / postgres 52 (unchanged) · **App migrations:** 26 (unchanged).
+- **Security:** the member Sharing API can no longer mint `sign_request`,
+  `booking_manage`, `collab_invite` or `commerce_order` links (#6225). Adopters carry
+  `test/sharing-system-mint-only.test.ts` at sync (#6226).
+- **Breaking:** none. No route, env var or config key is removed or renamed.
+  Behaviour changes: a replay fork with no matching AI record fails with
+  `replay_source_missing` instead of calling the model (`mode: 'branch'` re-runs live,
+  #6206); the app reloads after a confirmed workspace switch or create (#6207).
+- **Config:** none. A proxy in front of the backend's direct host must pass the
+  `x-openwop-workspace-selection` header (#6219).
+- Kanban group-by and facet filters on the paged board, index-backed unpaged board
+  read, paged "Assigned to me" (ADR 1155 P5); approve a held tool call on a chat card
+  (ADR 1156 P1).
+- Fixes: due-date sweep covers boards without roster agents (#6212); example data in
+  a shared workspace (#6219); a failed run names a node's stated refusal (#6229);
+  command palette Escape (#6227); three grade-tests product asks (#6218).
+- [CHANGELOG §0.20.0](./CHANGELOG.md#0200--2026-11-24)
+
 ### v0.19.0 — 2026-11-23
 
 - **Required stop:** no. **Rolling-safe:** yes.

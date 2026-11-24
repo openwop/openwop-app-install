@@ -154,21 +154,78 @@ function requestIdTokenRefresh(): void {
  *  the capabilities cache (GAP-ANALYSIS A-3) — register here so a tenant change
  *  re-negotiates instead of serving a prior tenant's view. Cycle-free: callers
  *  register their own clearers rather than config importing them. */
-type AuthChangeListener = () => void;
-const authChangeListeners = new Set<AuthChangeListener>();
-export function onAuthChange(fn: AuthChangeListener): () => void {
-  authChangeListeners.add(fn);
-  return () => authChangeListeners.delete(fn);
+const authEventBrand: unique symbol = Symbol('auth-change-event');
+/** Local revocation metadata, not a token, UID or workspace authority. */
+export interface AuthChangeEvent {
+  readonly [authEventBrand]: true;
+  readonly reason: 'initial' | 'token' | 'explicit';
+}
+export type AuthChangeListener = (event: AuthChangeEvent) => void;
+interface AuthRegistration { readonly callback: AuthChangeListener }
+const authChangeListeners = new Map<AuthChangeListener, Readonly<AuthRegistration>>();
+const newAuthChangeEvent = (reason: AuthChangeEvent['reason']): AuthChangeEvent =>
+  Object.freeze({ [authEventBrand]: true as const, reason });
+let currentAuthChangeEvent = newAuthChangeEvent('initial');
+
+/** Exact identity changes synchronously before any notification code. */
+export function getCurrentAuthChangeEvent(): AuthChangeEvent { return currentAuthChangeEvent; }
+
+/** Sanitized message/counts; diagnostic causes are never user-facing copy. */
+export class AuthChangeDispatchError extends Error {
+  readonly event: AuthChangeEvent;
+  readonly listenerFailureCount: number;
+  readonly preparationFailed: boolean;
+  readonly causes: readonly unknown[];
+  constructor(event: AuthChangeEvent, listenerFailureCount: number, preparationFailed: boolean, causes: readonly unknown[]) {
+    super('auth_change_dispatch_failed');
+    this.name = 'AuthChangeDispatchError';
+    this.event = event;
+    this.listenerFailureCount = listenerFailureCount;
+    this.preparationFailed = preparationFailed;
+    this.causes = Object.freeze([...causes]);
+  }
 }
 
-/** Fire the auth/tenant-change listeners WITHOUT a token change (Deferred
- *  Phase D / SHELL-8): a workspace SWITCH rebinds the session tenant server-
- *  side while the Firebase token stays the same, so `setCurrentIdToken` never
- *  notifies — this is the explicit broadcast for that case. Every tenant-keyed
- *  cache already registered here (capabilities, effective access, feature
- *  assignments, nav config) resets for free. */
-export function fireAuthChanged(): void {
-  for (const fn of authChangeListeners) fn();
+export function onAuthChange(fn: AuthChangeListener): () => void {
+  // Active duplicates share ONE entry/no refcount. Entry identity is the
+  // registration generation; an old disposer cannot delete a replacement.
+  const entry = authChangeListeners.get(fn) ?? Object.freeze({ callback: fn });
+  if (!authChangeListeners.has(fn)) authChangeListeners.set(fn, entry);
+  return () => {
+    if (authChangeListeners.get(fn) === entry) authChangeListeners.delete(fn);
+  };
+}
+
+function emitAuthChange(
+  reason: 'token' | 'explicit', beforeNotify?: (event: AuthChangeEvent) => void,
+): AuthChangeEvent {
+  const event = newAuthChangeEvent(reason);
+  currentAuthChangeEvent = event;
+  // Capture ENTRIES before the hook. A remove/re-add cannot inherit an old
+  // snapshot slot; a new registration waits for a subsequent/nested event.
+  const entries = Object.freeze(Array.from(authChangeListeners.values()));
+  const causes: unknown[] = [];
+  let preparationFailed = false;
+  let listenerFailureCount = 0;
+  try { beforeNotify?.(event); }
+  catch (error) { preparationFailed = true; causes.push(error); }
+  for (const entry of entries) {
+    if (authChangeListeners.get(entry.callback) !== entry) continue;
+    try { entry.callback(event); }
+    catch (error) { listenerFailureCount += 1; causes.push(error); }
+  }
+  // Nested events remain current. Never restore event here or retry a listener.
+  if (preparationFailed || listenerFailureCount) {
+    throw new AuthChangeDispatchError(event, listenerFailureCount, preparationFailed, causes);
+  }
+  return event;
+}
+
+/** Broadcast tenant invalidation without changing the token. The optional
+ *  synchronous hook binds a private completion's expected event, not authority.
+ *  Delivery invokes synchronous listeners; their async work is not settled. */
+export function fireAuthChanged(beforeNotify?: (event: AuthChangeEvent) => void): AuthChangeEvent {
+  return emitAuthChange('explicit', beforeNotify);
 }
 
 export function setCurrentIdToken(token: string | null): void {
@@ -180,9 +237,7 @@ export function setCurrentIdToken(token: string | null): void {
   if (token) lastRefreshAt = 0;
   // Token rotation to the same value (rare) is a no-op; identity changes
   // notify subscribers so tenant-scoped caches drop.
-  if (changed) {
-    for (const fn of authChangeListeners) fn();
-  }
+  if (changed) emitAuthChange('token');
 }
 
 /** Headers carrying auth.

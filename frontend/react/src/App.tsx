@@ -85,7 +85,8 @@ import { NotificationNavigator } from './notifications/NotificationNavigator.js'
 const NotFoundPage = lazy(() => import('./NotFoundPage.js').then((m) => ({ default: m.NotFoundPage })));
 import { Sidebar } from './chrome/Sidebar.js';
 import { AppGate } from './chrome/AppGate.js';
-import { SiteShell } from './chrome/SiteShell.js';
+// Site-tier chrome is not needed by workspace routes, like the public/admin shells.
+const SiteShell = lazy(() => import('./chrome/SiteShell.js').then((m) => ({ default: m.SiteShell })));
 import { siteWrapsAppGate, tierIsSessionBearing } from './chrome/tierShell.js';
 import { useSignedOutPageRedirect } from './chrome/useSignedOutPageRedirect.js';
 // Anonymous-route navigation belongs to the public shell; workspace visits
@@ -138,6 +139,11 @@ import { GlobalLiveRegion } from './ui/announce.js';
 import { ConfirmRoot } from './ui/confirm.js';
 import { ReauthRoot } from './auth/ReauthRoot.js';
 import { ErrorBoundary } from './ui/ErrorBoundary.js';
+import { StateCard } from './ui/StateCard.js';
+import { Button } from './ui/Button.js';
+import { AlertIcon, RotateCwIcon } from './ui/icons/index.js';
+import i18n from './i18n/index.js';
+import { reloadIntoSession } from './auth/reloadIntoSession.js';
 import { Skeleton } from './ui/Skeleton.js';
 import { useBrand } from './brand/BrandProvider.js';
 import { FeatureAccessProvider } from './featureToggles/FeatureAccessContext.js';
@@ -155,6 +161,37 @@ function RouteLoading(): JSX.Element {
     <div className="u-p-4" role="status" aria-label={t('common:loading')} aria-busy="true">
       <Skeleton />
       <span className="sr-only">{t('common:loading')}</span>
+    </div>
+  );
+}
+
+/**
+ * A shell failure replaces SiteShell, including its main and live-region host.
+ * Mount the replacement host before enabling StateCard's title announcement.
+ */
+function SiteShellFailure(): JSX.Element {
+  const failureMainRef = useRef<HTMLElement>(null);
+  const [announcementReady, setAnnouncementReady] = useState(false);
+  useEffect(() => {
+    failureMainRef.current?.focus();
+    setAnnouncementReady(true);
+  }, []);
+  return (
+    <div className="public-shell">
+      <GlobalLiveRegion />
+      <main id="site-main" ref={failureMainRef} className="public-shell-main" tabIndex={-1}>
+        <StateCard
+          announce={announcementReady}
+          icon={<AlertIcon size={26} />}
+          title={i18n.t('ui:errorTitle')}
+          body={<>{i18n.t('ui:errorBodyGeneric')}{i18n.t('ui:errorBodyRecover')}</>}
+          action={
+            <Button variant="accent-solid" size="sm" onClick={reloadIntoSession}>
+              <RotateCwIcon size={14} aria-hidden /> {i18n.t('ui:errorReload')}
+            </Button>
+          }
+        />
+      </main>
     </div>
   );
 }
@@ -406,13 +443,17 @@ export function App() {
     // still happens above the router, by `matchPath`, exactly as before; this
     // only gives the matched element the params that match produced.
     const body = (
-      <SiteShell>
-        <Suspense fallback={<RouteLoading />}>
-          <Routes>
-            <Route path={siteRoute.path} element={siteRoute.element} />
-          </Routes>
+      <ErrorBoundary resetKey={location.pathname} label="site" fallback={() => <SiteShellFailure />}>
+        <Suspense fallback={<main id="site-main" className="public-shell-main" tabIndex={-1}><RouteLoading /></main>}>
+          <SiteShell>
+            <Suspense fallback={<RouteLoading />}>
+              <Routes>
+                <Route path={siteRoute.path} element={siteRoute.element} />
+              </Routes>
+            </Suspense>
+          </SiteShell>
         </Suspense>
-      </SiteShell>
+      </ErrorBoundary>
     );
     // `required` wraps the sign-in wall; `optional` MUST NOT (decision 3).
     // Omission selects `required` — fail-closed, matching siteRouteContract and

@@ -67,6 +67,9 @@ import {
   type KanbanCardSource,
   toKanbanWorkItemProjection,
   listBoardCardsPage,
+  pageAssignedCards,
+  setBoardGroupBy,
+  FACET_KEY_RE,
   KANBAN_PAGE_DEFAULT,
   KANBAN_PAGE_MAX,
   type KanbanBoardPageQuery,
@@ -167,6 +170,17 @@ function parseBoardPageQuery(req: Request): KanbanBoardPageQuery | null {
     bad('assignee must be a user id, me, none or role:<key>.');
   }
   const cursor = one('cursor');
+  const facets: Record<string, string> = {};
+  for (const name of Object.keys(q)) {
+    if (!name.startsWith('facet.')) continue;
+    const key = name.slice('facet.'.length);
+    if (!FACET_KEY_RE.test(key)) bad(`${name} names an invalid facet key.`);
+    const value = one(name) ?? '';
+    if (value.length > 64) bad(`${name} is longer than 64 characters.`);
+    facets[key] = value;
+  }
+  const groupBy = one('groupBy');
+  if (groupBy !== undefined && groupBy !== 'column' && groupBy !== 'assignee' && !FACET_KEY_RE.test(groupBy)) bad('groupBy must be column, assignee or a facet key.');
   const columns = many('column');
   const labels = many('label');
   const dueFrom = isoBound('dueFrom', false);
@@ -181,6 +195,8 @@ function parseBoardPageQuery(req: Request): KanbanBoardPageQuery | null {
     ...(dueTo ? { dueTo } : {}),
     ...(overdueRaw === 'true' ? { overdue: true } : {}),
     ...(assignee !== undefined ? { assignee } : {}),
+    ...(Object.keys(facets).length > 0 ? { facets } : {}),
+    ...(groupBy !== undefined ? { groupBy } : {}),
   };
 }
 
@@ -495,7 +511,20 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
         if (lvl === null) { visible.push(card); continue; } // legacy (non-org) board
         if (lvl !== 'none') visible.push(card);             // readable membership/org board
       }
-      res.json({ cards: visible });
+      // ADR 1155 D3 — `limit` pages the list; without it the response is unchanged.
+      if (req.query.limit === undefined) { res.json({ cards: visible }); return; }
+      const rawLimit = typeof req.query.limit === 'string' ? req.query.limit : undefined;
+      const limit = rawLimit === '' ? KANBAN_PAGE_DEFAULT : Number(rawLimit);
+      const cursor = typeof req.query.cursor === 'string' && req.query.cursor.length > 0 ? req.query.cursor : undefined;
+      try {
+        res.json(pageAssignedCards(visible, { limit, ...(cursor ? { cursor } : {}) }));
+      } catch (err) {
+        const code = err && typeof err === 'object' ? (err as { code?: unknown }).code : undefined;
+        if (code === 'kanban_cursor_invalid' || code === 'kanban_command_invalid') {
+          throw new OpenwopError('validation_error', err instanceof Error ? err.message : 'Invalid page.', 400, { reason: code });
+        }
+        throw err;
+      }
     } catch (err) {
       next(err);
     }
@@ -534,6 +563,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
         workItems: onPage.size === 0 ? [] : (await listWorkItemProjectionsForBoard(board.tenantId, board.id)).filter((w) => onPage.has(w.cardId)),
         total: page.total,
         ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+        ...(page.groupCounts ? { groupCounts: page.groupCounts } : {}),
       });
     } catch (err) {
       next(err);
@@ -606,19 +636,26 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
       if (!board) {
         throw new OpenwopError('not_found', 'Board not found.', 404, { boardId: req.params.boardId });
       }
-      const body = (req.body ?? {}) as { name?: unknown } & Record<string, unknown>;
-      const extra = Object.keys(body).filter((k) => k !== 'name');
+      const body = (req.body ?? {}) as { name?: unknown; groupBy?: unknown } & Record<string, unknown>;
+      const extra = Object.keys(body).filter((k) => k !== 'name' && k !== 'groupBy');
       if (extra.length > 0) {
-        throw new OpenwopError('validation_error', 'Only `name` is mutable on a board.', 400, { fields: extra });
+        throw new OpenwopError('validation_error', 'Only `name` and `groupBy` are mutable on a board.', 400, { fields: extra });
       }
-      if (typeof body.name !== 'string' || body.name.trim().length === 0) {
-        throw new OpenwopError('validation_error', 'Field `name` is required and MUST be a non-empty string.', 400, {
-          field: 'name',
-        });
+      if (body.name === undefined && body.groupBy === undefined) {
+        throw new OpenwopError('validation_error', 'Send `name`, `groupBy`, or both.', 400, {});
       }
-      const renamed = await renameBoard(board.id, body.name.trim());
+      if (body.name !== undefined && (typeof body.name !== 'string' || body.name.trim().length === 0)) {
+        throw new OpenwopError('validation_error', 'Field `name` MUST be a non-empty string.', 400, { field: 'name' });
+      }
+      // ADR 1155 D7 — a facet key, or null to clear.
+      if (body.groupBy !== undefined && body.groupBy !== null && (typeof body.groupBy !== 'string' || !FACET_KEY_RE.test(body.groupBy))) {
+        throw new OpenwopError('validation_error', 'Field `groupBy` MUST be a facet key or null.', 400, { field: 'groupBy' });
+      }
+      let updated: KanbanBoard | null = board;
+      if (typeof body.name === 'string') updated = await renameBoard(board.id, body.name.trim());
+      if (body.groupBy !== undefined) updated = await setBoardGroupBy(board.id, body.groupBy as string | null);
       notifyBoardChanged(board.id);
-      res.json(renamed);
+      res.json(updated);
     } catch (err) {
       next(err);
     }

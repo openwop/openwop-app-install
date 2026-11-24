@@ -39,10 +39,10 @@ const json = (body: unknown, status = 200): Response => new Response(JSON.string
 const stream = (): Response => new Response(JSON.stringify({ type: 'step', ...result.results[0] }) + '\n' + JSON.stringify({ type: 'summary', success: true, summary: result.summary }) + '\n', { headers: { 'content-type': 'application/x-ndjson' } });
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); wireTenant.resetWireTenant(); });
 
-function fixture(active = 'ws:qa') {
+function fixture(active = 'ws:qa', selectionToken?: string) {
   const writes: Array<{ url: string; init: RequestInit; body: Record<string, unknown> }> = [];
   const fetcher = vi.fn(async (url: string, init: RequestInit = {}): Promise<Response> => {
-    if (url === '/api/host/openwop-app/me/workspaces') return json({ active, personal: 'user:personal', workspaces: [] });
+    if (url === '/api/host/openwop-app/me/workspaces') return json({ active, personal: 'user:personal', workspaces: [], ...(selectionToken ? { selectionToken } : {}) });
     const body: unknown = JSON.parse(String(init.body));
     if (!isRecord(body)) throw new Error(`Write to ${url} sent a non-object body`);
     writes.push({ url, init, body });
@@ -160,5 +160,30 @@ describe('workspace capture cache boundary', () => {
     const unexpectedResolve = vi.fn(async () => ({ active: 'ws:wrong' }));
     expect(await wireTenant.ensureWireTenant(unexpectedResolve)).toBe('ws:normal');
     expect(unexpectedResolve).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * ADR 1158 — the direct NDJSON writes carry the active workspace's selection token (the
+ * cookie does not travel to the backend host); the same-origin JSON writes do not need it.
+ * Sabotage: dropping `scope.selectionHeaders` from either direct caller reds its row.
+ */
+describe('ADR 1158 — the direct writes carry the workspace selection', () => {
+  const SEL = 'x-openwop-workspace-selection';
+  it.each<{ label: string; call: () => Promise<unknown>; url: string }>([
+    { label: 'streamed run', call: () => runExampleDataSeedStream({ steps: ['agents'] }, onEvent()), url: 'https://streams.invalid/host/openwop-app/example-data/run' },
+    { label: 'streamed clear', call: () => clearExampleDataStream({ steps: ['agents'] }, onEvent()), url: 'https://streams.invalid/host/openwop-app/example-data/clear' },
+    { label: 'provision', call: () => provisionDemoTenant(onEvent()), url: 'https://streams.invalid/host/openwop-app/example-data/provision-demo' },
+    { label: 'agent seed', call: () => seedExampleAgents(), url: 'https://streams.invalid/host/openwop-app/example-data/seed' },
+  ])('$label sends the token the workspace list returned', async ({ call, url }) => {
+    const { writes } = fixture('ws:qa', 'ws1.tok');
+    await call();
+    expect(writes[0]?.url).toBe(url);
+    expect(new Headers(writes[0]?.init.headers).get(SEL)).toBe('ws1.tok');
+  });
+  it('no token from the list (personal workspace) ⇒ no header', async () => {
+    const { writes } = fixture('user:personal');
+    await clearExampleDataStream({ steps: ['agents'] }, onEvent());
+    expect(new Headers(writes[0]?.init.headers).has(SEL)).toBe(false);
   });
 });

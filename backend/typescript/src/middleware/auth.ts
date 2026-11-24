@@ -48,6 +48,7 @@
  * @see plans/openwop-app-deployment-plan.md (P0.2)
  */
 
+import { readWorkspaceSelection, WORKSPACE_SELECTION_HEADER } from '../host/workspaceSelectionToken.js';
 import { sendErrorBody } from './errorEnvelope.js';
 import { isFeaturePublicRoute, setHostPublicPrefixes } from './featurePublicRoutes.js';
 import type { Request as ExpressRequest, RequestHandler } from 'express';
@@ -1449,12 +1450,20 @@ export function authMiddleware(): RequestHandler {
           // non-member falls back to the personal tenant (and the cookie is
           // re-pinned below). Authority is ALSO re-resolved per-op and fails
           // closed, so this is belt-and-suspenders.
-          const requested =
+          const cookieRequested =
             cookieSession?.tier === 'user'
             && cookieSession.personalTenant === personalTenant
             && typeof cookieSession.tenantId === 'string'
               ? cookieSession.tenantId
               : undefined;
+          // ADR 1158 — a request sent straight to this host (not through `/api`)
+          // carries this host's own cookie, which the workspace switch never
+          // updated. The same-origin workspace list hands the page a selection
+          // token for exactly that case; it stands in for the cookie's selection
+          // and is checked the same way below (bound to this identity, membership
+          // re-validated). It never changes the cookie.
+          const tokenRequested = readWorkspaceSelection(req.headers[WORKSPACE_SELECTION_HEADER], personalTenant);
+          const requested = tokenRequested ?? cookieRequested;
           let active = personalTenant;
           if (requested && requested !== personalTenant) {
             // Membership keys on the CANONICAL subject — after an OIDC bind the
@@ -1491,7 +1500,7 @@ export function authMiddleware(): RequestHandler {
             && (!cookieSession
               || cookieSession.tier !== 'user'
               || cookieSession.subject !== subject
-              || cookieSession.tenantId !== active
+              || cookieSession.tenantId !== (tokenRequested ? cookieRequested ?? personalTenant : active)
               || cookieSession.userId !== boundUserId
               // ADR 0833 D3 (review H1) — a verified bearer is a fresh IdP
               // authentication: re-stamp `authAt` daily, so a user whose IdP
@@ -1509,7 +1518,8 @@ export function authMiddleware(): RequestHandler {
             // (`authAt` = now) that keeps the same-identity cookie's family, so a
             // logout still reaches a cookie copied before this re-mint.
             const upgraded = buildSessionPayload({
-              tenantId: active, tier: 'user', subject, personalTenant,
+              // ADR 1158 — a token's selection is per request: the cookie keeps its own.
+              tenantId: tokenRequested ? cookieRequested ?? personalTenant : active, tier: 'user', subject, personalTenant,
               // Preserve the bound durable userId across re-mints (e.g. a switch),
               // else the canonical subject would silently revert to oidc:<sub>.
               // ADR 0621 D1 (c): the ONLY `userId` this mint can carry is the one

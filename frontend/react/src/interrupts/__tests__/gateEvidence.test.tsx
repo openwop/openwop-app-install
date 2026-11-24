@@ -25,6 +25,9 @@
  * settles and before the positive check, the empty/unrenderable copy is exact, and a
  * cancelled confirm waits for EITHER the confirm or a send before asserting which one
  * happened. Sabotage ids `w118g4-ge-*`.
+ *
+ * TST-OAN-2 (2026-11-22, user decision): the `/^pick$/` absence line is gone; the
+ * exact button list is the failable form of the same claim.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { t } from 'i18next';
@@ -118,8 +121,9 @@ describe('inbox / runs ApprovalCard — the approver sees what they are approvin
     // not offered as a picker: this card resolves with {action, comment} and
     // cannot carry a chosen resume value.
     expect(screen.getByText(/more items? under review/).textContent).toBe('+1 more item under review.');
-    expect(screen.queryByRole('button', { name: /^pick$/i })).toBeNull();
     // The card's exact controls: View full + the five verbs, and no picker beside them.
+    // (TST-OAN-2, user decision 2026-11-22: this list carries the no-picker claim; the
+    // old `/^pick$/` absence line could not fail and was removed.)
     expect(screen.getAllByRole('button').map((b) => b.textContent?.trim())).toEqual(['View full', 'Approve', 'Reject', 'Request changes', 'Defer', 'Escalate']);
   });
 

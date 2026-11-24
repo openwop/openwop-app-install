@@ -396,20 +396,18 @@ assertSiteRouteContracts(
 // `App.tsx` selects a SITE-tier route by path BEFORE the router runs, because shell
 // selection must precede routing. So a `site` claimant pre-empts an `admin` one
 // regardless of manifest order — which is exactly how `/leaderboard` went unnoticed:
-// `evals` is first in the manifest and `kicktodo-engagement` is what actually renders.
+// `evals` was first in the manifest and `kicktodo-engagement` was what actually rendered.
 //
 // SHRINK-ONLY. The list may lose entries, never gain them. A new collision fails at
-// import; the one known pair is recorded here with its resolution rather than
-// silently tolerated, so the next reader sees a decision instead of an oversight.
-const KNOWN_PATH_COLLISIONS: ReadonlySet<string> = new Set([
-  // `/leaderboard`: `kicktodo-engagement` (site, gamification, has the nav entry and
-  // the user-facing bookmarks) WINS over `evals` (admin, model Elo). The model
-  // leaderboard's canonical home is the Models console tab — `/models?tab=leaderboard`
-  // — and ADR 0718 D1 retargeted the two inbound links that used to land users on the
-  // wrong feature. Taking the path back would break a shipped user-facing surface to
-  // serve an admin page that already has a home.
-  '/leaderboard',
-]);
+// import; a known pair is recorded here with its resolution rather than silently
+// tolerated, so the next reader sees a decision instead of an oversight.
+//
+// EMPTY since 2026-11-23 (TST-OAR-2, user decision 2026-11-22). Its one entry,
+// `/leaderboard`, excused `kicktodo-engagement` (site) pre-empting `evals` (admin).
+// KickTodo left this repo in ADR 1031 P3, so `evals` is the path's only claimant and
+// the entry excused a collision that no longer exists. Keep the set empty: a new
+// pair means two features claim one path, and one of them should move.
+const KNOWN_PATH_COLLISIONS: ReadonlySet<string> = new Set<string>([]);
 
 {
   const byPath = new Map<string, string[]>();

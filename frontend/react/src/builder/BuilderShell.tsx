@@ -860,6 +860,8 @@ export function BuilderShell({ onNewWorkflow }: Props) {
   // the same graph validation as Run, so cycles/orphans surface here too.
   // ONE failure path for both chain-export actions (builderShellHelpers).
   function reportChainExportFailure(err: unknown): void {
+    // A refused retry must not leave a publish helper for an earlier snapshot.
+    setPublishHelp(null);
     const { message, selectNodeId } = chainExportFailure(err, useBuilderStore.getState().snapshot().nodes);
     setError(message);
     if (selectNodeId) useBuilderStore.getState().selectNode(selectNodeId);

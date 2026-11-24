@@ -135,6 +135,11 @@ describe('ADR 0872 — kanban card tenant index', () => {
     const c = await createCard({ boardId: b.id, columnId: b.columns[0].id, title: 'hidden' });
     await verifyIndex(t);
     await storage.kvDelete(`hostextidx:kanban:card:${t}:${c.id}`);
+    // Since ADR 1155 a display read of a board uses the card STORE index (ADR 1110 P5)
+    // once it is built, so "the index misses it" means that index too.
+    for (const { key, value } of await storage.kvList(`hostext:entity:sysidx:${t}:`)) {
+      if ((JSON.parse(value) as { id?: string }).id === c.id) await storage.kvDelete(key);
+    }
 
     expect(await listCards(b.id), 'display may miss it until the next repair').toHaveLength(0);
     expect((await listCardsExact(b.id)).map((x) => x.id)).toEqual([c.id]);

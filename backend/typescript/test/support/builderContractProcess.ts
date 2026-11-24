@@ -20,10 +20,13 @@ function answer(payload: unknown, exitCode: number): void {
 }
 if (!process.send) throw new Error('Builder contract helper requires IPC');
 process.once('disconnect', () => process.exit(1));
-process.once('message', (request: unknown) => {
+process.once('message', async (request: unknown) => {
   try {
     if (!isRecord(request) || Buffer.byteLength(JSON.stringify(request)) > MAX_BYTES) throw new Error('Invalid builder contract request');
-    if (request.command === 'expand-kernel') {
+    if (request.command === 'chain-export-catalog' || request.command === 'chain-export-load') {
+      const { chainExportContract } = await import('./chainExportContract.js');
+      answer({ ok: true, ...chainExportContract(request) }, 0);
+    } else if (request.command === 'expand-kernel') {
       const packPath = fileURLToPath(new URL('../../../../examples/workflow-chain-packs/campaign-brief/pack.json', import.meta.url));
       const pack: { chains: WorkflowChain[] } = JSON.parse(readFileSync(packPath, 'utf8'));
       const chain = pack.chains.find(c => c.chainId === 'campaign-studio.messaging-kernel');

@@ -280,6 +280,17 @@ approved the tool for their own actions.
 > surface (the composer gear → `CapabilityScopeModal`) IS the reused component; it
 > became the pending indicator.
 
+> **CORRECTED 2026-11-23 (ADR 1156): a held call now also has a card in the
+> conversation.** The disposition above stands: it is not an interrupt and not a
+> second approval path. The card renders the same ledger row through the same
+> `capability-scope` read and decides through the same approvals route, with the same
+> version check and authority. What changed is where the one path is shown: under the
+> turn that raised the call, in the full chat and the embedded one, with one press
+> instead of three. "Clearing the arguments on decision" still holds, and so do the
+> tool's own description lines (`requestedLines`), which are cleared with them. The
+> composer control remains the conversation-wide list. A denial now has a grain: the
+> card's Deny covers that call only, and the dialog's Deny keeps its tool-wide meaning.
+
 ### D7 — Doc honesty
 
 The five false claims in § Context are corrected inline (code comments, ADR 0132 /

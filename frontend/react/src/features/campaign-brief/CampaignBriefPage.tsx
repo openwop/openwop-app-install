@@ -38,18 +38,23 @@ import { minorToMajorString, majorToMinor, isIsoCurrency } from './budgetUnits.j
 import { formatCurrencyMinor, formatDateTime } from '../../i18n/format.js';
 
 type TFn = ReturnType<typeof useTranslation>['t'];
+type BrandCatalogState = 'loading' | 'ready' | 'failed';
 
 /** Brand generation is client-bound (ADR 0891 D7). Keep an unavailable saved
  * binding visible until the user explicitly replaces or removes it. */
-function ClientBrandSelect({ t, brands, orgId, brandId, onChange }: {
-  t: TFn; brands: BrandRef[]; orgId: string; brandId: string; onChange: (id: string) => void;
+function ClientBrandSelect({ t, brands, brandsState, orgId, brandId, onChange }: {
+  t: TFn; brands: BrandRef[]; brandsState: BrandCatalogState; orgId: string; brandId: string; onChange: (id: string) => void;
 }): JSX.Element {
   const choices = brands.filter((b) => b.orgId === orgId);
-  const unavailable = brandId !== '' && !choices.some((b) => b.id === brandId);
+  const retained = brandId !== '' && !choices.some((b) => b.id === brandId);
+  // Pending/failed reads cannot establish absence; keep the saved value visible.
+  const unavailable = brandsState === 'ready' && retained;
+  const retainedLabel = brandsState === 'loading' ? t('common:loading')
+    : brandsState === 'failed' ? t('reviewBrandUnknown') : t('brandUnavailableOption');
   return <>
     <SelectField label={t('fieldBrand')} value={brandId} onChange={(e) => onChange(e.target.value)}>
       <option value="">{t('brandNone')}</option>
-      {unavailable ? <option value={brandId} disabled>{t('brandUnavailableOption')}</option> : null}
+      {retained ? <option value={brandId} disabled>{retainedLabel}</option> : null}
       {choices.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
     </SelectField>
     {unavailable ? <Notice variant="warning" announce={t('brandUnavailableWarning')}>{t('brandUnavailableWarning')}</Notice> : null}
@@ -78,11 +83,12 @@ export function CampaignBriefPage(): JSX.Element {
   const [disabled, setDisabled] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [orgs, setOrgs] = useState<OrgRef[]>([]);
-  const [brands, setBrands] = useState<BrandRef[]>([]);
+  const [brands, setBrands] = useState<BrandRef[] | null>(null);
   // R2 CB-SP-6 — a FAILED orgs/brands read is not an empty one: "No organization
   // yet — create an organization first" told a user with orgs to start over.
   const [orgsFailed, setOrgsFailed] = useState(false);
   const [brandsFailed, setBrandsFailed] = useState(false);
+  const brandsState: BrandCatalogState = brandsFailed ? 'failed' : brands === null ? 'loading' : 'ready';
 
   useEffect(() => {
     void listOrgs().then(setOrgs).catch(() => setOrgsFailed(true));
@@ -116,8 +122,8 @@ export function CampaignBriefPage(): JSX.Element {
           )}
           <TabPanel idBase="campaign-brief" tabId={tab}>
             {tab === 'briefs'
-              ? <BriefsTab t={t} orgs={orgs} orgsFailed={orgsFailed} brands={brands} brandsFailed={brandsFailed} onDisabled={onDisabled} onError={setError} onDetailOpen={setDetailOpen} />
-              : <PersonasTab t={t} orgs={orgs} orgsFailed={orgsFailed} brands={brands} onDisabled={onDisabled} onError={setError} />}
+              ? <BriefsTab t={t} orgs={orgs} orgsFailed={orgsFailed} brands={brands ?? []} brandsState={brandsState} onDisabled={onDisabled} onError={setError} onDetailOpen={setDetailOpen} />
+              : <PersonasTab t={t} orgs={orgs} orgsFailed={orgsFailed} brands={brands ?? []} brandsState={brandsState} onDisabled={onDisabled} onError={setError} />}
           </TabPanel>
         </>
       )}
@@ -129,7 +135,7 @@ export function CampaignBriefPage(): JSX.Element {
 // BRIEFS
 // ============================================================================
 
-function BriefsTab({ t, orgs, orgsFailed, brands, brandsFailed, onDisabled, onError, onDetailOpen }: { t: TFn; orgs: OrgRef[]; orgsFailed: boolean; brands: BrandRef[]; brandsFailed: boolean; onDisabled: () => void; onError: (m: string) => void; onDetailOpen: (open: boolean) => void }): JSX.Element {
+function BriefsTab({ t, orgs, orgsFailed, brands, brandsState, onDisabled, onError, onDetailOpen }: { t: TFn; orgs: OrgRef[]; orgsFailed: boolean; brands: BrandRef[]; brandsState: BrandCatalogState; onDisabled: () => void; onError: (m: string) => void; onDetailOpen: (open: boolean) => void }): JSX.Element {
   const navigate = useNavigate();
   const [briefs, setBriefs] = useState<CampaignBrief[] | null>(null);
   // A DIFFERENT shape from the empty-state defects: the generic catch below never set
@@ -192,7 +198,7 @@ function BriefsTab({ t, orgs, orgsFailed, brands, brandsFailed, onDisabled, onEr
   if (current) {
     return (
       <BriefDetail
-        t={t} brief={current} brands={brands} brandsFailed={brandsFailed} personas={personas} personasReadFailed={personasReadFailed}
+        t={t} brief={current} brands={brands} brandsState={brandsState} personas={personas} personasReadFailed={personasReadFailed}
         onBack={() => { setSelected(null); void refresh(); }}
         onChanged={refresh} onError={onError}
         onOpenStrategist={(intent) => {
@@ -334,8 +340,8 @@ function CreateBriefModal({ t, orgs, onClose, onCreated, onError }: { t: TFn; or
   );
 }
 
-function BriefDetail({ t, brief, brands, brandsFailed, personas, personasReadFailed, onBack, onChanged, onError, onOpenStrategist }: {
-  t: TFn; brief: CampaignBrief; brands: BrandRef[]; brandsFailed: boolean; personas: Persona[]; personasReadFailed: boolean;
+function BriefDetail({ t, brief, brands, brandsState, personas, personasReadFailed, onBack, onChanged, onError, onOpenStrategist }: {
+  t: TFn; brief: CampaignBrief; brands: BrandRef[]; brandsState: BrandCatalogState; personas: Persona[]; personasReadFailed: boolean;
   onBack: () => void; onChanged: () => Promise<void>; onError: (m: string) => void; onOpenStrategist: (intent: StrategistIntent) => void;
 }): JSX.Element {
   const [objective, setObjective] = useState(brief.objective);
@@ -661,7 +667,7 @@ function BriefDetail({ t, brief, brands, brandsFailed, personas, personasReadFai
         <TextField label={t('fieldProductName')} value={productName} onChange={(e) => setProductName(e.target.value)} />
         <TextareaField label={t('fieldProductDescription')} value={productDescription} rows={2} onChange={(e) => setProductDescription(e.target.value)} />
         <TextField label={t('fieldIndustry')} value={industryVertical} onChange={(e) => setIndustryVertical(e.target.value)} />
-        <ClientBrandSelect t={t} brands={brands} orgId={brief.orgId} brandId={brandId} onChange={setBrandId} />
+        <ClientBrandSelect t={t} brands={brands} brandsState={brandsState} orgId={brief.orgId} brandId={brandId} onChange={setBrandId} />
         {/* ADR 0351 P2 — grounding policy: strict makes generation FAIL rather
             than draft ungrounded when the KB has no coverage. */}
         <BriefKnowledgeField key={brief.orgId} orgId={brief.orgId} value={kbCollectionId} onChange={setKbCollectionId} />
@@ -729,8 +735,8 @@ function BriefDetail({ t, brief, brands, brandsFailed, personas, personasReadFai
       <section className="surface-card u-mb-4">
         <h3 className="u-mt-0">{t('secReview')}</h3>
         <div className="u-flex u-gap-2 u-wrap">
-          {/* R2 CB-SP-6 — a failed brands read must not chip "No brand" as fact. */}
-          <span className={`chip ${brandAvailable ? 'chip--success' : 'chip--muted'}`}>{brandsFailed ? t('reviewBrandUnknown') : brandId ? brandAvailable ? t('reviewBrandBound') : t('reviewBrandUnavailable') : t('reviewBrandMissing')}</span>
+          {/* Pending/failed catalogs cannot classify a saved brand binding. */}
+          <span className={`chip ${brandsState === 'ready' && brandAvailable ? 'chip--success' : 'chip--muted'}`}>{brandsState === 'loading' ? t('common:loading') : brandsState === 'failed' ? t('reviewBrandUnknown') : brandId ? brandAvailable ? t('reviewBrandBound') : t('reviewBrandUnavailable') : t('reviewBrandMissing')}</span>
           <span className={`chip ${personaIds.length > 0 ? 'chip--success' : 'chip--muted'}`}>{personaIds.length > 0 ? t('reviewPersonas', { count: personaIds.length }) : t('reviewPersonasMissing')}</span>
           <span className={`chip ${brief.kbCollectionId ? 'chip--success' : 'chip--muted'}`}>{brief.kbCollectionId ? t('reviewKbBound') : t('reviewKbMissing')}</span>
           {/* CS-UX-4: the policy enum maps to its localized label — never raw. */}
@@ -749,7 +755,7 @@ function BriefDetail({ t, brief, brands, brandsFailed, personas, personasReadFai
 // PERSONAS
 // ============================================================================
 
-function PersonasTab({ t, orgs, orgsFailed, brands, onDisabled, onError }: { t: TFn; orgs: OrgRef[]; orgsFailed: boolean; brands: BrandRef[]; onDisabled: () => void; onError: (m: string) => void }): JSX.Element {
+function PersonasTab({ t, orgs, orgsFailed, brands, brandsState, onDisabled, onError }: { t: TFn; orgs: OrgRef[]; orgsFailed: boolean; brands: BrandRef[]; brandsState: BrandCatalogState; onDisabled: () => void; onError: (m: string) => void }): JSX.Element {
   const [personas, setPersonas] = useState<Persona[] | null>(null);
   // R2 CB-SP-2 — the R1 briefs fix, finally applied here: a load failure used
   // to leave the `null` loading sentinel forever (banner over an eternal
@@ -842,7 +848,7 @@ function PersonasTab({ t, orgs, orgsFailed, brands, onDisabled, onError }: { t: 
           )}
         </>
       )}
-      {(creating || editingPersona) ? <PersonaEditor t={t} persona={creating ? null : editingPersona} orgs={orgs} brands={brands} onClose={closeEditor} onSaved={async () => { closeEditor(); await refresh(); }} onError={onError} /> : null}
+      {(creating || editingPersona) ? <PersonaEditor t={t} persona={creating ? null : editingPersona} orgs={orgs} brands={brands} brandsState={brandsState} onClose={closeEditor} onSaved={async () => { closeEditor(); await refresh(); }} onError={onError} /> : null}
       {confirmDelete ? (
         <ConfirmDialog title={t('deletePersonaTitle')} body={t('deletePersonaBody')} confirmLabel={t('common:delete')} danger busy={deletingPersona}
           onConfirm={async () => {
@@ -857,7 +863,7 @@ function PersonasTab({ t, orgs, orgsFailed, brands, onDisabled, onError }: { t: 
   );
 }
 
-function PersonaEditor({ t, persona, orgs, brands, onClose, onSaved, onError }: { t: TFn; persona: Persona | null; orgs: OrgRef[]; brands: BrandRef[]; onClose: () => void; onSaved: () => void; onError: (m: string) => void }): JSX.Element {
+function PersonaEditor({ t, persona, orgs, brands, brandsState, onClose, onSaved, onError }: { t: TFn; persona: Persona | null; orgs: OrgRef[]; brands: BrandRef[]; brandsState: BrandCatalogState; onClose: () => void; onSaved: () => void; onError: (m: string) => void }): JSX.Element {
   const [orgId, setOrgId] = useState(persona?.orgId ?? orgs[0]?.orgId ?? '');
   const [name, setName] = useState(persona?.name ?? '');
   const [role, setRole] = useState(persona?.role ?? '');
@@ -900,7 +906,7 @@ function PersonaEditor({ t, persona, orgs, brands, onClose, onSaved, onError }: 
         <TextareaField label={t('fieldObjections')} help={t('linePerItem')} value={objections} rows={3} onChange={(e) => setObjections(e.target.value)} />
         <TextareaField label={t('fieldGoals')} help={t('linePerItem')} value={goals} rows={2} onChange={(e) => setGoals(e.target.value)} />
         <TextareaField label={t('fieldDemographics')} value={demographics} rows={2} onChange={(e) => setDemographics(e.target.value)} />
-        <ClientBrandSelect t={t} brands={brands} orgId={orgId} brandId={brandId} onChange={setBrandId} />
+        <ClientBrandSelect t={t} brands={brands} brandsState={brandsState} orgId={orgId} brandId={brandId} onChange={setBrandId} />
         <div className="action-bar u-flex u-gap-2 u-justify-end">
           <Button variant="secondary" size="sm" onClick={onClose}>{t('common:cancel')}</Button>
           <Button type="submit" variant="primary" size="sm" disabled={!canSave || busy}>{t('common:save')}</Button>

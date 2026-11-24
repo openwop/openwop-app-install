@@ -615,7 +615,10 @@ const NEW_BASELINE = readGateBaseline(
   // 126 → 124 (2026-11-06): creative private-link recovery (ADR 0522) now
   // announces deepLinkError; delete its exact cohort row and tighten to the
   // measured 124 (one existing unit of slack is removed as well).
-  scanningRealTree ? 124 : 0,
+  // 124 → 122 (2026-11-23, ADR 1158): the Example data page's `error` Notice now
+  // sits beside its action bar and passes `announce`; its cohort row is deleted
+  // and the baseline drops to the measured 122 (one unit of slack removed too).
+  scanningRealTree ? 122 : 0,
 );
 /** (file, flag) -> the recorded ceiling. */
 const NEW_COHORT = new Map(LEGACY_SILENT_READ_SITES.map(([f, flag, n]) => [`${f}${SITE_SEP}${flag}`, n]));

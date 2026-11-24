@@ -104,4 +104,9 @@ export const messages = {
   comboboxResultsMore_other: "{{count}}+ matches; type to narrow",
   // Issue 5911 — a workflow the caller's own list does not name (shared by several areas).
   workflowUnnamed: 'Unnamed workflow',
+  // Shared tenancy completion notice; no blind retry or settlement claim.
+  // Mutation failure copy never prints raw errors or promises rollback/retry.
+  workspaceChangeNotAllowed: 'This workspace change was not allowed. A workspace may already have been created or changed. Reload this page and check your workspaces before trying again.',
+  workspaceChangeCouldNotFinish: 'This page could not finish the workspace change. A workspace may already have been created or changed. Reload this page and check your workspaces before trying again.',
+  workspaceChangeNeedsRefresh: "The workspace change may already have completed. This page could not finish refreshing. Reload this page and check your workspaces before trying again.",
 } as const;

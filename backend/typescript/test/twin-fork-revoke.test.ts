@@ -21,10 +21,12 @@
  *      the SAME prompt, and the provider call is SERVED from the source run's
  *      invocation log (no live mock call: `lastReceivedMessages` unchanged).
  *   3. REVOKE, then fork again: the re-executed node composes a DIFFERENT
- *      prompt (no borrowed block) ⇒ the invocation-log lookup misses ⇒ a LIVE
- *      mock call records the fork's prompt — which contains NO borrowed
- *      content — and no new ok audit row is written. The fork still completes
- *      (revocation degrades recall; it does not fail the run).
+ *      prompt (no borrowed block) ⇒ the invocation-log lookup misses ⇒ the
+ *      replay REFUSES (`replay_source_missing`, no provider call, no borrowed
+ *      content on the wire) and no new ok audit row is written.
+ *      CORRECTED 2026-11-23 (user decision on #6206): this leg used to make a
+ *      LIVE mock call and complete. A replay miss now fails the fork; re-running
+ *      live is `mode:'branch'`.
  *
  * Sabotage witnesses (w12): declaring the node `sideEffecting` (the fork is served from the log
  * and never re-reads), ignoring a grant's `revoked` status, and dropping the acting caller from
@@ -191,15 +193,23 @@ describe('PROBE-RCL-2 — grant → run → revoke → :fork re-resolves recall 
     const fork2 = await member.post<RunView>(`/runs/${encodeURIComponent(sourceRunId)}:fork`, { fromSeq: 0, mode: 'replay' });
     expect(fork2.status, JSON.stringify(fork2.body)).toBe(201);
     const fork2Id = fork2.body.runId;
-    // Revocation DEGRADES recall — it must not fail the fork.
-    expect(await waitTerminal(member, fork2Id)).toBe('completed');
-    // The re-executed node re-resolved recall LIVE, found the grant revoked,
-    // and composed WITHOUT the borrowed block ⇒ different semantic digest ⇒
-    // the invocation-log lookup MISSED ⇒ a live mock call recorded the fork's
-    // actual prompt. THE property: no borrowed content in the fork.
-    const fork2Prompt = promptOf();
-    expect(fork2Prompt, 'a live provider call must have happened (prompt diverged)').not.toBe(sourcePrompt);
-    expect(fork2Prompt, 'the fork after revocation must compose NO borrowed content').not.toContain(OWNER_FACT);
+    // CORRECTED 2026-11-23 (user decision on #6206, ADR 1002 explicit-source
+    // correction): this leg used to assert the fork COMPLETES through a live
+    // call. A replay never sends an unrecorded request to a model now, so the
+    // re-executed node re-resolves recall LIVE, finds the grant revoked,
+    // composes WITHOUT the borrowed block ⇒ different semantic digest ⇒ the
+    // invocation-log lookup MISSES ⇒ the fork FAILS typed, with no provider
+    // call. Re-running live is `mode:'branch'`. THE property is unchanged: the
+    // fork after revocation sends NO borrowed content anywhere.
+    expect(await waitTerminal(member, fork2Id)).toBe('failed');
+    const fork2Events = await member.get<{ events: unknown[] }>(`/runs/${encodeURIComponent(fork2Id)}/events/poll?fromSeq=0&limit=500`);
+    expect(fork2Events.status).toBe(200);
+    const fork2Wire = JSON.stringify(fork2Events.body.events);
+    expect(fork2Wire, 'the miss refuses as replay_source_missing').toContain('replay_source_missing');
+    expect(fork2Wire, 'the fork after revocation carries NO borrowed content').not.toContain(OWNER_FACT);
+    expect(fork2Wire, 'and is not served the source answer').not.toContain('SOURCE-ANSWER');
+    // No live call: the mock's last-seen prompt is still the source's.
+    expect(promptOf(), 'a refused replay makes no provider call').toBe(sourcePrompt);
     // And no new consent-ledger row claims a read that did not happen.
     expect(await okRowsFor(fork2Id)).toBe(0);
   }, 60_000);

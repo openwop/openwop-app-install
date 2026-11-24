@@ -27,7 +27,8 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../../auth/useAuth.js';
 import { useBackendSession } from '../../auth/backendSession.js';
 import { openHeaderSignIn, rememberReturn, takeReturn } from '../../auth/signInReturn.js';
-import { listMyWorkspaces, switchWorkspace, type MyWorkspaces } from '../../client/workspaceClient.js';
+import { listMyWorkspaces, switchWorkspace, WorkspaceLifecycleError, type MyWorkspaces } from '../../client/workspaceClient.js';
+import { reloadIntoSession } from '../../auth/reloadIntoSession.js';
 import { ApiError } from '../../client/requestJson.js';
 import { errorReasonOf } from '../../client/classifyHttpError.js';
 import { applyUnlistedHead } from '../site/siteSeo.js';
@@ -171,7 +172,12 @@ export function StartTrialPage(): JSX.Element {
     const switchToPersonal = async (): Promise<void> => {
       if (!ws) return;
       setBusy(true);
-      try { await switchWorkspace(ws.personal); retry(); } catch { setLoad({ kind: 'failed' }); } finally { setBusy(false); }
+      try { await switchWorkspace(ws.personal); retry(); } catch (err: unknown) {
+        // An uncertain switch blocks every later one in this page (ADR 1148), so a
+        // retry here could never succeed. Reload: the next page reads the cookie's truth (D2a, #6156).
+        if (err instanceof WorkspaceLifecycleError && err.code === 'workspace_transition_uncertain') { reloadIntoSession(); return; }
+        setLoad({ kind: 'failed' });
+      } finally { setBusy(false); }
     };
     return (
       <Column>

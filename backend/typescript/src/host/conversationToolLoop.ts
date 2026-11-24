@@ -39,7 +39,7 @@
 import { maybeCaptureExecuteTool } from './evals/toolBoundary.js';
 import { createAiProvidersAdapter, providerSupportsToolCalling, toolRoundResult, AiProviderError, CREDENTIAL_PROVIDERS } from '../aiProviders/aiProvidersHost.js';
 import { explicitRefNamesOtherProvider } from '../aiProviders/credentialRefLadder.js';
-import { createScopedAgentToolProvider, builtinAgentToolIds, builtinAgentTool } from './agentToolProvider.js';
+import { createScopedAgentToolProvider, builtinAgentToolIds, builtinAgentTool, approvalDescriberFor } from './agentToolProvider.js';
 import { resolveToolCapability } from '../features/capability-firewall/toolCapabilityResolver.js';
 import { withToolSummaryChannel } from './chatToolSummaries.js';
 import { createTurnRunDispatchCollector, type TurnRunDispatch } from './turnRunDispatch.js';
@@ -57,7 +57,8 @@ import { resolveConversationModelTarget, unchosenModelTarget, type ConversationM
 import type { RoutingTarget } from '../features/model-router/routeTurn.js';
 import { resolveUserNamedSecret } from '../byok/userNamedSecret.js';
 import { createLogger } from '../observability/logger.js';
-import { listToolApprovals, recordToolApprovalRequested, claimApprovedToolApprovals, returnUnspentToolApprovals, makeApprovalGrant, deleteSpentCallApprovals, scopeFoldRows, type ApprovalGrant, type ToolApprovalRecord } from '../features/conversation-tools/approvalLedger.js';
+import { scrubSecretShaped } from './redactSecrets.js';
+import { listToolApprovals, recordToolApprovalRequested, claimApprovedToolApprovals, returnUnspentToolApprovals, makeApprovalGrant, deleteSpentCallApprovals, scopeFoldRows, type ApprovalGrant, type ApprovalLine, type ToolApprovalRecord } from '../features/conversation-tools/approvalLedger.js';
 import { computeFirewallStamp } from '../features/capability-firewall/firewallHook.js';
 import { buildLaneFirewall, safeModeBaseline } from './laneFirewall.js';
 import { resolveConversationToolGate } from './conversationToolScope.js';
@@ -90,6 +91,11 @@ export interface AgentToolTurnResult {
   /** ADR 0132 Phase 3 — tool calls the agent deferred for per-conversation approval
    *  (recorded in the ledger; surfaced as interrupt.approval cards). Absent ⇒ none. */
   pendingApprovals?: { toolName: string; callId: string; input: Record<string, unknown> }[];
+  /** ADR 1156 D2 — the held calls this turn left WAITING in the ledger (a card each).
+   *  A hold the ledger answered from an earlier decision is not listed. */
+  heldCalls?: HeldCallAsk[];
+  /** ADR 1156 D5 — what became of earlier cards' approvals this turn. */
+  settledApprovals?: SettledApproval[];
   /** Workflow runs this turn's tools ignited (`host/turnRunDispatch.ts`). The
    *  EXCHANGE materializes one `workflow_run` turn per entry — it owns turnIndex
    *  allocation and the response, so the bubble lands at a correct index and
@@ -439,6 +445,63 @@ export function groupRoomToolLoopOptedOut(tier: ConversationModelTierInput | und
 export const GROUP_ROOM_NO_TOOLS_NOTICE =
   "Workspace tools are not available in this room: you cannot create items, schedule work, or read workspace data this turn. Answer from the context provided in this conversation, and do not promise workspace actions you cannot perform.";
 
+
+/** ADR 1156 D2 — a held call waiting on its card (the `tool-approval-requested` event). */
+export interface HeldCallAsk { toolName: string; requestedAt: string }
+/** ADR 1156 D5 — the `tool-approval-settled` event: `ran` = the approved call executed;
+ *  `refused` = it executed and the tool (or a later gate) refused it, `reason` its words;
+ *  `superseded` = the agent asked for something else, so a new card asks again. */
+export interface SettledApproval { askId: string; toolName: string; outcome: 'ran' | 'refused' | 'superseded'; reason?: string }
+const SETTLED_REASON_MAX_CHARS = 300;
+const DESCRIBE_TIMEOUT_MS = 2_000;
+
+/** ADR 1156 D3 — the tool's own description of a held call, or undefined (no describer,
+ *  a throw, a timeout): the card then shows the arguments. Never fails the turn. */
+async function describeHeldCall(toolName: string, input: Record<string, unknown>, ctx: { tenantId: string; conversationId: string }): Promise<ApprovalLine[] | undefined> {
+  const describe = approvalDescriberFor(toolName);
+  if (!describe) return undefined;
+  try {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<undefined>((res) => { timer = setTimeout(() => res(undefined), DESCRIBE_TIMEOUT_MS); });
+    const out = await Promise.race([Promise.resolve(describe(input, ctx)), timeout]).finally(() => clearTimeout(timer));
+    return Array.isArray(out) ? out.map((l) => (typeof l === 'string' ? { text: l } : l)) : undefined;
+  } catch (err) {
+    log.info('approval_describer_failed', { toolName, error: err instanceof Error ? err.message : String(err) });
+    return undefined;
+  }
+}
+
+/** A tool's error text as a person reads it: a JSON error body (`{"message": …}` or
+ *  `{"error": …}`) is reduced to its message; anything else is kept as written. */
+function plainToolMessage(text: string): string | undefined {
+  const t = text.trim();
+  if (!t) return undefined;
+  if (t.startsWith('{')) {
+    try {
+      const o = JSON.parse(t) as { message?: unknown; error?: unknown };
+      const m = typeof o.message === 'string' ? o.message : typeof o.error === 'string' ? o.error : undefined;
+      if (m && m.trim()) return m.trim();
+    } catch { /* not JSON: keep the text */ }
+  }
+  return t;
+}
+
+/** ADR 1156 D5 — what the call each spent one-call approval let through did, read from
+ *  the loop's own `agent.toolReturned` events (matched by call id, the grant's key). */
+export function settledFromSpent(spent: ReadonlyArray<{ row: ToolApprovalRecord; callKey: string }>, events: readonly AgentEvent[]): SettledApproval[] {
+  const out: SettledApproval[] = [];
+  for (const { row, callKey } of spent) {
+    if (row.grain !== 'call' || !row.askId) continue;
+    const ret = events.find((e) => e.type === 'agent.toolReturned' && e.callId === callKey);
+    if (!ret) continue;
+    if (ret.status === 'ok') { out.push({ askId: row.askId, toolName: row.toolName, outcome: 'ran' }); continue; }
+    const err = ret.error && typeof ret.error === 'object' ? (ret.error as { message?: unknown }).message : undefined;
+    const said = typeof err === 'string' ? plainToolMessage(err) : undefined;
+    const reason = said ? scrubSecretShaped(said).slice(0, SETTLED_REASON_MAX_CHARS) : undefined;
+    out.push({ askId: row.askId, toolName: row.toolName, outcome: 'refused', ...(reason ? { reason } : {}) });
+  }
+  return out;
+}
 
 /**
  * ADR 1042 CHAN-F3 (security review H2) + ADR 0834 FW2-D1 (CHAN-F2) — the approvals a
@@ -798,8 +861,22 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   const runDispatches = runDispatchCollector.drain();
   const clarificationAsk = clarificationCollector?.drain();
   const pendingApprovals = loop.pendingApprovals ?? [];
+  // ADR 1156 — the cards: which held calls now wait (and on which turn), and what became
+  // of earlier cards' approvals (ran, refused, or overtaken by a different ask).
+  const heldCalls: HeldCallAsk[] = [];
+  const settledApprovals: SettledApproval[] = actsAsOwner ? settledFromSpent(turnApprovals.grant.spentCalls?.() ?? [], loop.events) : [];
   for (const p of actsAsOwner ? pendingApprovals : []) {
-    try { await recordToolApprovalRequested(run.tenantId, conversationStateKey, p.toolName, { ...(p.origin ? { origin: p.origin } : {}), input: p.input, lane: channelTurn ? 'channel' : 'app' }); }
+    try {
+      const lines = await describeHeldCall(p.toolName, p.input, { tenantId: run.tenantId, conversationId: conversationStateKey });
+      const rec = await recordToolApprovalRequested(run.tenantId, conversationStateKey, p.toolName, {
+        ...(p.origin ? { origin: p.origin } : {}), input: p.input, lane: channelTurn ? 'channel' : 'app',
+        ...(params.turnMessageId ? { askId: params.turnMessageId } : {}), ...(lines ? { lines } : {}),
+      });
+      if (rec.status === 'pending') {
+        heldCalls.push({ toolName: p.toolName, requestedAt: rec.requestedAt });
+        if (rec.replacedAskId) settledApprovals.push({ askId: rec.replacedAskId, toolName: p.toolName, outcome: 'superseded' });
+      }
+    }
     catch { /* best-effort — the agent's reply already told the user it is pending */ }
   }
 
@@ -814,6 +891,8 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
     // information is exposed.
     ...(loop.error ? { error: { ...loop.error, message: `${loop.error.message} (${loopProvider}/${modelUsed})` } } : {}),
     ...(pendingApprovals.length ? { pendingApprovals } : {}),
+    ...(heldCalls.length ? { heldCalls } : {}),
+    ...(settledApprovals.length ? { settledApprovals } : {}),
     // Surfaced even when `loop.error` is set: the run was already IGNITED, so
     // hiding it because the narration failed is exactly the dishonesty this
     // seam exists to remove. The earlier `return null` paths precede any tool

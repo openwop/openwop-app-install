@@ -9,7 +9,7 @@
 import type { BackendFeature } from '../types.js';
 import { runUnderWorkerContract } from '../../storage/eventEraAdapter.js';
 import { createLogger } from '../../observability/logger.js';
-import { KANBAN_DUE_REMINDERS_TOGGLE, sweepDueTick } from './dueSweep.js';
+import { KANBAN_DUE_REMINDERS_TOGGLE, dueSweepTenantSource, sweepDueTick } from './dueSweep.js';
 
 const log = createLogger('feature.kanban-due-reminders');
 const TICK_MS = 5 * 60 * 1000;
@@ -34,12 +34,15 @@ export const kanbanDueRemindersFeature: BackendFeature = {
   onStart: (ctx) => {
     let tick = 0;
     let running = false;
+    // Roster tenants plus every tenant with a board: an adopter with boards and no
+    // roster agents would otherwise never be swept.
+    const tenants = dueSweepTenantSource(ctx.listRosterTenants);
     const run = (): void => {
       if (running) return;
       running = true;
       const n = tick;
       tick += 1;
-      void sweepDueTick(ctx.listRosterTenants, n)
+      void sweepDueTick(tenants, n)
         .catch((err) => log.warn('due_sweep_failed', { error: err instanceof Error ? err.message : String(err) }))
         .finally(() => { running = false; });
     };

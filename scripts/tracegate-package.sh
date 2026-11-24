@@ -34,7 +34,7 @@ PKG_LEDGER="${TRACEGATE_PACKAGE_LEDGER:-$(cd "$ROOT" && git rev-parse --path-for
 CLI="${TRACEGATE_PACKAGE_CLI:-}"
 if [ -z "$CLI" ]; then
   if [ -f "$ROOT/node_modules/tracegate-ci/src/cli.mjs" ]; then CLI="node $ROOT/node_modules/tracegate-ci/src/cli.mjs"
-  else CLI="npx -y tracegate-ci@0.10.4"; fi
+  else CLI="npx -y tracegate-ci@0.10.6"; fi
 fi
 
 case "${1:-}" in

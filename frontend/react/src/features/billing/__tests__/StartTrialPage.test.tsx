@@ -32,7 +32,12 @@ vi.mock('../billingClient.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   getTrialOffer: api.getTrialOffer, buyPlan: api.buyPlan, buyBundle: api.buyBundle,
 }));
-vi.mock('../../../client/workspaceClient.js', () => ({ listMyWorkspaces: api.listMyWorkspaces, switchWorkspace: api.switchWorkspace }));
+vi.mock('../../../client/workspaceClient.js', async (orig) => ({
+  WorkspaceLifecycleError: (await orig<typeof import('../../../client/workspaceClient.js')>()).WorkspaceLifecycleError,
+  listMyWorkspaces: api.listMyWorkspaces, switchWorkspace: api.switchWorkspace,
+}));
+const reload = vi.hoisted(() => ({ reloadIntoSession: vi.fn() }));
+vi.mock('../../../auth/reloadIntoSession.js', () => reload);
 vi.mock('../../../auth/useAuth.js', () => ({ useAuth: () => ({ user: null, loading: false, isConfigured: true }) }));
 vi.mock('../../../auth/backendSession.js', () => ({ useBackendSession: () => ({ user: h.backendUser, resolved: h.resolved }) }));
 import { StartTrialPage } from '../StartTrialPage.js';
@@ -79,6 +84,7 @@ beforeEach(() => {
   api.buyBundle.mockReset().mockResolvedValue({ sessionId: 'cs_2', url: 'https://checkout.stripe.com/c/pay/cs_2', mode: 'live', trialDays: 14 });
   api.listMyWorkspaces.mockReset().mockResolvedValue(WS);
   api.switchWorkspace.mockReset().mockResolvedValue({ ok: true, active: 'user:u-1' });
+  reload.reloadIntoSession.mockReset();
   assign = vi.fn();
   Object.defineProperty(window, 'location', { configurable: true, writable: true, value: { ...originalLocation, assign } });
 });
@@ -179,6 +185,31 @@ describe('/start-trial — honest fallbacks', () => {
     await waitFor(() => expect(api.switchWorkspace).toHaveBeenCalledWith('user:u-1'));
     expect(await screen.findByRole('button', { name: 'Continue to checkout' })).toBeTruthy();
     expect(api.getTrialOffer).toHaveBeenCalledTimes(2);
+    expect(reload.reloadIntoSession).not.toHaveBeenCalled();
+  });
+  // D2a (#6156): an uncertain switch blocks every later switch on this page
+  // (ADR 1148), so a retry could never succeed. The page reloads instead.
+  // Sabotage witness: dropping the `workspace_transition_uncertain` branch in
+  // StartTrialPage turns the first case red.
+  it('an uncertain switch to the personal workspace reloads into the session, never a dead retry', async () => {
+    const { WorkspaceLifecycleError } = await import('../../../client/workspaceClient.js');
+    api.listMyWorkspaces.mockResolvedValue(SHARED);
+    api.getTrialOffer.mockRejectedValueOnce(refusal(403));
+    api.switchWorkspace.mockRejectedValueOnce(new WorkspaceLifecycleError('workspace_transition_uncertain'));
+    mount('/start-trial?plan=pro');
+    fireEvent.click(await screen.findByRole('button', { name: 'Use my personal workspace' }));
+    await waitFor(() => expect(reload.reloadIntoSession).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    expect(api.getTrialOffer).toHaveBeenCalledTimes(1);
+  });
+  it('any other failed switch is a retryable failure and does not reload', async () => {
+    api.listMyWorkspaces.mockResolvedValue(SHARED);
+    api.getTrialOffer.mockRejectedValueOnce(refusal(403));
+    api.switchWorkspace.mockRejectedValueOnce(refusal(500));
+    mount('/start-trial?plan=pro');
+    fireEvent.click(await screen.findByRole('button', { name: 'Use my personal workspace' }));
+    expect(await screen.findByRole('button', { name: 'Try again' })).toBeTruthy();
+    expect(reload.reloadIntoSession).not.toHaveBeenCalled();
   });
   it('an anonymous-session refusal (403 anonymous_session) asks to sign in', async () => {
     api.getTrialOffer.mockRejectedValue(refusal(403, 'anonymous_session'));

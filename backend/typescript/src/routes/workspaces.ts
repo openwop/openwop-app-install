@@ -40,6 +40,7 @@ import { resolveCallerUser } from '../features/users/usersGuards.js';
 import { getUser, sessionEpochOf } from '../features/users/usersService.js';
 import { createLogger } from '../observability/logger.js';
 import { declaredDefaultWorkspaceTargets } from '../host/workspaceJoinLedger.js';
+import { mintWorkspaceSelection } from '../host/workspaceSelectionToken.js';
 
 const wsLog = createLogger('routes.workspaces');
 
@@ -114,7 +115,14 @@ export function registerWorkspaceTenancyRoutes(app: Express): void {
         });
       }
 
-      res.json({ workspaces: out, active, personal });
+      // ADR 1158 — a portable copy of this request's workspace selection, for a
+      // request the page sends straight to the backend host (where this origin's
+      // cookie does not travel). Only for a signed-in caller in a shared workspace
+      // the auth middleware has just membership-checked; it grants nothing more.
+      const selectionToken = personal && active !== personal && isDurableCaller(req) && out.some((w) => w.active && w.kind === 'shared')
+        ? mintWorkspaceSelection(personal, active)
+        : undefined;
+      res.json({ workspaces: out, active, personal, ...(selectionToken ? { selectionToken } : {}) });
     } catch (err) {
       next(err);
     }

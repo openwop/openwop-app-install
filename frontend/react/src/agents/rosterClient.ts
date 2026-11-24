@@ -261,7 +261,7 @@ export async function seedExampleAgents(opts: { heal?: boolean } = {}): Promise<
   return withExampleDataScope(async (scope) => {
     const res = await fetch(`${config.sseBaseUrl}/host/openwop-app/example-data/seed`, fetchOpts({
       method: 'POST',
-      headers: { ...jsonHeaders(), accept: 'application/x-ndjson' },
+      headers: { ...jsonHeaders(), ...scope.selectionHeaders, accept: 'application/x-ndjson' },
       // heal:true = explicit restore (the "Load demo data" buttons); the silent
       // auto-seed omits heal, so it never resurrects deletions.
       body: JSON.stringify({ ...(opts.heal ? { heal: true } : {}), expectedTenantId: scope.expectedTenantId }),

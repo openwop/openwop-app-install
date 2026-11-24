@@ -25,8 +25,11 @@
  * Tracked in the ADR 0523 §Open.
  */
 
-import { serializeWithIdMap } from './serialize.js';
-import type { SavedWorkflow } from './workflow.js';
+import { serializeWithIdMap, type BackendEdge, type BackendWorkflowDefinition } from './serialize.js';
+import type { SavedWorkflow, EdgeTriggerRule } from './workflow.js';
+import i18n from '../../i18n/index.js';
+import { definitionMetadataFor } from '../persistence/definitionMetadata.js';
+import { builderDefaultInputsFromMetadata, withBuilderDefaultInputs } from '../persistence/editorMetadata.js';
 
 interface FragmentNode {
   id: string;
@@ -39,7 +42,12 @@ interface FragmentNode {
    *  the same defect, one surface along. */
   inputs?: Record<string, unknown>;
 }
-interface FragmentEdge { from: string; to: string }
+interface FragmentCondition {
+  type: 'equals' | 'notEquals' | 'contains' | 'truthy' | 'falsy';
+  left: string;
+  right?: unknown;
+}
+interface FragmentEdge { from: string; to: string; condition?: FragmentCondition; triggerRule?: EdgeTriggerRule }
 interface WorkflowChain {
   chainId: string;
   version: string;
@@ -124,6 +132,159 @@ export class ChainExportVersionError extends Error {
   }
 }
 
+/** A trusted, value-free refusal: never put graph/config/metadata text in UI copy. */
+export class ChainExportFidelityError extends Error {
+  readonly fields: readonly string[];
+  constructor(fields: readonly string[]) {
+    super(i18n.t('builder:exportChainPackFidelity'));
+    this.name = 'ChainExportFidelityError';
+    this.fields = Object.freeze([...new Set(fields)].sort());
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype: unknown = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+function emptyRecord(value: unknown): boolean { return isRecord(value) && Object.keys(value).length === 0; }
+function neutralDraft(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (typeof value !== 'string') return false;
+  if (value.trim() === '') return true;
+  try { const parsed: unknown = JSON.parse(value); return emptyRecord(parsed); } catch { return false; }
+}
+function jsonValue(value: unknown, ancestors = new Set<object>()): boolean {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (!Array.isArray(value) && !isRecord(value)) return false;
+  if (ancestors.has(value)) return false;
+  ancestors.add(value);
+  const values: unknown[] = Array.isArray(value) ? value : Object.values(value);
+  const dense = !Array.isArray(value) || Object.keys(value).length === value.length;
+  const valid = dense && values.every(v => jsonValue(v, ancestors));
+  ancestors.delete(value);
+  return valid;
+}
+function sameJson(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((v, i) => sameJson(v, b[i]));
+  if (!isRecord(a) || !isRecord(b)) return false;
+  const keys = Object.keys(a).sort();
+  return keys.length === Object.keys(b).length && keys.every(k => Object.hasOwn(b, k) && sameJson(a[k], b[k]));
+}
+function neutralLifecycle(value: unknown): boolean {
+  if (value === undefined) return true;
+  return isRecord(value) && Object.entries(value).every(([key, v]) =>
+    (key === 'transient' && (v === false || v === undefined)) || (key === 'generatedBy' && v === undefined));
+}
+function variableRead(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(variableRead);
+  if (!isRecord(value)) return false;
+  return (value.type === 'variable' && typeof value.variableName === 'string') || Object.values(value).some(variableRead);
+}
+function unknownKeys(value: object, allowed: readonly string[]): boolean {
+  return Object.keys(value).some(key => !allowed.includes(key));
+}
+const TRIGGERS: readonly EdgeTriggerRule[] = ['all_success', 'any_success', 'all_complete', 'none_failed', 'any_failed'];
+
+/** Execution fidelity, not a second serializer. Neutral editor state is projected
+ * through the existing metadata composer, never a second namespaced-leaf codec. */
+function assertChainFidelity(
+  snap: SavedWorkflow,
+  definition: BackendWorkflowDefinition,
+  backendIdToBuilder: Record<string, string>,
+  builderById: ReadonlyMap<string, SavedWorkflow['nodes'][number]>,
+): void {
+  const fields = new Set<string>();
+  const add = (field: string): void => { fields.add(field); };
+  if (unknownKeys(snap, ['id', 'name', 'version', 'nodes', 'edges', 'defaultInputs', 'inputSchema', 'variables', 'configurableSchema', 'createdAt', 'updatedAt', 'metadata', 'lifecycle'])) add('workflow.fields');
+  if (unknownKeys(definition, ['workflowId', 'nodes', 'edges', 'inputSchema', 'variables', 'configurableSchema'])) add('definition.fields');
+  if (!neutralDraft(snap.defaultInputs)) add('workflow.defaultInputs');
+  if (!neutralDraft(snap.inputSchema) || (definition.inputSchema !== undefined && !emptyRecord(definition.inputSchema))) add('workflow.inputSchema');
+  for (const variables of [snap.variables, definition.variables]) {
+    if (variables !== undefined && (!Array.isArray(variables) || variables.length !== 0)) add('workflow.variables');
+  }
+  for (const configurable of [snap.configurableSchema, definition.configurableSchema]) {
+    if (configurable !== undefined && !emptyRecord(configurable)) add('workflow.configurableSchema');
+  }
+  if (!neutralLifecycle(snap.lifecycle)) add('workflow.lifecycle');
+  try {
+    if (snap.metadata !== undefined && !isRecord(snap.metadata)) throw new ChainExportFidelityError(['workflow.metadata']);
+    const metadata = definitionMetadataFor(snap);
+    if (!neutralLifecycle(metadata.lifecycle)) add('workflow.lifecycle');
+    const { lifecycle: _lifecycle, ...withoutLifecycle } = metadata;
+    const rawDefaults = builderDefaultInputsFromMetadata(metadata);
+    if (!neutralDraft(rawDefaults)) add('workflow.defaultInputs');
+    const { metadata: _metadata, lifecycle: _life, defaultInputs: _defaults, ...base } = snap;
+    const expected = definitionMetadataFor({ ...base, defaultInputs: '{}' });
+    const normalized = withBuilderDefaultInputs(withoutLifecycle, '{}');
+    if (!jsonValue(normalized) || !sameJson(normalized, expected)) add('workflow.metadata');
+  } catch {
+    add('workflow.metadata');
+  }
+
+  // expandChain's existing default is the LAST terminal in fragment order.
+  const outgoing = new Set(definition.edges.map(e => e.sourceNodeId));
+  const terminals = definition.nodes.filter(n => !outgoing.has(n.nodeId));
+  const primary = (terminals[terminals.length - 1] ?? definition.nodes[definition.nodes.length - 1])?.nodeId;
+  for (const node of definition.nodes) {
+    const builder = builderById.get(backendIdToBuilder[node.nodeId] ?? '');
+    if (!builder) { add('node.identity'); continue; }
+    if (unknownKeys(builder, ['id', 'kind', 'name', 'position', 'config', 'inputs', 'outputRole', 'compensation', 'irreversibleEffect', 'agent'])
+      || unknownKeys(node, ['nodeId', 'typeId', 'name', 'position', 'config', 'inputs', 'outputRole', 'compensation', 'irreversibleEffect', 'agent'])) add('node.fields');
+    for (const role of [builder.outputRole, node.outputRole]) {
+      if (role !== undefined && !(role === 'primary' && node.nodeId === primary)) add('node.outputRole');
+    }
+    // The wire supports inverses, but this exporter has no inverse-pin/reference
+    // transform yet. Refuse explicitly rather than claiming the protocol lacks it.
+    if (builder.compensation !== undefined || node.compensation !== undefined) add('node.compensation');
+    if (builder.irreversibleEffect !== undefined || node.irreversibleEffect !== undefined) add('node.irreversibleEffect');
+    if (builder.agent !== undefined || node.agent !== undefined) add('node.agent');
+    if (!isRecord(builder.config) || !jsonValue(builder.config)
+      || (builder.inputs !== undefined && (!isRecord(builder.inputs) || !jsonValue(builder.inputs)))) add('node.payload');
+    if (isRecord(builder.config) && (Object.hasOwn(builder.config, 'workflowId') || Object.hasOwn(builder.config, 'subChainRef'))) add('node.childWorkflow');
+    if (variableRead(builder.config) || variableRead(builder.inputs)) add('node.variableRead');
+    if (!node.nodeId || node.nodeId.includes('.')) add('node.identity');
+  }
+  for (const edge of definition.edges) {
+    if (unknownKeys(edge, ['edgeId', 'sourceNodeId', 'sourceOutput', 'targetNodeId', 'targetInput', 'triggerRule', 'condition', 'label'])) add('edge.fields');
+  }
+  for (const edge of snap.edges) {
+    if (edge.condition !== undefined) {
+      if (!isRecord(edge.condition) || unknownKeys(edge.condition, ['op', 'path', 'value'])) add('edge.condition');
+      else { try { conditionForChain(edge.condition); } catch { add('edge.condition'); } }
+    }
+    if (unknownKeys(edge, ['id', 'source', 'sourcePort', 'canonicalSourceOutput', 'target', 'targetPort', 'triggerRule', 'condition', 'label'])) add('edge.fields');
+    if (edge.label !== undefined && edge.label !== '') add('edge.label');
+    if (edge.triggerRule !== undefined && !TRIGGERS.includes(edge.triggerRule)) add('edge.triggerRule');
+  }
+  if (fields.size) throw new ChainExportFidelityError([...fields]);
+}
+
+/** Inverse of the admitted host mapper for its five portable operators.
+ * Optional undefined comparison operands normalize to omission, exactly as
+ * mapEdgeCondition does; false, zero and null are carried rather than tested. */
+function conditionForChain(condition: BackendEdge['condition']): FragmentCondition | undefined {
+  if (condition === undefined) return undefined;
+  if (!isRecord(condition) || typeof condition.path !== 'string' || condition.path.length === 0) throw new ChainExportFidelityError(['edge.condition']);
+  const left = condition.path;
+  switch (condition.op) {
+    case 'truthy': case 'falsy': return { type: condition.op, left };
+    case 'eq': case 'neq': case 'contains': {
+      const value = condition.value;
+      if (value !== undefined && !jsonValue(value)) throw new ChainExportFidelityError(['edge.condition']);
+      const type = condition.op === 'eq' ? 'equals' : condition.op === 'neq' ? 'notEquals' : 'contains';
+      return { type, left, ...(value !== undefined ? { right: value } : {}) };
+    }
+    default: throw new ChainExportFidelityError(['edge.condition']);
+  }
+}
+function endpoint(nodeId: string, port: string | undefined): string {
+  if (!nodeId || nodeId.includes('.') || port === '') throw new ChainExportFidelityError(['edge.endpoint']);
+  return port === undefined ? nodeId : nodeId + '.' + port;
+}
+
 /** The engine range an export declares: the v2 grammar's explicit upper bound
  *  (RFC 0177 §A.1). `^1.0.0` — what this used to write — is not in that grammar,
  *  so a v2 registry refused it at install. */
@@ -151,6 +312,8 @@ export function buildChainPackManifest(
     else unknownVersion.push(typeId);
   }
   if (unknownVersion.length > 0) throw new ChainExportVersionError(unknownVersion.sort());
+  if ([...pinned.values()].some(version => !/^[0-9]+\.[0-9]+\.[0-9]+$/.test(version))) throw new ChainExportFidelityError(['node.version']);
+  assertChainFidelity(snap, definition, backendIdToBuilder, builderById);
 
   const nodes: FragmentNode[] = definition.nodes.map((n) => {
     const builder = builderById.get(backendIdToBuilder[n.nodeId] ?? '');
@@ -164,7 +327,15 @@ export function buildChainPackManifest(
       ...(n.inputs && Object.keys(n.inputs).length > 0 ? { inputs: n.inputs } : {}),
     };
   });
-  const edges: FragmentEdge[] = definition.edges.map((e) => ({ from: e.sourceNodeId, to: e.targetNodeId }));
+  const edges: FragmentEdge[] = definition.edges.map((e) => {
+    const condition = conditionForChain(e.condition);
+    return {
+      from: endpoint(e.sourceNodeId, e.sourceOutput),
+      to: endpoint(e.targetNodeId, e.targetInput),
+      ...(condition ? { condition } : {}),
+      ...(e.triggerRule !== undefined ? { triggerRule: e.triggerRule } : {}),
+    };
+  });
 
   const slug = slugify(snap.name || 'workflow');
   // ADR 0525 §Correction (ux-review) — capping the SLUG bounded `name`/`chainId`

@@ -251,7 +251,12 @@ describe('the three node-field writers declare the same contract', () => {
     // chain-backed definition — and every run's `definitionRevision` pin with it.
     // A template is auto-laid-out on first open, then persists (ADR 0770 P3 owns
     // carrying pack layout). Listed, not hidden: a new field still fails here.
-    const BUILDER_LAYOUT = new Set(['name', 'position']);
+    //
+    // CORRECTED 2026-11-23 (owner decision D1a, #6156): expansion now carries
+    // `position`. It never moved a hash: definitionHash's `withoutLayout` strips
+    // it. `name` stays excepted, because the hash KEEPS it (carrying it would
+    // re-hash the 44 tmpl.* GOLDEN pins).
+    const BUILDER_LAYOUT = new Set(['name']);
     // ADR 1005 — a second named exception: `agent` (RFC 0082 §B). The RFC 0013
     // `FragmentNode` is closed and has no `agent`, so a chain cannot carry a
     // binding and expansion has nothing to emit. It reaches a node only through a

@@ -167,6 +167,16 @@ export const messages = {
   bulkClear: 'Clear',
   deleteCardsConfirm_one: 'Delete {{count}} card?',
   deleteCardsConfirm_other: 'Delete {{count}} cards?',
+  // ADR 1155 D7 — a paged column's footer
+  showMoreCards: 'Show more ({{shown}} of {{total}})',
+  loadingMoreCards: 'Loading…',
+  // ADR 1155 D7 — swimlanes
+  laneNone: 'No value',
+  laneAria_one: '{{lane}}, {{count}} card',
+  laneAria_other: '{{lane}}, {{count}} cards',
+  laneColumn: '{{column}} in {{lane}}',
+  groupByLabel: 'Group by',
+  groupByNone: 'No grouping',
   // Card sources
   sourceHuman: 'From a human',
   sourceDiscord: 'Simulated Discord',

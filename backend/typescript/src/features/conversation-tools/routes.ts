@@ -33,10 +33,17 @@ function approvalView(r: ToolApprovalRecord): Omit<ToolApprovalRecord, 'inputDig
   return expiresAt ? { ...view, expiresAt } : view;
 }
 
-/** The approve/revoke authority: the principal the conversation's tools act as (ADR 0834 D3). */
+/** ADR 1156 D7 — deciding a held call is a person's act: a signed-in session (or a
+ *  person's own OIDC bearer), never an API key, an operator env key or the test seam. */
+export function isPersonSession(req: Pick<Request, 'principal'>): boolean {
+  return req.principal?.auth?.kind === 'subject';
+}
+
+/** The approve/revoke authority: the principal the conversation's tools act as (ADR 0834 D3),
+ *  signed in as a person (ADR 1156 D7). */
 function requireToolAuthority(req: Request, meta: ConversationMeta, action: string): string {
   const approver = actingUserOf(req);
-  if (!approver || !toolAuthorityHolds(approver, meta.ownerUserId)) {
+  if (!approver || !isPersonSession(req) || !toolAuthorityHolds(approver, meta.ownerUserId)) {
     throw new OpenwopError('forbidden', `Only the conversation owner may ${action} its tool calls.`, 403);
   }
   return approver;
@@ -126,7 +133,7 @@ export function registerConversationToolsRoutes(deps: RouteDeps): void {
         // conversation is its owner; an ownerless (legacy) conversation leaves it to the
         // exchange.
         viewer: {
-          mayApprove: toolAuthorityHolds(actingUserOf(req), meta.ownerUserId),
+          mayApprove: isPersonSession(req) && toolAuthorityHolds(actingUserOf(req), meta.ownerUserId),
           mayBypass: !meta.ownerUserId || toolAuthorityHolds(actingUserOf(req), meta.ownerUserId),
           // The scope PUT's own gate (`requireOwnerWrite`): the owner, or anyone visible on
           // an ownerless conversation.
@@ -178,8 +185,10 @@ export function registerConversationToolsRoutes(deps: RouteDeps): void {
       // ADR 0834 FW2-D1 — what the approval covers: `call` (default) = this exact call,
       // once; `conversation` = any call of this tool for the rest of the conversation
       // (in-app asks only).
-      const grain = body.grain === undefined ? 'call' : body.grain;
-      if (grain !== 'call' && grain !== 'conversation') {
+      // ADR 1156 D6 — a denial has a grain too; absent, the ledger keeps a denial's old
+      // tool-wide meaning, and the chat card sends `call`.
+      const grain = body.grain;
+      if (grain !== undefined && grain !== 'call' && grain !== 'conversation') {
         throw new OpenwopError('validation_error', "grain MUST be 'call' or 'conversation'.", 400);
       }
       const out = await resolveToolApproval(tenantId, sessionId, req.params.toolName, decision, approver, body.requestedAt, grain);

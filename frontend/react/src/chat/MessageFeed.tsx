@@ -31,6 +31,7 @@ import { scrollBehavior } from '../ui/motion.js';
 import { MessageBubble } from './MessageBubble.js';
 import { WorkflowRunBubble } from './WorkflowRunBubble.js';
 import { CardHost } from './registry/CardHost.js';
+import { getCard } from './registry/CardRegistry.js';
 import { a2uiInterruptCard } from './a2ui/interruptBridge.js';
 import { HitlDecisionCard } from './HitlDecisionCard.js';
 import { AGENT_CLARIFICATION_PROFILE } from '../interrupts/clarificationModel.js';
@@ -42,6 +43,8 @@ import { SelectionRewriteOverlay } from './SelectionRewrite.js';
 // LAZY — the artifact preview only mounts when the user clicks "View" on a
 // completed workflow's card; keeping it out of the ENTRY chunk preserves
 // bundle-budget headroom for feed-path code.
+// ADR 1156 — the held-call card, lazy with its conversation-tools client.
+const HeldCallCard = lazy(() => import('../conversationTools/HeldCallCard.js'));
 const ArtifactPreviewModal = lazy(() => import('./ArtifactPreviewModal.js').then((m) => ({ default: m.ArtifactPreviewModal })));
 import { ArrowDownIcon } from '../ui/icons/index.js';
 import { announce } from '../ui/announce.js';
@@ -246,6 +249,10 @@ interface Props {
    *  turn id; `answers` the spec `ClarificationResume.answers`, `[]` = skip).
    *  Surfaces that send through the conversation pass it; absent ⇒ no card. */
   onAnswerClarification?: (askId: string, data: unknown, answers: unknown) => Promise<void>;
+  /** ADR 1156 — a persisted conversation's held-call cards: its chat session id (the
+   *  conversation-tools ledger key) and the surface's own submit, which sends the
+   *  Continue message after one press on Approve. Absent ⇒ no card (an ephemeral chat). */
+  heldCallHost?: { sessionId: string; onContinue: (text: string) => void };
 }
 
 export function MessageFeed({
@@ -272,6 +279,7 @@ export function MessageFeed({
   summarizeBusy,
   onOpenArtifact,
   onAnswerClarification,
+  heldCallHost,
 }: Props): JSX.Element {
   const { t } = useTranslation('chat');
   const endRef = useRef<HTMLDivElement>(null);
@@ -607,6 +615,29 @@ export function MessageFeed({
               />
             </div>
           ) : null}
+          {/* ADR 1156 — a held tool call's card, under the turn that raised it: one press
+              approves exactly that call and continues. A feature may register its own
+              card for the tool (`tool-approval.<toolName>`). */}
+          {heldCallHost && m.role === 'assistant' && m.meta?.heldCalls?.map((h) => {
+            const custom = getCard(`tool-approval.${h.toolName}`);
+            return (
+              <div key={`held-${h.askId}-${h.toolName}`} className="msgfeed-card-indent">
+                <Suspense fallback={null}>
+                  <HeldCallCard
+                    sessionId={heldCallHost.sessionId}
+                    held={h}
+                    refreshKey={displayMessages.length}
+                    onContinue={heldCallHost.onContinue}
+                    {...(custom ? {
+                      renderCustom: (payload, onAction) => (
+                        <CardHost cardType={custom.cardType} payload={payload} context={{ runId: runIdFor(m), tenantId }} onAction={async (actionId) => { await onAction(actionId); }} />
+                      ),
+                    } : {})}
+                  />
+                </Suspense>
+              </div>
+            );
+          })}
           {/* Persistent HITL decision artifacts — one per resolved
               interrupt. Survives the open interrupt being cleared.
               Renders only the resolved entries; an open interrupt is

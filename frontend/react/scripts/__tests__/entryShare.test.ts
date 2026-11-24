@@ -1,6 +1,6 @@
 /**
  * ADR 0874 amendment (2026-10-18) — a named white-label distribution may declare
- * an entry share; the host ceiling stays 129 kB for the default build.
+ * an entry share; the host ceiling stays 130 kB for the default build.
  *
  * Runs the REAL `check-bundle-budget.mjs` on a fixture `dist/` whose entry is
  * incompressible random bytes ~300 B over the host ceiling. Red under: the share
@@ -19,7 +19,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const BUDGET_SCRIPT = join(dirname(fileURLToPath(import.meta.url)), '..', 'check-bundle-budget.mjs');
-const HOST_CEILING = 129 * 1024;
+const HOST_CEILING = 130 * 1024;
 
 let root: string;
 beforeAll(() => { root = mkdtempSync(join(tmpdir(), 'owp-entryshare-')); });
@@ -48,21 +48,21 @@ describe('declared distribution entry share (ADR 0874 amendment)', () => {
   it('the default build is held to the host ceiling: ~300 B over fails', () => {
     const r = run('default', null);
     expect(r.code).toBe(1);
-    expect(r.out).toMatch(/over the ENTRY budget of 129\.0 kB/);
+    expect(r.out).toMatch(/over the ENTRY budget of 130\.0 kB/);
   });
 
   it('a named distribution with a declared share passes, and the report keeps the host number separate', () => {
     const r = run('bookai', { entryShareBytes: 1024, entryShareReason: REASON });
     expect(r.code).toBe(0);
-    expect(r.out).toMatch(/= host 129\.0 kB \+ 'bookai' declared entry share 1024 B/);
-    // The share is APPLIED, not only reported: 129 kB + 1024 B = 130.0 kB.
-    expect(r.out).toMatch(/\(budget 130\.0 kB =/);
+    expect(r.out).toMatch(/= host 130\.0 kB \+ 'bookai' declared entry share 1024 B/);
+    // The share is APPLIED, not only reported: 130 kB + 1024 B = 131.0 kB.
+    expect(r.out).toMatch(/\(budget 131\.0 kB =/);
   });
 
   it('a named distribution WITHOUT a declaration is held to the host ceiling too', () => {
     const r = run('bookai', { bundles: [] });
     expect(r.code).toBe(1);
-    expect(r.out).toMatch(/over the ENTRY budget of 129\.0 kB/);
+    expect(r.out).toMatch(/over the ENTRY budget of 130\.0 kB/);
     expect(r.out).not.toMatch(/declared entry share/);
   });
 
@@ -93,7 +93,7 @@ describe('declared distribution entry share (ADR 0874 amendment)', () => {
   it('the share is not slack beyond itself: host ceiling + share + 200 B still fails', () => {
     const r = run('bookai', { entryShareBytes: 512, entryShareReason: REASON }, HOST_CEILING + 512 + 200);
     expect(r.code).toBe(1);
-    // 129 kB + 512 B = 132 608 B = 129.5 kB.
-    expect(r.out).toMatch(/over the ENTRY budget of 129\.5 kB/);
+    // 130 kB + 512 B = 133 632 B = 130.5 kB.
+    expect(r.out).toMatch(/over the ENTRY budget of 130\.5 kB/);
   });
 });

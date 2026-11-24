@@ -68,6 +68,8 @@ export interface KanbanCard {
   /** Optional reusable work-item aggregate behind this card. Legacy cards omit it. */
   workItemId?: string;
   order: number;
+  /** ADR 1155 D1 — stable grouping keys (at most 8). */
+  facets?: Record<string, string>;
   createdAt: string;
   updatedAt: string;
 }
@@ -118,6 +120,8 @@ export interface KanbanBoard {
   /** ADR 0045 — the canonical owner. A board an agent files onto (`kanban.add-todo`,
    *  `ensureSubjectBoard`) carries ONLY this, not the legacy `rosterId`. */
   ownerSubject?: { kind: string; id: string };
+  /** ADR 1155 D7 — the facet key the board groups its swimlanes by, by default. */
+  groupBy?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -158,10 +162,30 @@ export async function createBoard(input: {
   return (await res.json()) as KanbanBoard;
 }
 
-export async function getBoard(boardId: string): Promise<{ board: KanbanBoard; cards: KanbanCard[]; workItems: KanbanWorkItem[] }> {
-  const res = await fetch(`${base}/boards/${encodeURIComponent(boardId)}`, fetchOpts({ headers: authedHeaders() }));
+/** ADR 1155 D3 — one page of a board: `limit` turns paging on. */
+export interface BoardPageParams { limit: number; cursor?: string; column?: string }
+
+/** A board read. `total` and `nextCursor` are present only on a paged read from a
+ *  host that pages; an unpaged read, or an older host, returns every card. */
+export interface KanbanBoardRead {
+  board: KanbanBoard;
+  cards: KanbanCard[];
+  workItems: KanbanWorkItem[];
+  total?: number;
+  nextCursor?: string;
+}
+
+export async function getBoard(boardId: string, page?: BoardPageParams): Promise<KanbanBoardRead> {
+  const query = page
+    ? `?${new URLSearchParams({
+      limit: String(page.limit),
+      ...(page.cursor ? { cursor: page.cursor } : {}),
+      ...(page.column ? { column: page.column } : {}),
+    }).toString()}`
+    : '';
+  const res = await fetch(`${base}/boards/${encodeURIComponent(boardId)}${query}`, fetchOpts({ headers: authedHeaders() }));
   if (!res.ok) throw new Error(`getBoard returned ${res.status}`);
-  return (await res.json()) as { board: KanbanBoard; cards: KanbanCard[]; workItems: KanbanWorkItem[] };
+  return (await res.json()) as KanbanBoardRead;
 }
 
 /** Start a manually-dispatched reusable WorkItem. The selected workflow remains
@@ -257,6 +281,8 @@ export async function patchCard(
     blockerNote?: string;
     /** ADR 0963 — apply `blockerNote` only if the stored note is still this one (409 otherwise). */
     ifBlockerNote?: string;
+    /** ADR 1155 D1 — merged; a key set to `null` clears it, `null` clears the map. */
+    facets?: Record<string, string | null> | null;
   },
 ): Promise<{ card: KanbanCard; triggeredRunId: string | null }> {
   const res = await fetch(

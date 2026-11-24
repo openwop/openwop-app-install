@@ -93,6 +93,10 @@ Two facts about this host shape the decision:
   - A source record that carries a recipe-2 key is served to a replay only
     when the replay's recomputed key equals it. On a mismatch the replay
     dispatches live.
+    > **CORRECTED 2026-11-23 (ADR 1002, #6156):** a replay fork no longer
+    > dispatches live on a mismatch. ADR 1002 makes it refuse with a typed
+    > `ReplayEffectError` ("no matching recorded AI invocation"), so a fork
+    > never re-fires a paid provider call.
   - A source record with no key was recorded under RFC 0041's recipe and keeps
     today's matching.
 - **D9 — sabotage switches.** Under `OPENWOP_TEST_SEAM_ENABLED` only,

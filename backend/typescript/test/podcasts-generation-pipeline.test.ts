@@ -32,6 +32,10 @@
  * authorization, its no-write refusal list, its notebook / unreadable / toggle / empty
  * checks and its grounding source; `recordOrFail`'s refusal; `readRefused`; each
  * `stillWritable` site; the surface's `errorCode` allowlist.
+ *
+ * TST-OAL-1 (2026-11-22, user decision): `mix`'s REFUSED-mux branch (ADR 1115 D2) is
+ * witnessed by a surface whose `mixClips` alone refuses. Red when the node reads a
+ * refusal as the codec degrade (success with no audio) or drops the surface's code.
  */
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { selectContent, outline, transcript, synthesize, mix } from '../../../packs/feature.podcasts.nodes/index.mjs';
@@ -201,6 +205,27 @@ describe('PODC-1 — the `mix` NODE, driven through the real ctx.features.podcas
     // New clips without new audio now clear the old asset, so publish readiness can
     // never pass audio that does not match what is stored.
     expect(after!.audioMediaRef).toBeUndefined();
+  });
+
+  // TST-OAL-1 (2026-11-22, user decision) — ADR 1115 D2 keeps a REFUSED mux distinct
+  // from the codec degrade. Over the real surface the refusal is unreachable here
+  // (the write just above re-resolves the same access first), so the surface's
+  // `mixClips` alone is replaced, and both outcomes are driven through the real node.
+  const withMix = (mixed: { url: string; refused?: string }) =>
+    ({ podcasts: { ...surface(), mixClips: async () => mixed } });
+
+  it('a REFUSED mix fails `mix` typed with the surface\'s code, and publishes no audio', async () => {
+    const episodeId = await seedEpisodeWithClips('mix refused');
+    const out = await mix({ inputs: { episodeId, clips: [CLIPS[0]] }, features: withMix({ url: '', refused: 'podcast_write_forbidden' }) });
+    expect(out).toEqual({ status: 'failed', error: { code: 'podcast_write_forbidden', message: "the podcasts surface refused this run's mix (podcast_write_forbidden)" } });
+    expect((await getEpisode(TENANT, episodeId))!.audioMediaRef).toBeUndefined();
+  });
+
+  it('control: the codec degrade (a bare `url: \'\'`) still SUCCEEDS, keeping the playlist', async () => {
+    const episodeId = await seedEpisodeWithClips('mix degraded');
+    const out = await mix({ inputs: { episodeId, clips: [CLIPS[0]] }, features: withMix({ url: '' }) });
+    expect(out).toEqual({ status: 'success', outputs: { clipCount: 1, audioMediaRef: '' } });
+    expect((await getEpisode(TENANT, episodeId))!.clips.map((c) => c.url)).toEqual(['/media/clip-one']);
   });
 
   it('a run that DID synthesize clips records them (the node still writes)', async () => {

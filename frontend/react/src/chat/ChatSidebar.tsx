@@ -486,6 +486,9 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
     messageCount: session.messages.length, isSending, continueRef: approvalContinueRef,
   });
   const answerClarification = useClarificationAnswer({ send, config, baseSendOptions: getSubmitExtras });
+  // ADR 1156 — the held-call card's one-press Continue rides the same submit as the
+  // approvals dialog's (bound below, after `onUserSubmit` exists).
+  const heldCallHost = useMemo(() => ({ sessionId: session.id, onContinue: (text: string) => approvalContinueRef.current?.(text) }), [session.id]);
   // ADR 0768 D2 — judge attachments by the model that will ACTUALLY answer (the
   // per-message override, else the default).
   const { supportsImageInput, supportsPdfInput } = attachmentCaps(config.provider, config.model, selectedModel);
@@ -893,6 +896,7 @@ export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, t
           composerModifiers={composerModifiers}
           onResolveInterrupt={resolveInterrupt}
           onAnswerClarification={answerClarification}
+          heldCallHost={heldCallHost}
           progress={{ focusedMessageId: workbench.tab === 'run' ? focusedWorkflowMessageId : null, onOpen: openProgressForRun }}
           onRegenerate={onRegenerate}
           onBranchFrom={(fromSeq) => { void onBranchFrom(fromSeq); }}

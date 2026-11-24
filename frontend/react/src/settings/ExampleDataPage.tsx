@@ -238,7 +238,6 @@ export function ExampleDataPage(): JSX.Element {
         lede={t('exampleDataLede')}
       />
 
-      {error ? <Notice variant="error">{error}</Notice> : null}
       {!seedEnabled ? <Notice variant="info">{t('seedDisabledNotice')}</Notice> : null}
 
       <div className="surface-card u-mt-3">
@@ -299,6 +298,9 @@ export function ExampleDataPage(): JSX.Element {
           </Button>
         </div>
 
+        {/* Next to the buttons that caused it, and announced: a refusal shown above a
+            long list, with focus left on the button, read as a dead button. */}
+        {error ? <div className="u-mt-2"><Notice variant="error" announce={error}>{error}</Notice></div> : null}
         {result ? <ResultList result={result} /> : null}
       </div>
     </section>

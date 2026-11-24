@@ -149,14 +149,18 @@ describe.each([
     expect(served.content).toBe('The answer is 42.');
   });
 
-  it('control: a fork whose MESSAGES differ misses and calls live (the digest is not blind)', async () => {
+  // CORRECTED 2026-11-23 (user decision on #6206, ADR 1002 explicit-source
+  // correction): a replay miss now REFUSES instead of calling live. The control
+  // still discriminates: a digest blind to messages would SERVE the source's
+  // record here (no throw); a sighted digest misses, and the miss refuses with
+  // zero provider calls.
+  it('control: a fork whose MESSAGES differ misses and refuses (the digest is not blind)', async () => {
     beginNodeActivity(`run-src3-${label}`, NODE, 1);
     await adapterFor(`run-src3-${label}`, byok).callAIWithTools(reqFor(byok));
     provider().mockClear();
     beginNodeActivity(`run-fork3-${label}`, NODE, 1);
-    const out = await adapterFor(`run-fork3-${label}`, byok, `run-src3-${label}`).callAIWithTools({ ...reqFor(byok), messages: [{ role: 'user', content: 'A different question.' }] });
-    expect(provider()).toHaveBeenCalledTimes(1);
-    // The live round answered the NEW question (round 1 of the script asks for the tool).
-    expect(out.toolCalls?.map((t) => t.name)).toEqual([TOOL_NAME]);
+    const refused = adapterFor(`run-fork3-${label}`, byok, `run-src3-${label}`).callAIWithTools({ ...reqFor(byok), messages: [{ role: 'user', content: 'A different question.' }] });
+    await expect(refused).rejects.toMatchObject({ name: 'ReplayEffectError', code: 'replay_source_missing', effectKind: 'network-egress' });
+    expect(provider()).toHaveBeenCalledTimes(0);
   });
 });

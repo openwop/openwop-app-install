@@ -9,7 +9,7 @@ const TIMEOUT_MS = 4_000;
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
-async function callContract(request: { command: 'expand-kernel' } | { command: 'validate'; definition: unknown } | { command: 'build-inputs'; definition: unknown; target: string; outputs: Record<string, Record<string, unknown>> }): Promise<Record<string, unknown>> {
+async function callContract(request: { command: 'chain-export-catalog' } | { command: 'chain-export-load'; manifestJson: string; params: Record<string, unknown> } | { command: 'expand-kernel' } | { command: 'validate'; definition: unknown } | { command: 'build-inputs'; definition: unknown; target: string; outputs: Record<string, Record<string, unknown>> }): Promise<Record<string, unknown>> {
   if (Buffer.byteLength(JSON.stringify(request)) > MAX_BYTES) throw new Error('Builder contract request exceeds limit');
   const backend = resolve(process.cwd(), '../../backend/typescript');
   const helper = join(backend, 'test/support/builderContractProcess.ts');
@@ -71,4 +71,31 @@ export async function projectBuilderInputs(definition: unknown, target: string, 
   const reply = await callContract({ command: 'build-inputs', definition, target, outputs });
   if (!isRecord(reply.inputs)) throw new Error('Invalid projected input response');
   return reply.inputs;
+}
+
+/** These rows come from the real backend metadata producer, not stubEntry(). */
+export interface ExportCatalogRow {
+  typeId: string; version?: string; label: string; source: 'local' | 'pack';
+  packName?: string; inputSchema?: unknown; outputSchema?: unknown;
+}
+export async function chainExportCatalog(): Promise<{ nodes: ExportCatalogRow[]; digest: string }> {
+  const reply = await callContract({ command: 'chain-export-catalog' });
+  if (!Array.isArray(reply.nodes) || !reply.nodes.every((n): n is ExportCatalogRow => isRecord(n)
+    && typeof n.typeId === 'string' && typeof n.label === 'string'
+    && (n.version === undefined || typeof n.version === 'string')
+    && (n.source === 'pack' || n.source === 'local'))
+    || typeof reply.digest !== 'string') throw new Error('Invalid real catalog response');
+  return { nodes: reply.nodes, digest: reply.digest };
+}
+export interface ExportLoadResult {
+  catalogDigest: string; manifestDigest: string; errors: unknown[];
+  entry: Record<string, unknown> | null; definition: Record<string, unknown> | null;
+}
+export async function loadChainExport(manifestJson: string, params: Record<string, unknown> = {}): Promise<ExportLoadResult> {
+  const reply = await callContract({ command: 'chain-export-load', manifestJson, params });
+  if (typeof reply.catalogDigest !== 'string' || typeof reply.manifestDigest !== 'string'
+    || !Array.isArray(reply.errors) || !(reply.entry === null || isRecord(reply.entry))
+    || !(reply.definition === null || isRecord(reply.definition))) throw new Error('Invalid real loader response');
+  return { catalogDigest: reply.catalogDigest, manifestDigest: reply.manifestDigest,
+    errors: reply.errors, entry: reply.entry, definition: reply.definition };
 }

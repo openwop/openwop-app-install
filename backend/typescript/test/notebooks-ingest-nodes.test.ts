@@ -19,7 +19,6 @@
  */
 
 import { describe, expect, it } from 'vitest';
-// @ts-expect-error — untyped .mjs pack module (loaded the way the runtime does)
 import * as pack from '../../../packs/feature.notebooks.nodes/index.mjs';
 
 type ContentPart = { type: string; text?: string; mimeType?: string; dataBase64?: string };
@@ -41,8 +40,8 @@ describe('feature.notebooks.nodes — transcribe-source (ADR 0085)', () => {
     };
     const out = await pack.transcribeSource(ctx);
     expect(out.status).toBe('success');
-    expect(out.outputs.transcript).toBe('Hello world.');
-    expect(out.outputs.empty).toBe(false);
+    expect(out.outputs?.transcript).toBe('Hello world.');
+    expect(out.outputs?.empty).toBe(false);
     // The audio part is shaped per RFC 0091 (type:'audio' + dataBase64 + mimeType).
     expect(audioPartOf(seen)).toEqual({ type: 'audio', mimeType: 'audio/mpeg', dataBase64: 'QUJD' });
     expect(seen?.provider).toBe('google');
@@ -70,8 +69,8 @@ describe('feature.notebooks.nodes — fetch-youtube-source (ADR 0085)', () => {
       },
     };
     const out = await pack.fetchYoutubeSource(ctx);
-    expect(out.outputs.transcript).toBe('Hello & welcome\nto the show');
-    expect(out.outputs.empty).toBe(false);
+    expect(out.outputs?.transcript).toBe('Hello & welcome\nto the show');
+    expect(out.outputs?.empty).toBe(false);
   });
 
   it('throws no_transcript when no captions AND no transcription host', async () => {
@@ -113,8 +112,8 @@ describe('feature.notebooks.nodes — fetch-youtube-source (ADR 0085)', () => {
       callAI: async (req: CallAIRequest) => { calledAI = req; return { content: 'Transcribed from the audio.' }; },
     };
     const out = await pack.fetchYoutubeSource(ctx);
-    expect(out.outputs.transcript).toBe('Transcribed from the audio.');
-    expect(out.outputs.source).toBe('stt');
+    expect(out.outputs?.transcript).toBe('Transcribed from the audio.');
+    expect(out.outputs?.source).toBe('stt');
     // It picked the LOWER-bitrate stream (cheapest to transcribe) and sent ITS bytes as an audio part.
     expect(fetched).toContain('https://r1.googlevideo.com/audio-lo');
     expect(audioPartOf(calledAI)).toEqual({ type: 'audio', mimeType: 'audio/webm', dataBase64: Buffer.from('audiobts').toString('base64') });
@@ -129,8 +128,8 @@ describe('feature.notebooks.nodes — ingest-source (ADR 0084 deferred / 0085)',
       features: { notebooks: { ingestSource: async (a: { notebookId: string; title: string; text: string }) => { seen = a; return { ingested: true, sourceId: 's1', title: a.title }; } } },
     };
     const out = await pack.ingestSource(ctx);
-    expect(out.outputs.ingested).toBe(true);
-    expect(out.outputs.sourceId).toBe('s1');
+    expect(out.outputs?.ingested).toBe(true);
+    expect(out.outputs?.sourceId).toBe('s1');
     expect(seen).toEqual({ notebookId: 'nb1', title: 'My recording (audio)', text: 'transcribed words' }); // sourceType woven into the title
   });
 
@@ -169,7 +168,7 @@ describe('feature.notebooks.nodes — hardening (ADR 0085)', () => {
       http: { safeFetch: async (u: string) => u.includes('timedtext') ? textRes(timedtext) : textRes(html) },
     };
     const out = await pack.fetchYoutubeSource(ctx);
-    expect(out.outputs.transcript).toBe('Nested caption works');
-    expect(out.outputs.source).toBe('captions');
+    expect(out.outputs?.transcript).toBe('Nested caption works');
+    expect(out.outputs?.source).toBe('captions');
   });
 });

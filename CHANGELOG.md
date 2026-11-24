@@ -18,6 +18,137 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-11-24
+
+A MINOR release under ADR 0052. **Nothing is breaking for API callers:** no route,
+env var or config key is removed or renamed. It leads with a **security fix**: the
+member Sharing API could mint capability links that only the host should mint,
+including an e-sign signer link. Kanban boards group by a facet and page "Assigned
+to me" (ADR 1155 P5). A held tool call is approved on a card in the chat (ADR 1156
+P1). Two behaviour changes are worth reading (see "Upgrading from 0.19.0"): a replay
+fork now refuses an AI call it has no record for, and the app reloads after a
+confirmed workspace switch or create. No schema migration (sqlite 54 / postgres 52)
+and no app migration (26). It is rolling-safe, not a required stop.
+
+### Security
+
+- **The member Sharing API can no longer mint host-only capability links (#6225).**
+  `POST /host/openwop-app/sharing/orgs/:orgId/links` refused only `campaign_approval`
+  and `client_report`. It now also refuses `sign_request`, `booking_manage`,
+  `collab_invite` and `commerce_order` with the uniform 404. These are minted only by
+  the host's own flows (requesting a signature, a booking, an admin's collaborator
+  invite, a paid order), which are unchanged. `commerce_quote` stays shareable by
+  members. The app's Sharing page never offered these types; the API did. Upgrade
+  promptly if you expose the Sharing API.
+- **A census keeps every share type classified (#6226).**
+  `test/sharing-system-mint-only.test.ts` requires every share type to be either
+  host-only or member-publishable content, and every visitor-lane mint to use a
+  classified type, in host and `src/adopter/` code alike. A new share type fails it
+  until it is classified. **Adopters: carry this test at sync.** It is the only
+  reader of the `__assertMintAccessForTests` seam, so a fork without it reds
+  `test-seam-export-ratchet`. A visitor-lane `document` mint in adopter code passes.
+
+### Added
+
+- **Approve a held tool call on a card in the chat (ADR 1156 P1, #6210).** A card
+  appears under the turn that raised the held call, in the full chat, the tab deck
+  and a persisted embedded chat. One press approves exactly that call and sends the
+  Continue message. The card says whether the call ran, was refused (in the tool's
+  own words) or was superseded because the model asked for different arguments. It
+  is the existing conversation-tools approval, not a second path. Two host-extension
+  run-log events place and settle it, carrying no arguments.
+- **Kanban boards group by a facet, and a board page filters by facets and counts groups (ADR 1155 D3/D7, P5 backend, #6215).** `PATCH …/kanban/boards/:boardId` accepts `groupBy`, a facet key (`null` clears it), beside `name`. The paged `GET …/boards/:boardId?limit=` accepts `facet.<key>=<value>` (repeatable across keys, all must match; an empty value matches cards without the key) and `groupBy` (`column`, `assignee` or a facet key), which adds `groupCounts`. Cards' facets ride the card index's board markers, so changing a board's `groupBy` needs no rebuild. The index declaration is now versioned (ADR 1110, `version`): an index built before this change is rebuilt on its tenant's first read, or queued above 500 cards, never trusted.
+- **`GET /host/openwop-app/me/workspaces` returns a short-lived `selectionToken` for a shared active workspace (ADR 1158, #6219).** See Fixed.
+
+### Changed
+
+- **A replay fork refuses an AI call it has no record for (ADR 1002, #6206).** When a
+  `mode: 'replay'` fork reaches a model call whose request is missing from, or
+  different to, what the source run recorded (including a source deleted or erased
+  since), it now fails with `replay_source_missing` instead of calling the model
+  live. This covers managed and bring-your-own-key calls, plain and with tools.
+  Matching records are still served. A `mode: 'branch'` fork and ordinary live
+  retries call the model as before. Each refusal logs a warning, sets the
+  `openwop.replay_effect_blocked` span attribute and counts
+  `openwop.effect.blocked{effect_kind="network-egress"}`. One case to know: forking a
+  run after a twin-recall grant was revoked now fails rather than completing without
+  the owner's data (ADR 0044 correction).
+- **The app reloads after a confirmed workspace switch or create (ADR 1148, #6207).**
+  The workspace switcher and workspace creation reload once the server confirms the
+  change, unless a newer switch is pending; trial start reloads when the switch's
+  outcome is uncertain. Auth listeners now all run
+  before an error is reported, and the transition is owned by one state machine. The
+  frontend entry-bundle budget rises from 129 to 130 kB gzip (129.3 kB today).
+- **`pubsub_listener_recycled` logs a fixed `reasonCode` (ADR 0900 D2, #6230):**
+  `pubsub_listener_ping_timeout`, `pubsub_listener_error` or `pubsub_listener_end`, so
+  recycles can be counted by cause. `reason` is still logged, hashed as before.
+- **Chain export keeps node layout (D1a, #6206).** The chain loader carries a node's
+  `position` into the definition (it is not part of the definition hash), never its
+  `name`, so no workflow's revision hash moves.
+- **The unpaged kanban board read uses the card index, and `GET /host/openwop-app/kanban/assigned` pages (ADR 1155, #6220).** Once a tenant's card index is built and its legacy tenant index is verified, `GET …/boards/:boardId` (no `limit`) and every display read of a board read only that board's index slice and cards, not every card in the tenant. The response is unchanged. Otherwise the read is as before, so a legacy card with no tenant still shows. `GET …/kanban/assigned?limit=` (1–100; empty means 50) returns `{ cards, total, nextCursor? }`. A bad `cursor` or `limit` is a 400 with `details.reason`, and without `limit` the response is unchanged. The assigned list is now ordered by `updatedAt`, then card id, so ties have a fixed order.
+
+### Fixed
+
+- **The kanban due-date sweep visits every workspace that owns a board (ADR 1138 D4,
+  #6212).** It took its workspaces from the agent roster, so a workspace with boards
+  and assigned cards but no roster agents never got `task.due` notices. It now adds
+  every workspace that owns a board, refreshed once an hour. Such a workspace's first
+  sweep may send its overdue notices at once.
+- **Example data writes land in the shared workspace you have open (ADR 1158,
+  #6219).** With a shared workspace active, every streamed Clear, Load and demo
+  provision was refused `409 example_data_workspace_mismatch`, because those writes go
+  straight to the backend host, whose cookie still named the personal workspace. The
+  page now sends a 10-minute workspace selection token in
+  `x-openwop-workspace-selection`, signed with `OPENWOP_SESSION_SECRET`. It only
+  chooses the workspace: it never signs anyone in, the membership check still decides,
+  and the cookie is not rewritten. The page's error notice now sits beside its buttons
+  and is announced.
+- **A run that fails on a node's stated refusal now names the cause (#6229).** A node
+  that threw a host error such as `conflict` (for example "Missing input: …") used to
+  fail as `internal_error`, and the run-failed notice, the dead-letter `reason` and
+  `run.failed.userMessage` said only "Something went wrong. Check the server logs."
+  The node's own code is now kept, and for `conflict`, `not_found` and
+  `validation_error` its message is what the user reads.
+- **Escape closes the command palette as soon as it opens (#6227).** An Escape pressed
+  before the first paint was lost and the palette stayed open.
+- **The Email feature's not-found check, a stale route-collision entry and two
+  identical stale-data notices (#6218).** `isEmailNotFound` now decides by the 404
+  alone; the `/leaderboard` collision allowlist entry is gone (KickTodo left the repo);
+  the operations page's two stale-data notices (service levels and run admission) now
+  each name their panel, so a screen reader no longer hears one sentence for both.
+
+### Tests and tooling
+
+- **Test-only:** the w117–w121 grade-tests case asks (#6223), a midnight-safe
+  usage-by-feature route test (#6222), the ADR 0145 `/leaderboard` reachability case
+  scoped to in-tree routes (#6221), and ambient types for the notebooks pack, a
+  checked `shaped()` accessor, an A2UI catalog derived from its schema and a test
+  census that counts `it.for` (#6234).
+- **`tracegate-ci` pinned to 0.10.6 (ADR 1028 P1, #6211).** It treats tests that start
+  a process as opaque. The gate's shadow package decides nothing; its first run after
+  upgrade selects the whole frontend lane once.
+
+#### Upgrading from 0.19.0
+
+- **Required stop:** no. **Rolling-safe:** yes. `node scripts/upgrade-plan.mjs
+  0.19.0` → one step, no stop: back up the database (and object store); the schema
+  permits 0.19.0 instances during 0.20.0 migrations; start 0.20.0 (sqlite 54 → 54,
+  postgres 52 → 52, app 26 → 26); check `/readiness` reports version 0.20.0.
+- **Migrations:** none. Schema stays sqlite 54 / postgres 52; app migrations stay 26.
+- **Config:** nothing to change. If a proxy or CDN sits in front of the backend's
+  direct host, it must pass the `x-openwop-workspace-selection` request header (the
+  backend's own CORS allow-list already admits it).
+- **Behaviour:** a `mode: 'replay'` fork that reaches an AI call with no matching
+  record now fails with `replay_source_missing` instead of calling the model; use
+  `mode: 'branch'` to re-run live. The app reloads after a confirmed workspace switch
+  or create. Workspaces whose boards have no roster agents start getting due-date
+  notices.
+- **Adopters:** carry `test/sharing-system-mint-only.test.ts` at sync (it is the only
+  reader of `__assertMintAccessForTests`). If your fork changed the entry-bundle
+  budget, note that it is now 130 kB gzip.
+- **Steps:** back up the database, deploy the new backend image and then the
+  frontend, and check that `/readiness` reports `"version": "0.20.0"`.
+
 ## [0.19.0] — 2026-11-23
 
 A MINOR release under ADR 0052. **Nothing is breaking for API callers or operators:**

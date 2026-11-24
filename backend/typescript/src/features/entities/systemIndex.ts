@@ -48,6 +48,12 @@ export interface SystemIndexDecl<R = EntityRecord> {
   orgOf(rec: R): string | undefined;
   /** Every marker the row should have. Pure and deterministic. */
   markers(rec: R): IndexMarker[];
+  /** ADR 1155 P5 — bump when `markers` changes shape for rows that did not change (a
+   *  new family, a wider projection). A tenant built at another version reads as not
+   *  built: its first read rebuilds it (inline, or queued above `INLINE_BUILD_MAX`)
+   *  and the hourly drift check queues it, so no reader trusts old-shape markers.
+   *  Defaults to 0. */
+  version?: number;
   /** The family the per-org row counter follows. Each row has at most one marker in it. */
   countedFamily: string;
   /** A family EVERY row has exactly one marker in (its size is the row count): the
@@ -82,7 +88,7 @@ interface MarkerRow { k: string; tenantId: string; orgId?: string; type: string;
 interface ManifestRow { k: string; tenantId: string; orgId?: string; type: string; id: string; keys: string[]; hash: string; counted: boolean; w?: number }
 interface PendRow { k: string; tenantId: string; type: string; id: string; dirty: boolean; lease?: string; until?: number; at: string; markedAt?: number }
 interface CountRow { k: string; tenantId: string; orgId: string; type: string; count: number; sum?: number }
-interface BuiltRow { k: string; tenantId: string; type: string; builtAt: string }
+interface BuiltRow { k: string; tenantId: string; type: string; builtAt: string; v?: number }
 
 // Every index row's id starts with its tenant (teardown deletes one key range), and an
 // index row is never an org's own data (the org-delete guard does not count it).
@@ -104,6 +110,7 @@ interface Decl {
   markers(row: unknown): IndexMarker[];
   idOf(row: unknown): string;
   tenantOf(row: unknown): string;
+  version: number;
   countedFamily: string;
   everyRowFamily: string;
   weightOf: ((row: unknown) => number) | null;
@@ -138,6 +145,7 @@ export function registerSystemIndex(typeName: string, decl: SystemIndexDecl): vo
     markers: (row) => (isEntityRecord(row) ? decl.markers(row) : []),
     idOf: (row) => (isEntityRecord(row) ? row.entityId : ''),
     tenantOf: (row) => (isEntityRecord(row) ? row.tenantId : ''),
+    version: decl.version ?? 0,
     countedFamily: decl.countedFamily,
     everyRowFamily: decl.everyRowFamily ?? decl.countedFamily,
     weightOf: decl.weightOf ? (row) => (isEntityRecord(row) ? weightOfRow(decl.weightOf!(row)) : 0) : null,
@@ -154,6 +162,7 @@ export function registerStoreIndex<R>(typeName: string, decl: StoreIndexDecl<R>)
     markers: (row) => (decl.isRow(row) ? decl.markers(row) : []),
     idOf: (row) => (decl.isRow(row) ? decl.idOf(row) : ''),
     tenantOf: (row) => (decl.isRow(row) ? decl.tenantOf(row) : ''),
+    version: decl.version ?? 0,
     countedFamily: decl.countedFamily,
     everyRowFamily: decl.everyRowFamily ?? decl.countedFamily,
     weightOf: decl.weightOf ? (row) => (decl.isRow(row) ? weightOfRow(decl.weightOf!(row)) : 0) : null,
@@ -541,7 +550,7 @@ export async function rebuildSystemIndex(tenantId: string, typeName: string): Pr
     afterId = page.lastId;
   }
   for (const org of orgs) await indexedCount(tenantId, typeName, org, { exact: true });
-  await built.put({ k: rowKey(tenantId, typeName, ''), tenantId, type: typeName, builtAt: new Date().toISOString() });
+  await built.put({ k: rowKey(tenantId, typeName, ''), tenantId, type: typeName, builtAt: new Date().toISOString(), ...(decl.version ? { v: decl.version } : {}) });
   return { rows, removed };
 }
 
@@ -585,10 +594,11 @@ export async function ensureSystemIndexBuilt(tenantId: string, typeName: string)
   if (verified.has(vk)) return 'built';
   const count = decl.count ?? countRows;
   const rows = count ? await count(tenantId, typeName) : 0;
-  if (await built.get(vk)) {
+  const b = await built.get(vk);
+  if (b) {
     const indexed = await markers.countByPrefix(`${tenantId}:${enc(typeName)}:${decl.everyRowFamily}:`);
-    if (indexed === rows) { verified.add(vk); return 'built'; }
-    await built.delete(vk); // drifted: rebuild below
+    if (indexed === rows && (b.v ?? 0) === decl.version) { verified.add(vk); return 'built'; }
+    await built.delete(vk); // drifted, or built at another version: rebuild below
   }
   if (rows > INLINE_BUILD_MAX) {
     await buildQueue.put({ k: vk, tenantId, type: typeName, at: new Date().toISOString() });
@@ -621,7 +631,8 @@ export async function checkSystemIndex(tenantId: string, typeName: string): Prom
     if (!page.lastId) break;
     afterId = page.lastId;
   }
-  if (indexed === rows && (await built.get(vk))) return true;
+  const b = await built.get(vk);
+  if (indexed === rows && b && (b.v ?? 0) === decl.version) return true;
   verified.delete(vk);
   await built.delete(vk);
   await buildQueue.put({ k: vk, tenantId, type: typeName, at: new Date().toISOString() });

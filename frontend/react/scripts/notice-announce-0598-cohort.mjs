@@ -166,7 +166,6 @@ const HOST_LEGACY_SILENT_READ_SITES = [
   ['settings/AuditLogPage.tsx', 'error', 1],
   ['settings/AuditLogPage.tsx', 'exportError', 1],
   ['settings/EventBindingsPage.tsx', 'error', 1],
-  ['settings/ExampleDataPage.tsx', 'error', 1],
   ['settings/HeartbeatSettingsPage.tsx', 'error', 1],
   ['walkthroughs/WalkthroughsPage.tsx', 'error', 1],
   ['workforces/TraceSearchPanel.tsx', 'error', 1],

@@ -246,3 +246,50 @@ Four more probes carried `[x]` with no result, date or database at all — unche
 **No RFC.** Node-pack schema declarations and steward docs are not the wire.
 `CONTRIBUTING.md` in `../openwop` is a contributor contract, corrected for
 accuracy rather than changed in substance.
+
+## Correction — chain export execution fidelity (issue82, proposal2768)
+
+Status: Accepted (2026-11-18). Targeted native qualification is recorded;
+the complete composition gate and deployed regression remain required.
+Historical decision and evidence remain unchanged.
+
+Use serializeWithIdMap and its sourceOutputForWire authority to export canonical
+default/named endpoints, five supported condition operators and nondefault
+triggers. First-dot loader parsing is compatible with canonical serializer IDs;
+literal out/output and dotted port suffixes stay named. Comparison false/0/null
+survive; truthy/falsy omit right. Host exists is refused, not approximated.
+
+Native producer-to-loader qualification also reproduced dropped node names.
+The same expansion projection omitted positions; the fragment declares both and
+the workflow wire accepts both. Carry these authored presentation fields
+through the existing loader, cloning coordinates rather than sharing the pack's
+object. Node identities, execution routing and deterministic expansion remain
+under the same existing owners; no new wire field is introduced.
+
+This is an execution-fidelity subset, not an archival export. Normal builder
+defaults '{}'/blank, absent/empty schema, empty variables/configurable schema,
+name/layout and false transient remain allowed. Effective metadata/defaults use
+the existing composer/editor-metadata helpers. Business/custom metadata,
+meaningful declarations/lifecycle and unknown/unmapped authored fields refuse;
+false/zero/null are not generic absence. The loader's last-terminal primary is
+explicit normalization; only an authored matching primary is allowed.
+
+The accepted wire supports compensation/irreversibility, but this exporter lacks
+a complete pinned inverse/reference transform. Those fields, agent/runtime
+variable/child-workflow bindings and other unrepresented semantics therefore
+refuse as EXPORTER limitations. Trusted localized copy offers complete workflow
+JSON Export and states the graph is unchanged, without interpolated private
+values. No new wire field or RFC shape is introduced.
+
+The shared chain-export failure path also retires a previously opened publish
+helper. A real mounted retry reproduced a visible refusal alongside the earlier
+helper's still-connected download action; retaining that older snapshot makes
+the retry's outcome ambiguous. Editing alone does not dismiss the helper.
+
+New tests use actual builder initialization, real backend catalog metadata,
+actual frontend exporter bytes and actual loader/expander through the existing
+bounded IPC seam. No idealized manifest, whole-catalog mock, cross-suite ordering,
+node execution or signed-registry/auth claim. Existing tests remain intact.
+Independent review, admitted baseline/fixed native runs, causal controls,
+canonical checks/exact-tree gate, real UI no-download/refusal/privacy and
+deployed issue82 regression are required before claiming the repair complete.

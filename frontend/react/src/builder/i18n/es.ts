@@ -77,6 +77,7 @@ export const messages = {
   exportChainPackTitle: 'Exportar como un manifiesto de workflow-chain-pack (enviar mediante el flujo de PR del registro)',
   exportChainPackNoVersion: 'No se puede exportar este paquete de cadena: no se conoce la versión instalada de {{types}}, y una cadena publicada debe indicar versiones exactas de los nodos. Comprueba que estos tipos de nodo estén instalados en este host, recarga e inténtalo de nuevo.',
   exportChainPackCatalogUnavailable: 'Aún no se puede exportar: el catálogo de nodos no se cargó desde este host, así que no se pueden fijar las versiones de los nodos. Comprueba tu conexión e inténtalo de nuevo.',
+  exportChainPackFidelity: "Esta exportación no puede conservar todos los detalles de este flujo. Usa Exportar para conservar el JSON completo del flujo; tu flujo no ha cambiado.",
   publishToRegistry: 'Publicar en el registro…',
   publishToRegistryTitle: 'Publicar este flujo de trabajo como paquete de cadena en packs.openwop.dev (guía a través del flujo de envío basado en PR)',
   import: 'Importar',

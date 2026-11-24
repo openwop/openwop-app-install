@@ -24,4 +24,9 @@ describe('issue 5962 — EmailApiError', () => {
     expect(isEmailNotFound(err)).toBe(false);
     expect(isEmailNotFound(new Error('getTemplate returned 404'))).toBe(false);
   });
+
+  it('TST-OAR-1 — the status decides, not the code: a non-404 carrying `not_found` is not a not-found', () => {
+    expect(isEmailNotFound(new EmailApiError('Template not found.', 404))).toBe(true);
+    expect(isEmailNotFound(new EmailApiError('nope', 409, 'not_found'))).toBe(false);
+  });
 });

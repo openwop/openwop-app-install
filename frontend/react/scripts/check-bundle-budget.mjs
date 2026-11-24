@@ -276,7 +276,12 @@ const ASSETS = 'dist/assets';
 // the user chose to "raise the budget a little" instead, so it stays at 129 kB and the
 // reclaimed ~2.4 kB is headroom. `navCopyRatchet.test.ts` keeps a literal from coming
 // back beside a key.
-const ENTRY_GZIP_BUDGET = 129 * 1024;
+// ═══ 2026-11-23: RAISED 129 -> 130 kB (user decision, #6207 / ADR 1148). ═══
+// The ADR 1148 workspace transition machine in `client/workspaceClient.ts` is on
+// the boot path (App, the switcher, config), and it took the entry 127.6 -> 129.3 kB
+// gzip, 307 B over. Asked to choose between a lazy split and a raise, the user
+// chose the raise. About 0.7 kB of headroom remains.
+const ENTRY_GZIP_BUDGET = 130 * 1024;
 
 /**
  * ═══ 2026-10-18: a DECLARED white-label entry share (ADR 0874 amendment, user

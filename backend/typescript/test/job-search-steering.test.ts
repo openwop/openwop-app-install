@@ -28,12 +28,10 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { getSteering, putSteering, eraseSubjectSteering, DEFAULT_POLICY, MAX_GOALS_CHARS } from '../src/features/job-search/agent/steering.js';
-import { computePriority } from '../src/host/weightedScoring.js';
 import { runTenantCampaignPass } from '../src/features/job-search/autopilot/campaignRun.js';
 import { registerBoardAdapter, getBoardAdapter, type BoardAdapter } from '../src/features/job-search/boards/adapters.js';
 import { upsertListing } from '../src/features/job-search/boards/listing.js';
 import { createApplyGrant } from '../src/host/applyGrant.js';
-import { JOB_FIT_CRITERIA, projectFitScores } from '../src/features/job-search/domain/fitScoring.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 import { stripComments } from './helpers/stripComments.js';
@@ -75,21 +73,11 @@ describe('ADR 0543 P5 / OQ-2 — the PROSE never reaches ranking', () => {
   });
 
   it('changing the goals PROSE does not change a single score', async () => {
-    const digest = { title: 'Backend Engineer', companyName: 'Acme', location: null, remote: null,
-      skills: ['typescript'], requirements: [], responsibilities: [], descriptionExcerpt: '',
-      employmentType: 'w2' as const, sponsorship: 'silent' as const, citizenshipRequirementQuote: null,
-      clearanceRequirementQuote: null, sponsorshipQuote: null, salaryMin: null, salaryMax: null,
-      currency: null, sourceUrl: null, capturedAt: '', dealId: 'd', tenantId: TENANT, version: 1 };
-    const profile = { skills: ['TypeScript'], targetTitles: ['Backend Engineer'], salaryFloor: null, wantsRemote: null };
-    const before = computePriority(JOB_FIT_CRITERIA, projectFitScores(digest, profile));
-
-    await putSteering(TENANT, { goals: 'I really want to move into platform work and avoid agencies.' }, 'user-1');
-    const after = computePriority(JOB_FIT_CRITERIA, projectFitScores(digest, profile));
-
-    expect(after, 'prose changed a score — selection is no longer reproducible').toBe(before);
-
-    // The tripwire with teeth: the pass builds its fit profile from steering, so
-    // this is where prose COULD reach a score. The goals name the listing's title
+    // TST-OAL-2 (user decision 2026-11-22): this case used to open with a
+    // `computePriority` before/after `putSteering`. That half called a pure
+    // function steering never enters, so it could not fail, and was dropped.
+    // The campaign pass is the one place steering reaches a score:
+    // this is where prose COULD reach one. The goals name the listing's title
     // exactly; folded into the profile, the title match would rise and the
     // below-floor detail ("scored N, floor 10") would change.
     const NOW = Date.now();

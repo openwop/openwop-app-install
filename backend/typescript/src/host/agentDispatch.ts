@@ -1131,7 +1131,11 @@ export interface ChatToolLoopOpts {
   /** ADR 0834 FW2-D1 — per-call approvals for the ADR 0132 scope gate (the SAME grant the
    *  firewall is built with, so one approval answers both gates for one call). A tool in
    *  `capabilityScope.requireApproval` runs only when this says its exact call is approved. */
-  approvalGrant?: { check: (toolName: string, origin: 'baseline' | 'policy' | undefined, input: Record<string, unknown> | undefined, callKey: string) => boolean };
+  approvalGrant?: {
+    check: (toolName: string, origin: 'baseline' | 'policy' | undefined, input: Record<string, unknown> | undefined, callKey: string) => boolean;
+    /** ADR 1156 D6 — the person declined exactly this call; the gate refuses it at once. */
+    declined?: (toolName: string, input: Record<string, unknown> | undefined) => boolean;
+  };
   /** ADR 0397 Phase 1 — best-effort sink for a firewall verdict that narrowed a tool
    *  call (`deny` / `require-approval`). The host closure captures the tenant + run and
    *  records it to the unified governance decision log; this loop stays feature-free and
@@ -1596,6 +1600,13 @@ export async function runChatToolLoop(
       // ceiling. Recorded as agent.toolReturned{forbidden} is wrong here (it is not
       // forbidden, it is deferred), so it carries a distinct message + the pending
       // list; the requested/resolved decision is recorded by the conversation.
+      // ADR 1156 D6 — the person declined exactly this call on its card: refuse it now
+      // (asking again would raise no card; the decision for these arguments stands).
+      if (opts.approvalGrant?.declined?.(call.name, call.input)) {
+        await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden', error: { code: 'approval_declined', message: 'The person declined this exact request.' } });
+        messages.push({ role: 'user', content: `Tool "${call.name}": the person declined this exact request. Do not retry it with the same arguments; ask what they would like instead.` });
+        continue;
+      }
       if (requireApprovalSet && requireApprovalSet.has(call.name) && !opts.approvalGrant?.check(call.name, 'baseline', call.input, call.id)) {
         if (!pendingApprovals.some((p) => p.toolName === call.name)) {
           // ADR 0834 D2 (FW2-CD-5) — the owner's OWN scope ask is user-level: approving

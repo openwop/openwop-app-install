@@ -77,6 +77,7 @@ export const messages = {
   exportChainPackTitle: 'Export as a workflow-chain-pack manifest (submit via the registry PR flow)',
   exportChainPackNoVersion: "Could not export this chain pack: the installed version of {{types}} isn't known, and a published chain must name exact node versions. Check these node types are installed on this host, reload, and try again.",
   exportChainPackCatalogUnavailable: "Could not export this chain pack: the node catalog didn't load from this host, so node versions can't be pinned. Check your connection and try again.",
+  exportChainPackFidelity: "This export cannot preserve every detail of this workflow. Use Export to keep the complete workflow JSON instead; your workflow has not changed.",
   publishToRegistry: 'Publish to registry…',
   publishToRegistryTitle: 'Publish this workflow as a chain pack on packs.openwop.dev (walks through the PR-based submission flow)',
   import: 'Import',

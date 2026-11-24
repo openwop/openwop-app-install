@@ -121,6 +121,15 @@ froze the *authorization decision*, not the content — privacy-first therefore 
 replay fidelity while making revocation effective even on a fork. Revocation is a safety control
 and wins over replay fidelity for borrowed personal data.
 
+> **CORRECTED 2026-11-23 (user decision on #6206, ADR 1002 explicit-source correction):** "a
+> forked run may recall *less*" assumed the fork then called the model live and completed. A
+> replay fork no longer sends an unrecorded request to a model. So after a revoke, the
+> re-executed node composes without the borrowed block, its request misses the source's
+> invocation record, and a `mode:'replay'` fork **fails** with `replay_source_missing` and makes no
+> provider call. Revocation still wins: no borrowed content reaches the fork, a provider or the
+> wire. To re-run live after a revoke, fork with `mode:'branch'`. Witness:
+> `test/twin-fork-revoke.test.ts` leg 3.
+
 ### 5. Audit
 Every cross-subject recall emits an audit row (`storage.listAudit`) keyed by `{runId, agentId,
 twin.userId, grantVersion}` so a user (and an admin) can see when their memory was used.

@@ -14,6 +14,10 @@
  * (`java\tscript:` then reads as a relative href), dropping `mailto` from the
  * allowed schemes, or fencing a chart/embed with a fixed ``` instead of
  * `fenceFor(body)` → the export-hygiene cases go red.
+ *
+ * DE87CD-13 hard breaks (TST-OAH-1, 2026-11-22): a `hardBreak` node exported
+ * as a bare `\n`, or a text node's newline left unconverted → the hard-break
+ * cases go red.
  */
 import { describe, it, expect } from 'vitest';
 import { pmToMarkdown } from '../pmToMarkdown.js';
@@ -211,5 +215,18 @@ describe('block-leading escaping (grade pass)', () => {
   it('fences an embed or chart with more backticks than any run inside it', () => {
     expect(pmToMarkdown(doc([{ type: 'embedBlock', attrs: { html: '<p>```</p><script>x</script>' } }]))).toBe('````html\n<p>```</p><script>x</script>\n````\n');
     expect(pmToMarkdown(doc([{ type: 'chartBlock', attrs: { spec: '{"t":"````"}' } }]))).toBe('`````chart\n{"t":"````"}\n`````\n');
+  });
+});
+
+// TST-OAH-1 (user decision 2026-11-22): the hard-break export had no frontend case.
+// Both shapes must export the Markdown hard break (two spaces, then a newline). A
+// bare `\n` would re-import as one joined line, and a dropped break as `ab`.
+describe('hard breaks (DE87CD-13, ADR 1055 D5)', () => {
+  it('exports a hardBreak node as a Markdown hard break', () => {
+    expect(pmToMarkdown(doc([{ type: 'paragraph', content: [text('a'), { type: 'hardBreak' }, text('b')] }]))).toBe('a  \nb\n');
+  });
+
+  it('exports a newline inside a text node (an applied AI suggestion) as a hard break, not a lost line', () => {
+    expect(pmToMarkdown(doc([{ type: 'paragraph', content: [text('a\nb')] }]))).toBe('a  \nb\n');
   });
 });

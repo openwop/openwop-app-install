@@ -442,6 +442,10 @@ export interface ChatMessage {
      *  `data` is the host's lifted `ClarificationData`. Set from the run log's
      *  `clarification-requested` event, so it survives a reopen. */
     clarificationAsk?: { askId: string; data: unknown; answered?: boolean };
+    /** ADR 1156 — tool calls this agent turn held for approval, each with its card's
+     *  outcome once known. Set from the run log's `tool-approval-requested` /
+     *  `-settled` events, so it survives a reopen. */
+    heldCalls?: Array<{ askId: string; toolName: string; requestedAt: string; outcome?: 'ran' | 'refused' | 'superseded'; reason?: string }>;
     /** ADR 1001 D7 — this user turn skipped an agent's questions; the feed shows
      *  the viewer's localized line instead of the host's English fallback. */
     clarificationSkipped?: boolean;

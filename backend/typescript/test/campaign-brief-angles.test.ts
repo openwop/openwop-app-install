@@ -45,10 +45,10 @@ import { listTargetingPacks, __resetTargetingStore, TARGETING_PLATFORMS, TARGETI
 import { buildCampaignBriefSurface } from '../src/features/campaign-brief/surface.js';
 import { nodes as nodePack } from '../../../packs/feature.campaign-brief.nodes/index.mjs';
 import type { MessagingKernel } from '../src/features/campaign-brief/types.js';
+import { shaped } from './helpers/shaped.js';
 
 const TENANT = 'tenant-angles';
 const ORG = 'org-1';
-function as<T>(v: unknown): T { return JSON.parse(JSON.stringify(v)); }
 
 const REF = { documentId: 'doc-1', sourceKind: 'kb' as const, locator: 'chunk:0', contentHash: 'a'.repeat(64) };
 const KERNEL: MessagingKernel = {
@@ -104,7 +104,7 @@ describe('surface.persistAngles — closed-world + hook emission', () => {
   it('persists grounded angles, drops unresolvable ones with findings, and emits candidate hooks', async () => {
     const { briefId, evidence } = await briefWithEvidence();
     const surface = buildCampaignBriefSurface({ tenantId: TENANT });
-    const out = as<{ angles: Array<{ id: string; claim: string; proofRefs: string[] }>; droppedFindings: Array<{ index: number; field: string }>; emittedHooks: Array<{ id: string; status: string }> }>(
+    const out = shaped<{ angles: Array<{ id: string; claim: string; proofRefs: string[] }>; droppedFindings: Array<{ index: number; field: string }>; emittedHooks: Array<{ id: string; status: string }> }>(['angles', 'droppedFindings', 'emittedHooks'],
       await surface.persistAngles({
         briefId,
         candidates: [
@@ -128,7 +128,7 @@ describe('surface.persistAngles — closed-world + hook emission', () => {
     await surface.persistAngles({ briefId, candidates: [mk('First')] });
     const hookId = deterministicHookId(TENANT, ORG, 'Two hours, gone.');
     await promoteHook(TENANT, ORG, hookId, 'tested', 'perf:123');
-    const out = as<{ skippedExistingHooks: number; emittedHooks: unknown[] }>(
+    const out = shaped<{ skippedExistingHooks: number; emittedHooks: unknown[] }>(['skippedExistingHooks', 'emittedHooks'],
       await surface.persistAngles({ briefId, candidates: [mk('Second — same hook line')] }),
     );
     expect(out.emittedHooks).toHaveLength(0);
@@ -152,9 +152,9 @@ describe('ADR 1020 D10 (CS70WF-14) — angle ids are content-derived, so a re-ru
     const { briefId, evidence } = await briefWithEvidence();
     const surface = buildCampaignBriefSurface({ tenantId: TENANT });
     const cand = { claim: 'Fastest  picks', positioningLens: 'speed', proofRefs: [evidence[0].id], hookVariants: [] };
-    const first = as<{ angles: Array<{ id: string }> }>(await surface.persistAngles({ briefId, candidates: [cand] }));
+    const first = shaped<{ angles: Array<{ id: string }> }>(['angles'], await surface.persistAngles({ briefId, candidates: [cand] }));
     // Whitespace and case in the claim do not make a new angle.
-    const second = as<{ angles: Array<{ id: string }> }>(await surface.persistAngles({ briefId, candidates: [{ ...cand, claim: 'fastest picks' }] }));
+    const second = shaped<{ angles: Array<{ id: string }> }>(['angles'], await surface.persistAngles({ briefId, candidates: [{ ...cand, claim: 'fastest picks' }] }));
     expect(second.angles.map((a) => a.id)).toEqual(first.angles.map((a) => a.id));
     expect(await listAngles(TENANT, briefId)).toHaveLength(1);
     // A different proof set IS a different angle.
@@ -189,7 +189,7 @@ describe('assembleContext — TESTED-only hooks projection', () => {
       candidates: [{ claim: 'C', positioningLens: 'l', proofRefs: [evidence[0].id], hookVariants: [{ text: 'Tested hook', format: 'question' }, { text: 'Candidate hook', format: 'story' }] }],
     });
     await promoteHook(TENANT, ORG, deterministicHookId(TENANT, ORG, 'Tested hook'), 'tested');
-    const asm = as<{ hooks: Array<{ text: string; id: string }> }>(await surface.assembleContext({ briefId }));
+    const asm = shaped<{ hooks: Array<{ text: string; id: string }> }>(['hooks'], await surface.assembleContext({ briefId }));
     expect(asm.hooks.map((h) => h.text)).toEqual(['Tested hook']);
     // Minimal shape: no status, metricRef, tenant or audit fields reach the prompt.
     expect(Object.keys(asm.hooks[0]!).sort()).toEqual(['angleId', 'format', 'id', 'text']);
@@ -206,7 +206,7 @@ describe('generate-angles node — index→id mapping + typed failures', () => {
     const callAI = vi.fn(async () => ({
       data: { angles: [{ claim: 'Fastest', positioningLens: 'speed', evidenceIndexes: [0, 99], hookVariants: [{ text: 'Two hours, gone.', format: 'bold-claim' }] }] },
     }));
-    const out = as<{ status: string; outputs: { angles: Array<{ proofRefs: string[] }>; emittedHooks: unknown[] } }>(
+    const out = shaped<{ status: string; outputs: { angles: Array<{ proofRefs: string[] }>; emittedHooks: unknown[] } }>(['status', 'outputs'],
       await nodePack['feature.campaign-brief.nodes.generate-angles'](ctx(callAI, briefId)),
     );
     expect(out.status).toBe('success');
@@ -219,21 +219,21 @@ describe('generate-angles node — index→id mapping + typed failures', () => {
   it('fails typed without a kernel', async () => {
     const brief = await createBrief(TENANT, ORG, 'u1', { name: 'NK', productName: 'P' });
     await persistVocEvidence(TENANT, ORG, brief.id, 'u1', [{ quote: 'q', sourceRef: REF, theme: 't', sentiment: 'pain' }]);
-    const out = as<{ status: string; error: { code: string } }>(await nodePack['feature.campaign-brief.nodes.generate-angles'](ctx(vi.fn(), brief.id)));
+    const out = shaped<{ status: string; error: { code: string } }>(['status', 'error'], await nodePack['feature.campaign-brief.nodes.generate-angles'](ctx(vi.fn(), brief.id)));
     expect(out).toMatchObject({ status: 'failed', error: { code: 'kernel_required' } });
   });
 
   it('fails typed without stored evidence', async () => {
     const brief = await createBrief(TENANT, ORG, 'u1', { name: 'NE', productName: 'P' });
     await setKernel(TENANT, brief.id, KERNEL);
-    const out = as<{ status: string; error: { code: string } }>(await nodePack['feature.campaign-brief.nodes.generate-angles'](ctx(vi.fn(), brief.id)));
+    const out = shaped<{ status: string; error: { code: string } }>(['status', 'error'], await nodePack['feature.campaign-brief.nodes.generate-angles'](ctx(vi.fn(), brief.id)));
     expect(out).toMatchObject({ status: 'failed', error: { code: 'grounding_insufficient' } });
   });
 
   it('all-ungrounded after ONE repair is a typed generation_ungrounded failure', async () => {
     const { briefId } = await briefWithEvidence();
     const callAI = vi.fn(async () => ({ data: { angles: [{ claim: 'X', positioningLens: 'y', evidenceIndexes: [42], hookVariants: [] }] } }));
-    const out = as<{ status: string; error: { code: string } }>(await nodePack['feature.campaign-brief.nodes.generate-angles'](ctx(callAI, briefId)));
+    const out = shaped<{ status: string; error: { code: string } }>(['status', 'error'], await nodePack['feature.campaign-brief.nodes.generate-angles'](ctx(callAI, briefId)));
     expect(out).toMatchObject({ status: 'failed', error: { code: 'generation_ungrounded' } });
     expect(callAI).toHaveBeenCalledTimes(2);
     expect(await listAngles(TENANT, briefId)).toHaveLength(0);
@@ -255,11 +255,11 @@ describe('build-targeting node + surface — platform packs', () => {
     let first!: { status: string; outputs: { pack: { keywords: string[]; evidenceRefs: string[] } } };
     let second!: { status: string };
     try {
-      first = as<{ status: string; outputs: { pack: { keywords: string[]; evidenceRefs: string[] } } }>(
+      first = shaped<{ status: string; outputs: { pack: { keywords: string[]; evidenceRefs: string[] } } }>(['status', 'outputs'],
         await nodePack['feature.campaign-brief.nodes.build-targeting'](ctx(mkAI('picking speed'), briefId, 'meta')),
       );
       vi.setSystemTime(Date.now() + 1_000);
-      second = as<{ status: string }>(await nodePack['feature.campaign-brief.nodes.build-targeting'](ctx(mkAI('recount waste'), briefId, 'meta')));
+      second = shaped<{ status: string }>(['status'], await nodePack['feature.campaign-brief.nodes.build-targeting'](ctx(mkAI('recount waste'), briefId, 'meta')));
     } finally {
       vi.useRealTimers();
     }
@@ -285,14 +285,14 @@ describe('build-targeting node + surface — platform packs', () => {
 
   it('rejects an unknown platform typed', async () => {
     const { briefId } = await briefWithEvidence();
-    const out = as<{ status: string; error: { code: string } }>(await nodePack['feature.campaign-brief.nodes.build-targeting'](ctx(vi.fn(), briefId, 'myspace')));
+    const out = shaped<{ status: string; error: { code: string } }>(['status', 'error'], await nodePack['feature.campaign-brief.nodes.build-targeting'](ctx(vi.fn(), briefId, 'myspace')));
     expect(out).toMatchObject({ status: 'failed', error: { code: 'missing_input' } });
   });
 
   it('ungrounded after ONE repair is a typed failure; nothing persists', async () => {
     const { briefId } = await briefWithEvidence();
     const callAI = vi.fn(async () => ({ data: { audiences: ['a'], interests: [], keywords: [], rationale: 'r', evidenceIndexes: [] } }));
-    const out = as<{ status: string; error: { code: string } }>(await nodePack['feature.campaign-brief.nodes.build-targeting'](ctx(callAI, briefId, 'google')));
+    const out = shaped<{ status: string; error: { code: string } }>(['status', 'error'], await nodePack['feature.campaign-brief.nodes.build-targeting'](ctx(callAI, briefId, 'google')));
     expect(out).toMatchObject({ status: 'failed', error: { code: 'generation_ungrounded' } });
     expect(callAI).toHaveBeenCalledTimes(2);
     expect(await listTargetingPacks(TENANT, briefId)).toHaveLength(0);
@@ -333,7 +333,7 @@ describe('CB-UNTRUSTED-1 — stored quotes reach the angle/targeting prompts fen
     const briefId = await briefWithInjectedQuote();
     const callAI = vi.fn(async (_req: unknown) => ({ data: { angles: [{ claim: 'C', positioningLens: 'l', evidenceIndexes: [0], hookVariants: [] }] } }));
     await nodePack['feature.campaign-brief.nodes.generate-angles']({ features: { 'campaign-brief': buildCampaignBriefSurface({ tenantId: TENANT }) }, callAI, inputs: { briefId } });
-    const prompt = as<{ messages: Array<{ content: string }> }>(callAI.mock.calls[0]![0]).messages[0]!.content;
+    const prompt = shaped<{ messages: Array<{ content: string }> }>(['messages'], callAI.mock.calls[0]![0]).messages[0]!.content;
     expect(prompt).toContain(INJECTED); // the quote IS in the prompt (setup reached the call)
     expect(quoteIsFenced(prompt, INJECTED)).toBe(true);
   });
@@ -343,7 +343,7 @@ describe('CB-UNTRUSTED-1 — stored quotes reach the angle/targeting prompts fen
     const briefId = await briefWithInjectedQuote();
     const callAI = vi.fn(async (_req: unknown) => ({ data: { audiences: ['a'], interests: [], keywords: [], rationale: 'r', evidenceIndexes: [0] } }));
     await nodePack['feature.campaign-brief.nodes.build-targeting']({ features: { 'campaign-brief': buildCampaignBriefSurface({ tenantId: TENANT }) }, callAI, inputs: { briefId, platform: 'meta' } });
-    const prompt = as<{ messages: Array<{ content: string }> }>(callAI.mock.calls[0]![0]).messages[0]!.content;
+    const prompt = shaped<{ messages: Array<{ content: string }> }>(['messages'], callAI.mock.calls[0]![0]).messages[0]!.content;
     expect(prompt).toContain(INJECTED);
     expect(quoteIsFenced(prompt, INJECTED)).toBe(true);
   });

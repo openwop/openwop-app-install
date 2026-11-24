@@ -2,14 +2,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { Link, MemoryRouter, Route, Routes } from 'react-router-dom';
 import { blankFilm, type FilmSpec } from '../../../../../contracts/films.js';
-import { onAuthChange } from '../../client/config.js';
+import { fireAuthChanged, onAuthChange } from '../../client/config.js';
 import { listOrgs } from '../../canvas/canvasClient.js';
 import { FilmPresentPage } from './FilmPresentPage.js';
 
-vi.mock('../../client/config.js', async importOriginal => ({
-  ...await importOriginal<typeof import('../../client/config.js')>(),
-  onAuthChange: vi.fn(() => () => {}),
-}));
+vi.mock('../../client/config.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../client/config.js')>();
+  return { ...actual, onAuthChange: vi.fn(actual.onAuthChange) };
+});
 vi.mock('../../canvas/canvasClient.js', async importOriginal => ({
   ...await importOriginal<typeof import('../../canvas/canvasClient.js')>(),
   listOrgs: vi.fn(),
@@ -79,8 +79,7 @@ it('drops the prior identity and reauthorizes organizations before requesting an
   const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(response('Private first identity'));
   mount('/films/film-1/present?org=first');
   await screen.findByRole('heading', { name: 'Private first identity' });
-  const notify = vi.mocked(onAuthChange).mock.calls.at(-1)![0];
-  act(() => notify());
+  act(() => { fireAuthChanged(); });
   expect(screen.queryByRole('heading', { name: 'Private first identity' })).toBeNull();
   await vi.waitFor(() => expect(listOrgs).toHaveBeenCalledTimes(2));
   expect(fetch).toHaveBeenCalledTimes(1);

@@ -124,6 +124,13 @@ export interface BuiltinTool {
    */
   safeModeApproval?: true | { reason: string };
   /**
+   * ADR 1156 D3 — the tool's own plain description of a held call, shown on the chat's
+   * approval card in place of the raw arguments: one line per change, optionally
+   * grouped. Called once, when the call is held; a throw or an empty answer falls back
+   * to the arguments. Host-written, never model text. Bounded by the ledger.
+   */
+  describeApproval?: (input: Record<string, unknown>, ctx: { tenantId: string; conversationId: string }) => Promise<Array<string | { text: string; group?: string }>> | Array<string | { text: string; group?: string }>;
+  /**
    * ADR 0954 P4 — on an ANONYMOUS surface this write may only be HELD for an
    * operator (the RFC 0132 `hitl` control), never auto-run under
    * `rate-limit-session-cap`. Set it for a write whose input a visitor can aim
@@ -729,6 +736,11 @@ export function declaredSafeModeApprovals(): Map<string, string | undefined> {
     if (d) out.set(id, d === true ? undefined : d.reason);
   }
   return out;
+}
+
+/** ADR 1156 D3 — the describer a registered tool declares for its held calls. */
+export function approvalDescriberFor(id: string): BuiltinTool['describeApproval'] {
+  return BUILTINS.get(id)?.describeApproval;
 }
 
 export function registerFeatureAgentTool(tool: BuiltinTool): void {

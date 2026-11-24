@@ -8,7 +8,7 @@
  */
 import { authedHeaders, config, fetchOpts, onAuthChange } from './config.js';
 
-import { listMyWorkspaces } from './workspaceClient.js';
+import { listMyWorkspaces, WORKSPACE_SELECTION_HEADER } from './workspaceClient.js';
 
 const base = `${config.baseUrl}/host/openwop-app/example-data`;
 // Streaming seeds hit Cloud Run DIRECTLY (like SSE) — the Firebase `/api` rewrite
@@ -18,7 +18,7 @@ const streamBase = `${config.sseBaseUrl}/host/openwop-app/example-data`;
 /** Capture host workspace intent before any asynchronous write preparation.
  * The ID is only an assertion; the server retains all tenant/role authority. */
 export async function withExampleDataScope<T>(
-  run: (scope: { expectedTenantId: string; signal: AbortSignal; assertCurrent: () => void }) => Promise<T>,
+  run: (scope: { expectedTenantId: string; signal: AbortSignal; assertCurrent: () => void; selectionHeaders: Record<string, string> }) => Promise<T>,
 ): Promise<T> {
   const controller = new AbortController();
   let changed = false;
@@ -30,7 +30,11 @@ export async function withExampleDataScope<T>(
     const workspace = await listMyWorkspaces({ rememberTenant: false });
     assertCurrent();
     if (typeof workspace.active !== 'string' || !workspace.active) throw new Error('The active workspace could not be confirmed. Reload and try again.');
-    const result = await run({ expectedTenantId: workspace.active, signal: controller.signal, assertCurrent });
+    // ADR 1158 — the streamed writes go straight to the backend host, where this
+    // origin's cookie (and with it the workspace switch) does not travel: carry
+    // the selection explicitly. The server still checks membership.
+    const selectionHeaders: Record<string, string> = workspace.selectionToken ? { [WORKSPACE_SELECTION_HEADER]: workspace.selectionToken } : {};
+    const result = await run({ expectedTenantId: workspace.active, signal: controller.signal, assertCurrent, selectionHeaders });
     assertCurrent();
     return result;
   } finally {
@@ -137,7 +141,7 @@ async function streamSeed(
   return withExampleDataScope(async (scope) => {
     const res = await fetch(`${streamBase}/${path}`, fetchOpts({
       method: 'POST',
-      headers: { ...authedHeaders(), 'content-type': 'application/json', accept: 'application/x-ndjson' },
+      headers: { ...authedHeaders(), ...scope.selectionHeaders, 'content-type': 'application/json', accept: 'application/x-ndjson' },
       body: JSON.stringify({ ...body, expectedTenantId: scope.expectedTenantId }),
       signal: scope.signal,
     }));

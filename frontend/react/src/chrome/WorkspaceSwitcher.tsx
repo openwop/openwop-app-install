@@ -13,13 +13,27 @@
  *
  * @see ../client/workspaceClient.ts, ../../../backend/typescript/src/routes/workspaces.ts
  */
-import { useEffect, useState } from 'react';
-import { fireAuthChanged } from '../client/config.js';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { getCurrentAuthChangeEvent, onAuthChange } from '../client/config.js';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { useBrand } from '../brand/BrandProvider.js';
 import { BuildingIcon, ChevronRightIcon, SettingsIcon } from '../ui/icons/index.js';
-import { listMyWorkspaces, switchWorkspace, createAndEnterWorkspace, type WorkspaceSummary } from '../client/workspaceClient.js';
+import { listMyWorkspaces, switchWorkspace, createAndEnterWorkspace, completeWorkspaceTransition, reloadIfTransitionStranded, getWorkspaceTransitionSnapshot, WorkspaceLifecycleError, type WorkspaceSummary, type WorkspaceMutationResult } from '../client/workspaceClient.js';
+import { Notice } from '../ui/Notice.js';
+import { reloadIntoSession } from '../auth/reloadIntoSession.js';
+import { ApiError } from '../client/requestJson.js';
+
+interface CallerLife { alive: boolean }
+function captureWorkspaceStamp() {
+  const state = getWorkspaceTransitionSnapshot();
+  return { event: getCurrentAuthChangeEvent(), auth: state.authRevision, revision: state.revision };
+}
+function currentWorkspaceStamp(stamp: ReturnType<typeof captureWorkspaceStamp>): boolean {
+  const state = getWorkspaceTransitionSnapshot();
+  return getCurrentAuthChangeEvent() === stamp.event
+    && state.authRevision === stamp.auth && state.revision === stamp.revision;
+}
 
 const NEW = '__new__';
 
@@ -31,51 +45,111 @@ export function WorkspaceSwitcher(): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const lifeRef = useRef<CallerLife | null>(null);
+  const requestRef = useRef<object | null>(null);
+  const busyRef = useRef<object | null>(null);
+
+  useLayoutEffect(() => {
+    const life: CallerLife = { alive: true };
+    lifeRef.current = life;
+    return () => {
+      life.alive = false;
+      if (lifeRef.current === life) {
+        lifeRef.current = null;
+        requestRef.current = null;
+        busyRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     let alive = true;
-    listMyWorkspaces()
-      .then((r) => { if (alive) { setWorkspaces(r.workspaces); setActive(r.active); } })
-      .catch(() => { /* unauthenticated / endpoint unavailable — keep the static fallback */ });
-    return () => { alive = false; };
+    let readTicket: object | null = null;
+    const load = (): void => {
+      const ticket = Object.freeze({});
+      readTicket = ticket;
+      const event = getCurrentAuthChangeEvent();
+      const current = (): boolean => alive && readTicket === ticket
+        && lifeRef.current?.alive === true && getCurrentAuthChangeEvent() === event;
+      void listMyWorkspaces()
+        .then((result) => {
+          if (!current()) return;
+          setWorkspaces((prior) => current() ? result.workspaces : prior);
+          setActive((prior) => current() ? result.active : prior);
+        })
+        .catch(() => { /* endpoint unavailable: retain the existing static fallback */ });
+    };
+    load();
+    const unsubscribe = onAuthChange(() => { load(); });
+    return () => { alive = false; readTicket = null; unsubscribe(); };
   }, []);
 
-  const reloadInto = async (fn: () => Promise<unknown>): Promise<void> => {
+  const reloadInto = async (fn: () => Promise<WorkspaceMutationResult>): Promise<void> => {
+    const life = lifeRef.current;
+    if (!life?.alive || busyRef.current) return;
+    const ticket = Object.freeze({});
+    requestRef.current = ticket;
+    busyRef.current = ticket;
+    const current = (): boolean => life.alive && lifeRef.current === life && requestRef.current === ticket;
+    const startEvent = getCurrentAuthChangeEvent();
+    const notice = t('common:workspaceChangeNeedsRefresh');
+    const showError = (message: string): void => {
+      if (!current()) return;
+      const stamp = captureWorkspaceStamp();
+      setError((prior) => current() && currentWorkspaceStamp(stamp) ? message : prior);
+    };
     setBusy(true);
+    setError((prior) => current() ? null : prior);
+    let completing = false;
     try {
-      await fn();
-      // Deferred Phase D (SHELL-8, staged): broadcast the tenant change so
-      // every registered tenant-keyed cache resets in-app… and then STILL
-      // reload. The reload fallback stays until the SSE-bound stores
-      // (notifications, review status) and the builder canvas grow real
-      // tenant-reset paths — removing it before then risks a half-reset
-      // showing the prior tenant's data (store inventory, PLAN-DEFERRED D.1).
-      fireAuthChanged();
-      window.location.reload();
-    } catch {
-      setBusy(false); // surface stays usable; the failed call already logged
+      const result = await fn();
+      completing = true;
+      reloadIfTransitionStranded(completeWorkspaceTransition(result, {
+        isCallerCurrent: current,
+        action: reloadIntoSession,
+        failed: () => { showError(notice); },
+      }), reloadIntoSession);
+    } catch (err: unknown) {
+      if (!completing && current() && getCurrentAuthChangeEvent() === startEvent) {
+        if (err instanceof WorkspaceLifecycleError) {
+          if (err.code === 'workspace_transition_uncertain') showError(t('common:workspaceChangeCouldNotFinish'));
+        } else {
+          // Status classifies a refusal; arbitrary server/internal text is not UI copy.
+          const key = err instanceof ApiError && (err.status === 401 || err.status === 403)
+            ? 'common:workspaceChangeNotAllowed' : 'common:workspaceChangeCouldNotFinish';
+          showError(t(key));
+        }
+      }
+    } finally {
+      if (current()) {
+        busyRef.current = null;
+        setBusy((prior) => current() ? false : prior);
+      }
     }
   };
 
   const onChange = (value: string): void => {
-    if (busy) return;
+    if (busy || busyRef.current) return;
     if (value === NEW) { setCreating(true); return; }
     if (value !== active) void reloadInto(() => switchWorkspace(value));
   };
-
   const submitCreate = (): void => {
     const name = newName.trim();
-    if (!name || busy) return;
-    // ADR 0015 — create+enter is ONE behaviour (`createAndEnterWorkspace`), shared
-    // with the Organizations page so the two entry points cannot drift.
-    void reloadInto(async () => { await createAndEnterWorkspace(name); });
+    if (!name || busy || busyRef.current) return;
+    // Return the actual issued result; completion identity cannot be discarded.
+    void reloadInto(() => createAndEnterWorkspace(name));
   };
-  const cancelCreate = (): void => { if (!busy) { setCreating(false); setNewName(''); } };
+  const cancelCreate = (): void => {
+    if (!busy && !busyRef.current) { setCreating(false); setNewName(''); }
+  };
 
   // Until workspaces load (or for an anonymous visitor), keep the original
   // static affordance so the chrome never looks broken.
   if (workspaces.length === 0) {
     return (
+      <>
+      {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}
       <Link to="/orgs" className="app-workspace-switcher" title={t('workspaceAndOrgs')}>
         <span className="app-workspace-icon" aria-hidden><BuildingIcon size={16} /></span>
         <span className="app-workspace-meta">
@@ -84,10 +158,13 @@ export function WorkspaceSwitcher(): JSX.Element {
         </span>
         <span className="app-workspace-caret" aria-hidden><ChevronRightIcon size={14} /></span>
       </Link>
+      </>
     );
   }
 
   return (
+    <>
+    {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}
     <div className="app-workspace-block">
       <div className="app-workspace-switcher" title={t('switchWorkspace')}>
         <span className="app-workspace-icon" aria-hidden><BuildingIcon size={16} /></span>
@@ -136,5 +213,6 @@ export function WorkspaceSwitcher(): JSX.Element {
         />
       )}
     </div>
+    </>
   );
 }

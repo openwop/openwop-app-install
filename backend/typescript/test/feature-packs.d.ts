@@ -213,6 +213,35 @@ declare module '*feature.podcasts.nodes/index.mjs' {
   export function mix(ctx: unknown): Promise<PodResult<{ clipCount: number; audioMediaRef: string }>>;
   export const nodes: Record<string, (ctx: unknown) => Promise<PodResult<Record<string, unknown>>>>;
 }
+// TST-OAT-1 — the notebooks pack, under test in notebooks-nodes, notebooks-ingest-nodes
+// and notebooks-node-typed-failures (they used an `@ts-expect-error` import).
+declare module '*feature.notebooks.nodes/index.mjs' {
+  // Each node's SUCCESS outputs, as `packs/feature.notebooks.nodes/index.mjs` returns them.
+  // `outputs` is optional because a failed node returns none.
+  type NbResult<O> = {
+    status: 'success' | 'failed';
+    outputs?: O;
+    error?: { code?: string; message?: string; details?: unknown };
+  };
+  type Cited = { documentId: string };
+  export function ask(ctx: unknown): Promise<NbResult<{ augmentedPrompt: string; citations: Cited[]; contexts: Array<Record<string, unknown>> }>>;
+  export function search(ctx: unknown): Promise<NbResult<{ hits: Cited[] }>>;
+  export function readSource(ctx: unknown): Promise<NbResult<{ empty: boolean; messages: Array<{ role: string; content: string }>; revision?: unknown }>>;
+  export function storeSummary(ctx: unknown): Promise<NbResult<{ stored: boolean }>>;
+  export function writeTransformation(ctx: unknown): Promise<NbResult<{ written: boolean; documentId: string; title: string }>>;
+  export function transcribeSource(ctx: unknown): Promise<NbResult<{ empty: boolean; transcript: string }>>;
+  export function fetchYoutubeSource(ctx: unknown): Promise<NbResult<{ empty: boolean; transcript: string; source: 'captions' | 'stt' }>>;
+  export function ingestSource(ctx: unknown): Promise<NbResult<{ ingested: boolean; sourceId: string; title: string }>>;
+  export function listNotebooks(ctx: unknown): Promise<NbResult<{ notebooks: unknown[] }>>;
+  export function getNotebook(ctx: unknown): Promise<NbResult<{ notebook: unknown }>>;
+  export function listSourcesNode(ctx: unknown): Promise<NbResult<{ sources: unknown[] }>>;
+  export function listNotesNode(ctx: unknown): Promise<NbResult<{ notes: unknown[] }>>;
+  export function mcpAddSource(ctx: unknown): Promise<NbResult<{ written: boolean; declined?: boolean; sourceId?: string }>>;
+  export function mcpCreateNote(ctx: unknown): Promise<NbResult<{ created: boolean; declined?: boolean }>>;
+  export const nodes: Record<string, (ctx: unknown) => Promise<NbResult<Record<string, unknown>>>>;
+  const _default: typeof nodes;
+  export default _default;
+}
 // ADR 0114 — the code-exec node's honest-off / HITL-gate tests import the real handler.
 declare module '*feature.code-exec.nodes/index.mjs' {
   export function run(ctx: unknown): Promise<{ status: string; outputs: { exitCode: number; stdout: string; stderr: string; declined?: boolean; artifact: { artifactTypeId: string; contentTrust: string; payload: { stdout: string } } } }>;

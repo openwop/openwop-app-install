@@ -282,6 +282,9 @@ export interface KanbanBoard {
    *  is authoritative; legacy `rosterId`/`ownerUserId` remain for back-compat (no
    *  migration). A `kind:'project'` board's cards fire workflows, not agent turns. */
   ownerSubject?: Subject;
+  /** ADR 1155 D7 — the facet key the board view groups its swimlanes by, by default.
+   *  A viewer's own choice rides the URL (`?groupBy=`). */
+  groupBy?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -862,6 +865,9 @@ type KanbanCardIndexFacts = {
   assigneeRole?: string;
   completedAt?: string;
   labels?: string[];
+  /** ADR 1155 P5 — every facet, so grouping and `facet.<key>` filters need no family
+   *  per key and no rebuild when a board changes its group-by key. */
+  facets?: Record<string, string>;
 };
 function cardFactsOf(c: KanbanCard): KanbanCardIndexFacts {
   return {
@@ -871,9 +877,13 @@ function cardFactsOf(c: KanbanCard): KanbanCardIndexFacts {
     ...(c.assigneeRole ? { assigneeRole: c.assigneeRole } : {}),
     ...(c.completedAt ? { completedAt: c.completedAt } : {}),
     ...(c.labels?.length ? { labels: c.labels } : {}),
+    ...(c.facets && Object.keys(c.facets).length > 0 ? { facets: { ...c.facets } } : {}),
   };
 }
 registerStoreIndex<KanbanCard>(KANBAN_CARD_TYPE, {
+  // 1 (ADR 1155 P5): the board families' projection gained `facets`. A tenant built at 0
+  // rebuilds rather than serve facet filters and group counts from markers without them.
+  version: 1,
   isRow: (v): v is KanbanCard => typeof v === 'object' && v !== null && typeof (v as KanbanCard).id === 'string' && typeof (v as KanbanCard).boardId === 'string',
   idOf: (c) => c.id,
   tenantOf: (c) => c.tenantId ?? '',
@@ -1132,6 +1142,18 @@ export async function getBoard(boardId: string): Promise<KanbanBoard | null> {
  *  deliberately NOT mutable here: rebinding the owner alters run attribution
  *  (RFC 0086 §C) and column edits alter trigger semantics (architect memo
  *  2026-06-05). Returns null when the board doesn't exist. */
+/** ADR 1155 D7 — set (a facet key) or clear (null) the board's default grouping. The
+ *  index needs no rebuild: every card's facets ride its board markers' projection. */
+export async function setBoardGroupBy(boardId: string, groupBy: string | null): Promise<KanbanBoard | null> {
+  if (groupBy !== null && !FACET_KEY_RE.test(groupBy)) throw boardCommandError('kanban_command_invalid', 'groupBy must be a facet key.');
+  const board = await boards.get(boardId);
+  if (!board) return null;
+  const { groupBy: _old, ...rest } = board;
+  const next: KanbanBoard = { ...rest, ...(groupBy !== null ? { groupBy } : {}), updatedAt: new Date().toISOString() };
+  await boards.put(next);
+  return next;
+}
+
 export async function renameBoard(boardId: string, name: string): Promise<KanbanBoard | null> {
   const board = await boards.get(boardId);
   if (!board) return null;
@@ -1240,6 +1262,11 @@ export interface KanbanBoardPageQuery {
   assignee?: string;
   /** Any of these labels. */
   labels?: string[];
+  /** ADR 1155 D3 — facet equals value, for every key given (AND). An empty value
+   *  matches cards without that key. */
+  facets?: Record<string, string>;
+  /** ADR 1155 D7 — count every match by `column`, `assignee` or a facet key. */
+  groupBy?: string;
 }
 
 export interface KanbanBoardPage {
@@ -1247,6 +1274,9 @@ export interface KanbanBoardPage {
   /** Every card on the board that matches, across all pages. */
   total: number;
   nextCursor?: string;
+  /** With `groupBy`: every match counted by group. `''` is the group of cards with
+   *  no value (no assignee, or no such facet). */
+  groupCounts?: Record<string, number>;
 }
 
 const PAGE_SCAN = 200;
@@ -1264,7 +1294,8 @@ function pageSegments(boardId: string, q: KanbanBoardPageQuery): string[] {
 /** True when the slice alone answers the query, so `total` is a counted read. */
 function sliceOnly(q: KanbanBoardPageQuery): boolean {
   const columnsInSlice = !q.columns?.length || (pageFamily(q) === 'board' && q.columns.length === 1);
-  return columnsInSlice && !q.dueFrom && !q.dueTo && !q.overdue && q.assignee === undefined && !q.labels?.length;
+  return columnsInSlice && !q.dueFrom && !q.dueTo && !q.overdue && q.assignee === undefined && !q.labels?.length
+    && !(q.facets && Object.keys(q.facets).length > 0) && q.groupBy === undefined;
 }
 
 function factsMatch(board: KanbanBoard, f: KanbanCardIndexFacts, q: KanbanBoardPageQuery, nowMs: number): boolean {
@@ -1281,7 +1312,24 @@ function factsMatch(board: KanbanBoard, f: KanbanCardIndexFacts, q: KanbanBoardP
     else if (f.assigneeId !== q.assignee) return false;
   }
   if (q.labels?.length && !(f.labels ?? []).some((l) => q.labels!.includes(l))) return false;
+  for (const [key, want] of Object.entries(q.facets ?? {})) {
+    const have = f.facets?.[key];
+    if (want === '' ? have !== undefined : have !== want) return false;
+  }
   return true;
+}
+
+/** The group a card counts under for `groupBy`; `''` when it has none. */
+function groupOf(f: KanbanCardIndexFacts, groupBy: string): string {
+  if (groupBy === 'column') return f.columnId;
+  if (groupBy === 'assignee') return f.assigneeId ?? (f.assigneeRole ? `role:${f.assigneeRole}` : '');
+  return f.facets?.[groupBy] ?? '';
+}
+
+function countGroup(counts: Record<string, number> | undefined, f: KanbanCardIndexFacts, groupBy: string | undefined): void {
+  if (!counts || groupBy === undefined) return;
+  const g = groupOf(f, groupBy);
+  counts[g] = (counts[g] ?? 0) + 1;
 }
 
 function isFacts(p: Record<string, unknown>): p is Record<string, unknown> & KanbanCardIndexFacts {
@@ -1299,6 +1347,8 @@ function pageQueryHash(boardId: string, q: KanbanBoardPageQuery): string {
     o: q.overdue === true,
     a: q.assignee ?? null,
     l: [...(q.labels ?? [])].sort(),
+    x: Object.entries(q.facets ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+    g: q.groupBy ?? null,
   };
   return createHash('sha256').update(JSON.stringify(norm)).digest('hex').slice(0, 16);
 }
@@ -1349,6 +1399,7 @@ export async function listBoardCardsPage(board: KanbanBoard, q: KanbanBoardPageQ
   // slice's markers (never its rows) once, so `total` counts every match.
   const picked: { id: string; key: string }[] = [];
   let total = 0;
+  const groupCounts: Record<string, number> | undefined = q.groupBy !== undefined ? {} : undefined;
   const walkAll = !sliceOnly(q);
   let cursor = walkAll || after === undefined ? undefined : Buffer.from(after, 'utf8').toString('base64url');
   for (;;) {
@@ -1365,6 +1416,7 @@ export async function listBoardCardsPage(board: KanbanBoard, q: KanbanBoardPageQ
       }
       if (!facts || !factsMatch(board, facts, q, now)) continue;
       total += 1;
+      countGroup(groupCounts, facts, q.groupBy);
       const key = Buffer.from(row.cursor, 'base64url').toString('utf8');
       if (after !== undefined && !keyAfter(key, after)) continue;
       if (picked.length <= q.limit) picked.push({ id: row.id, key });
@@ -1389,6 +1441,7 @@ export async function listBoardCardsPage(board: KanbanBoard, q: KanbanBoardPageQ
     cards: out,
     total,
     ...(hasMore ? { nextCursor: encodePageCursor(hash, onPage[onPage.length - 1]!.key) } : {}),
+    ...(groupCounts ? { groupCounts } : {}),
   };
 }
 
@@ -1412,10 +1465,16 @@ async function boardPageFromRows(
     .sort((a, b) => Buffer.compare(Buffer.from(a.key, 'utf8'), Buffer.from(b.key, 'utf8')));
   const rest = after === undefined ? keyed : keyed.filter((e) => keyAfter(e.key, after));
   const onPage = rest.slice(0, q.limit);
+  let groupCounts: Record<string, number> | undefined;
+  if (q.groupBy !== undefined) {
+    groupCounts = {};
+    for (const e of keyed) countGroup(groupCounts, cardFactsOf(e.c), q.groupBy);
+  }
   return {
     cards: onPage.map((e) => e.c),
     total: keyed.length,
     ...(rest.length > q.limit ? { nextCursor: encodePageCursor(hash, onPage[onPage.length - 1]!.key) } : {}),
+    ...(groupCounts ? { groupCounts } : {}),
   };
 }
 
@@ -1425,8 +1484,37 @@ async function boardPageFromRows(
  *  must see every card (dedupe, caps, repoint) uses {@link listCardsExact}. */
 export async function listCards(boardId: string): Promise<KanbanCard[]> {
   const board = await boards.get(boardId);
+  // ADR 1155 (unpaged read on the index) — when the tenant's card index is built and
+  // its legacy tenant index is verified (which proves no card lacks a tenant, so none
+  // lacks a marker), read only this board's slice: its markers, then its cards. The
+  // result is the same cards in the same order; the cost is the board, not the tenant.
+  if (board && (await cards.tenantIndexVerified()) && (await ensureSystemIndexBuilt(board.tenantId, KANBAN_CARD_TYPE)) === 'built') {
+    const ids = await cardIndexIds(board.tenantId, 'board', [board.id]);
+    return (await readCardsBounded(ids))
+      .filter((c): c is KanbanCard => c !== null && c.boardId === board.id && c.tenantId === board.tenantId)
+      .sort(byColumnThenOrder);
+  }
   const rows = board ? await cardsOnBoards(board.tenantId, new Set([boardId])) : (await cards.list()).filter((c) => c.boardId === boardId);
   return rows.sort(byColumnThenOrder);
+}
+
+/** Test-only: today's read of a board's cards, whatever the index's state. */
+export async function __listCardsWithoutStoreIndex(boardId: string): Promise<KanbanCard[]> {
+  const board = await boards.get(boardId);
+  const rows = board ? await cardsOnBoards(board.tenantId, new Set([boardId])) : (await cards.list()).filter((c) => c.boardId === boardId);
+  return rows.sort(byColumnThenOrder);
+}
+
+/**
+ * ADR 1138 D4 — every tenant that owns at least one board, for a sweep that must
+ * reach each workspace with cards. The agent roster is not that list: an adopter
+ * with boards and no roster agents (casavoga-prod) is missing from it. One boards
+ * scan; callers cache it (see `dueSweepTenantSource`).
+ */
+export async function listBoardTenants(): Promise<string[]> {
+  const out = new Set<string>();
+  for (const b of await boards.list()) if (b.tenantId) out.add(b.tenantId);
+  return [...out].sort();
 }
 
 /**
@@ -3067,6 +3155,32 @@ export async function updateCardFields(
   })).card;
 }
 
+/** ADR 1155 D3 — one page of an already-ordered "assigned to me" list. The cursor is
+ *  the last card's `(updatedAt, id)`, so a page boundary survives cards added later. */
+export function pageAssignedCards<T extends { id: string; updatedAt: string }>(
+  ordered: readonly T[], q: { limit: number; cursor?: string },
+): { cards: T[]; total: number; nextCursor?: string } {
+  if (!Number.isInteger(q.limit) || q.limit < 1 || q.limit > KANBAN_PAGE_MAX) {
+    throw boardCommandError('kanban_command_invalid', `limit must be a whole number from 1 to ${KANBAN_PAGE_MAX}.`);
+  }
+  const keyOf = (c: T): string => `${c.updatedAt}\u0000${c.id}`;
+  let after: string | undefined;
+  if (q.cursor) {
+    try {
+      const o = JSON.parse(Buffer.from(q.cursor, 'base64url').toString('utf8')) as { a?: unknown };
+      if (typeof o.a === 'string') after = o.a;
+    } catch { /* fall through */ }
+    if (after === undefined) throw boardCommandError('kanban_cursor_invalid', 'This cursor is not an assigned-cards cursor. Start again without it.');
+  }
+  const rest = after === undefined ? ordered : ordered.filter((c) => keyOf(c) > after!);
+  const page = rest.slice(0, q.limit);
+  return {
+    cards: page,
+    total: ordered.length,
+    ...(rest.length > q.limit ? { nextCursor: Buffer.from(JSON.stringify({ a: keyOf(page[page.length - 1]!) }), 'utf8').toString('base64url') } : {}),
+  };
+}
+
 /** Every id in one family slice of the card index, in key order. */
 async function cardIndexIds(tenantId: string, family: string, segments: string[]): Promise<string[]> {
   const ids: string[] = [];
@@ -3150,7 +3264,8 @@ export async function listCardsAssignedToUser(
       ...(doneColumnOf(board) ? { doneColumnId: doneColumnOf(board)!.id } : {}),
     });
   }
-  return out.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));
+  // Oldest change first, then id, so the order is total and a page cursor is stable.
+  return out.sort((a, b) => (a.updatedAt < b.updatedAt ? -1 : a.updatedAt > b.updatedAt ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 }
 
 /** ADR 0049 — is `userId` allowed to act on this card without being a member

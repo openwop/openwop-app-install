@@ -25,7 +25,7 @@ import { createHash } from 'node:crypto';
 import { createLogger } from '../../observability/logger.js';
 import { getNotificationEmitter } from '../../notifications/emitter.js';
 import { resolveOne, toggleCandidateTenants } from '../../host/featureToggles/service.js';
-import { assigneeCanSeeBoard, listOpenDueCards, type KanbanBoard, type KanbanCard } from '../../host/kanbanService.js';
+import { assigneeCanSeeBoard, listBoardTenants, listOpenDueCards, type KanbanBoard, type KanbanCard } from '../../host/kanbanService.js';
 
 const log = createLogger('feature.kanban-due-reminders');
 
@@ -50,6 +50,32 @@ export function dueNoticeFor(dueAt: string, now: number): DueState | null {
 
 export function dueNotificationId(tenantId: string, cardId: string, state: DueState, dueAt: string): string {
   return `kanban-due-${createHash('sha256').update([tenantId, cardId, state, dueAt].join('\u0000')).digest('hex').slice(0, 32)}`;
+}
+
+/** How long the sweep's tenant list is reused: one round of {@link TICKS_PER_ROUND} ticks. */
+export const SWEEP_TENANTS_TTL_MS = 60 * 60 * 1000;
+
+/**
+ * The tenants the sweep visits: the roster tenants plus every tenant that owns a
+ * board. The roster alone misses a workspace whose boards hold assigned cards but
+ * which runs no roster agents, and then that workspace never gets a reminder.
+ * Cached for {@link SWEEP_TENANTS_TTL_MS}, so the boards scan runs once a round,
+ * not once a tick; a new workspace is picked up within the hour.
+ */
+export function dueSweepTenantSource(
+  listRosterTenants: () => Promise<string[]>,
+  listBoards: () => Promise<string[]> = listBoardTenants,
+  clock: () => number = Date.now,
+): () => Promise<string[]> {
+  let cached: string[] | null = null;
+  let at = 0;
+  return async () => {
+    if (cached && clock() - at < SWEEP_TENANTS_TTL_MS) return cached;
+    const [roster, withBoards] = await Promise.all([listRosterTenants(), listBoards()]);
+    cached = [...new Set([...roster, ...withBoards])].sort();
+    at = clock();
+    return cached;
+  };
 }
 
 /** The tenants the toggle is on for, without reading any kanban data. */

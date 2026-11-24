@@ -41,6 +41,7 @@ import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { interruptFormDefect } from '../src/host/interruptFormRules.js';
+import { A2UI_CATALOG, A2UI_CATALOG_VERSION } from './helpers/interruptFormCatalog.js';
 import { buildAssistantSurface } from '../src/features/assistant/surface.js';
 import { __resetAssistantStore } from '../src/features/assistant/assistantService.js';
 
@@ -49,11 +50,11 @@ const answers = (values: Record<string, unknown>): { answers: Array<{ id: string
   answers: Object.entries(values).map(([id, answer]) => ({ id, answer })),
 });
 
-// Mirrors the host-pinned closed catalog (frontend `chat/a2ui/catalog.ts`
-// SUPPORTED_COMPONENTS + A2UI_CATALOG_VERSION) — the renderer fail-closes on
-// anything outside it, so a producer surface MUST stay within this set.
-const CATALOG_VERSION = '0.9.1';
-const CATALOG = new Set(['heading', 'text', 'field.text', 'field.date', 'field.select', 'field.checkbox', 'action.button']);
+// The host-pinned closed catalog: the renderer fail-closes on anything outside it,
+// so a producer surface MUST stay within this set. TST-OAS-3: derived from
+// `schemas/v2/interrupt-form.schema.json`, no longer hand-copied.
+const CATALOG_VERSION = A2UI_CATALOG_VERSION;
+const CATALOG = A2UI_CATALOG;
 
 describe('Assistant calendar.invite A2UI clarification (ADR 0051 §3/§5)', () => {
   // Typed from the pack's ambient module declaration (test/feature-packs.d.ts) —

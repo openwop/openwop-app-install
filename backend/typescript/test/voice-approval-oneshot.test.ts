@@ -21,10 +21,13 @@
  * WHAT IS BEHAVIOURAL AND WHAT IS NOT. Invariant 1 and the sideband's
  * authority/lifecycle are driven through the real functions. The grant below is a
  * fixture shaped like the bridge's (its predicate is NOT exported); the predicate
- * itself is the wiring tripwire in the second block, and it is driven live through
- * `executeRealtimeToolCall` in `adr0834-firewall-exit-witness.test.ts` ("control:
- * userApproved answers the safe-mode baseline ask", "userApproved does NOT answer a
- * platform-floor ask"). Invariant 3 is a source tripwire on `routes.ts`.
+ * itself is driven live through `executeRealtimeToolCall` in
+ * `adr0834-firewall-exit-witness.test.ts` ("control: userApproved answers the
+ * safe-mode baseline ask", "userApproved does NOT answer a platform-floor ask"), so
+ * its substring pin here was retired (TST-OAG-2, 2026-11-22); the second block keeps
+ * the no-blanket-bypass scan. Invariant 3 is a source tripwire on `routes.ts`, and
+ * is now also driven over HTTP in `adr0893-voice-session-authority.test.ts` ("A7 — a
+ * user-less session cannot self-approve over /tool-call").
  *
  * Re-graded at grade-tests w117: the semantics block used to drive the by-name
  * `approvedBaselineTools` set, which the voice lane stopped feeding at FW2-D1, so
@@ -119,10 +122,10 @@ describe('A7 — one-shot approvedTools semantics (the voice card\'s Approve)', 
 });
 
 describe('A7 — wiring pins (source-level, the voice-tool-parity idiom)', () => {
-  it('the bridge maps userApproved to a one-shot baseline approval on the canonical name', () => {
+  it('the bridge maps userApproved to a one-shot grant, never a blanket bypass', () => {
     const src = srcOf('features/voice/realtime/toolBridge.ts');
-    // ADR 0834 FW2-D1 — the one-shot rides the per-call grant: this tool, this call, never a policy ask.
-    expect(src).toContain("(input.userApproved === true && tool === name && origin !== 'policy')");
+    // The grant's predicate (this tool, this call, never a policy ask) is driven live in
+    // adr0834-firewall-exit-witness; its substring pin here was retired (TST-OAG-2).
     // Never blanket bypass: the voice lane passes no `bypass` to the lane factory. Read
     // the WHOLE call (to its closing `});`), since its args contain a template `}`.
     expect(src).not.toMatch(/bypass(Approval)?:\s*true/);

@@ -77,6 +77,7 @@ export const messages = {
   exportChainPackTitle: 'Exportar como um manifesto workflow-chain-pack (envie pelo fluxo de PR do registry)',
   exportChainPackNoVersion: 'Não é possível exportar este chain pack: a versão instalada de {{types}} é desconhecida, e uma cadeia publicada precisa indicar versões exatas dos nós. Verifique se esses tipos de nó estão instalados neste host, recarregue e tente novamente.',
   exportChainPackCatalogUnavailable: 'Ainda não é possível exportar: o catálogo de nós não carregou deste host, então as versões dos nós não podem ser fixadas. Verifique sua conexão e tente novamente.',
+  exportChainPackFidelity: "Esta exportação não pode preservar todos os detalhes deste fluxo. Use Exportar para manter o JSON completo do fluxo; seu fluxo não foi alterado.",
   publishToRegistry: 'Publicar no registry…',
   publishToRegistryTitle: 'Publicar este fluxo de trabalho como um chain pack em packs.openwop.dev (orienta pelo fluxo de submissão baseado em PR)',
   import: 'Importar',

@@ -234,7 +234,7 @@ export async function fetchTurns(runId: string, sinceSeq = 0): Promise<Conversat
     return toRunEvent({ type: e.type, payload: e.payload });
   });
   const clarification = clarificationStateFromEvents(events);
-  return { turns: reconstructConversation(events), lastSeq, ...(clarification.asks.length || clarification.answered.length ? { clarification } : {}) };
+  return { turns: reconstructConversation(events), lastSeq, ...(clarification.asks.length || clarification.answered.length || clarification.held?.length || clarification.settled?.length ? { clarification } : {}) };
 }
 
 /** ADR 1001 D7 — the chat question cards (`clarification-requested`) and the
@@ -246,21 +246,41 @@ export interface ClarificationState {
   answered: string[];
   /** Wire ids of answer turns that were a Skip (shown in the viewer's language). */
   skippedTurns: string[];
+  /** ADR 1156 D2 — held tool calls waiting on a card under the agent turn `askId`. They
+   *  ride this state because they are folded from the same slice the same way. */
+  held?: HeldCallEvent[];
+  /** ADR 1156 D5 — what became of a card's approval. */
+  settled?: HeldCallSettledEvent[];
 }
+/** ADR 1156 — the two held-call card events (host-extension, never on the wire turn). */
+export const TOOL_APPROVAL_REQUESTED_EVENT = 'openwop-app.conversation.tool-approval-requested';
+export const TOOL_APPROVAL_SETTLED_EVENT = 'openwop-app.conversation.tool-approval-settled';
+export interface HeldCallEvent { askId: string; toolName: string; requestedAt: string }
+export type HeldCallOutcome = 'ran' | 'refused' | 'superseded';
+export interface HeldCallSettledEvent { askId: string; toolName: string; outcome: HeldCallOutcome; reason?: string }
+const OUTCOMES: ReadonlySet<string> = new Set<HeldCallOutcome>(['ran', 'refused', 'superseded']);
 export function clarificationStateFromEvents(events: ReadonlyArray<{ type?: string; payload?: unknown }>): ClarificationState {
   const asks: ClarificationState['asks'] = [];
   const answered: string[] = [];
   const skippedTurns: string[] = [];
+  const held: HeldCallEvent[] = [];
+  const settled: HeldCallSettledEvent[] = [];
   for (const e of events) {
-    const p = (e.payload ?? {}) as { askId?: unknown; data?: unknown; skipped?: unknown; turnMessageId?: unknown };
+    const p = (e.payload ?? {}) as { askId?: unknown; data?: unknown; skipped?: unknown; turnMessageId?: unknown; toolName?: unknown; requestedAt?: unknown; outcome?: unknown; reason?: unknown };
     if (typeof p.askId !== 'string' || !p.askId) continue;
-    if (e.type === CLARIFICATION_REQUESTED_EVENT && p.data && typeof p.data === 'object') asks.push({ askId: p.askId, data: p.data });
+    if (e.type === TOOL_APPROVAL_REQUESTED_EVENT) {
+      if (typeof p.toolName === 'string' && typeof p.requestedAt === 'string') held.push({ askId: p.askId, toolName: p.toolName, requestedAt: p.requestedAt });
+    } else if (e.type === TOOL_APPROVAL_SETTLED_EVENT) {
+      if (typeof p.toolName === 'string' && typeof p.outcome === 'string' && OUTCOMES.has(p.outcome)) {
+        settled.push({ askId: p.askId, toolName: p.toolName, outcome: p.outcome as HeldCallOutcome, ...(typeof p.reason === 'string' && p.reason ? { reason: p.reason } : {}) });
+      }
+    } else if (e.type === CLARIFICATION_REQUESTED_EVENT && p.data && typeof p.data === 'object') asks.push({ askId: p.askId, data: p.data });
     else if (e.type === CLARIFICATION_ANSWERED_EVENT) {
       answered.push(p.askId);
       if (p.skipped === true && typeof p.turnMessageId === 'string') skippedTurns.push(p.turnMessageId);
     }
   }
-  return { asks, answered, skippedTurns };
+  return { asks, answered, skippedTurns, ...(held.length ? { held } : {}), ...(settled.length ? { settled } : {}) };
 }
 
 /** Provider selection carried into the conversation run (mirrors the per-turn

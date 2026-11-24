@@ -282,7 +282,7 @@ function TargetingSection({ t, briefId, onError }: { t: TFn; briefId: string; on
               <Button variant="quiet" size="sm" aria-label={t('common:delete')} onClick={() => setConfirmDelete(p)}><TrashIcon size={15} /></Button>
             </div>
             <div className="u-flex u-gap-2 u-wrap u-mt-1">
-              {p.audiences.map((a, i) => <span key={`a${i}`} className="chip chip--accent">{a}</span>)}
+              {p.audiences.map((a, i) => <span key={`a${i}`} className="chip chip--accent campaign-intel-audience">{a}</span>)}
               {p.interests.map((x, i) => <span key={`i${i}`} className="chip chip--muted">{x}</span>)}
               {p.keywords.map((k, i) => <span key={`k${i}`} className="chip chip--muted">{k}</span>)}
             </div>

@@ -17,41 +17,111 @@
  * `createAndEnterWorkspace`, the same unit the switcher uses, so the two entry
  * points cannot drift on the create-then-enter pair.
  */
-import { useState, type FormEvent } from 'react';
+import { useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Notice } from '../ui/Notice.js';
+import { reloadIntoSession } from '../auth/reloadIntoSession.js';
 import { Button } from '../ui/Button.js';
 import { BuildingIcon } from '../ui/icons/index.js';
-import { createAndEnterWorkspace } from '../client/workspaceClient.js';
+import { createAndEnterWorkspace, completeWorkspaceTransition, reloadIfTransitionStranded, getWorkspaceTransitionSnapshot, WorkspaceLifecycleError } from '../client/workspaceClient.js';
+import { getCurrentAuthChangeEvent } from '../client/config.js';
+import { ApiError } from '../client/requestJson.js';
+
+interface CallerLife { alive: boolean }
+interface CallerConfiguration { readonly handler: (() => void) | undefined }
+function captureWorkspaceStamp() {
+  const state = getWorkspaceTransitionSnapshot();
+  return { event: getCurrentAuthChangeEvent(), auth: state.authRevision, revision: state.revision };
+}
+function currentWorkspaceStamp(stamp: ReturnType<typeof captureWorkspaceStamp>): boolean {
+  const state = getWorkspaceTransitionSnapshot();
+  return getCurrentAuthChangeEvent() === stamp.event
+    && state.authRevision === stamp.auth && state.revision === stamp.revision;
+}
 
 export function WorkspaceCreateSection({ onCreated }: { onCreated?: () => void }): JSX.Element {
   const { t } = useTranslation('orgs');
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const lifeRef = useRef<CallerLife | null>(null);
+  const configurationRef = useRef<Readonly<CallerConfiguration> | null>(null);
+  const requestRef = useRef<object | null>(null);
+  const busyRef = useRef<object | null>(null);
+
+  useLayoutEffect(() => {
+    const life: CallerLife = { alive: true };
+    lifeRef.current = life;
+    return () => {
+      life.alive = false;
+      if (lifeRef.current === life) {
+        lifeRef.current = null;
+        requestRef.current = null;
+        busyRef.current = null;
+      }
+    };
+  }, []);
+  // A committed change issues a fresh configuration identity. A→B→same A must
+  // never re-arm A's earlier request; abandoned renders publish no authority.
+  useLayoutEffect(() => {
+    const previous = configurationRef.current;
+    if (!previous || previous.handler !== onCreated) {
+      configurationRef.current = Object.freeze({ handler: onCreated });
+    }
+  }, [onCreated]);
 
   const submit = (e: FormEvent): void => {
     e.preventDefault();
     const trimmed = name.trim();
-    if (!trimmed || busy) return;
+    const life = lifeRef.current;
+    const configuration = configurationRef.current;
+    if (!trimmed || busy || busyRef.current || !life?.alive || !configuration) return;
+    const ticket = Object.freeze({});
+    requestRef.current = ticket;
+    busyRef.current = ticket;
+    const handler = configuration.handler;
+    const requestOwned = (): boolean => life.alive && lifeRef.current === life && requestRef.current === ticket;
+    const actionCurrent = (): boolean => requestOwned() && configurationRef.current === configuration;
+    const startEvent = getCurrentAuthChangeEvent();
+    const notice = t('common:workspaceChangeNeedsRefresh');
+    const showError = (message: string): void => {
+      if (!actionCurrent()) return;
+      const stamp = captureWorkspaceStamp();
+      setError((prior) => actionCurrent() && currentWorkspaceStamp(stamp) ? message : prior);
+    };
     setBusy(true);
-    setError(null);
+    setError((prior) => actionCurrent() ? null : prior);
+    let completing = false;
     void createAndEnterWorkspace(trimmed)
-      .then(() => {
-        setName('');
-        // Entering a new workspace changes the tenant every surface reads from, so
-        // a full reload is the honest refresh — a partial one would leave stale
-        // org/member lists from the PREVIOUS tenant on screen. Same choice the
-        // sidebar switcher makes.
-        if (onCreated) onCreated();
-        else window.location.reload();
+      .then((result) => {
+        completing = true;
+        reloadIfTransitionStranded(completeWorkspaceTransition(result, {
+          isCallerCurrent: actionCurrent,
+          beforeAction: () => {
+            const stamp = captureWorkspaceStamp();
+            setName((prior) => actionCurrent() && currentWorkspaceStamp(stamp) ? '' : prior);
+          },
+          action: handler ?? reloadIntoSession,
+          failed: () => { showError(notice); },
+        }), reloadIntoSession);
       })
       .catch((err: unknown) => {
-        // A failed create must SAY so. Reporting nothing here would leave the user
-        // unable to tell "not allowed" from "nothing happened" — the failed-read-as-
-        // empty family, in its write-path form.
-        setError(err instanceof Error ? err.message : t('workspaceCreateFailed'));
-        setBusy(false);
+        if (!completing && actionCurrent() && getCurrentAuthChangeEvent() === startEvent) {
+          if (err instanceof WorkspaceLifecycleError) {
+            if (err.code === 'workspace_transition_uncertain') showError(t('common:workspaceChangeCouldNotFinish'));
+          } else {
+            // Status classifies a refusal; arbitrary server/internal text is not UI copy.
+            const key = err instanceof ApiError && (err.status === 401 || err.status === 403)
+              ? 'common:workspaceChangeNotAllowed' : 'common:workspaceChangeCouldNotFinish';
+            showError(t(key));
+          }
+        }
+      })
+      .finally(() => {
+        if (requestOwned()) {
+          busyRef.current = null;
+          setBusy((prior) => requestOwned() ? false : prior);
+        }
       });
   };
 

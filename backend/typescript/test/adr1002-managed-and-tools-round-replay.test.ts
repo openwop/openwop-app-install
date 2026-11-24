@@ -69,9 +69,11 @@ type Adapter = ReturnType<typeof import('../src/aiProviders/aiProvidersHost.js')
 let createAdapter: typeof import('../src/aiProviders/aiProvidersHost.js')['createAiProvidersAdapter'];
 let beginNodeActivity: typeof import('../src/host/effectIdentity.js')['beginNodeActivity'];
 let logicalInvocationId: typeof import('../src/host/effectIdentity.js')['logicalInvocationId'];
+let peekNodeActivityOrdinal: typeof import('../src/host/effectIdentity.js')['peekNodeActivityOrdinal'];
 let runChatToolLoop: typeof import('../src/host/agentDispatch.js')['runChatToolLoop'];
 let runWithEffectContext: typeof import('../src/host/runEffectContext.js')['runWithEffectContext'];
 let assertEffectAllowed: typeof import('../src/host/runEffectContext.js')['assertEffectAllowed'];
+let ReplayEffectError: typeof import('../src/host/runEffectContext.js')['ReplayEffectError'];
 let replayTools: typeof import('../src/host/replayToolResults.js');
 let lastReplayLaneKey: typeof import('../src/aiProviders/aiProvidersHost.js')['__lastReplayLaneKeyForTests'];
 let invocationLog: () => ReturnType<typeof import('../src/executor/invocationLog.js')['getInvocationLog']>;
@@ -86,9 +88,9 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   const { createApp } = await import('../src/index.js');
   ({ createAiProvidersAdapter: createAdapter, __lastReplayLaneKeyForTests: lastReplayLaneKey } = await import('../src/aiProviders/aiProvidersHost.js'));
-  ({ beginNodeActivity, logicalInvocationId } = await import('../src/host/effectIdentity.js'));
+  ({ beginNodeActivity, logicalInvocationId, peekNodeActivityOrdinal } = await import('../src/host/effectIdentity.js'));
   ({ runChatToolLoop } = await import('../src/host/agentDispatch.js'));
-  ({ runWithEffectContext, assertEffectAllowed } = await import('../src/host/runEffectContext.js'));
+  ({ runWithEffectContext, assertEffectAllowed, ReplayEffectError } = await import('../src/host/runEffectContext.js'));
   replayTools = await import('../src/host/replayToolResults.js');
   const { getInvocationLog } = await import('../src/executor/invocationLog.js');
   invocationLog = getInvocationLog;
@@ -272,23 +274,34 @@ describe('ADR 1002 — privacy: records stay in the tenant and die with the run'
   const call = { name: WRITE_TOOL, input: { title: 'private' }, callId: 'c1' };
   const plain = { provider: 'openwop-free', model: 'openwop-free', credentialRef: 'managed:openwop-free', messages: [{ role: 'user' as const, content: 'Private question.' }] };
 
-  async function recordSource(src: Lane): Promise<void> {
+  async function recordSource(src: Lane): Promise<NonNullable<ReturnType<typeof lastReplayLaneKey>>> {
     const now = new Date().toISOString();
     await storage.insertRun({ runId: src.runId, workflowId: 'wf', tenantId: src.tenantId, status: 'completed', inputs: null, metadata: {}, configurable: {}, createdAt: now, updatedAt: now });
     beginNodeActivity(src.runId, NODE, 1);
     await inNode(src, () => replayTools.createReplayToolGuard(mockTools().raw).executeTool(call));
     await src.adapter.callAI(plain);
+    const key = lastReplayLaneKey();
+    if (!key) throw new Error('Privacy source did not reach its real model identity');
+    expect(key).toMatchObject({ runId: src.runId, nodeId: NODE, attempt: 1 });
+    expect(await invocationLog().get(key)).toMatchObject({ tenantId: src.tenantId, content: 'managed reply' });
+    return structuredClone(key);
   }
-  /** Replays one tool call and one model call against `src`; returns what was served. */
-  async function replayAgainst(src: Lane, forkId: string): Promise<{ tool: unknown; modelCalls: number }> {
+  /** Replays the same real calls; a model-source miss must refuse, never dispatch. */
+  async function replayAgainst(src: Lane, forkId: string): Promise<{
+    tool: unknown; modelCalls: number; modelError: unknown; modelRecord: unknown;
+  }> {
     const fork = lane(forkId, { replayFrom: src.runId, tenantId: src.tenantId });
     const tools = mockTools();
     managedChat.mockClear();
     beginNodeActivity(fork.runId, NODE, 1);
     const tool = await inNode(fork, () => replayTools.createReplayToolGuard(tools.raw).executeTool(call));
     expect(tools.raw).not.toHaveBeenCalled();
-    await fork.adapter.callAI(plain);
-    return { tool, modelCalls: managedChat.mock.calls.length };
+    let modelError: unknown = null;
+    try { await fork.adapter.callAI(plain); } catch (error) { modelError = error; }
+    const key = lastReplayLaneKey();
+    if (!key) throw new Error('Privacy replay did not reach its real model identity');
+    expect(key).toMatchObject({ runId: forkId, nodeId: NODE, attempt: 1 });
+    return { tool, modelCalls: managedChat.mock.calls.length, modelError, modelRecord: await invocationLog().get(key) };
   }
 
   it('control: an undeleted source is served (tool result, zero model calls)', async () => {
@@ -297,24 +310,36 @@ describe('ADR 1002 — privacy: records stay in the tenant and die with the run'
     const r = await replayAgainst(src, 'run-priv-keep-fork');
     expect(r.tool).toMatchObject({ content: expect.stringContaining('wrote card') });
     expect(r.modelCalls).toBe(0);
+    expect(r.modelError).toBeNull();
+    expect(r.modelRecord).toMatchObject({ tenantId: src.tenantId, content: 'managed reply' });
   });
 
   it('deleteRun removes the tool and model records', async () => {
     const src = lane('run-priv-del', { tenantId: 'user:priv-del' });
-    await recordSource(src);
+    const sourceModelKey = await recordSource(src);
     expect(await storage.deleteRun(src.runId)).toBe(true);
+    expect(await invocationLog().get(sourceModelKey)).toBeNull();
     const r = await replayAgainst(src, 'run-priv-del-fork');
     expect(r.tool).toMatchObject({ errorCode: 'replay_source_missing' });
-    expect(r.modelCalls).toBe(1);
+    expect(r.modelError).toBeInstanceOf(ReplayEffectError);
+    expect(r.modelError).toMatchObject({ code: 'replay_source_missing', effectKind: 'network-egress' });
+    expect(r.modelCalls).toBe(0);
+    expect(r.modelRecord).toBeNull();
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it('tenant erasure (deleteAllTenantData) removes the tool and model records', async () => {
     const src = lane('run-priv-erase', { tenantId: 'user:priv-erase' });
-    await recordSource(src);
+    const sourceModelKey = await recordSource(src);
     await storage.deleteAllTenantData(src.tenantId);
+    expect(await invocationLog().get(sourceModelKey)).toBeNull();
     const r = await replayAgainst(src, 'run-priv-erase-fork');
     expect(r.tool).toMatchObject({ errorCode: 'replay_source_missing' });
-    expect(r.modelCalls).toBe(1);
+    expect(r.modelError).toBeInstanceOf(ReplayEffectError);
+    expect(r.modelError).toMatchObject({ code: 'replay_source_missing', effectKind: 'network-egress' });
+    expect(r.modelCalls).toBe(0);
+    expect(r.modelRecord).toBeNull();
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it('a tool record stamped with ANOTHER tenant is refused (replay_tenant_mismatch) and never copied', async () => {
@@ -412,17 +437,28 @@ describe('ADR 1002 — replay fidelity', () => {
     expect(managedRound).toHaveBeenCalledTimes(0);
   });
 
-  it('a replay whose request DIVERGED from the source misses and calls live', async () => {
+  it('a replay whose request DIVERGED refuses the source miss without dispatch or a new provider record', async () => {
     beginNodeActivity('run-div-src', NODE, 1);
     await lane('run-div-src').adapter.callAIWithTools(TOOLS_REQ);
+    const sourceKey = lastReplayLaneKey();
+    if (!sourceKey) throw new Error('Divergence source did not reach its real model identity');
+    const sourceRecord = await invocationLog().get(sourceKey);
+    expect(managedRound).toHaveBeenCalledTimes(1);
+    expect(sourceRecord).toMatchObject({ tenantId: TENANT, toolCalls: [{ name: TOOL_NAME }, { name: SEND_TOOL }, { name: WRITE_TOOL }] });
+    const sourceRecipe = await invocationLog().llmCacheKey(sourceKey);
     managedRound.mockClear();
     beginNodeActivity('run-div-fork', NODE, 1);
-    const diverged = await lane('run-div-fork', { replayFrom: 'run-div-src' }).adapter.callAIWithTools({ ...TOOLS_REQ, messages: [{ role: 'user', content: `${TOOL_RESULT} a different question.` }] });
-    expect(managedRound).toHaveBeenCalledTimes(1);
-    // The live round answered the DIVERGED request (its history holds a tool
-    // result, so the script answers in text), not the source's recorded tool ask.
-    expect(diverged.content).toBe('The answer is 42.');
-    expect(diverged.toolCalls ?? []).toEqual([]);
+    const refused = lane('run-div-fork', { replayFrom: 'run-div-src' }).adapter.callAIWithTools({ ...TOOLS_REQ, messages: [{ role: 'user', content: `${TOOL_RESULT} a different question.` }] });
+    await expect(refused).rejects.toBeInstanceOf(ReplayEffectError);
+    await expect(refused).rejects.toMatchObject({ code: 'replay_source_missing', effectKind: 'network-egress' });
+    expect(managedRound).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    const forkKey = lastReplayLaneKey();
+    if (!forkKey) throw new Error('Divergence replay did not reach its real model identity');
+    expect(forkKey).toMatchObject({ runId: 'run-div-fork', nodeId: NODE, attempt: 1 });
+    expect(await invocationLog().get(forkKey)).toBeNull();
+    expect(await invocationLog().get(sourceKey)).toEqual(sourceRecord);
+    expect(await invocationLog().llmCacheKey(sourceKey)).toBe(sourceRecipe);
   });
 });
 
@@ -469,7 +505,7 @@ describe('ADR 1002 D4 — through the REAL agent-runner node and REAL write tool
 
   /** Runs the agent-runner node for `runId`, the way the executor does (run-effect
    *  context + the run's adapter), with the model scripted to file one todo. */
-  async function runNode(runId: string, replayFrom?: string) {
+  async function runNode(runId: string, replayFrom?: string, afterModelRound?: (request: AiToolCallRequest) => void) {
     const { default: agentRunnerNode } = await import('../src/host/agentRunnerNode.js');
     const { getAgentRegistry } = await import('../src/executor/agentRegistry.js');
     if (!getAgentRegistry().get?.(AGENT)) {
@@ -485,7 +521,15 @@ describe('ADR 1002 D4 — through the REAL agent-runner node and REAL write tool
       inputs: { agentId: AGENT, task: 'File the venue call', credentialRef: 'managed:openwop-free' },
       config: { offerTools: [TODO_TOOL] }, configurable: {},
       actingUserId: 'user:adr1002-human',
-      callAI: l.adapter.callAI, callAIWithTools: l.adapter.callAIWithTools,
+      callAI: l.adapter.callAI,
+      // Fixture-only observation/stop boundary AFTER the real adapter returns
+      // and awaits its record write, BEFORE the loop receives that result.
+      // Ordinary callers retain the original exact function binding.
+      callAIWithTools: afterModelRound ? async (request: AiToolCallRequest) => {
+        const result = await l.adapter.callAIWithTools(request);
+        afterModelRound(request);
+        return result;
+      } : l.adapter.callAIWithTools,
       emit: async () => ({ eventId: 'e', sequence: 0 }),
     };
     return inNode(l, () => agentRunnerNode.execute(nodeCtx));
@@ -509,13 +553,60 @@ describe('ADR 1002 D4 — through the REAL agent-runner node and REAL write tool
 
   it('an UNRECORDED tool call on a replay FAILS THE NODE with replay_source_missing and files nothing', async () => {
     const before = await cardCount(NODE_TENANT);
+    const sourceId = 'run-node-model-only-source';
+    const forkId = 'run-node-unrec';
+    const stop = 'ADR1002 fixture stopped after persisted model round before tool execution';
+    const sourceRequests: AiToolCallRequest[] = [];
+    const source = await runNode(sourceId, undefined, (request) => {
+      sourceRequests.push(structuredClone(request));
+      throw new Error(stop);
+    });
+    // This is an intentionally FAILED direct-node producer, not a completed run:
+    // the genuine first adapter round is persisted, but its tool ask never
+    // reaches the actual loop/tool boundary.
+    expect(source).toMatchObject({ status: 'failure', error: { code: 'provider_error', message: stop } });
+    expect(sourceRequests).toHaveLength(1);
+    expect(managedRound).toHaveBeenCalledTimes(1);
+    expect(await cardCount(NODE_TENANT)).toBe(before);
+    const sourceModelKey = lastReplayLaneKey();
+    if (!sourceModelKey) throw new Error('Model-only source did not record an actual model identity');
+    expect(sourceModelKey).toMatchObject({ runId: sourceId, nodeId: NODE, attempt: 1 });
+    const sourceModelRecord = await invocationLog().get(sourceModelKey);
+    expect(sourceModelRecord).toMatchObject({
+      tenantId: NODE_TENANT,
+      toolCalls: [{ id: 'tu-todo', name: TODO_TOOL, input: { title: 'Call the venue' } }],
+    });
+    const sourceRecipe = await invocationLog().llmCacheKey(sourceModelKey);
+    const toolOrdinal = peekNodeActivityOrdinal(sourceId, NODE);
+    expect(toolOrdinal, 'one genuine model round, before any tool allocation').toBe(1);
+    const toolKey = (runId: string) => ({
+      runId, nodeId: NODE, attempt: 1,
+      invocationId: logicalInvocationId({
+        tenantId: NODE_TENANT, runId, nodeId: NODE, logicalInvocationOrdinal: toolOrdinal,
+        providerKey: replayTools.toolCallKey(TODO_TOOL, { title: 'Call the venue' }),
+      }),
+    });
+    expect(await invocationLog().get(toolKey(sourceId)), 'the producer stopped before the real tool').toBeNull();
+
     managedRound.mockClear();
-    const out = await runNode('run-node-unrec', 'run-node-never-ran');
+    const replayRequests: AiToolCallRequest[] = [];
+    const out = await runNode(forkId, sourceId, (request) => { replayRequests.push(structuredClone(request)); });
     expect(out).toMatchObject({ status: 'failure', retryable: false, error: { code: 'replay_source_missing' } });
     expect(await cardCount(NODE_TENANT)).toBe(before);
-    // The source has no model records either, so round 1 dispatched (the D2 miss
-    // policy); the guard stopped round 2, so the model never saw the refusal.
-    expect(managedRound).toHaveBeenCalledTimes(1);
+    expect(replayRequests, 'the SAME actual model request was returned from the source record').toEqual(sourceRequests);
+    expect(managedRound).toHaveBeenCalledTimes(0);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(peekNodeActivityOrdinal(forkId, NODE), 'the real missing-tool lookup consumed the next ordinal').toBe(toolOrdinal + 1);
+    const forkModelKey = lastReplayLaneKey();
+    if (!forkModelKey) throw new Error('Replay did not reach the actual first model lookup');
+    expect(forkModelKey).toMatchObject({ runId: forkId, nodeId: NODE, attempt: 1 });
+    expect(forkModelKey.invocationId).not.toBe(sourceModelKey.invocationId);
+    expect(await invocationLog().get(forkModelKey), 'positive source model hit/copy, not an earlier model miss').toEqual(sourceModelRecord);
+    expect(await invocationLog().llmCacheKey(forkModelKey)).toBe(sourceRecipe);
+    expect(await invocationLog().get(toolKey(sourceId))).toBeNull();
+    expect(await invocationLog().get(toolKey(forkId))).toBeNull();
+    expect(await invocationLog().get(sourceModelKey)).toEqual(sourceModelRecord);
+    expect(await invocationLog().llmCacheKey(sourceModelKey)).toBe(sourceRecipe);
   });
 
   it('tasks.schedule-followup + schedule-recurring: a replay fork creates ZERO new scheduler:job rows', async () => {

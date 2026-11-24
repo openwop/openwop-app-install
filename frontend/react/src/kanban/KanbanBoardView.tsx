@@ -87,7 +87,52 @@ export interface CardMovePosition {
   afterCardId?: string;
 }
 
-const CARD_DROP_PREFIX = 'kanban-card-target:';
+export const CARD_DROP_PREFIX = 'kanban-card-target:';
+/** ADR 1155 D7 — a column inside one swimlane: `kanban-lane:<lane>:<columnId>`,
+ *  each part URI-encoded. The lane `''` is the "none" lane (no value for the key). */
+const LANE_DROP_PREFIX = 'kanban-lane:';
+export const laneDropId = (lane: string, columnId: string): string => `${LANE_DROP_PREFIX}${encodeURIComponent(lane)}:${encodeURIComponent(columnId)}`;
+export type DropOutcome =
+  | { kind: 'move'; columnId: string; position?: CardMovePosition }
+  /** `facets` is the patch the drop sends: the lane's value, or `null` for "none". */
+  | { kind: 'regroup'; columnId: string; lane: string; facets: Record<string, string | null>; position?: CardMovePosition };
+
+/** ADR 1155 D7 — what a drop does. A drop into a column, or onto a card, in the same
+ *  swimlane moves the card; one into another swimlane (or onto a card in another
+ *  swimlane) regroups it: its `groupBy` facet becomes that lane's value, `''` (the
+ *  "none" lane) clearing it. Null when the drop does nothing. */
+export function resolveDrop(input: {
+  activeId: string;
+  overId: string;
+  cards: readonly KanbanCard[];
+  groupBy: string | undefined;
+  /** For a drop onto a card: below its middle. */
+  after: boolean;
+}): DropOutcome | null {
+  const active = input.cards.find((c) => c.id === input.activeId);
+  if (!active) return null;
+  const laneOf = (c: KanbanCard): string => (input.groupBy ? c.facets?.[input.groupBy] ?? '' : '');
+  const patchFor = (value: string): Record<string, string | null> => (input.groupBy ? { [input.groupBy]: value === '' ? null : value } : {});
+  const lane = parseLaneDropId(input.overId);
+  if (lane) {
+    return input.groupBy && lane.lane !== laneOf(active)
+      ? { kind: 'regroup', columnId: lane.columnId, lane: lane.lane, facets: patchFor(lane.lane) }
+      : { kind: 'move', columnId: lane.columnId };
+  }
+  if (!input.overId.startsWith(CARD_DROP_PREFIX)) return { kind: 'move', columnId: input.overId };
+  const target = input.cards.find((c) => c.id === input.overId.slice(CARD_DROP_PREFIX.length));
+  if (!target || target.id === active.id) return null;
+  const position: CardMovePosition = input.after ? { afterCardId: target.id } : { beforeCardId: target.id };
+  return input.groupBy && laneOf(target) !== laneOf(active)
+    ? { kind: 'regroup', columnId: target.columnId, lane: laneOf(target), facets: patchFor(laneOf(target)), position }
+    : { kind: 'move', columnId: target.columnId, position };
+}
+
+export function parseLaneDropId(raw: string): { lane: string; columnId: string } | null {
+  if (!raw.startsWith(LANE_DROP_PREFIX)) return null;
+  const [lane, columnId] = raw.slice(LANE_DROP_PREFIX.length).split(':');
+  return lane === undefined || columnId === undefined ? null : { lane: decodeURIComponent(lane), columnId: decodeURIComponent(columnId) };
+}
 
 /** The full create-card payload the add-card form can produce. */
 export interface NewCardInput {
@@ -541,10 +586,12 @@ function DroppableColumn({
   onMove,
   footer,
   todoAutonomy, onSetColumnLimit, selectedIds,
-  workItemsByCardId, onRunWorkItem, startingWorkItemIds, cardExtra,
+  workItemsByCardId, onRunWorkItem, startingWorkItemIds, cardExtra, dropId,
 }: {
   column: KanbanColumn;
   cards: KanbanCard[];
+  /** ADR 1155 D7 — the droppable id; a swimlane's column uses `laneDropId`. */
+  dropId?: string | undefined;
   /** Absent ⇒ the column is read-only for creation: no add-card affordance.
    *  (Non-task boards — e.g. the CRM deal pipeline — move cards but create
    *  records through their own domain forms.) */
@@ -571,7 +618,7 @@ function DroppableColumn({
   cardExtra?: ((card: KanbanCard) => React.ReactNode) | undefined;
 }): JSX.Element {
   const { t } = useTranslation('kanban');
-  const { setNodeRef, isOver } = useDroppable({ id: column.id });
+  const { setNodeRef, isOver } = useDroppable({ id: dropId ?? column.id });
   const [adding, setAdding] = useState(false);
   const [title, setTitle] = useState('');
   // KB-R2-4 — a multi-line paste into the title offers one-card-per-line
@@ -785,9 +832,18 @@ export function KanbanBoardView({
   onRunWorkItem,
   startingWorkItemIds,
   cardExtra,
+  groupBy,
+  onRegroupCard,
 }: {
   board: KanbanBoard;
   cards: KanbanCard[];
+  /** ADR 1155 D7 — a facet key: the board renders one swimlane per value of it, plus
+   *  a "none" lane for cards without one. Absent ⇒ plain columns. */
+  groupBy?: string | undefined;
+  /** ADR 1155 D7 — a drop into another lane sets the card's `groupBy` facet to that
+   *  lane's value (the "none" lane clears it), in the same write as any column move.
+   *  Absent ⇒ a cross-lane drop is refused (nothing moves). */
+  onRegroupCard?: ((cardId: string, toColumnId: string, facets: Record<string, string | null>, position?: CardMovePosition) => void) | undefined;
   enableSources?: boolean | undefined;
   /** Workflows the embedding surface permits a card to bind. Strings preserve
    * legacy consumers; object entries carry the dynamic, editable workflow name. */
@@ -853,6 +909,11 @@ export function KanbanBoardView({
   const columnName = (id: string | number | undefined): string => {
     if (id === undefined) return '';
     const raw = String(id);
+    const laneTarget = parseLaneDropId(raw);
+    if (laneTarget) {
+      const column = board.columns.find((c) => c.id === laneTarget.columnId)?.name ?? laneTarget.columnId;
+      return t('laneColumn', { lane: laneTarget.lane || t('laneNone'), column });
+    }
     const cardTarget = raw.startsWith(CARD_DROP_PREFIX)
       ? local.find((candidate) => candidate.id === raw.slice(CARD_DROP_PREFIX.length))
       : undefined;
@@ -896,22 +957,30 @@ export function KanbanBoardView({
     onMoveCard(cardId, toColumnId, position);
   };
 
+  const laneOf = (card: KanbanCard): string => (groupBy ? card.facets?.[groupBy] ?? '' : '');
+
+  /** ADR 1155 D7 — a drop into another lane: the facet and the column change in one
+   *  write. The optimistic move is undone by the parent's refetch if it is refused. */
+  const regroupCard = (cardId: string, toColumnId: string, patch: Record<string, string | null>, position?: CardMovePosition): void => {
+    if (!groupBy || !onRegroupCard) return; // no regroup affordance: refuse the drop
+    setLocal((prev) => prev.map((candidate) => {
+      if (candidate.id !== cardId) return candidate;
+      const facets = { ...(candidate.facets ?? {}) };
+      for (const [k, v] of Object.entries(patch)) { if (v === null) delete facets[k]; else facets[k] = v; }
+      return { ...candidate, columnId: toColumnId, facets };
+    }));
+    onRegroupCard(cardId, toColumnId, patch, position);
+  };
+
   const onDragEnd = (event: DragEndEvent) => {
     if (!event.over) return;
-    const overId = String(event.over.id);
-    if (!overId.startsWith(CARD_DROP_PREFIX)) {
-      moveCard(String(event.active.id), overId);
-      return;
-    }
-    const targetCardId = overId.slice(CARD_DROP_PREFIX.length);
-    const targetCard = local.find((candidate) => candidate.id === targetCardId);
-    if (!targetCard || targetCard.id === String(event.active.id)) return;
     const activeRect = event.active.rect.current.translated;
     const after = activeRect !== null && activeRect !== undefined
       && activeRect.top + activeRect.height / 2 > event.over.rect.top + event.over.rect.height / 2;
-    moveCard(String(event.active.id), targetCard.columnId, after
-      ? { afterCardId: targetCard.id }
-      : { beforeCardId: targetCard.id });
+    const outcome = resolveDrop({ activeId: String(event.active.id), overId: String(event.over.id), cards: local, groupBy, after });
+    if (!outcome) return;
+    if (outcome.kind === 'regroup') regroupCard(String(event.active.id), outcome.columnId, outcome.facets, outcome.position);
+    else moveCard(String(event.active.id), outcome.columnId, outcome.position);
   };
 
   // Canonical lane → first matching column, so each card's contextual action
@@ -1020,36 +1089,63 @@ export function KanbanBoardView({
     toggleSelect(id, e.shiftKey);
   };
 
+  /** One column, of the whole board or of one swimlane (`dropId`). The footer (e.g.
+   *  Show more) renders once per column: on the last lane when grouped. */
+  const renderColumn = (col: KanbanColumn, pool: readonly KanbanCard[], dropId: string | undefined, withFooter: boolean): JSX.Element => {
+    const colCards = pool.filter((c) => c.columnId === col.id).sort((a, b) => a.order - b.order);
+    return (
+      <DroppableColumn
+        key={dropId ?? col.id}
+        dropId={dropId}
+        column={col}
+        cards={colCards}
+        onAddCard={onCreateCard}
+        onDeleteCard={onDeleteCard}
+        onEditCard={onEditCard}
+        enableSources={enableSources}
+        workflowOptions={workflowOptions}
+        laneTargets={laneTargets}
+        onMove={moveCard}
+        footer={withFooter ? columnFooter?.(col, local.filter((c) => c.columnId === col.id)) : undefined}
+        onSetColumnLimit={onSetColumnLimit}
+        selectedIds={selected}
+        workItemsByCardId={workItemsByCardId}
+        onRunWorkItem={onRunWorkItem}
+        startingWorkItemIds={startingWorkItemIds}
+        todoAutonomy={todoAutonomy}
+        cardExtra={cardExtra}
+      />
+    );
+  };
+
   return (
     <DndContext sensors={sensors} onDragEnd={onDragEnd} accessibility={{ announcements, screenReaderInstructions }}>
+      {groupBy ? (
+        // ADR 1155 D7 — one swimlane per value of the group-by facet, the "none"
+        // lane last (always shown, so a drop can clear the value).
+        <div className="kb-swimlanes" onKeyDown={onBoardKeyDown} onClickCapture={onBoardClickCapture}>
+          {leadingColumn}
+          {[...[...new Set(local.map(laneOf).filter((lane) => lane !== ''))].sort(), ''].map((lane, laneIndex, lanes) => {
+            const laneCards = local.filter((c) => laneOf(c) === lane);
+            return (
+              <section key={`lane:${lane}`} className="kb-swimlane" aria-label={t('laneAria', { lane: lane || t('laneNone'), count: laneCards.length })}>
+                <h3 className="kb-swimlane-head u-fs-13 u-fw-600">
+                  <span>{lane || t('laneNone')}</span>
+                  <span className="u-text-muted">{laneCards.length}</span>
+                </h3>
+                <div className="kanban-board-scroll">
+                  {board.columns.map((col) => renderColumn(col, laneCards, laneDropId(lane, col.id), laneIndex === lanes.length - 1))}
+                </div>
+              </section>
+            );
+          })}
+        </div>
+      ) : (
       <div className="kanban-board-scroll" onKeyDown={onBoardKeyDown} onClickCapture={onBoardClickCapture}>
         {leadingColumn}
-        {board.columns.map((col) => {
-          const colCards = local.filter((c) => c.columnId === col.id).sort((a, b) => a.order - b.order);
-          return (
-            <DroppableColumn
-              key={col.id}
-              column={col}
-              cards={colCards}
-              onAddCard={onCreateCard}
-              onDeleteCard={onDeleteCard}
-              onEditCard={onEditCard}
-              enableSources={enableSources}
-              workflowOptions={workflowOptions}
-              laneTargets={laneTargets}
-              onMove={moveCard}
-              footer={columnFooter?.(col, colCards)}
-              onSetColumnLimit={onSetColumnLimit}
-              selectedIds={selected}
-              workItemsByCardId={workItemsByCardId}
-              onRunWorkItem={onRunWorkItem}
-              startingWorkItemIds={startingWorkItemIds}
-              todoAutonomy={todoAutonomy}
-              cardExtra={cardExtra}
-            />
-          );
-        })}
+        {board.columns.map((col) => renderColumn(col, local, undefined, true))}
       </div>
+      )}
       {/* KB-BULK — the bottom-floating bulk bar (the Linear/Asana convention).
           Every action fans out over the EXISTING per-card callback and appears
           only when that callback exists — one mutation path, structural no-op

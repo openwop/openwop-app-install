@@ -30,6 +30,11 @@ export const LOG_REASON_CODES = [
   'widget_managed_binding',
   'widget_subscription_binding',
   'widget_key_unavailable',
+  // #6133 — why the Postgres pub/sub LISTEN connection was recycled
+  // (`storage/postgres/pubsubListener.ts`), logged on `pubsub_listener_recycled`.
+  'pubsub_listener_ping_timeout',
+  'pubsub_listener_error',
+  'pubsub_listener_end',
 ] as const;
 
 /**

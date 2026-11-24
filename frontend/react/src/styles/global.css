@@ -5994,6 +5994,19 @@ a.chip:hover { background: var(--paper); }
 /* #5851 — the implicit auto column could not shrink below a card's widest row: /inbox scrolled 21px sideways at 380px. */
 .page-stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-5); align-content: start; }
 
+/* Campaign Studio owns one shrinkable track inside the shell. Keep its header,
+ * tab strip and active panel within the available inline size; do not clip
+ * overflowing controls or change the shared u-grid contract. */
+.campaign-studio-hub { min-inline-size: 0; grid-template-columns: minmax(0, 1fr); }
+.campaign-studio-hub > * { min-inline-size: 0; }
+/* Audience descriptions are prose, unlike the shared single-line chip labels. */
+.campaign-studio-hub .campaign-intel-audience {
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 /* ─── PageHeader — the editorial page-title primitive (DESIGN.md §5) ─── */
 .page-header {
   display: flex;
@@ -8592,6 +8605,10 @@ button.teampage-skill-chip:not(:disabled):hover { background: var(--clay-soft); 
 .kanban-grip { cursor: grab; display: inline-flex; align-items: center; color: var(--ink-3); touch-action: none; flex-shrink: 0; padding: 5px; margin: -3px; border-radius: var(--radius); }
 .kanban-blocker { font-size: 12px; color: var(--color-warning-text, var(--ink-3)); margin-top: var(--space-1); display: flex; align-items: center; gap: var(--space-1); }
 .kanban-board-scroll { display: flex; gap: var(--space-3); align-items: flex-start; overflow-x: auto; padding-bottom: var(--space-2); scroll-snap-type: x proximity; }
+/* ADR 1155 D7 — grouped boards: one labelled row of the board's columns per value. */
+.kb-swimlanes { display: flex; flex-direction: column; gap: var(--space-3); }
+.kb-swimlane { display: flex; flex-direction: column; gap: var(--space-2); }
+.kb-swimlane-head { display: flex; align-items: baseline; gap: var(--space-2); margin: 0; }
 /* Phones (UX RUN-2): the board stays a horizontal swimlane scroller — a vertical
  * stack would bury the lane semantics — but columns shrink toward the viewport so
  * one lane is fully visible at a time, and scroll-snap (above) makes the swipe land

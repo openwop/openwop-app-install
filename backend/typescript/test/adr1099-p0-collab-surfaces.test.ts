@@ -94,7 +94,9 @@ async function setup() {
   const v = await visitor.post<{ user: { userId: string } }>('/host/openwop-app/test/login', { email: `client-${n}@home.test` });
   const email = (await getUser(v.body.user.userId))?.email ?? '';
   const collaborator = await createCollaborator({ tenantId, orgId, kind: 'client-stakeholder', email, displayName: 'Casey Client', createdBy: a.body.user.userId });
-  const link = await createLink(tenantId, orgId, 'system:adr1099-test', { resourceType: 'collab_invite', resourceId: collaborator.collaboratorId });
+  // The visitor lane, as the invite routes mint it: collab_invite is system-mint-only
+  // (2026-11-24), so the member-lane default this fixture used to take is refused.
+  const link = await createLink(tenantId, orgId, 'system:adr1099-test', { resourceType: 'collab_invite', resourceId: collaborator.collaboratorId }, { lane: 'visitor', why: 'test fixture: the invite routes mint on the visitor lane' });
   const accepted = await visitor.post('/host/openwop-app/collab/invites/accept', { token: link.token });
   expect(accepted.status, accepted.raw).toBe(200);
   return { tenantId, orgId, adminId: a.body.user.userId, visitor, visitorId: v.body.user.userId, collaborator };

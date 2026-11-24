@@ -36,6 +36,7 @@
  * (`?replay=required`).
  */
 import { randomUUID } from 'node:crypto';
+import type { LogReasonCode } from '../../observability/logReasonCodes.js';
 
 /** The parts of a `pg` client the listener uses. */
 export interface ListenClient {
@@ -101,12 +102,16 @@ export function createPubSubListener(opts: PubSubListenerOptions) {
     retryTimer.unref?.();
   }
 
-  /** Drop `c` (if it is still the live client) and re-listen. */
-  function recycle(c: ListenClient, reason: string): void {
+  /**
+   * Drop `c` (if it is still the live client) and re-listen. `reason` may carry a
+   * driver error message, so the log mask hashes it; `reasonCode` is the fixed
+   * literal a probe can count (ADR 0900 D2).
+   */
+  function recycle(c: ListenClient, reason: string, reasonCode: LogReasonCode): void {
     if (client !== c) return;
     client = null;
     recoveries += 1;
-    log.warn('pubsub_listener_recycled', { reason, recoveries });
+    log.warn('pubsub_listener_recycled', { reason, reasonCode, recoveries });
     if (pending) { clearTimeout(pending.timer); pending = null; }
     try { c.release(true); } catch { /* already gone */ }
     scheduleRetry();
@@ -127,8 +132,8 @@ export function createPubSubListener(opts: PubSubListenerOptions) {
         try { h(parsed.p); } catch { /* a handler must not break delivery */ }
       }
     });
-    c.on('error', (err) => recycle(c, `error: ${err instanceof Error ? err.message : String(err)}`));
-    c.on('end', () => recycle(c, 'end'));
+    c.on('error', (err) => recycle(c, `error: ${err instanceof Error ? err.message : String(err)}`, 'pubsub_listener_error'));
+    c.on('end', () => recycle(c, 'end', 'pubsub_listener_end'));
     try {
       await c.query(`LISTEN ${physicalChannel}`);
     } catch (err) {
@@ -153,7 +158,7 @@ export function createPubSubListener(opts: PubSubListenerOptions) {
     const c = client;
     if (!c || closing || pending) return;
     const nonce = randomUUID();
-    pending = { nonce, timer: setTimeout(() => { pending = null; recycle(c, 'ping-timeout'); }, pingTimeoutMs) };
+    pending = { nonce, timer: setTimeout(() => { pending = null; recycle(c, 'ping-timeout', 'pubsub_listener_ping_timeout'); }, pingTimeoutMs) };
     pending.timer.unref?.();
     try {
       await opts.notify(physicalChannel, JSON.stringify({ c: LISTENER_PING_CHANNEL, p: nonce }));

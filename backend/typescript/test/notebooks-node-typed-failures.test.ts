@@ -15,7 +15,6 @@
  */
 
 import { describe, expect, it } from 'vitest';
-// @ts-expect-error — untyped .mjs pack module (loaded the way the runtime does)
 import * as pack from '../../../packs/feature.notebooks.nodes/index.mjs';
 
 const refused = (code: string) => async () => ({ error: { code, message: `refused: ${code}` } });

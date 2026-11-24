@@ -34,7 +34,13 @@ export interface ToolApproval {
   grain?: ApprovalGrain;
   /** CHAN-F17 — a channel row (a pending ask, or an unused one-call approval) stops counting at this time. */
   expiresAt?: string;
+  /** ADR 1156 D2 — the agent turn whose call raised the latest ask (its chat card). */
+  askId?: string;
+  /** ADR 1156 D3 — the tool's own plain description of the held call; present while pending. */
+  requestedLines?: ApprovalLine[];
 }
+/** ADR 1156 D3 — one line of a tool's description, optionally under a heading. */
+export interface ApprovalLine { text: string; group?: string }
 export type ApprovalGrain = 'call' | 'conversation';
 
 export interface CapabilityScopeView {

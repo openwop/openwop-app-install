@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { setNavSource } from '../chrome/navSource.js';
 import { useFocusTrap } from './useFocusTrap.js';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -85,7 +85,16 @@ export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JS
   // an Escape inside that gap (or with focus on an option) went nowhere and the
   // palette stayed open. MEASURED: the e2e "Escape closes the palette" went red
   // under load (dialog still open after 14 polls) and passed 3/3 alone.
-  useEffect(() => {
+  //
+  // CORRECTED 2026-11-24: that fix narrowed the gap without closing it. The
+  // listener was itself a passive `useEffect`, which runs AFTER paint, so on
+  // the lazy-mount open (openSignal → setOpen in a passive effect, a
+  // default-priority commit) the dialog was visible before any Escape listener
+  // existed. A fast Escape was lost, and the palette stayed open (train 516's
+  // e2e red, and DeckTalk's twice). It is now a LAYOUT effect, attached in
+  // the same commit that inserts the dialog. The dialog's own onKeyDown below
+  // also closes on Escape, since React's handler is live from the first commit.
+  useLayoutEffect(() => {
     if (!open) return;
     function onEsc(e: KeyboardEvent) {
       if (e.key === 'Escape') { e.preventDefault(); close(); }
@@ -183,9 +192,10 @@ export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JS
     <div className="cmdk-scrim" onClick={close} role="presentation">
       {/* role="dialog" is a window/structure role the a11y plugin treats as
           non-interactive; the onClick only stops propagation to the backdrop
-          so a click inside the panel doesn't close it (no keyboard analogue
-          is needed — Escape-to-close is a window listener while open). */}
-      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/click-events-have-key-events */}
+          so a click inside the panel doesn't close it. Escape closes from the
+          panel's own onKeyDown, and from a window listener attached before
+          paint for focus outside the panel. */}
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
       <div
         className="cmdk-panel"
         ref={trapRef}
@@ -193,6 +203,7 @@ export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JS
         aria-modal="true"
         aria-label={t('cmdkLabel')}
         onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); close(); } }}
       >
         <div className="cmdk-input-row">
           <span className="cmdk-input-icon" aria-hidden><SearchIcon size={16} /></span>

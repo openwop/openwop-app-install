@@ -9,7 +9,8 @@
  * an unassigned card, a far-future card, or a long-overdue backlog card is
  * announced; a person who can no longer see the project still gets the notice;
  * or the per-tenant cap stops the sweep instead of resuming on the next tick;
- * or a killed toggle, or a tenant turned off under a global on, is swept.
+ * or a killed toggle, or a tenant turned off under a global on, is swept;
+ * or a workspace with boards but no roster agents is never visited.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { openStorage } from '../src/storage/index.js';
@@ -26,8 +27,10 @@ import { kanbanDueRemindersFeature } from '../src/features/kanban-due-reminders/
 import {
   DUE_SOON_MS,
   MAX_CARDS_PER_TENANT_TICK,
+  SWEEP_TENANTS_TTL_MS,
   __resetDueSweepCursor,
   dueNoticeFor,
+  dueSweepTenantSource,
   noticeLabel,
   reminderTenants,
   sweepTenantDue,
@@ -159,5 +162,35 @@ describe('ADR 1138 D4 — due reminders', () => {
     } finally {
       await saveConfig(original, 'test');
     }
+  });
+  it('a workspace with boards and no roster agents is swept (the roster is not the tenant list)', async () => {
+    const original = (await getEffectiveConfig('kanban-due-reminders'))!;
+    const noRoster = (await createWorkspace({ name: 'Boards only', ownerSubject: 'user:owner' })).tenantId;
+    await createMember({ tenantId: noRoster, orgId: noRoster, subject: 'user:alice', displayName: 'Alice', roles: ['editor'] });
+    const board = await createBoard({ tenantId: noRoster, name: 'Studio' });
+    const card = await createCard({ boardId: board.id, columnId: 'todo', title: 'Chase the rug', assigneeId: 'user:alice', dueAt: iso(NOW - HOUR) });
+    try {
+      await saveConfig({ ...original, status: 'on' }, 'test');
+      const source = dueSweepTenantSource(async () => []);
+      expect(await source()).toContain(noRoster);
+      expect(await reminderTenants(source)).toContain(noRoster);
+      expect((await sweepTenantDue(noRoster, NOW)).sent).toBe(1);
+      expect(await dueInbox(noRoster, card.id)).toHaveLength(1);
+    } finally {
+      await saveConfig(original, 'test');
+    }
+  });
+
+  it('the tenant list is the union of roster and board tenants, read once per round', async () => {
+    let now = 0;
+    let reads = 0;
+    const source = dueSweepTenantSource(async () => ['t-b', 't-a'], async () => { reads += 1; return ['t-a', 't-c']; }, () => now);
+    expect(await source()).toEqual(['t-a', 't-b', 't-c']);
+    now = SWEEP_TENANTS_TTL_MS - 1;
+    await source();
+    expect(reads).toBe(1);
+    now = SWEEP_TENANTS_TTL_MS;
+    await source();
+    expect(reads).toBe(2);
   });
 });
