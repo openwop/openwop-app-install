@@ -14,7 +14,7 @@
  */
 import { createHash } from 'node:crypto';
 import { getNodeRegistry } from '../../executor/nodeRegistry.js';
-import { createCanvasForTenant } from '../../host/canvasSurface.js';
+import { createCanvasForTenant, canvasEditorLink, getCanvasForTenant } from '../../host/canvasSurface.js';
 import { APP_BUILDER_CANVAS_TYPE } from './componentCatalog.js';
 import { validateAppDoc } from './validateAppDoc.js';
 import { buildAppBuilderSurface } from './surface.js';
@@ -29,6 +29,9 @@ export interface RenderDesignArgs {
   baseVersion?: number | undefined;
   /** Canvas owner on create (the acting human when one exists). */
   ownerSubject?: { kind: 'user'; id: string } | undefined;
+  /** ADR 1160 D1 — the org a created canvas belongs to; `null` (with a reason)
+   *  for the MCP lane, which has no org. */
+  org: { orgId: string } | { orgId: null; orgWhy: `system:${string}` };
   /** Provenance stamped on canvas metadata on create. */
   producedBy: Record<string, unknown>;
   /** Idempotency basis on create (retries inside one run short-circuit). */
@@ -106,7 +109,8 @@ export async function renderDesign(tenantId: string, args: RenderDesignArgs): Pr
     if (!applyRepair) return { ok: false, error: 'host_capability_missing', message: 'The app-builder surface does not expose applyRepair on this host.' };
     try {
       const applied = (await applyRepair({ canvasId: args.canvasId, expectedVersion: baseVersion, app: payload })) as { canvasId: string; newVersion: number };
-      return { ok: true, canvasId: applied.canvasId, version: applied.newVersion, screenCount, url: `/app-builder/${encodeURIComponent(applied.canvasId)}`, created: false };
+      const orgId = (await getCanvasForTenant(tenantId, applied.canvasId))?.orgId ?? args.org.orgId;
+      return { ok: true, canvasId: applied.canvasId, version: applied.newVersion, screenCount, url: canvasEditorLink('/app-builder', applied.canvasId, orgId), created: false };
     } catch (e) {
       const err = e as { code?: string; message?: string };
       if (err.code === 'canvas_version_conflict') {
@@ -125,11 +129,12 @@ export async function renderDesign(tenantId: string, args: RenderDesignArgs): Pr
     : undefined;
   const created = await createCanvasForTenant(tenantId, {
     canvasTypeId: APP_BUILDER_CANVAS_TYPE,
+    ...args.org, // orgId: from the caller (ADR 1160 D1)
     ...(typeof payload.name === 'string' ? { name: payload.name } : {}),
     ...(args.ownerSubject ? { ownerSubject: args.ownerSubject } : {}),
     initialState: payload as never,
     metadata: { producedBy: args.producedBy, ...(args.runId ? { runId: args.runId } : {}) },
     ...(idempotencyKey ? { idempotencyKey } : {}),
   });
-  return { ok: true, canvasId: created.canvasId, version: created.version, screenCount, url: `/app-builder/${encodeURIComponent(created.canvasId)}`, created: true };
+  return { ok: true, canvasId: created.canvasId, version: created.version, screenCount, url: canvasEditorLink('/app-builder', created.canvasId, created.orgId ?? args.org.orgId), created: true };
 }

@@ -264,15 +264,17 @@ describe('esign — loud staleness, decline, void, isolation', () => {
  * `getSignatureStatus(...)` and not the service result, would have dropped it.
  * That is the same "the host knew and didn't say" shape the fix exists to remove,
  * so the assertion has to be on what the CLIENT receives.
+ *
+ * #6135: invites now ride the transactional seam (sender address + the requester's
+ * email Connection), so `invitesEmailed` is what the sends returned. The true case is
+ * `transactional-email-headers-6135.test.ts`.
  */
 describe('signature invites report delivery honestly (route level)', () => {
-  it('returns invitesEmailed:false while the console stub is the transport', async () => {
-    const { emailTransportConfigured } = await import('../src/features/email/emailService.js');
-    // Precondition asserted, not assumed: if a real transport ever gets wired
-    // into this harness, this test stops proving anything and should say so.
-    expect(emailTransportConfigured(), 'a real email transport is configured — this test no longer proves anything').toBe(false);
-
+  it('returns invitesEmailed:false while the org has no sender address or email connection', async () => {
     const { owner, tenantId, orgId } = await ownerOrg();
+    // #6135 — invites ride the transactional seam now, not the console stub. Precondition
+    // asserted, not assumed: if this org could send, this test would stop proving anything.
+    const { transactionalEmailReady } = await import('../src/host/transactionalEmail.js');
     const docId = await seedDoc(tenantId, orgId, '# MSA\n\nPlease sign.');
     const created = await owner.post(org(orgId), {
       target: { kind: 'document', id: docId },
@@ -281,9 +283,11 @@ describe('signature invites report delivery honestly (route level)', () => {
 
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     expect(created.body.signRequestId, 'the request itself must still be created').toBeTruthy();
+    const stored = await getSignRequestById(created.body.signRequestId);
+    expect(await transactionalEmailReady({ tenantId, orgId, actingUserId: stored!.createdBy }), 'this org can send — the test no longer proves anything').toBe(false);
     expect(
       created.body.invitesEmailed,
-      'no transport is configured, so the API must not imply the invite was sent',
+      'no sender or connection is configured, so the API must not imply the invite was sent',
     ).toBe(false);
   });
 });

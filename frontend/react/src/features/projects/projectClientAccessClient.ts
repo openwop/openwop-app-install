@@ -18,6 +18,8 @@ export interface ProjectGrant {
   expiresAt: string;
   status: 'active' | 'revoked';
   createdAt: string;
+  /** Which party the grant is for (ADR 1099), from the labels the workspace's features offer. */
+  audience?: string;
 }
 export interface OrgCollaborator {
   collaboratorId: string; kind: string;
@@ -51,8 +53,16 @@ export async function inviteToOrg(orgId: string, body: { kind: ProjectCollaborat
   return asJson(await fetch(base(orgId), json('POST', body)));
 }
 
-export async function grantProject(orgId: string, collaboratorId: string, projectId: string, actions: ProjectGrantAction[], expiresInDays: number): Promise<ProjectGrant> {
-  return (await asJson<{ grant: ProjectGrant }>(await fetch(`${base(orgId)}/${encodeURIComponent(collaboratorId)}/grants`, json('POST', { resource: { kind: 'project', id: projectId }, actions, expiresInDays })))).grant;
+export async function grantProject(orgId: string, collaboratorId: string, projectId: string, actions: ProjectGrantAction[], expiresInDays: number, audience?: string): Promise<ProjectGrant> {
+  const body = { resource: { kind: 'project', id: projectId }, actions, expiresInDays, ...(audience ? { audience } : {}) };
+  return (await asJson<{ grant: ProjectGrant }>(await fetch(`${base(orgId)}/${encodeURIComponent(collaboratorId)}/grants`, json('POST', body)))).grant;
+}
+
+/** ADR 1099 — the audience labels a project grant may carry here (from the
+ *  workspace's features). An empty list means the workspace offers none. */
+export async function listProjectAudiences(orgId: string): Promise<string[]> {
+  const out = await asJson<{ kinds: Array<{ kind: string; audiences?: string[] }> }>(await fetch(`${base(orgId)}/grantable`, fetchOpts({ headers: authedHeaders() })));
+  return out.kinds.find((k) => k.kind === 'project')?.audiences ?? [];
 }
 
 export async function revokeProjectGrant(orgId: string, collaboratorId: string, grantId: string): Promise<void> {

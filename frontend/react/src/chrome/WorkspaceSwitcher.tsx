@@ -17,10 +17,10 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { getCurrentAuthChangeEvent, onAuthChange } from '../client/config.js';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
-import { useBrand } from '../brand/BrandProvider.js';
-import { BuildingIcon, ChevronRightIcon, SettingsIcon } from '../ui/icons/index.js';
+import { BuildingIcon, SettingsIcon } from '../ui/icons/index.js';
 import { listMyWorkspaces, switchWorkspace, createAndEnterWorkspace, completeWorkspaceTransition, reloadIfTransitionStranded, getWorkspaceTransitionSnapshot, WorkspaceLifecycleError, type WorkspaceSummary, type WorkspaceMutationResult } from '../client/workspaceClient.js';
 import { Notice } from '../ui/Notice.js';
+import { WorkspaceSwitcherLink } from './WorkspaceSwitcherLink.js';
 import { reloadIntoSession } from '../auth/reloadIntoSession.js';
 import { ApiError } from '../client/requestJson.js';
 
@@ -39,7 +39,6 @@ const NEW = '__new__';
 
 export function WorkspaceSwitcher(): JSX.Element {
   const { t } = useTranslation('chrome');
-  const brand = useBrand(); // live runtime brand (ADR 0170)
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [active, setActive] = useState<string>('');
   const [busy, setBusy] = useState(false);
@@ -150,14 +149,7 @@ export function WorkspaceSwitcher(): JSX.Element {
     return (
       <>
       {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}
-      <Link to="/orgs" className="app-workspace-switcher" title={t('workspaceAndOrgs')}>
-        <span className="app-workspace-icon" aria-hidden><BuildingIcon size={16} /></span>
-        <span className="app-workspace-meta">
-          <span className="app-workspace-eyebrow">{t('workspace')}</span>
-          <span className="app-workspace-name">{brand.instanceName}</span>
-        </span>
-        <span className="app-workspace-caret" aria-hidden><ChevronRightIcon size={14} /></span>
-      </Link>
+      <WorkspaceSwitcherLink />
       </>
     );
   }

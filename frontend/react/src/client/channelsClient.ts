@@ -4,6 +4,7 @@
  * default-deny access gate; this just calls it). Mirrors the other host-ext clients.
  */
 import { authedHeaders, config, fetchOpts } from './config.js';
+import { directHostSelectionHeaders } from './directHostSelection.js';
 import { readSseFrames } from './sseFrames.js';
 
 async function http<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -289,7 +290,9 @@ export function subscribeChannelPresence(channelId: string, onSnapshot: (s: Pres
         // exemption matches (path ∧ Accept); without it every reconnect burned
         // request budget. CS-CH-2 — a 403 (not a member / removed mid-stream)
         // is TERMINAL like 404/405: reconnecting can't fix membership.
-        const res = await fetch(url, { method: 'GET', headers: { ...authedHeaders(), accept: 'text/event-stream' }, credentials: 'include', signal: sub.signal });
+        // ADR 1158 — the channel is looked up in the ACTIVE workspace, which the
+        // direct host learns only from the selection header.
+        const res = await fetch(url, { method: 'GET', headers: { ...authedHeaders(), ...(await directHostSelectionHeaders()), accept: 'text/event-stream' }, credentials: 'include', signal: sub.signal });
         if (res.status === 403 || res.status === 404 || res.status === 405) return; // presence denied/not enabled — terminal
         if (res.ok && res.body) {
           attempt = 0; // a successful connect resets the backoff
@@ -344,7 +347,9 @@ export function subscribeChannelMessages(channelId: string, onMessage: (messageI
         // presence subscription above (membership loss must not reconnect forever).
         // CHV-UX-6 — the terminal exit is REPORTED (not silent): a user removed
         // mid-session gets a designed notice instead of a feed that goes quiet.
-        const res = await fetch(url, { method: 'GET', headers: { ...authedHeaders(), accept: 'text/event-stream' }, credentials: 'include', signal: sub.signal });
+        // ADR 1158 — the channel is looked up in the ACTIVE workspace, which the
+        // direct host learns only from the selection header.
+        const res = await fetch(url, { method: 'GET', headers: { ...authedHeaders(), ...(await directHostSelectionHeaders()), accept: 'text/event-stream' }, credentials: 'include', signal: sub.signal });
         if (res.status === 403 || res.status === 404 || res.status === 405) { onTerminal?.(res.status); return; } // not a member / unavailable — terminal
         if (res.ok && res.body) {
           attempt = 0; // a successful connect resets the backoff

@@ -74,6 +74,23 @@ const CLASSIFIED: Record<string, { kind: Kind; why: string; decisionSource?: Reg
     why: 'The workflow agent node. Forwards ctx.compaction, which the executor read from run.metadata.',
     decisionSource: /compaction:\s*ctx\.compaction/,
   },
+  // ADR 1099 D5 — the turn's run insert and loop moved to host/scopedToolTurn.ts; the
+  // anon lane still names `executeTool` (its wrapper, and the deferred approve).
+  'host/scopedToolTurn.ts': {
+    kind: 'EXEMPT',
+    why:
+      'ADR 0604 (recorded, not fixed): the non-member turn (anon widget, ADR 1099 collaborator) creates its ' +
+      'run with a bare `storage.insertRun`, so no frozen decision exists to supply. Routing it through the ' +
+      'seam also runs the AUTHORITY contributor for a non-member principal, which needs its own decision.',
+  },
+  // ADR 1099 D5 (P2) — names `executeTool` (its per-call grant re-check wrapper); the
+  // run and the loop are host/scopedToolTurn.ts's.
+  'host/collaboratorTurn.ts': {
+    kind: 'EXEMPT',
+    why:
+      'ADR 0604 (recorded, not fixed): the collaborator turn runs in host/scopedToolTurn.ts, whose bare ' +
+      '`storage.insertRun` freezes no compaction decision to supply (same reason as that row).',
+  },
   'host/anonymousActor.ts': {
     kind: 'EXEMPT',
     why:

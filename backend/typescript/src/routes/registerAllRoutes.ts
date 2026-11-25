@@ -401,7 +401,7 @@ const ROUTE_MODULES: RouteModule[] = [
   // trigger is the RFCS/0086 "named workflow agents" demo surface.
   { name: 'kanban', register: ({ app, storage, hostSuite }) => registerKanbanRoutes(app, { storage, hostSuite }) },
   // ADR 1099 D2 — the collaborator's side of ADR 0958 (shared, grant view, invite accept).
-  { name: 'external-collaborators', register: ({ app }) => registerExternalCollaboratorRoutes(app) },
+  { name: 'external-collaborators', register: ({ app, storage }) => registerExternalCollaboratorRoutes(app, storage) },
   // Agent-experience ops (PRD §14): idempotent demo seed + the agent heartbeat
   // "Check now" task-claim. After roster + kanban since it composes both.
   { name: 'agentOps', register: ({ app, storage, hostSuite }) => registerAgentOpsRoutes(app, { storage, hostSuite }) },

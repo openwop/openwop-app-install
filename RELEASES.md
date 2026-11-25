@@ -48,6 +48,34 @@ upgrade is neither: list it in `breakingConfig`.
 
 ## Version log
 
+### v0.21.0 — 2026-11-25
+
+- **Required stop:** no. **Rolling-safe:** yes.
+- **Schema:** sqlite 54 / postgres 52 (unchanged) · **App migrations:** 26 → 27.
+  Migration 27 stamps `autonomyLevel: "auto"` on roster agents with none stored, so
+  they keep running as before. New agents default to `review` (ADR 1159).
+- **Security:** a canvas created since ADR 1160 P0 is read and written only in its
+  own org (#6260, #6262). A switched-off collaboration surface admits no signed-in
+  invite (#6258).
+- **Breaking:** none. No route, env var or config key is removed or renamed.
+  Behaviour changes:
+  - e-sign invites and completion emails are now really sent (#6248);
+  - an unpaged kanban read above 2,000 cards answers `400 kanban_board_page_required`
+    (ADR 1155 P5b; deploy the new SPA with it, or use `@openwop/cli` ≥ 2.2.0);
+  - new agents propose for review (ADR 1159).
+- **Config:** none required. Two optional caps for client portal turns (#6261).
+- Transactional email gains `fromName` / `replyTo` / `listUnsubscribe` (#6248).
+  Work-item proposals carry card facets (ADR 1155 P2b, kanban-work-items 1.3.0).
+  The host entry chunk is about 2.8 kB gzip smaller (#6250).
+- A client on a `project` grant can talk to the project's agent, one turn at a time,
+  behind `projects.client-portal` (default off) with per-grant and per-tenant day caps
+  (ADR 1099 P2, #6261). Optional `OPENWOP_COLLAB_TURNS_PER_{GRANT,TENANT}_DAY`.
+  Its Project Guide agent is not listed to members or on the A2A card; it still
+  serves the collaborator turn (#6268).
+- Fixes: direct-host feeds carry the active workspace (#6232); a sign-in-required
+  site route can be the app home (#6245); example data starts unselected (#6231).
+- [CHANGELOG §0.21.0](./CHANGELOG.md#0210--2026-11-25)
+
 ### v0.20.0 — 2026-11-24
 
 - **Required stop:** no. **Rolling-safe:** yes.

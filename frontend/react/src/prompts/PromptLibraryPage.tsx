@@ -220,7 +220,7 @@ export function PromptLibraryPage() {
           <Notice variant={tierOneCompliance === 'strict' ? 'warning' : 'info'}>
             <strong>{t('tierOneStrong')}</strong> {t('tierOnePosture', { posture: tierOneCompliance })}{' '}
             <strong>{flaggedCount}</strong> {t('tierOneFlagged', { count: flaggedCount })}{' '}
-            <a href="https://github.com/openwop/openwop/blob/main/spec/v1/structured-output-subset.md" target="_blank" rel="noopener">{t('tierOneLinkText')}</a>.
+            <a href="https://github.com/openwop/openwop/blob/main/spec/v2/core/host-services.md#structured-output" target="_blank" rel="noopener">{t('tierOneLinkText')}</a>.
             {' '}{t('tierOneFindingHint')}
           </Notice>
         )}

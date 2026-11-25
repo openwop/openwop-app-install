@@ -165,7 +165,10 @@ describe('CFP-1 — cad render tool: gates, repair-loop errors, persistence', ()
     expect(out.isError).toBeFalsy();
     const res = JSON.parse(out.content) as { canvasId: string; url: string; solidCount: number; version: number };
     expect(res.solidCount).toBe(2);
-    expect(res.url).toBe(`/cad/${encodeURIComponent(res.canvasId)}`);
+    // ADR 1160 D2 — the link names the canvas's own org, so a multi-org user lands in it.
+    const linkOrg = (await getCanvasForTenant(TENANT, res.canvasId))?.orgId;
+    expect(linkOrg, 'P0 stamps the tool org').toEqual(expect.any(String));
+    expect(res.url).toBe(`/cad/${encodeURIComponent(res.canvasId)}?org=${encodeURIComponent(linkOrg!)}`);
     const canvas = await getCanvasForTenant(TENANT, res.canvasId);
     expect(canvas?.canvasTypeId).toBe('canvas.cad');
     expect(canvas?.ownerSubject).toEqual({ kind: 'user', id: 'u-1' });

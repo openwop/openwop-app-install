@@ -74,7 +74,8 @@ export interface SmtpDialOptions {
   servername?: string;
 }
 export interface SmtpMessage {
-  from: string;
+  /** An address object carries the #6135 display name; nodemailer encodes it. */
+  from: string | { name: string; address: string };
   to: string | string[];
   cc?: string | string[];
   bcc?: string | string[];
@@ -190,7 +191,7 @@ export async function sendViaSmtp(
 
   const lu = listUnsubscribeHeaders(args);
   const msg: SmtpMessage = {
-    from: args.from,
+    from: args.fromName !== undefined ? { name: args.fromName, address: args.from } : args.from,
     to: args.to,
     subject: args.subject,
     ...(args.cc !== undefined ? { cc: args.cc } : {}),

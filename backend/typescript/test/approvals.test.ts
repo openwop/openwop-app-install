@@ -149,7 +149,7 @@ describe('approval inbox — agents propose, humans dispose', () => {
     const auto = await api<RosterEntry>(`/host/openwop-app/roster/${ren.rosterId}`, {
       method: 'PATCH', body: JSON.stringify({ autonomyLevel: 'auto' }),
     });
-    expect(auto.body.autonomyLevel).toBeUndefined(); // 'auto' is the default → stored as unset
+    expect(auto.body.autonomyLevel).toBe('auto'); // ADR 1159: 'auto' is opt-in and stored explicitly
     await api(`/host/openwop-app/roster/${ren.rosterId}`, { method: 'PATCH', body: JSON.stringify({ autonomyLevel: 'guided' }) });
   });
 
@@ -164,7 +164,7 @@ describe('approval inbox — agents propose, humans dispose', () => {
       method: 'PATCH', body: JSON.stringify({ autonomyLevel: 'auto' }),
     });
     expect(set.status).toBe(200);
-    expect(set.body.autonomyLevel).toBeUndefined(); // 'auto' is the default → stored as unset
+    expect(set.body.autonomyLevel).toBe('auto'); // ADR 1159: 'auto' is opt-in and stored explicitly
     const checked = await api<CheckResult>(`/host/openwop-app/roster/${felix.rosterId}/check`, { method: 'POST', body: '{}' });
     expect(checked.status).toBe(200);
     expect(checked.body.picked).toBe(true);

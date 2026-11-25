@@ -4,8 +4,9 @@
  * The brand key (`brand.appHomePath`, validated in `brand/defaults.ts`) names a
  * route. Two places use it: "Open app" on the public site and the app shell's
  * `/` (`RootRedirect`). Neither may strand a visitor, so the configured path is
- * used only when it is a registered workspace route whose feature is on and
- * unlocked for the caller. A typo, a feature switched off, a paid feature the
+ * used only when it is a registered signed-in route (a workspace route, or a
+ * `site` route whose auth is `required`) whose feature is on and unlocked for the
+ * caller. A typo, a feature switched off, a paid feature the
  * tenant has not bought, or a toggle read that failed all land on `/dashboard`.
  *
  * Unset (the stock build and every adopter that does not set it), nothing
@@ -59,9 +60,13 @@ export interface AppHomeAccess {
 export function resolveAppHome(configured: string, route: FeatureRoute | null, access: AppHomeAccess): string {
   // The stock path, or the hop itself (a key naming the hop would loop).
   if (configured === DEFAULT_APP_HOME_PATH || configured === APP_HOME_ENTRY) return DEFAULT_APP_HOME_PATH;
-  // Not a registered app route, or one that is not a plain workspace page: the
-  // admin tier is role-gated, and `/` and the entry itself would loop.
-  if (!route || route.tier !== 'workspace' || route.path === '/' || route.path === APP_HOME_ENTRY) return DEFAULT_APP_HOME_PATH;
+  // A signed-in page: a workspace route, or a `site` route behind the sign-in wall
+  // (`auth` defaults to 'required', ADR 0641 decision 2). A white-label's own desk
+  // can be the latter (DeckTalk's `/app/*`); refusing it sent "Open app" to
+  // `/dashboard` with no error. The admin tier stays out (role-gated), as do
+  // `optional`-auth site pages, `/` and the entry itself (they would loop).
+  const signedInPage = route?.tier === 'workspace' || (route?.tier === 'site' && (route.auth ?? 'required') === 'required');
+  if (!route || !signedInPage || route.path === '/' || route.path === APP_HOME_ENTRY) return DEFAULT_APP_HOME_PATH;
   const featureId = route.ownerFeatureId ?? route.nav?.featureId;
   if (featureId) {
     if (access.resolutionFailed) return DEFAULT_APP_HOME_PATH;

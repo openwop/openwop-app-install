@@ -50,7 +50,7 @@ export function registerCadEditorRoutes(deps: RouteDeps): void {
       // NEW canvas holding one `mesh` solid.
       app.post(`${org}/canvases/import`, async (req, res, next) => {
         try {
-          const { user, tenantId } = await authorizeOrgScope(req, CAD_FEATURE, 'workspace:write');
+          const { user, orgId, tenantId } = await authorizeOrgScope(req, CAD_FEATURE, 'workspace:write');
           const body = (req.body ?? {}) as {
             contentBase64?: unknown; name?: unknown; sourceFormat?: unknown; dropped?: unknown;
           };
@@ -83,6 +83,7 @@ export function registerCadEditorRoutes(deps: RouteDeps): void {
           }
           const canvas = await createCanvasForTenant(tenantId, {
             canvasTypeId: 'canvas.cad',
+            orgId,
             name,
             initialState: state,
           });
@@ -98,12 +99,12 @@ export function registerCadEditorRoutes(deps: RouteDeps): void {
       // state; delivered as a short-TTL Media capability URL (slides pattern).
       app.post(`${org}/canvases/:canvasId/export`, async (req, res, next) => {
         try {
-          const { user, tenantId } = await authorizeOrgScope(req, CAD_FEATURE, 'workspace:read');
+          const { user, tenantId, orgId } = await authorizeOrgScope(req, CAD_FEATURE, 'workspace:read');
           const body = (req.body ?? {}) as { format?: unknown };
           if (!isCadExportFormat(body.format)) {
             throw new OpenwopError('validation_error', `\`format\` must be one of: ${CAD_EXPORT_FORMATS.join(', ')}.`, 400, { field: 'format' });
           }
-          const canvas = await loadCanvas(tenantId, req.params.canvasId, user.userId, 'read');
+          const canvas = await loadCanvas(tenantId, orgId, req.params.canvasId, user.userId, 'read');
           const startedAt = Date.now();
           const result = await exportCad(tenantId, canvas.state as Record<string, unknown>, body.format);
           log.info('cad_exported', { tenantId, format: body.format, bytes: result.sizeBytes, triangles: result.triangleCount, ms: Date.now() - startedAt });
@@ -115,8 +116,8 @@ export function registerCadEditorRoutes(deps: RouteDeps): void {
       // csvUrl (short-TTL capability) }. Computed, never model-authored.
       app.post(`${org}/canvases/:canvasId/bom`, async (req, res, next) => {
         try {
-          const { user, tenantId } = await authorizeOrgScope(req, CAD_FEATURE, 'workspace:read');
-          const canvas = await loadCanvas(tenantId, req.params.canvasId, user.userId, 'read');
+          const { user, tenantId, orgId } = await authorizeOrgScope(req, CAD_FEATURE, 'workspace:read');
+          const canvas = await loadCanvas(tenantId, orgId, req.params.canvasId, user.userId, 'read');
           const bom = await generateBom(tenantId, canvas.state as Record<string, unknown>);
           const csv = bomCsv(bom);
           const stored = await storeMediaAsset(tenantId, {

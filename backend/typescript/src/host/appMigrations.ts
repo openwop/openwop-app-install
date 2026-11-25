@@ -791,6 +791,19 @@ export const APP_MIGRATIONS: readonly AppMigration[] = [
       log.info('app_migration_geocode_rekeyed', { rekeyed: await rekeyLegacyGeocodes() });
     },
   },
+  {
+    // Roster autonomy now defaults to `review` and every write persists the level.
+    // Before that, `auto` was stored as ABSENT, so stamp an explicit `auto` on every
+    // absent row: existing agents keep running as they do today, and only agents
+    // created from now on default to review. Idempotent + concurrency-safe (skip rows
+    // with a level; compareAndSwap per row).
+    version: 27,
+    name: 'stamp-legacy-roster-autonomy',
+    async run(): Promise<void> {
+      const { stampLegacyAutonomyLevels } = await import('./rosterService.js');
+      log.info('app_migration_roster_autonomy_stamped', { stamped: await stampLegacyAutonomyLevels() });
+    },
+  },
 ];
 
 /**

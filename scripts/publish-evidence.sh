@@ -92,10 +92,10 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-# Major 2 FIRST: it is the evidence the corpus declaration waits on, and a run
-# that fails partway should have produced the one that matters most.
+# Major 2 only by default: v1 is retired (2026-10-04, RFC 0234), so a default
+# major-1 cut can certify nothing. `--major 1` still cuts it on request.
 MAJORS_DEFAULTED=0
-[ ${#MAJORS[@]} -gt 0 ] || { MAJORS=(2 1); MAJORS_DEFAULTED=1; }
+[ ${#MAJORS[@]} -gt 0 ] || { MAJORS=(2); MAJORS_DEFAULTED=1; }
 
 # ── config (strict parse, never `source` — same reasoning as deploy.sh) ─────
 [ -f "$ENV_FILE" ] || { echo "publish-evidence: $ENV_FILE not found (cp scripts/deploy.env.example scripts/deploy.env)" >&2; exit 2; }
@@ -135,7 +135,6 @@ if [ "$PRINT_CONFIG" -eq 1 ]; then
   echo "base=$BASE"
   echo "origin=$ORIGIN"
   echo "majors=${MAJORS[*]}"
-  [ "$MAJORS_DEFAULTED" -eq 1 ] && echo "major_1=only-if-advertised (dropped at run time when discovery offers no 1.x protocol)"
   echo "max_workers=$MAX_WORKERS"
   echo "allow_any_commit=$ALLOW_ANY_COMMIT"
   echo "lock=$LOCK"

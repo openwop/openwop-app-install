@@ -204,7 +204,7 @@ export const messages = {
   compareEllipsis: 'Comparer…',
   deleteRunHistoryTitle: 'Supprimer définitivement cette exécution et son historique',
   deleteRun: 'Supprimer l’exécution',
-  downloadBundleTitle: 'Télécharger un ensemble JSON des événements de cette exécution pour le support / le triage (spec/v1/debug-bundle.md)',
+  downloadBundleTitle: 'Télécharger un ensemble JSON des événements de cette exécution pour le support / le triage',
   downloadBundle: 'Télécharger l’ensemble',
   // RunDetailPage — redesigned summary (/polish-screens)
   loadingRun: 'Chargement de l’exécution…',

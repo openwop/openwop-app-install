@@ -51,6 +51,9 @@ export const messages = {
   noTypesBody: 'This host advertises no seedable example data.',
   seedDisabledNotice: 'Example-data seeding is disabled on this deployment (OPENWOP_DEMO_SEED_ENABLED). You can still clear previously seeded data.',
   selectAria: 'Select {{label}}',
+  selectAll: 'Select all',
+  selectNone: 'Select none',
+  selectHint: 'Select the example data types to load or clear. Nothing is selected until you choose.',
   countPresent: '{{n}} present',
 
   // ExampleDataPage — actions
@@ -65,8 +68,7 @@ export const messages = {
   clearExampleData: 'Clear example data',
   clearTitle: 'Remove example entities (your own agents are untouched)',
   clearing: 'Clearing…',
-  clearConfirm: 'Clear {{label}}? This removes the example entities for your tenant (your own agents are not touched).',
-  clearAllFallback: 'all example data',
+  clearConfirm: 'Clear {{label}} from {{workspace}}? This removes those example entities from that workspace (your own agents are not touched).',
 
   // ExampleDataPage — results
   dryRunNotice: 'Dry run — nothing was written.',

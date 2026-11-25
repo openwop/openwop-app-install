@@ -18,7 +18,7 @@ import { registerEmailAgentTools } from './agentTools.js';
 import { buildEmailSurface } from './surface.js';
 import { registerEmailSendApprovalGate } from './sendApproval.js';
 import { setTransactionalEmailTransport } from '../../host/transactionalEmail.js';
-import { sendBrokeredTransactionalEmail } from './brokeredProvider.js';
+import { brokeredTransactionalEmailReady, sendBrokeredTransactionalEmail } from './brokeredProvider.js';
 import { registerEmailPlaybookContent } from './playbookContent.js';
 
 export const emailFeature: BackendFeature = {
@@ -54,8 +54,11 @@ export const emailFeature: BackendFeature = {
         actingUserId: email.context.actingUserId,
         to: email.to, subject: email.subject, text: email.text,
         ...(email.context.idempotencyKey ? { idempotencyKey: email.context.idempotencyKey } : {}),
+        ...(email.fromName !== undefined ? { fromName: email.fromName } : {}),
+        ...(email.replyTo !== undefined ? { replyTo: email.replyTo } : {}),
+        ...(email.listUnsubscribe ? { listUnsubscribe: email.listUnsubscribe } : {}),
       });
-    });
+    }, (context) => brokeredTransactionalEmailReady(context));
   },
   // Face 2 (ADR 0014): `ctx.features.email` — a thin read surface (templates) that
   // backs the feature.email.nodes pack + the copywriter agent.

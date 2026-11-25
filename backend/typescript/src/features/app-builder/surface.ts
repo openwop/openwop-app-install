@@ -11,7 +11,7 @@
  */
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface } from '../../host/featureSurfaces.js';
-import { updateCanvasForTenant, getCanvasForCaller, canvasWriteAllowed } from '../../host/canvasSurface.js';
+import { updateCanvasForTenant, getCanvasForCaller, canvasWriteAllowed, type CanvasCaller } from '../../host/canvasSurface.js';
 import { catalogTypeListForPrompt, projectComponentCatalog } from './componentCatalog.js';
 import { exportCanvas, isExportTarget } from './export/exportService.js';
 import { EXPORT_TARGETS } from './export/generators.js';
@@ -23,7 +23,8 @@ export function buildAppBuilderSurface(scope: BundleScope): FeatureSurface {
   // ADR 0768 Phase 0 — every canvas load goes through THE shared predicate with
   // the run's acting user. A run with no acting user (schedule/webhook) is
   // refused on member-owned canvases (fail-closed; subjectReadAllowed).
-  const caller = { subject: scope.actingUserId };
+  // ADR 1160 D2 — a run with no person keeps its tenant-wide reach, said explicitly.
+  const caller: CanvasCaller = scope.actingUserId ? { subject: scope.actingUserId } : { orgSystemLane: 'system:run-without-person' };
   return {
     // export({ target, canvasId? , app? }) → { assetToken, serveUrl, fileName, fileCount, sizeBytes, warnings }
     export: async (args) => {

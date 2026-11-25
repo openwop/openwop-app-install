@@ -6,6 +6,7 @@
  * barge-in. No second chat.
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
+import { directHostSelectionHeaders } from '../../client/directHostSelection.js';
 import { cachedRead } from '../../client/requestCache.js';
 import { readSseFrames } from '../../client/sseFrames.js';
 import { readErrorCode, readErrorMessage } from '../../client/errorEnvelope.js';
@@ -165,7 +166,9 @@ export function subscribeVoiceTranscripts(conversationId: string, onMessage: () 
       try {
         // CS-CH-1 — declare the stream intent so the per-IP limiter's SSE
         // exemption matches (path ∧ Accept) instead of burning request budget.
-        const res = await fetch(url, { method: 'GET', headers: { ...authedHeaders(), accept: 'text/event-stream' }, credentials: 'include', signal: sub.signal });
+        // ADR 1158 — the conversation is looked up in the ACTIVE workspace, which
+        // the direct host learns only from the selection header.
+        const res = await fetch(url, { method: 'GET', headers: { ...authedHeaders(), ...(await directHostSelectionHeaders()), accept: 'text/event-stream' }, credentials: 'include', signal: sub.signal });
         // Terminal: not visible / unavailable (404/405) AND auth loss (401/403) —
         // retrying an expired session forever would just hammer the backend with
         // backoff traffic for the rest of the voice call.

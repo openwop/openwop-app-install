@@ -20,7 +20,7 @@
 import { getNodeRegistry } from '../../executor/nodeRegistry.js';
 import type { NodeContext, NodeOutcome } from '../../executor/types.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
-import { createCanvasForTenant, getCanvasForCaller, listCanvasesForCaller } from '../../host/canvasSurface.js';
+import { createCanvasForTenant, getCanvasForCaller, listCanvasesForCaller, canvasEditorLink } from '../../host/canvasSurface.js';
 import type { Storage } from '../../storage/storage.js';
 import type { HostAdapterSuite } from '../../host/index.js';
 import { resolveAndResume } from '../../routes/interrupts.js';
@@ -88,11 +88,12 @@ export function registerAppBuilderMcpNodes(deps: { storage: Storage; hostSuite: 
     const name = str(inputsOf(ctx).name) ?? 'Untitled app';
     const created = await createCanvasForTenant(ctx.tenantId, {
       canvasTypeId: APP_BUILDER_CANVAS_TYPE,
+      orgId: null, orgWhy: 'system:mcp-run-no-org', // ADR 1160 D6: a run has no org
       name,
       initialState: { name, screens: [{ id: 'home', name: 'Home', isInitial: true, components: [] }] } as never,
       metadata: { producedBy: { kind: 'mcp-client' }, runId: ctx.runId },
     });
-    return { status: 'success', outputs: { canvasId: created.canvasId, version: created.version, url: `/app-builder/${encodeURIComponent(created.canvasId)}` } };
+    return { status: 'success', outputs: { canvasId: created.canvasId, version: created.version, url: canvasEditorLink('/app-builder', created.canvasId, created.orgId) } };
   }, { sideEffecting: true }));
 
   // open-project — with `canvasId`: one project's handle (id + version, the
@@ -105,12 +106,12 @@ export function registerAppBuilderMcpNodes(deps: { storage: Storage; hostSuite: 
       const all = await listCanvasesForCaller(ctx.tenantId, { subject: ctx.actingUserId });
       const projects = all
         .filter((c) => c.canvasTypeId === APP_BUILDER_CANVAS_TYPE)
-        .map((c) => ({ canvasId: c.canvasId, name: c.name, version: c.version, url: `/app-builder/${encodeURIComponent(c.canvasId)}` }));
+        .map((c) => ({ canvasId: c.canvasId, name: c.name, version: c.version, url: canvasEditorLink('/app-builder', c.canvasId, c.orgId) }));
       return { status: 'success', outputs: { projects } };
     }
     const canvas = await getCanvasForCaller(ctx.tenantId, canvasId, { subject: ctx.actingUserId });
     if (!canvas || canvas.canvasTypeId !== APP_BUILDER_CANVAS_TYPE) return fail('not_found', `App Builder canvas '${canvasId}' not found in this workspace.`);
-    return { status: 'success', outputs: { canvasId, name: canvas.name, version: canvas.version, url: `/app-builder/${encodeURIComponent(canvasId)}` } };
+    return { status: 'success', outputs: { canvasId, name: canvas.name, version: canvas.version, url: canvasEditorLink('/app-builder', canvasId, canvas.orgId) } };
   }));
 
   // get-design — the full app JSON + version (the ADR 0358 read-before-write).
@@ -147,6 +148,7 @@ export function registerAppBuilderMcpNodes(deps: { storage: Storage; hostSuite: 
       producedBy: { kind: 'mcp-client' },
       runId: ctx.runId,
       ...(ctx.actingUserId ? { actingUserId: ctx.actingUserId } : {}),
+      org: { orgId: null, orgWhy: 'system:mcp-run-no-org' },
     });
     if (!result.ok) return fail(result.error, `${result.message}${result.extra ? ` ${JSON.stringify(result.extra)}` : ''}`);
     return { status: 'success', outputs: { canvasId: result.canvasId, version: result.version, screenCount: result.screenCount, url: result.url, created: result.created } };
@@ -167,7 +169,7 @@ export function registerAppBuilderMcpNodes(deps: { storage: Storage; hostSuite: 
       outputs: {
         canvasId,
         version: canvas.version,
-        url: `/app-builder/${encodeURIComponent(canvasId)}`,
+        url: canvasEditorLink('/app-builder', canvasId, canvas.orgId),
         previewUrl: `/app-builder/${encodeURIComponent(canvasId)}/preview`,
         app: projected,
       },

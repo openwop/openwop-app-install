@@ -85,7 +85,12 @@ const OWN_ENV = [
   'GOOGLE_API_KEY', 'OPENWOP_LLM_CACHE_KEY_RECIPE_2', 'OPENWOP_DEPLOY_POSTURE',
   'OPENWOP_TEST_SEAM_ENABLED', 'OPENWOP_MOCK_PROVIDER_ENABLED',
 ] as const;
-const MUST_BE_ABSENT = [
+/** Keys the fixture's run must never see: a shell value would change which credential,
+ *  policy or boot secret the real runtime picks. The harness removes them for its own
+ *  scope and restores them on close, so a developer's exported provider key neither
+ *  leaks into the run nor refuses it (it used to throw, which redded gates on every dev
+ *  box with GOOGLE_API_KEY exported). */
+export const MUST_BE_ABSENT = [
   'GOOGLE_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'MINIMAX_API_KEY',
   'OPENWOP_BYOK_ENCRYPTION_KEY', 'OPENWOP_BYOK_KMS_KEY', 'OPENWOP_BOOT_SECRETS', 'OPENWOP_SAMPLE_SECRETS',
   'OPENWOP_AI_POLICY_GOOGLE', 'OPENWOP_AI_POLICY_OPENAI', 'OPENWOP_AI_POLICY_ANTHROPIC', 'OPENWOP_AI_POLICY_MINIMAX',
@@ -107,7 +112,7 @@ export function inLane<T>(lane: Lane, work: () => T): T {
 }
 
 export async function createHarness(opts: { installInvocationLog?: boolean } = {}) {
-  const savedEnv = new Map<string, string | undefined>(OWN_ENV.map(name => [name, process.env[name]]));
+  const savedEnv = new Map<string, string | undefined>([...OWN_ENV, ...MUST_BE_ABSENT].map(name => [name, process.env[name]]));
   const originalFetch = globalThis.fetch;
   const requests: RequestObservation[] = [];
   const forbidden: Array<{ method: string; url: string }> = [];
@@ -165,10 +170,8 @@ export async function createHarness(opts: { installInvocationLog?: boolean } = {
     }
   };
   try {
-    for (const name of MUST_BE_ABSENT) {
-      if (process.env[name] !== undefined) throw new Error('Fixture requires a sanitized native environment: ' + name);
-    }
     envChanged = true;
+    for (const name of MUST_BE_ABSENT) delete process.env[name];
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     process.env.OPENWOP_BYOK_EPHEMERAL = 'true';
     process.env.OPENWOP_MANAGED_PROVIDER = 'google';

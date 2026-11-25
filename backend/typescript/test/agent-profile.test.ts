@@ -295,10 +295,12 @@ describe('agent profile autonomy sync + data preservation (ADR 0493)', () => {
 describe('agent profile routes — happy path', () => {
   it('PUT derives the profile autonomy from roster.autonomyLevel (ADR 0493 SSoT), not the body; GET round-trips', async () => {
     const a = await newTenantClient();
-    const id = await makeAgent(a, 'Fin Close'); // default roster autonomy = auto
+    const id = await makeAgent(a, 'Fin Close');
+    // ADR 1159 — a new agent defaults to review, so opt this one into auto first.
+    expect((await a('PATCH', `/host/openwop-app/roster/${id}`, { autonomyLevel: 'auto' })).status).toBe(200);
 
     // The body's autonomy is IGNORED — `roster.autonomyLevel` is the single source
-    // of truth (owned by the Edit-details modal). The default 'auto' derives the
+    // of truth (owned by the Edit-details modal). Roster 'auto' derives the
     // `autonomous-within-policy` spec level, regardless of the body's `draft-only`.
     const put = await a<ProfileResp>('PUT', `/host/openwop-app/agents/${id}/profile`, SAMPLE_BODY);
     expect(put.status).toBe(200);

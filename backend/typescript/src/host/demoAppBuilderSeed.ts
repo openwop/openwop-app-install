@@ -198,6 +198,7 @@ export async function seedDemoAppBuilder(tenantId: string): Promise<{ created: n
   }
   const canvas = await createCanvasForTenant(tenantId, {
     canvasTypeId: CANVAS_TYPE,
+    orgId: null, orgWhy: 'system:demo-seed', // ADR 1160 D1: tenant-shared demo
     name: NAME,
     initialState: doc,
     idempotencyKey: IDEMPOTENCY_KEY,

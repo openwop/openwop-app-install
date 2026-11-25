@@ -29,7 +29,6 @@ import type {
 import { adaptV2Capabilities, type HostCapabilities } from './capabilitiesV2Adapter.js';
 import { toClientEvent } from './eventVocabulary.js';
 import { unbindRunIds, bindRunId, resetWireTenant, VENDOR_BASE } from './v2Wire.js';
-import { listMyWorkspaces } from './workspaceClient.js';
 import { authedHeaders, config, fetchOpts, onAuthChange } from './config.js';
 import { handleSessionRefusal } from './sessionRefusal.js';
 import { withSessionBootstrap } from './anonBootstrap.js';
@@ -125,7 +124,9 @@ export function clearCapabilitiesCache(): void {
 onAuthChange(clearCapabilitiesCache);
 onAuthChange(resetWireTenant);
 /** identity.md §5 — a run id leaves for the major-2 wire tenant-bound (ADR 0647 § Correction). */
-export const bound = (runId: string): Promise<string> => bindRunId(runId, listMyWorkspaces);
+// The workspace client loads on the first unbound id, not with the entry chunk.
+const loadWorkspaces = async (): Promise<{ active: string }> => (await import('./workspaceClient.js')).listMyWorkspaces();
+export const bound = (runId: string): Promise<string> => bindRunId(runId, loadWorkspaces);
 
 export async function getCapabilities(): Promise<HostCapabilities> {
   if (capsCache && Date.now() - capsCache.at < CAPS_TTL_MS) return capsCache.value;

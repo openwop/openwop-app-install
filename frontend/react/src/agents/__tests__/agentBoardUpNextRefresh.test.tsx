@@ -15,13 +15,13 @@ import type { CardPatch } from '../../kanban/KanbanBoardView.js';
 import type { KanbanBoard } from '../../kanban/kanbanClient.js';
 
 type KanbanClient = typeof import('../../kanban/kanbanClient.js');
-const { patchCard, getBoard } = vi.hoisted(() => ({
+const { patchCard, getWholeBoard } = vi.hoisted(() => ({
   patchCard: vi.fn<KanbanClient['patchCard']>(),
-  getBoard: vi.fn<KanbanClient['getBoard']>(),
+  getWholeBoard: vi.fn<KanbanClient['getWholeBoard']>(),
 }));
 vi.mock('../../kanban/kanbanClient.js', async (orig) => ({
   ...(await orig<KanbanClient>()),
-  getBoard,
+  getWholeBoard,
   subscribeBoardEvents: vi.fn(() => () => undefined),
   patchCard,
 }));
@@ -39,8 +39,8 @@ const { AgentBoardPanel } = await import('../AgentBoardPanel.js');
 
 const BOARD: KanbanBoard = { id: 'b1', tenantId: 't1', name: 'B', columns: [{ id: 'todo', name: 'To Do' }], createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' };
 
-beforeEach(() => { getBoard.mockResolvedValue({ board: BOARD, cards: [], workItems: [] }); });
-afterEach(() => { cleanup(); seen.length = 0; signals.length = 0; patchCard.mockReset(); getBoard.mockReset(); });
+beforeEach(() => { getWholeBoard.mockResolvedValue({ board: BOARD, cards: [], workItems: [] }); });
+afterEach(() => { cleanup(); seen.length = 0; signals.length = 0; patchCard.mockReset(); getWholeBoard.mockReset(); });
 
 describe('AgentBoardPanel → Up next', () => {
   it('a card edit (a Release) bumps the Up next refresh signal', async () => {
@@ -57,13 +57,13 @@ describe('AgentBoardPanel → Up next', () => {
     patchCard.mockRejectedValue(Object.assign(new Error('patchCard returned 409'), { status: 409 }));
     render(<AgentBoardPanel boardId="b1" persona="Atlas" />);
     await screen.findByText('board-view');
-    const reads = getBoard.mock.calls.length;
+    const reads = getWholeBoard.mock.calls.length;
     const before = signals.at(-1) ?? 0;
     await act(async () => { seen.at(-1)!.onEditCard!('c1', { blockerNote: '' }); });
     expect(await screen.findByText(/changed since you loaded it/)).toBeTruthy();
     expect(screen.queryByText(/409/)).toBeNull();
     // The reload half of the claim: the board is re-read and Up next is told to.
-    expect(getBoard.mock.calls.length).toBeGreaterThan(reads);
+    expect(getWholeBoard.mock.calls.length).toBeGreaterThan(reads);
     expect(signals.at(-1)).toBeGreaterThan(before);
   });
 });

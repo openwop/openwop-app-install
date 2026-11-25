@@ -112,7 +112,7 @@ export function AgentGuardrailsPanel({
   rosterId,
   roleKey,
   persona,
-  autonomyLevel = 'auto',
+  autonomyLevel = 'review',
   startEditing = false,
 }: {
   rosterId: string;

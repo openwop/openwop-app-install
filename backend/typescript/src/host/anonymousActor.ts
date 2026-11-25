@@ -32,25 +32,18 @@
  *      §C two tiers + MUST-NOTs, §D audit)
  */
 
-import { createHmac, randomBytes, randomUUID } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import { anonOwnerStamp } from './runOwner.js';
-import { scoreOnlineEvalsOnTerminal } from './workflowEvalOnline.js';
-import { stampRunCostOnTerminal } from '../observability/costEmitter.js';
-import { foldWorkflowSpendOnTerminal } from './workflowBudgets.js';
 import type { Storage } from '../storage/storage.js';
 import type { AiCallMessage, AiToolCallRequest, AiToolCallResult } from '../executor/types.js';
-import { buildRunRecord } from './runDispatch.js';
-import { compileAgentTools, runChatToolLoop, type AgentEvent } from './agentDispatch.js';
+import { runScopedToolTurn, type ScopedToolTurnParams } from './scopedToolTurn.js';
 import { createScopedAgentToolProvider, isAnonHitlOnlyTool } from './agentToolProvider.js';
 import { buildLaneFirewall } from './laneFirewall.js';
 import { isDeniedWebhookHost } from './webhookEgressGuard.js';
 import { getApproval, resolveApproval, reopenApproval, eraseApprovalSubject, registerAnonSurfaceWriteApprovalHandler, type PendingApproval } from './approvalService.js';
 import { resolveEffectiveAccess } from './accessControlService.js';
 import { OpenwopError } from '../types.js';
-import { createLogger } from '../observability/logger.js';
 import { toolError, untrustedToolError } from './agentToolKit.js';
-
-const log = createLogger('host.anonymousActor');
 
 // Re-exported so a consumer that builds an anon-owned run (the widget path here +
 // the sample seam) imports the run constructor from THIS one owner alongside the
@@ -389,61 +382,25 @@ export interface AnonReadTurnResult {
 export async function runAnonReadTurn(params: AnonReadTurnParams): Promise<AnonReadTurnResult> {
   const { storage, tenantId, agent, grant } = params;
   const principal = mintAnonPrincipal(params.surfaceSessionKey);
-  const now = new Date().toISOString();
-
-  const run = buildRunRecord({
-    workflowId: ANON_SURFACE_WORKFLOW_ID,
-    tenantId,
-    metadata: { principalKind: 'anonymous', anonPrincipal: principal },
-    // RFC 0165 §B (ADR 0625) — the same anon principal as the Subject.
-    owner: anonOwnerStamp(principal),
-    now,
-  });
-  // ADR 0604 (TOCC-1, RECORDED NOT FIXED) — this is a DELIBERATE `storage.insertRun`,
-  // i.e. the one run-creation path in the host that does NOT go through
-  // `insertRunWithStartContext`. ADR 0099 §implementation says "all run creation
-  // funnels through one new owner … a new run-creation path inherits the stamp
-  // by using the seam"; this lane does not, so an anon run can never carry a
-  // frozen `run.metadata.compaction` and tool-output compaction is structurally
-  // unavailable here — a second inert lane beside the chat one fixed in
-  // `conversationToolLoop.ts`.
-  //
-  // It is NOT switched to the seam in this batch on purpose. The seam also runs
-  // the AUTHORITY contributor, which mints a recorded authority block from
-  // `currentAuthority()`; doing that for an ANONYMOUS principal is a
-  // security-relevant change that belongs in its own reviewed decision, not in a
-  // token-savings fix. Routing anon through the seam (or giving the seam a
-  // per-contributor opt-out) is the follow-up.
-  await storage.insertRun(run);
-  const runId = run.runId;
-
-  const emit: AnonRunEmit = async (event) => {
-    await storage.appendEvent({ eventId: randomUUID(), runId, type: event.type, payload: event.payload, timestamp: new Date().toISOString() });
-  };
   const resource = `tenant:${tenantId}`;
-  const decide = (action: string, allowed: boolean, reason: AnonAuthorizationReason): Promise<void> =>
+  const decideOn = (emit: AnonRunEmit) => (action: string, allowed: boolean, reason: AnonAuthorizationReason): Promise<void> =>
     emitAnonAuthorizationDecided(emit, { principal, action: `tool:${action}`, resource, allowed, reason });
 
   // §C.1 — DEFAULT-DENY tool surface: read ∪ write granted tools, compiled against
   // themselves so the set is EXACTLY the grant (never the ADR 0315 baseline).
-  // `actingUserId` is intentionally absent (the fail-closed floor).
+  // `actingUserId` is intentionally absent (the fail-closed floor). ADR 1099 D5: the
+  // run, the compile, the firewall, the loop and the settle are `runScopedToolTurn`.
   const granted = [...grant.read, ...grant.write];
-  const toolProvider = createScopedAgentToolProvider({ tenantId, runId });
-  const tools = compileAgentTools(
-    { agentId: agent.agentId, persona: agent.persona, systemPrompt: agent.systemPrompt, toolAllowlist: granted } as Parameters<typeof compileAgentTools>[0],
-    granted,
-    toolProvider.resolveTool,
-    granted,
-  );
 
   // Per-tool authorization at the execution boundary (§C). A read tool executes; a
   // granted write tool is HELD behind its control (never executed here — the durable
   // write needs the RFC 0051 approval); an uncontrolled write is denied.
   let anonWriteIdx = 0; // ADR 0469 — per-run write index for the deterministic hold key
-  const wrappedExecuteTool: typeof toolProvider.executeTool = async (call) => {
+  const executeTool: ScopedToolTurnParams['executeTool'] = async (call, { runId, emit, base }) => {
+    const decide = decideOn(emit);
     const auth = authorizeAnonTool(grant, call.name);
     await decide(call.name, auth.allowed, auth.reason);
-    if (auth.tier === 'read' && auth.allowed) return toolProvider.executeTool(call);
+    if (auth.tier === 'read' && auth.allowed) return base(call);
     if (auth.reason === 'anon-write-ungated') {
       return toolError('anon_write_ungated', 'This action requires an approval control that is not configured for this public surface.');
     }
@@ -461,7 +418,7 @@ export async function runAnonReadTurn(params: AnonReadTurnParams): Promise<AnonR
         return untrustedToolError('anon_write_auto_capped', 'This surface has reached its automatic-action limit — tell the visitor to try again later.', cap.message);
       }
       await decide(call.name, true, 'anon-write-auto-allowed');
-      return toolProvider.executeTool(call);
+      return base(call);
     }
     // ADR 0469 A2 — a GRANTED write behind a control is HELD for operator review
     // (never executed here — the deferred write runs on approve, A4). The caller's
@@ -481,65 +438,29 @@ export async function runAnonReadTurn(params: AnonReadTurnParams): Promise<AnonR
     return { content: JSON.stringify({ status: 'pending_approval', message: 'This action was requested for human approval and NOT performed. Tell the visitor it is awaiting review.' }), isError: false };
   };
 
-  // §C.1 — a model-requested tool NOT in the grant is refused by the shared loop
-  // (`agent.toolReturned{status:'forbidden'}`) and never dispatched; mirror that into
-  // an allowed:false `anon-not-granted` audit record. ADR 0834 D1: the loop now also
-  // carries the capability firewall, which refuses GRANTED tools — those are audited
-  // through `onFirewallDecision` below with their own reason, so this mirror is
-  // restricted to names outside the grant (a firewall refusal is never mislabelled).
-  const grantedSet = new Set(granted);
-  const onEvent = async (e: AgentEvent): Promise<void> => {
-    if (e.type === 'agent.toolReturned' && (e as { status?: unknown }).status === 'forbidden') {
-      const toolName = typeof (e as { toolName?: unknown }).toolName === 'string' ? String((e as { toolName?: unknown }).toolName) : 'unknown';
-      if (!grantedSet.has(toolName)) await decide(toolName, false, 'anon-not-granted');
-    }
-  };
-  // ADR 0834 D1 / S3 — the anonymous lane was the one tool-executing lane with NO
-  // firewall, so a tenant or platform `deny` never reached a widget visitor. Forced
-  // safe (no bypass), no approvals (no ledger, no approver): a held call is refused.
-  const { hook: firewall } = await buildLaneFirewall({ tenantId, lane: 'anon', resource: runId, dedupeKey: runId });
-  // The loop's sink is synchronous; the audit writes are collected and awaited after the
-  // loop so the run's record is complete before the turn settles.
-  const firewallAudits: Promise<void>[] = [];
-  const onFirewallDecision = (d: { toolName: string; decision: 'deny' | 'require-approval' }): void => {
-    firewallAudits.push(decide(d.toolName, false, d.decision === 'deny' ? 'anon-firewall-denied' : 'anon-firewall-held').catch(() => {}));
-  };
+  const turn = await runScopedToolTurn({
+    storage,
+    tenantId,
+    lane: 'anon',
+    workflowId: ANON_SURFACE_WORKFLOW_ID,
+    runMetadata: { principalKind: 'anonymous', anonPrincipal: principal },
+    // RFC 0165 §B (ADR 0625) — the same anon principal as the Subject.
+    owner: anonOwnerStamp(principal),
+    agent,
+    toolIds: granted,
+    messages: [...(params.history ?? []).map((m): AiCallMessage => ({ role: m.role, content: m.content })), { role: 'user', content: params.fencedUserMessage }],
+    callAIWithTools: params.callAIWithTools,
+    ...(params.maxRounds ? { maxRounds: params.maxRounds } : {}),
+    executeTool,
+    // §C.1 — a model-requested tool NOT in the grant is refused by the shared loop
+    // (`agent.toolReturned{status:'forbidden'}`) and never dispatched; mirror that into
+    // an allowed:false `anon-not-granted` audit record.
+    onForbidden: (toolName, { emit }) => decideOn(emit)(toolName, false, 'anon-not-granted'),
+    // ADR 0834 D1 — the firewall refuses GRANTED tools too, audited with their own reason.
+    onFirewallDecision: (d, { emit }) => decideOn(emit)(d.toolName, false, d.decision === 'deny' ? 'anon-firewall-denied' : 'anon-firewall-held'),
+  });
 
-  const messages: AiCallMessage[] = [...(params.history ?? []).map((m): AiCallMessage => ({ role: m.role, content: m.content })), { role: 'user', content: params.fencedUserMessage }];
-  const loop = await runChatToolLoop(
-    {
-      provider: 'openwop-free', model: 'openwop-free', credentialRef: 'managed:openwop-free',
-      systemPrompt: agent.systemPrompt,
-      messages,
-      tools,
-      agentId: agent.agentId,
-      persona: agent.persona,
-      ...(params.maxRounds ? { maxRounds: params.maxRounds } : {}),
-      onEvent,
-      firewall,
-      onFirewallDecision,
-    },
-    { callAIWithTools: params.callAIWithTools, executeTool: wrappedExecuteTool },
-  );
-  await Promise.all(firewallAudits);
-
-  const doneAt = new Date().toISOString();
-  try {
-    await storage.updateRun(runId, { status: loop.error ? 'failed' : 'completed', completedAt: doneAt, updatedAt: doneAt });
-    // ADR 0480 (code-review M1) — the anon-widget settle lane is a production
-    // terminal the executor sites never see.
-    void scoreOnlineEvalsOnTerminal(storage, runId);
-    // ADR 0482 grade-fix M1 — its managed-AI spend is money: stamp + fold like
-    // every other terminal seam (the anon workflowId isn't budgetable, but the
-    // per-node cost record + fleet totals must still count it — no uncounted
-    // spend seam if the free tier ever bills).
-    void stampRunCostOnTerminal(storage, runId)
-      .then((usd) => foldWorkflowSpendOnTerminal(storage, runId, usd));
-  } catch (err) {
-    log.warn('anon_run_terminal_patch_failed', { runId, error: err instanceof Error ? err.message : String(err) });
-  }
-
-  return { reply: loop.finalText, runId, principal, failed: Boolean(loop.error) };
+  return { reply: turn.finalText, runId: turn.runId, principal, failed: turn.failed };
 }
 
 /**

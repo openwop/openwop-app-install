@@ -336,19 +336,19 @@ describe('publish-evidence.sh — arguments and config, without touching anythin
   const run = (args: string[], envFile: string) =>
     spawnSync('bash', [script, ...args], { encoding: 'utf8', env: { ...CLEAN_ENV, PUBLISH_EVIDENCE_ENV_FILE: envFile } });
 
-  it('--print-config: defaults to majors 2 then 1, strips trailing slashes, keys each object by the serving commit', () => {
+  it('--print-config: defaults to major 2 only (v1 retired), strips trailing slashes, keys each object by the serving commit', () => {
     const r = run(['--print-config'], env(GOOD));
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout).toContain('base=https://app.example\n');
     expect(r.stdout).toContain('origin=gs://openwop-dev-certification-bundles/evidence\n');
-    expect(r.stdout).toContain('majors=2 1\n');
+    expect(r.stdout).toContain('majors=2\n');
     expect(r.stdout).toContain('max_workers=1\n');
     expect(r.stdout).toContain('allow_any_commit=0\n');
     expect(r.stdout).toContain('signing_secret=openwop-app-bundle-signing-key\n');
     expect(r.stdout).toContain('conformance_secret=openwop-conformance-api-key\n');
     expect(r.stdout).toContain('object[2]=gs://openwop-dev-certification-bundles/evidence/<serving-commit>/major-2.json\n');
-    // CE-20 — the DEFAULT plan names major 1 as conditional on discovery.
-    expect(r.stdout).toContain('major_1=only-if-advertised');
+    // v2 migration plan phase 1 — v1 is retired, so the DEFAULT plan has no major 1 at all.
+    expect(r.stdout).not.toContain('major_1=');
   });
 
   it('--major / --max-workers / --allow-any-commit are honoured', () => {

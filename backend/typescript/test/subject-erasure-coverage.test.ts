@@ -197,6 +197,10 @@ const REVIEWED_EXEMPT = new Map<string, Exemption>([
   ['runs:plan-month-count', { reason: 'ADR 0821 D6 per-(tenant, month) workflow-run counter for the plan limit — a single integer per tenant-month, no subject identifier; purged on ADR 0284 tenant teardown (tenantOf)', tenantTeardownClaim: true }],
   // Strategy §8 — paywall funnel counters, the ADR 0512 nav-counts posture.
   ['paywall:funnel-counts', { reason: 'no-subject: strategy §8 paywall funnel counters — (UTC day, tenant, metric, featureId, bundleId, surface) → count; no user/session/URL identifier, nothing finer than a day; reclaimed by the 90-day kvAgeOut TTL, the internal retention purger, and ADR 0284 tenant teardown via the tenantId field', tenantTeardownClaim: true }],
+  // ADR 1099 D5 (P2) — the collaborator-turn day caps: `{ cKey, turns, tenantId,
+  // updatedAt }`, keyed `grant:<grantId>:<day>` or `tenant:<tenantId>:<day>`. A count,
+  // never a message, a person or an email; aged out after 2 days (kvAgeOut).
+  ['collab:turn:day', { reason: 'ADR 1099 P2 collaborator-turn day counter — a grant or tenant id, a day and a turn count; no subject, message or actor; kvAgeOut deletes it after 2 days' }],
   ['workflow:spend-day', { reason: 'ADR 0482 per-(tenant, workflow, day) spend counter — counts + alert flags only, no subject content; purged on ADR 0284 tenant teardown', tenantTeardownClaim: true }],
   // ADR 0738 P2 — core Kanban's executable projection stores only tenant-scoped
   // work identity, opaque source/workflow references, state and delivery facts.

@@ -11,6 +11,8 @@
  *   3. every host agent tool, read from the RUNTIME registry
  *      (`builtinAgentToolIds()` after `createApp`, so every feature, adopter
  *      features included, has registered).
+ *   4. every client tool (ADR 1099 D5), from `clientProjectToolIds()` — the
+ *      registry a collaborator turn compiles from.
  * A prompt that names a tool the model cannot call is a lie to the model; a new
  * one fails here instead of shipping.
  *
@@ -30,6 +32,7 @@ import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
 import { createApp } from '../src/index.js';
 import { builtinAgentToolIds } from '../src/host/agentToolProvider.js';
+import { clientProjectToolIds } from '../src/host/clientProjectTools.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(here, '../../..');
@@ -55,6 +58,9 @@ function collectUniverse(): Set<string> {
   for (const m of bootstrap.matchAll(/typeId:\s*'([^']+)'/g)) universe.add(m[1]!);
   // 3. host agent tools, from the runtime registry (the caller booted the app)
   for (const id of builtinAgentToolIds()) universe.add(trim(id));
+  // 4. ADR 1099 D5 — client tools, from their own runtime registry. A collaborator
+  //    turn compiles ONLY these, so they never appear in the agent tool registry.
+  for (const id of clientProjectToolIds()) universe.add(trim(id));
   return universe;
 }
 

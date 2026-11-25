@@ -23,6 +23,7 @@
  * Core: imports nothing under `features/`.
  */
 import { hostDefaultLocale } from './i18n/index.js';
+import { emailHeaderFieldProblem } from './emailHeaderFields.js';
 
 export interface TransactionalEmail {
   to: string;
@@ -34,22 +35,49 @@ export interface TransactionalEmail {
    *  (a webhook re-delivery must never re-send). Absent ⇒ a context-needing
    *  transport reports an honest no-op. */
   context?: { tenantId: string; orgId: string; actingUserId: string; idempotencyKey?: string };
+  /** #6135 — the sender display name (`"Hart Studio" <notices@…>`). The address stays
+   *  the org's configured sender. A control character (CR/LF above all) is refused. */
+  fromName?: string;
+  /** #6135 — one bare address replies go to (the designer, not the sender mailbox). */
+  replyTo?: string;
+  /** #6135 / ADR 0848 D7 — the feature's own RFC 8058 one-click opt-out. The adapter
+   *  accepts only an `https:` URL on this deployment (see `listUnsubscribeHeaders`). */
+  listUnsubscribe?: { url: string };
 }
+export type TransactionalSendReason = 'no_recipient' | 'no_transport' | 'invalid_header';
 export type EmailTransport = (email: TransactionalEmail) => Promise<boolean>;
 
+/** Could a send with this context be delivered (a sender address and an email
+ *  Connection exist)? Asked before promising an email, never instead of sending one. */
+export type EmailReadyProbe = (context: NonNullable<TransactionalEmail['context']>) => Promise<boolean>;
+
 let transport: EmailTransport | null = null;
-/** Wire the transactional sender (a deployment sets the real one; unwired ⇒ honest no-op). */
-export function setTransactionalEmailTransport(t: EmailTransport | null): void { transport = t; }
+let readyProbe: EmailReadyProbe | null = null;
+/** Wire the transactional sender (a deployment sets the real one; unwired ⇒ honest no-op).
+ *  A transport wired without a probe reads as ready whenever it is wired. */
+export function setTransactionalEmailTransport(t: EmailTransport | null, probe?: EmailReadyProbe): void { transport = t; readyProbe = probe ?? null; }
+
+/** #6135 — whether a send in `context` would reach a real transport. False when unwired,
+ *  when the probe needs a context and has none, or when the probe throws. */
+export async function transactionalEmailReady(context?: TransactionalEmail['context']): Promise<boolean> {
+  if (!transport) return false;
+  if (!readyProbe) return true;
+  if (!context) return false;
+  try { return await readyProbe(context); } catch { return false; }
+}
 
 /** Send a transactional email. Returns `sent` (false when no recipient or no transport —
- *  an honest no-op, never a throw; a failure must never block the order flow). */
-export async function sendTransactionalEmail(email: TransactionalEmail): Promise<{ sent: boolean; reason?: 'no_recipient' | 'no_transport' }> {
+ *  an honest no-op, never a throw; a failure must never block the order flow). A
+ *  `fromName` or `replyTo` that could break a header line is refused as `invalid_header`
+ *  before any transport sees it. */
+export async function sendTransactionalEmail(email: TransactionalEmail): Promise<{ sent: boolean; reason?: TransactionalSendReason }> {
   if (!email.to || !email.to.includes('@')) return { sent: false, reason: 'no_recipient' };
+  if (emailHeaderFieldProblem(email)) return { sent: false, reason: 'invalid_header' };
   if (!transport) return { sent: false, reason: 'no_transport' };
   try { return { sent: await transport(email) }; } catch { return { sent: false, reason: 'no_transport' }; }
 }
 
-export function __resetTransactionalEmail(): void { transport = null; }
+export function __resetTransactionalEmail(): void { transport = null; readyProbe = null; }
 
 // ── the template registry ────────────────────────────────────────────────────
 
@@ -156,8 +184,14 @@ export function renderTransactional<D>(kind: string, data: D, opts: { locale?: s
  *  seam's honest no-op); a render error does throw — it is a code defect, not an outage. */
 export async function sendTransactional<D>(
   kind: string,
-  input: { to: string; data: D; locale?: string; context?: TransactionalEmail['context'] },
-): Promise<{ sent: boolean; reason?: 'no_recipient' | 'no_transport' }> {
+  input: { to: string; data: D; locale?: string } & Pick<TransactionalEmail, 'context' | 'fromName' | 'replyTo' | 'listUnsubscribe'>,
+): Promise<{ sent: boolean; reason?: TransactionalSendReason }> {
   const { subject, text } = renderTransactional(kind, input.data, input.locale !== undefined ? { locale: input.locale } : {});
-  return sendTransactionalEmail({ to: input.to, subject, text, ...(input.context ? { context: input.context } : {}) });
+  return sendTransactionalEmail({
+    to: input.to, subject, text,
+    ...(input.context ? { context: input.context } : {}),
+    ...(input.fromName !== undefined ? { fromName: input.fromName } : {}),
+    ...(input.replyTo !== undefined ? { replyTo: input.replyTo } : {}),
+    ...(input.listUnsubscribe ? { listUnsubscribe: input.listUnsubscribe } : {}),
+  });
 }

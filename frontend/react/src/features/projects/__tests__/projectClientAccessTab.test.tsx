@@ -38,8 +38,14 @@ import { ProjectClientAccessTab } from '../ProjectClientAccessTab.js';
 const B = `${config.baseUrl}/host/openwop-app/orgs/o1/collaborators`;
 const json = (status: number, body: unknown): Response => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 const fetchMock = vi.fn<(url: string, init?: RequestInit) => Promise<Response>>();
+// Requests are answered in order from `queue`, except the grantable read (the
+// audience labels), which every load makes and which answers from `grantable`.
+let queue: Response[] = [];
+let grantable: () => Response = () => json(200, { kinds: [{ kind: 'project', actions: ['view', 'comment'], items: [] }] });
+const enqueue = (...r: Response[]): void => { queue.push(...r); };
+const GRANTABLE = `${B}/grantable`;
 const requests = (): Array<[string, string, unknown]> =>
-  fetchMock.mock.calls.map(([url, init]) => [url, init?.method ?? 'GET', init?.body ? JSON.parse(String(init.body)) : undefined]);
+  fetchMock.mock.calls.filter(([url]) => url !== GRANTABLE).map(([url, init]) => [url, init?.method ?? 'GET', init?.body ? JSON.parse(String(init.body)) : undefined]);
 
 const FUTURE = '2099-01-01T00:00:00Z';
 const PAST = '2020-01-01T00:00:00Z';
@@ -55,6 +61,9 @@ const person = (id: string, grants: ProjectGrant[], extra: Partial<OrgCollaborat
 beforeEach(() => {
   c.confirm.mockReset(); c.copyToClipboard.mockReset();
   fetchMock.mockReset();
+  queue = [];
+  grantable = () => json(200, { kinds: [{ kind: 'project', actions: ['view', 'comment'], items: [] }] });
+  fetchMock.mockImplementation(async (url) => (url === GRANTABLE ? grantable() : (queue.shift() ?? json(500, { error: 'internal', message: 'unexpected request' }))));
   vi.stubGlobal('fetch', fetchMock);
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
@@ -63,24 +72,24 @@ const mount = () => render(<ProjectClientAccessTab project={PROJECT} />);
 
 describe('ProjectClientAccessTab — reading', () => {
   it.each([403, 404])('a %s says only admins can do this', async (status) => {
-    fetchMock.mockResolvedValueOnce(json(status, { error: 'not_found', message: 'Not found.' }));
+    enqueue(json(status, { error: 'not_found', message: 'Not found.' }));
     mount();
     expect(await screen.findByText(/Only workspace admins/)).toBeTruthy();
     expect(screen.queryByText(/No one outside the workspace/)).toBeNull();
   });
 
   it('a failed read is said with a retry, never as no one has access', async () => {
-    fetchMock.mockResolvedValueOnce(json(500, { error: 'internal', message: 'boom' }));
+    enqueue(json(500, { error: 'internal', message: 'boom' }));
     mount();
     expect((await screen.findAllByText(/Couldn't load who has access/)).length).toBeGreaterThan(0);
     expect(screen.queryByText(/No one outside the workspace/)).toBeNull();
-    fetchMock.mockResolvedValueOnce(json(200, { collaborators: [] }));
+    enqueue(json(200, { collaborators: [] }));
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     expect(await screen.findByText(/No one outside the workspace/)).toBeTruthy();
   });
 
   it('lists only live grants on this project', async () => {
-    fetchMock.mockResolvedValueOnce(json(200, { collaborators: [
+    enqueue(json(200, { collaborators: [
       person('a', [grant('g1')]),
       person('b', [grant('g2', { resource: { kind: 'project', id: 'p-other' } })]),
       person('c', [grant('g3', { expiresAt: PAST })]),
@@ -97,7 +106,7 @@ describe('ProjectClientAccessTab — reading', () => {
 
 describe('ProjectClientAccessTab — actions', () => {
   it('invites, then grants this project, and shows the link once', async () => {
-    fetchMock.mockResolvedValueOnce(json(200, { collaborators: [] }));
+    enqueue(json(200, { collaborators: [] }));
     mount();
     await screen.findByText(/No one outside the workspace/);
     fireEvent.click(screen.getByRole('button', { name: 'Invite someone' }));
@@ -106,10 +115,9 @@ describe('ProjectClientAccessTab — actions', () => {
     fireEvent.change(screen.getByLabelText(/^Email/), { target: { value: 'site@oak.test' } });
     fireEvent.change(screen.getByLabelText(/^Access/), { target: { value: 'view' } });
     fireEvent.change(screen.getByLabelText(/^For/), { target: { value: '90' } });
-    fetchMock
-      .mockResolvedValueOnce(json(201, { collaborator: person('n', []), invite: { token: 'tok-1', expiresAt: FUTURE } }))
-      .mockResolvedValueOnce(json(201, { grant: grant('g-new') }))
-      .mockResolvedValueOnce(json(200, { collaborators: [person('n', [grant('g-new')])] }));
+    enqueue(json(201, { collaborator: person('n', []), invite: { token: 'tok-1', expiresAt: FUTURE } }));
+    enqueue(json(201, { grant: grant('g-new') }));
+    enqueue(json(200, { collaborators: [person('n', [grant('g-new')])] }));
     fireEvent.click(screen.getByRole('button', { name: 'Invite' }));
     expect(await screen.findByLabelText(/Invite link for Oak Builders/)).toBeTruthy();
     const [, invite, grantReq] = requests();
@@ -118,13 +126,13 @@ describe('ProjectClientAccessTab — actions', () => {
   });
 
   it('a refused invite shows the server message and grants nothing', async () => {
-    fetchMock.mockResolvedValueOnce(json(200, { collaborators: [] }));
+    enqueue(json(200, { collaborators: [] }));
     mount();
     await screen.findByText(/No one outside the workspace/);
     fireEvent.click(screen.getByRole('button', { name: 'Invite someone' }));
     fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Casey' } });
     fireEvent.change(screen.getByLabelText(/^Email/), { target: { value: 'casey@outside.test' } });
-    fetchMock.mockResolvedValueOnce(json(409, { error: 'conflict', message: 'This person is already a collaborator for this client.' }));
+    enqueue(json(409, { error: 'conflict', message: 'This person is already a collaborator for this client.' }));
     fireEvent.click(screen.getByRole('button', { name: 'Invite' }));
     expect(await screen.findByText('This person is already a collaborator for this client.')).toBeTruthy();
     expect(requests().some(([url]) => url.endsWith('/grants'))).toBe(false);
@@ -133,16 +141,15 @@ describe('ProjectClientAccessTab — actions', () => {
   });
 
   it('a grant that fails after the invite still shows the link, and says access was not given', async () => {
-    fetchMock.mockResolvedValueOnce(json(200, { collaborators: [] }));
+    enqueue(json(200, { collaborators: [] }));
     mount();
     await screen.findByText(/No one outside the workspace/);
     fireEvent.click(screen.getByRole('button', { name: 'Invite someone' }));
     fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Robin' } });
     fireEvent.change(screen.getByLabelText(/^Email/), { target: { value: 'robin@outside.test' } });
-    fetchMock
-      .mockResolvedValueOnce(json(201, { collaborator: person('r', []), invite: { token: 'tok-2', expiresAt: FUTURE } }))
-      .mockResolvedValueOnce(json(500, { error: 'internal', message: 'boom' }))
-      .mockResolvedValueOnce(json(200, { collaborators: [person('r', [])] }));
+    enqueue(json(201, { collaborator: person('r', []), invite: { token: 'tok-2', expiresAt: FUTURE } }));
+    enqueue(json(500, { error: 'internal', message: 'boom' }));
+    enqueue(json(200, { collaborators: [person('r', [])] }));
     fireEvent.click(screen.getByRole('button', { name: 'Invite' }));
     const link = await screen.findByLabelText(/Invite link for Robin/);
     expect((link as HTMLInputElement).value).toContain('/collab/accept/tok-2');
@@ -151,19 +158,19 @@ describe('ProjectClientAccessTab — actions', () => {
   });
 
   it('giving someone already invited access is a dialog that grants this project', async () => {
-    fetchMock.mockResolvedValueOnce(json(200, { collaborators: [person('a', [grant('g1', { resource: { kind: 'project', id: 'p-other' } })])] }));
+    enqueue(json(200, { collaborators: [person('a', [grant('g1', { resource: { kind: 'project', id: 'p-other' } })])] }));
     mount();
     await screen.findByText(/No one outside the workspace/);
     fireEvent.click(screen.getByRole('button', { name: 'Give someone already invited access' }));
     fireEvent.change(screen.getByLabelText(/^Person/), { target: { value: 'a' } });
-    fetchMock.mockResolvedValueOnce(json(201, { grant: grant('g2') })).mockResolvedValueOnce(json(200, { collaborators: [person('a', [grant('g2')])] }));
+    enqueue(json(201, { grant: grant('g2') })); enqueue(json(200, { collaborators: [person('a', [grant('g2')])] }));
     fireEvent.click(screen.getByRole('button', { name: 'Give access' }));
     expect(await screen.findByText('Person a now has access.')).toBeTruthy();
     expect(requests()[1]).toEqual([`${B}/a/grants`, 'POST', { resource: { kind: 'project', id: 'p1' }, actions: ['view', 'comment'], expiresInDays: 30 }]);
   });
 
   it('taking access back is behind a danger confirm; cancelling calls nothing', async () => {
-    fetchMock.mockResolvedValueOnce(json(200, { collaborators: [person('a', [grant('g1')])] }));
+    enqueue(json(200, { collaborators: [person('a', [grant('g1')])] }));
     mount();
     await screen.findByText('Person a');
     c.confirm.mockResolvedValueOnce(false);
@@ -172,9 +179,51 @@ describe('ProjectClientAccessTab — actions', () => {
     expect(c.confirm.mock.calls[0]?.[0].danger).toBe(true);
     expect(requests()).toHaveLength(1);
     c.confirm.mockResolvedValueOnce(true);
-    fetchMock.mockResolvedValueOnce(json(200, { grant: grant('g1', { status: 'revoked' }) })).mockResolvedValueOnce(json(200, { collaborators: [] }));
+    enqueue(json(200, { grant: grant('g1', { status: 'revoked' }) })); enqueue(json(200, { collaborators: [] }));
     fireEvent.click(screen.getByRole('button', { name: "Take back Person a's access" }));
     expect(await screen.findByText('Person a no longer has access.')).toBeTruthy();
     expect(requests()[1]).toEqual([`${B}/a/grants/g1`, 'DELETE', undefined]);
+  });
+});
+
+describe('ProjectClientAccessTab — audience (ADR 1099, decided 2026-11-23)', () => {
+  it('offers the workspace\'s labels, defaults to the most limited view, and sends the chosen one', async () => {
+    grantable = () => json(200, { kinds: [{ kind: 'project', actions: ['view', 'comment'], audiences: ['builder', 'client'], items: [] }] });
+    enqueue(json(200, { collaborators: [] }));
+    mount();
+    await screen.findByText(/No one outside the workspace/);
+    fireEvent.click(screen.getByRole('button', { name: 'Invite someone' }));
+    const picker = screen.getByLabelText(/^Sees this project as/) as HTMLSelectElement;
+    expect(picker.value).toBe('');
+    expect([...picker.options].map((o) => o.value)).toEqual(['', 'builder', 'client']);
+    fireEvent.change(picker, { target: { value: 'builder' } });
+    fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Oak Builders' } });
+    fireEvent.change(screen.getByLabelText(/^Email/), { target: { value: 'site@oak.test' } });
+    enqueue(
+      json(201, { collaborator: person('n', []), invite: { token: 'tok-3', expiresAt: FUTURE } }),
+      json(201, { grant: grant('g-new', { audience: 'builder' }) }),
+      json(200, { collaborators: [person('n', [grant('g-new', { audience: 'builder' })])] }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Invite' }));
+    expect(await screen.findByText('Sees as builder')).toBeTruthy();
+    expect(requests()[2]).toEqual([`${B}/n/grants`, 'POST', { resource: { kind: 'project', id: 'p1' }, actions: ['view', 'comment'], expiresInDays: 30, audience: 'builder' }]);
+  });
+
+  it('no labels offered: no picker, and the grant carries no audience', async () => {
+    enqueue(json(200, { collaborators: [] }));
+    mount();
+    await screen.findByText(/No one outside the workspace/);
+    fireEvent.click(screen.getByRole('button', { name: 'Invite someone' }));
+    expect(screen.queryByLabelText(/^Sees this project as/)).toBeNull();
+  });
+
+  it('a failed read of the labels says so, offers no picker, and never blocks the list', async () => {
+    grantable = () => json(500, { error: 'internal', message: 'boom' });
+    enqueue(json(200, { collaborators: [] }));
+    mount();
+    expect(await screen.findByText(/Couldn't load the viewing options/)).toBeTruthy();
+    expect(screen.getByText(/No one outside the workspace/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Invite someone' }));
+    expect(screen.queryByLabelText(/^Sees this project as/)).toBeNull();
   });
 });

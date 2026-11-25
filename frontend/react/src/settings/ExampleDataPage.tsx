@@ -9,7 +9,9 @@
  *
  * Everything here is EXPLICIT + user-triggered: nothing is seeded behind the
  * user's back, and a clean / white-label install starts empty until someone
- * clicks Load. Modelled on myndhyve's SeedDataPanel, in openwop primitives.
+ * clicks Load. Nothing starts selected, a workspace or account change empties the
+ * selection, and the Clear dialog names both the types and the workspace. Modelled
+ * on myndhyve's SeedDataPanel, in openwop primitives.
  *
  * @see ../client/exampleDataClient.ts
  */
@@ -34,6 +36,7 @@ import {
   type RunResult,
   type StepResult,
 } from '../client/exampleDataClient.js';
+import { listMyWorkspaces } from '../client/workspaceClient.js';
 
 /** Build a RunResult from the step results streamed so far — drives the live
  *  progress list as each seeder lands (ADR 0292). */
@@ -118,7 +121,9 @@ export function ExampleDataPage(): JSX.Element {
       setSteps(s.steps);
       setSeedEnabled(s.enabled);
       setSuperadmin(s.superadmin);
-      setSelected((prev) => (prev.size === 0 ? new Set(s.steps.map((x) => x.id)) : prev));
+      // Keep only what the person chose that still exists. Never select on their
+      // behalf: a select-all default made Clear one click from clearing everything.
+      setSelected((prev) => new Set([...prev].filter((id) => s.steps.some((x) => x.id === id))));
       setError(null);
     } catch (err) {
       if (captured === generation.current) setError(err instanceof Error ? err.message : String(err));
@@ -146,6 +151,11 @@ export function ExampleDataPage(): JSX.Element {
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
+  };
+
+  const selectAll = (all: boolean): void => {
+    if (hydratedGeneration === null || hydratedGeneration !== generation.current || !steps) return;
+    setSelected(all ? new Set(steps.map((x) => x.id)) : new Set());
   };
 
   const onSeed = async (all: boolean) => {
@@ -206,15 +216,27 @@ export function ExampleDataPage(): JSX.Element {
     if (captured === null || captured !== generation.current) return;
     const isCurrent = (): boolean => captured === generation.current;
     const ids = [...selected];
-    const label = ids.length ? ids.join(', ') : t('clearAllFallback');
-    if (!(await confirm({ title: t('clearConfirm', { label }), danger: true })) || !isCurrent()) return;
+    if (ids.length === 0) return;
+    const label = ids.map((id) => steps?.find((x) => x.id === id)?.label ?? id).join(', ');
+    // Name the workspace the clear lands in. The write's scope check reads it again,
+    // and a workspace change in between aborts the write (`onAuthChange`).
+    let workspace: string;
+    try {
+      const mine = await listMyWorkspaces({ rememberTenant: false });
+      if (!isCurrent()) return;
+      workspace = mine.workspaces.find((w) => w.workspaceId === mine.active)?.name ?? mine.active;
+    } catch (err) {
+      if (isCurrent()) setError(err instanceof Error ? err.message : String(err));
+      return;
+    }
+    if (!(await confirm({ title: t('clearConfirm', { label, workspace }), danger: true })) || !isCurrent()) return;
     setBusy('clear'); setError(null); setResult(null);
     try {
       // Stream the clear so the full cascade (roster deletes, thousands of rows)
       // never trips the Firebase `/api` ~60s cap and shows live progress — the
       // same path the reseed uses (ADR 0292 / ADR 0321).
       const collected: StepResult[] = [];
-      const final = await clearExampleDataStream(ids.length ? { steps: ids } : {}, (e) => {
+      const final = await clearExampleDataStream({ steps: ids }, (e) => {
         if (isCurrent() && e.type === 'step') { collected.push(e); setResult(liveResult(collected)); }
       });
       if (!isCurrent()) return;
@@ -229,6 +251,9 @@ export function ExampleDataPage(): JSX.Element {
       if (isCurrent()) setBusy(null);
     }
   };
+
+  // Load selected and Clear wait on a choice; say so instead of leaving dead buttons.
+  const selectHintShown = steps !== null && steps.length > 0 && selected.size === 0;
 
   return (
     <section data-walkthrough="example-data.page">
@@ -251,6 +276,15 @@ export function ExampleDataPage(): JSX.Element {
         ) : steps.length === 0 ? (
           <StateCard icon={<DatabaseIcon />} title={t('noTypesTitle')} body={t('noTypesBody')} />
         ) : (
+          <>
+          <div className="action-bar u-gap-2 u-wrap u-mt-2 u-items-center">
+            <Button variant="link" size="sm" disabled={busy !== null || selected.size === steps.length} onClick={() => selectAll(true)}>
+              {t('selectAll')}
+            </Button>
+            <Button variant="link" size="sm" disabled={busy !== null || selected.size === 0} onClick={() => selectAll(false)}>
+              {t('selectNone')}
+            </Button>
+          </div>
           <ul className="u-list-none u-mbox-t2 u-p-0 u-grid u-gap-2">
             {steps.map((s) => (
               <li key={s.id} className="surface-card u-pad-2-3">
@@ -273,8 +307,12 @@ export function ExampleDataPage(): JSX.Element {
               </li>
             ))}
           </ul>
+          </>
         )}
 
+        {selectHintShown ? (
+          <p id="example-data-select-hint" className="demodata-muted u-mt-3">{t('selectHint')}</p>
+        ) : null}
         <div className="action-bar u-gap-3 u-wrap u-mt-3 u-items-center">
           <label className="demodata-dryrun-label">
             <input type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} className="u-w-auto u-flex-auto" /> {t('dryRunLabel')}
@@ -282,7 +320,7 @@ export function ExampleDataPage(): JSX.Element {
           <Button variant="accent-solid" disabled={steps === null || busy !== null || !seedEnabled || (steps?.length ?? 0) === 0} onClick={() => void onSeed(true)}>
             <DatabaseIcon size={14} /> {busy === 'seed' ? t('common:loading') : t('loadAllExampleData')}
           </Button>
-          <Button variant="primary" disabled={steps === null || busy !== null || !seedEnabled || selected.size === 0} onClick={() => void onSeed(false)}>
+          <Button variant="primary" disabled={steps === null || busy !== null || !seedEnabled || selected.size === 0} aria-describedby={selectHintShown ? 'example-data-select-hint' : undefined} onClick={() => void onSeed(false)}>
             <CheckIcon size={14} /> {t('loadSelected', { n: formatNumber(selected.size) })}
           </Button>
           {superadmin ? (
@@ -293,7 +331,7 @@ export function ExampleDataPage(): JSX.Element {
           <Button variant="primary" disabled={busy !== null} onClick={() => void refresh()}>
             <RotateCwIcon size={14} /> {t('common:refresh')}
           </Button>
-          <Button variant="secondary" disabled={steps === null || busy !== null} onClick={() => void onClear()} title={t('clearTitle')}>
+          <Button variant="secondary" disabled={steps === null || busy !== null || selected.size === 0} aria-describedby={selectHintShown ? 'example-data-select-hint' : undefined} onClick={() => void onClear()} title={t('clearTitle')}>
             <TrashIcon size={14} /> {busy === 'clear' ? t('clearing') : t('clearExampleData')}
           </Button>
         </div>

@@ -27,11 +27,12 @@ import { copyToClipboard } from '../../ui/copyToClipboard.js';
 import { formatDate } from '../../i18n/format.js';
 import type { Project } from './projectsClient.js';
 import {
-  ClientAccessError, grantProject, inviteToOrg, listOrgCollaborators, projectInviteUrl, revokeProjectGrant,
+  ClientAccessError, grantProject, inviteToOrg, listOrgCollaborators, listProjectAudiences, projectInviteUrl, revokeProjectGrant,
   type OrgCollaborator, type ProjectCollaboratorKind, type ProjectGrant, type ProjectGrantAction,
 } from './projectClientAccessClient.js';
 
-type Load = { kind: 'loading' } | { kind: 'no-authority' } | { kind: 'failed' } | { kind: 'ready'; people: OrgCollaborator[] };
+/** `audiences` is null when the labels could not be read: no picker, and a new grant gets the most limited view. */
+type Load = { kind: 'loading' } | { kind: 'no-authority' } | { kind: 'failed' } | { kind: 'ready'; people: OrgCollaborator[]; audiences: string[] | null };
 type Access = 'view' | 'comment';
 const EXPIRY_CHOICES = [7, 30, 90, 180] as const;
 const actionsFor = (a: Access): ProjectGrantAction[] => (a === 'comment' ? ['view', 'comment'] : ['view']);
@@ -46,13 +47,20 @@ export function ProjectClientAccessTab({ project }: { project: Project }): JSX.E
   const [invite, setInvite] = useState({ kind: 'client-stakeholder' as ProjectCollaboratorKind, displayName: '', email: '', company: '' });
   const [access, setAccess] = useState<Access>('comment');
   const [days, setDays] = useState<number>(30);
+  const [audience, setAudience] = useState('');
   const [existing, setExisting] = useState('');
   const [sentLink, setSentLink] = useState<{ name: string; url: string; expiresAt?: string } | null>(null);
   const [dialog, setDialog] = useState<'invite' | 'add' | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      setLoad({ kind: 'ready', people: await listOrgCollaborators(orgId) });
+      const [people, audiences] = await Promise.all([
+        listOrgCollaborators(orgId),
+        // A failed read of the labels is shown below, and only narrows: no picker, so
+        // a new grant carries no audience and gets the most limited view.
+        listProjectAudiences(orgId).then((a): string[] | null => a, (): null => null),
+      ]);
+      setLoad({ kind: 'ready', people, audiences });
     } catch (e) {
       setLoad(e instanceof ClientAccessError && (e.status === 403 || e.status === 404) ? { kind: 'no-authority' } : { kind: 'failed' });
     }
@@ -94,7 +102,7 @@ export function ProjectClientAccessTab({ project }: { project: Project }): JSX.E
     setSentLink({ name, url: projectInviteUrl(out.invite.token), ...(out.invite.expiresAt ? { expiresAt: out.invite.expiresAt } : {}) });
     setInvite({ kind: invite.kind, displayName: '', email: '', company: '' });
     try {
-      await grantProject(orgId, out.collaborator.collaboratorId, project.id, actionsFor(access), days);
+      await grantProject(orgId, out.collaborator.collaboratorId, project.id, actionsFor(access), days, audience || undefined);
       setDone(t('clientAccessInvited', { name }));
     } catch {
       setError(t('clientAccessInvitedNotGranted', { name }));
@@ -105,7 +113,7 @@ export function ProjectClientAccessTab({ project }: { project: Project }): JSX.E
   const addExisting = async (): Promise<void> => {
     const c = addable.find((x) => x.collaboratorId === existing);
     if (!c) return;
-    await grantProject(orgId, c.collaboratorId, project.id, actionsFor(access), days);
+    await grantProject(orgId, c.collaboratorId, project.id, actionsFor(access), days, audience || undefined);
     setExisting('');
     setDone(t('clientAccessGranted', { name: c.displayName }));
     await refresh();
@@ -121,8 +129,15 @@ export function ProjectClientAccessTab({ project }: { project: Project }): JSX.E
     if (ok) await run(() => revokeProjectGrant(orgId, c.collaboratorId, g.grantId), t('clientAccessRevoked', { name: c.displayName }));
   };
 
+  const offered = load.audiences ?? [];
   const accessFields = (
     <>
+      {offered.length > 0 ? (
+        <SelectField label={t('clientAccessAudience')} value={audience} onChange={(e) => setAudience(offered.includes(e.target.value) ? e.target.value : '')} className="u-mb-0">
+          <option value="">{t('clientAccessAudienceNone')}</option>
+          {offered.map((a) => <option key={a} value={a}>{a}</option>)}
+        </SelectField>
+      ) : null}
       <SelectField label={t('clientAccessLevel')} value={access} onChange={(e) => setAccess(e.target.value === 'view' ? 'view' : 'comment')} className="u-mb-0">
         <option value="comment">{t('clientAccessLevelComment')}</option>
         <option value="view">{t('clientAccessLevelView')}</option>
@@ -143,6 +158,7 @@ export function ProjectClientAccessTab({ project }: { project: Project }): JSX.E
         <Button size="sm" onClick={() => openDialog('invite')}>{t('clientAccessInviteHeading')}</Button>
         {addable.length > 0 ? <Button size="sm" variant="secondary" onClick={() => openDialog('add')}>{t('clientAccessAddHeading')}</Button> : null}
       </div>
+      {load.audiences === null ? <Notice variant="warning" announce={t('clientAccessAudienceUnavailable')}>{t('clientAccessAudienceUnavailable')}</Notice> : null}
       {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}
       {done ? <Notice variant="success" announce={done}>{done}</Notice> : null}
 
@@ -170,6 +186,7 @@ export function ProjectClientAccessTab({ project }: { project: Project }): JSX.E
               {liveHere(c).map((g) => (
                 <span key={g.grantId} className="u-flex u-flex-wrap u-items-center u-gap-2 u-fs-13">
                   <span className="muted">{g.actions.includes('comment') ? t('clientAccessLevelComment') : t('clientAccessLevelView')}</span>
+                  {g.audience ? <span className="chip">{t('clientAccessAudienceChip', { audience: g.audience })}</span> : null}
                   <span className="muted">{t('clientAccessUntil', { date: formatDate(g.expiresAt) })}</span>
                   <Button size="sm" variant="link" disabled={busy} onClick={() => void revoke(c, g)} aria-label={t('clientAccessRevokeAria', { name: c.displayName })}>{t('clientAccessRevoke')}</Button>
                 </span>

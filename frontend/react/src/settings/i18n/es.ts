@@ -51,6 +51,9 @@ export const messages = {
   noTypesBody: 'Este host no anuncia datos de ejemplo cargables.',
   seedDisabledNotice: 'La carga de datos de ejemplo está deshabilitada en esta implementación (OPENWOP_DEMO_SEED_ENABLED). Aún puedes borrar los datos cargados anteriormente.',
   selectAria: 'Seleccionar {{label}}',
+  selectAll: 'Seleccionar todo',
+  selectNone: 'No seleccionar nada',
+  selectHint: 'Seleccione los tipos de datos de ejemplo que desea cargar o borrar. No hay nada seleccionado hasta que elija.',
   countPresent: '{{n}} presentes',
 
   // ExampleDataPage — actions
@@ -65,8 +68,7 @@ export const messages = {
   clearExampleData: 'Borrar datos de ejemplo',
   clearTitle: 'Eliminar entidades de ejemplo (sus propios agentes no se tocan)',
   clearing: 'Borrando…',
-  clearConfirm: '¿Borrar {{label}}? Esto elimina las entidades de ejemplo de su inquilino (sus propios agentes no se tocan).',
-  clearAllFallback: 'todos los datos de ejemplo',
+  clearConfirm: '¿Borrar {{label}} de {{workspace}}? Esto elimina esas entidades de ejemplo de ese espacio de trabajo (sus propios agentes no se tocan).',
 
   // ExampleDataPage — results
   dryRunNotice: 'Simulación: no se ha escrito nada.',

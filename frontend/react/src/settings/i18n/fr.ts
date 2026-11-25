@@ -51,6 +51,9 @@ export const messages = {
   noTypesBody: 'Cet hôte n’annonce aucune donnée d’exemple amorçable.',
   seedDisabledNotice: 'L’amorçage des données d’exemple est désactivé sur ce déploiement (OPENWOP_DEMO_SEED_ENABLED). Vous pouvez toujours effacer les données déjà amorcées.',
   selectAria: 'Sélectionner {{label}}',
+  selectAll: 'Tout sélectionner',
+  selectNone: 'Ne rien sélectionner',
+  selectHint: 'Sélectionnez les types de données d’exemple à charger ou à effacer. Rien n’est sélectionné tant que vous n’avez pas choisi.',
   countPresent: '{{n}} présent(s)',
 
   // ExampleDataPage — actions
@@ -65,8 +68,7 @@ export const messages = {
   clearExampleData: 'Effacer les données d’exemple',
   clearTitle: 'Supprimer les entités d’exemple (vos propres agents ne sont pas touchés)',
   clearing: 'Effacement…',
-  clearConfirm: 'Effacer {{label}} ? Cela supprime les entités d’exemple de votre locataire (vos propres agents ne sont pas touchés).',
-  clearAllFallback: 'toutes les données d’exemple',
+  clearConfirm: 'Effacer {{label}} de {{workspace}} ? Cela supprime ces entités d’exemple de cet espace de travail (vos propres agents ne sont pas touchés).',
 
   // ExampleDataPage — results
   dryRunNotice: 'Simulation — rien n’a été écrit.',

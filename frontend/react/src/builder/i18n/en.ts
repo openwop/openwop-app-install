@@ -153,7 +153,7 @@ export const messages = {
 
   // ── Publish-help banner ─────────────────────────────────────────────────
   publishHeading: 'Publish {{slug}} to packs.openwop.dev',
-  publishIntro: 'Registry submission is PR-based ({{size}} manifest). In-browser publishing is intentionally off — Ed25519 signing happens at PR-merge time by the registry maintainers, per PUBLISHING.md + spec/v1/registry-operations.md.',
+  publishIntro: 'Registry submission is PR-based ({{size}} manifest). In-browser publishing is intentionally off — Ed25519 signing happens at PR-merge time by the registry maintainers, per PUBLISHING.md.',
   publishStepDownload: 'Download manifest.json',
   publishStepDownloadNote: '(you may want to rename {{slug}} + replace fully-bound values with {{placeholder}} placeholders before submitting).',
   publishStepForkPre: 'Fork',

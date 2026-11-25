@@ -1,8 +1,8 @@
 /**
  * The autonomy gauge (roster + workspace header) — the canonical three-level
  * autonomy vocabulary shared with /workforces (DESIGN.md §5.3; architect memo
- * 2026-06-05: review → Supervised, guided → Guided, auto → Autonomous, absent ⇒
- * auto, all three LIVE).
+ * 2026-06-05: review → Supervised, guided → Guided, auto → Autonomous, all three
+ * LIVE; absent ⇒ review since ADR 1159, fail closed).
  *
  * What breaks it: a wrong level→dot mapping misstates how much an agent may do
  * on its own; dropping `role="img"` + the localized `aria-label` leaves a screen
@@ -49,10 +49,10 @@ describe('AutonomyMeter', () => {
     expect(dots.indexOf(current[0] as Element)).toBe(1);
   });
 
-  it('defaults an absent level to Autonomous (three active dots)', () => {
+  it('defaults an absent level to Supervised (one active dot; ADR 1159 fail closed)', () => {
     const { container } = render(<AutonomyMeter autonomyLevel={undefined} />);
-    expect(screen.getByRole('img').getAttribute('aria-label')).toBe('Autonomy: Autonomous');
-    expect(container.querySelectorAll('.auto-meter-dot--done, .auto-meter-dot--current').length).toBe(3);
+    expect(screen.getByRole('img').getAttribute('aria-label')).toBe('Autonomy: Supervised');
+    expect(container.querySelectorAll('.auto-meter-dot--done, .auto-meter-dot--current').length).toBe(1);
   });
 
   it('hides the visible label when showLabel is false but keeps the accessible name', () => {

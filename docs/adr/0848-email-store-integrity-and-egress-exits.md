@@ -183,6 +183,15 @@ unchanged, as ADR 0832 specifies.
   sendgrid (`headers`), postmark (`Headers`) and SMTP (`headers`).
 - The URL must be `https:` and must point at this host's `/public-email/u/` path. Anything else
   is dropped (logged), never sent.
+
+  > **CORRECTED 2026-11-24 (#6135, PR #6248): the URL rule is wider.** The transactional seam
+  > now carries `listUnsubscribe` too, so a feature can link its own opt-out page (CasaVoga's
+  > client notices). The adapter accepts the `/public-email/u/` path as before, **or** any
+  > `https:` path on the deployment's own `OPENWOP_PUBLIC_BASE_URL` origin. Other origins,
+  > `http:`, credentials and `<`/`>`/`,`/whitespace are still dropped, and with
+  > `OPENWOP_PUBLIC_BASE_URL` unset only the old path passes. It stays a closed-world field:
+  > the two RFC 8058 headers, nothing else. Witness:
+  > `test/transactional-email-headers-6135.test.ts`.
 - `sendCampaign` passes the same `/u/:token` URL `instrumentBody` appended. `EmailMessage`
   carries it through `brokeredProvider`. Test sends carry no header: they have no unsubscribe
   token, and a test is not bulk mail.

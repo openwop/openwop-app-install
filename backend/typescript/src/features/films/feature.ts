@@ -26,8 +26,8 @@ export const filmsFeature: BackendFeature = {
         registerFilmPerformanceRoutes({ app }, `${org}/canvases/:canvasId/performances`, async (req, revision, need) => {
           const { tenantId, orgId, user } = await authz(req, need === 'write' ? 'workspace:write' : 'workspace:read');
           const c = need === 'write'
-            ? await loadCanvas(tenantId, req.params.canvasId, user.userId, 'write')
-            : await loadCanvas(tenantId, req.params.canvasId, user.userId, 'read');
+            ? await loadCanvas(tenantId, orgId, req.params.canvasId, user.userId, 'write')
+            : await loadCanvas(tenantId, orgId, req.params.canvasId, user.userId, 'read');
           if (String(c.version) !== revision) throw new OpenwopError('conflict', 'The film changed. Reload before saving or opening a rehearsal take.', 409);
           const errors = validateFilm(c.state);
           if (errors.length) throw new OpenwopError('validation_error', 'Film is invalid.', 422, { errors });
@@ -36,7 +36,7 @@ export const filmsFeature: BackendFeature = {
         app.get(`${org}/canvases/:canvasId/presenter`, async (req, res, next) => {
           try {
             const { tenantId, orgId, user } = await authz(req, 'workspace:read');
-            const c = await loadCanvas(tenantId, req.params.canvasId, user.userId, 'read');
+            const c = await loadCanvas(tenantId, orgId, req.params.canvasId, user.userId, 'read');
             const errors = validateFilm(c.state);
             if (errors.length) throw new OpenwopError('validation_error', 'Film is invalid.', 422, { errors });
             const film = c.state as unknown as FilmSpec;
@@ -53,8 +53,8 @@ export const filmsFeature: BackendFeature = {
         // A separate audience response: private notes never reach this payload.
         app.get(`${org}/canvases/:canvasId/audience`, async (req, res, next) => {
           try {
-            const { tenantId, user } = await authz(req, 'workspace:read');
-            const c = await loadCanvas(tenantId, req.params.canvasId, user.userId, 'read');
+            const { tenantId, user, orgId } = await authz(req, 'workspace:read');
+            const c = await loadCanvas(tenantId, orgId, req.params.canvasId, user.userId, 'read');
             const errors = validateFilm(c.state);
             if (errors.length) throw new OpenwopError('validation_error', 'Film is invalid.', 422, { errors });
             res.setHeader('Cache-Control', 'no-store');

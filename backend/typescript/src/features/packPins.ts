@@ -141,6 +141,7 @@ export const PACK_PINS = {
   'vendor.openwop-app.podcasts.agents': '1.0.3',
   'vendor.openwop-app.priority-matrix.agents': '1.0.2',
   'vendor.openwop-app.production.agents': '1.0.2',
+  'vendor.openwop-app.projects.agents': '1.0.1',
   'vendor.openwop-app.promotions.agents': '1.0.3',
   'vendor.openwop-app.recommendations.agents': '1.0.2',
   'vendor.openwop-app.sales-commissions.agents': '1.0.3',

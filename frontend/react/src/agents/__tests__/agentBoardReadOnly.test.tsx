@@ -13,7 +13,7 @@ type KanbanClient = typeof import('../../kanban/kanbanClient.js');
 const { patchCard } = vi.hoisted(() => ({ patchCard: vi.fn<KanbanClient['patchCard']>() }));
 vi.mock('../../kanban/kanbanClient.js', async (orig) => ({
   ...(await orig<KanbanClient>()),
-  getBoard: vi.fn(async () => ({ board: { id: 'b1', tenantId: 't1', name: 'B', columns: [{ id: 'todo', name: 'To Do' }], createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }, cards: [] })),
+  getWholeBoard: vi.fn(async () => ({ board: { id: 'b1', tenantId: 't1', name: 'B', columns: [{ id: 'todo', name: 'To Do' }], createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' }, cards: [] })),
   subscribeBoardEvents: vi.fn(() => () => undefined),
   patchCard,
 }));

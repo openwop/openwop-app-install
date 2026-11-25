@@ -49,7 +49,7 @@ export function registerSlidesEditorRoutes(deps: RouteDeps): void {
       // Creates a NEW canvas; ~15 MB base64 cap (≈11 MB file).
       app.post(`${org}/canvases/import`, async (req, res, next) => {
         try {
-          const { tenantId } = await authorizeOrgScope(req, SLIDES_FEATURE, 'workspace:write');
+          const { orgId, tenantId } = await authorizeOrgScope(req, SLIDES_FEATURE, 'workspace:write');
           const body = (req.body ?? {}) as { fileBase64?: unknown; name?: unknown };
           if (typeof body.fileBase64 !== 'string' || body.fileBase64.length === 0) {
             throw new OpenwopError('validation_error', '`fileBase64` (the .pptx content) is required.', 400, { field: 'fileBase64' });
@@ -76,6 +76,7 @@ export function registerSlidesEditorRoutes(deps: RouteDeps): void {
           }
           const canvas = await createCanvasForTenant(tenantId, {
             canvasTypeId: 'canvas.slides',
+            orgId,
             name,
             initialState: state,
           });
@@ -87,12 +88,12 @@ export function registerSlidesEditorRoutes(deps: RouteDeps): void {
 
       app.post(`${org}/canvases/:canvasId/export`, async (req, res, next) => {
         try {
-          const { user, tenantId } = await authorizeOrgScope(req, SLIDES_FEATURE, 'workspace:read');
+          const { user, tenantId, orgId } = await authorizeOrgScope(req, SLIDES_FEATURE, 'workspace:read');
           const body = (req.body ?? {}) as Record<string, unknown>;
           if (!isSlidesExportFormat(body.format)) {
             throw new OpenwopError('validation_error', `\`format\` must be one of: ${SLIDES_EXPORT_FORMATS.join(', ')}.`, 400, { field: 'format' });
           }
-          const canvas = await loadCanvas(tenantId, req.params.canvasId, user.userId, 'read');
+          const canvas = await loadCanvas(tenantId, orgId, req.params.canvasId, user.userId, 'read');
           const startedAt = Date.now();
           const result = await exportSlides(tenantId, canvas.state, body.format);
           log.info('deck_exported', { tenantId, format: body.format, bytes: result.sizeBytes, ms: Date.now() - startedAt });

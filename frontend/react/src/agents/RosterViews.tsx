@@ -39,7 +39,7 @@ export interface RosterActions {
   onDeleteRequest?: ((r: RosterEntry) => void) | undefined;
 }
 
-const autonomyOf = (r: RosterEntry): 'auto' | 'guided' | 'review' => r.autonomyLevel ?? 'auto';
+const autonomyOf = (r: RosterEntry): 'auto' | 'guided' | 'review' => r.autonomyLevel ?? 'review';
 
 export function RosterCard({ entry: r, onToggleAutonomy, onProfile, onDeleteRequest }: { entry: RosterEntry } & RosterActions): JSX.Element {
   const { t } = useTranslation('agents');

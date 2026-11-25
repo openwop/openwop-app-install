@@ -187,6 +187,7 @@ export function registerUiPluginsFeatureRoutes(deps: RouteDeps): void {
       if (fixtureTenant) {
         await ensureCanvasForTenant(tenantOf(req), UI_PLUGIN_FIXTURE_ARTIFACT, {
           canvasTypeId: DEMO_CANVAS_TYPE,
+          orgId: null, orgWhy: 'system:ui-plugin-fixture', // ADR 1160 D1
           initialState: { title: 'RFC 0238 fixture artifact', credentialRef: '{{secrets.openwop-conformance-canary-secret}}' },
         });
       }
@@ -201,6 +202,7 @@ export function registerUiPluginsFeatureRoutes(deps: RouteDeps): void {
       const tenantId = tenantOf(req);
       const canvas = await ensureCanvasForTenant(tenantId, demoArtifactId(tenantId), {
         canvasTypeId: DEMO_CANVAS_TYPE,
+        orgId: null, orgWhy: 'system:ui-plugin-demo', // ADR 1160 D1
         initialState: {
           title: 'UI-plugin demo artifact',
           note: 'Read by community.openwop.artifact-viewer over ui-plugin/1 (artifact.read).',

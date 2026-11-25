@@ -18,6 +18,68 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-11-25
+
+A MINOR release under ADR 0052, because it adds **app-migration 27**. **No route, env var or config key is removed or renamed.** Read "Upgrading from 0.20.0" for five behaviour changes:
+
+- roster agents with no autonomy level are stamped `auto` so they keep running, while new agents default to `review` (ADR 1159);
+- e-sign invites and completion emails are now really sent (#6248);
+- an unpaged kanban read above 2,000 cards is refused (ADR 1155 P5b);
+- a canvas created since ADR 1160 P0 opens only in its own org (ADR 1160 P1);
+- the workspace switcher left the entry bundle (#6250).
+
+There is no schema migration (sqlite 54 / postgres 52).
+
+### Security
+
+- **A canvas is read and written only in its own org (ADR 1160 P0 #6260, P1 #6262).** Every canvas create now stamps the org (workspace) it was made in, with creates and retries keyed per org. `canvasReadAllowed` / `canvasWriteAllowed` check `workspace:read` / `workspace:write` in the canvas's **own** org, ahead of the owner rule, and every lane that used them inherits the check: the editor, agent tools, run lanes, sharing mint, present-remote, the ui-plugin RPC and the MCP nodes. A path naming another org answers 404, even to a member of both. Agent canvas links carry `?org=`. Canvases created before P0 are unstamped, tenant-shared and unchanged. Runs with no person (a schedule, a webhook, app-builder inbound sync) declare `orgSystemLane` and keep their reach.
+- **A switched-off collaboration surface admits no signed-in invite (ADR 1099 D1, #6258).** `createCollaborator` now checks the surface's switch as well as its org rule, which is what the accept lane already checked. The HTTP route was already safe; this closes the gap for direct service callers. Link-only collaborators keep their owner-feature gate.
+
+### Added
+
+- **A workflow's work-item proposal can carry card facets (ADR 1155 P2b).** `core.openwop.kanban-work-items` 1.3.0 accepts `facets` on each proposal item (at most 8 lower-case keys, values of 1–64 characters with no control characters), written at create and rewritten by `refresh`. `vendor.openwop.app-builder.workflows` 1.4.4 re-pins the node. Both are image-vendored packs; no production pin names them.
+- **Transactional email carries a sender name, a Reply-To and the feature's own opt-out link (#6135).** `sendTransactional` / `sendTransactionalEmail` accept optional `fromName`, `replyTo` and `listUnsubscribe: { url }`, and the brokered transport passes them to the email adapter, which writes the name in each provider's shape (SendGrid `from.name`, Postmark `"Name" <addr>`, SMTP an address object). A `fromName` or `replyTo` with a control character (CR/LF), a display name or a list is refused: `invalid_header` at the seam, `email_header_invalid` at the adapter, with no provider request. `listUnsubscribe` is now also accepted for any `https:` path on the deployment's own `OPENWOP_PUBLIC_BASE_URL` origin; any other origin is still dropped. Existing callers are unchanged.
+- **A client can talk to the project's agent (ADR 1099 P2, #6261).** `POST /host/openwop-app/collab/grants/:grantId/turn` runs one turn as an outside collaborator on a `project` grant. It answers only while the grant is usable (`checkGrantUse`, re-checked before every tool call) and the `projects.client-portal` switch is on (default off). It uses the firm's model credential, and a refused credential answers 503. Turns are capped per day at 50 per grant and 500 per tenant (`OPENWOP_COLLAB_TURNS_PER_GRANT_DAY` / `OPENWOP_COLLAB_TURNS_PER_TENANT_DAY`, 429 above). The run is owned by `collab:<collaboratorId>`, the message is fenced, and only tools from the new client registry (`registerClientProjectTool`, read-only `openwop:client.<kind>.*`) resolve; scope keys are dropped from model input at every depth. Each tool decision is audited (`collab-turn.tool`). The agent is the Project Guide (`vendor.openwop-app.projects.agents`) with one tool, `openwop:client.project.overview`. A grant can carry an `audience` label (registered by features), set on the Client access tab, and the projection and every client tool receive it; a grant without one gets the most limited view. A member cannot fork a collaborator's run: `409 collab_run_not_forkable`. The default-deny turn (`host/scopedToolTurn.ts`) and the outsider credential rule (`host/outsiderTurnCredential.ts`) are now shared with the anonymous chat-widget lane, which is unchanged. There is no thread yet: one turn, no history (P3).
+
+### Changed
+
+- **Agents propose, humans dispose, by default (ADR 1159).** A roster agent with no autonomy level used to run heartbeat picks with no human gate, because `autonomyOf()` read absent as `auto`. Absent now reads as `review`, new agents (API, hire screen, create wizard, agent author, portability import) store an explicit level defaulting to `review`, and existing agents keep their current behaviour through app-migration 27.
+- **An unpaged kanban read above 2,000 cards is refused (ADR 1155 OQ-2, P5b). This is a contract change for API callers.** `GET /host/openwop-app/kanban/boards/:boardId` with no `limit` counts the board first, and `GET …/kanban/assigned` with no `limit` counts the caller's matching cards. Above 2,000 either answers `400 validation_error` with `details: { reason: "kanban_board_page_required", total, cap: 2000 }` and no cards. It never answers a truncated `200`, which an old client would render as the whole board. At or below 2,000 the response is unchanged, and a paged read (`?limit=`) is never capped. The SPA's agent board, agent view, "Assigned to me" list and dashboard tiles now read a page at a time, and `@openwop/cli` 2.2.0 `kanban board` and `kanban assigned` follow `nextCursor`. The personal board route (`/boards/personal`) is not capped.
+- **The workspace switcher and client left the entry bundle (#6250).** `Sidebar` lazy-loads `WorkspaceSwitcher` behind its own static `/orgs` link, and `runsClient` / `exampleDataClient` load `workspaceClient` on first use. The host entry goes from 129.4 kB to 126.7 kB gzip, against its 130.0 kB budget.
+- **Example data starts with nothing selected (#6231).** The page adds Select all and Select none. Load selected and Clear stay disabled until something is chosen, with a visible hint. The Clear dialog names the chosen types and the workspace.
+- **The Project Guide (the agent an outside collaborator talks to) is no longer listed to a firm's members or on the A2A card; it still serves the collaborator turn (ADR 1099 P2, #6268).** The member agent list leaves out any agent whose every tool is a client tool (`openwop:client.*`), because in a member's chat it would have none. `vendor.openwop-app.projects.agents` 1.0.1 sets `a2aExposed: false`. The agent stays installed and resolvable by id.
+- **Conformance suite pinned to 2.49.9 (#6253).** Schemas re-vendored at `v2.49.9`. No fixtures, capabilities or declarations change.
+
+### Fixed
+
+- **E-sign invites and completion emails are sent (#6135).** They went to the console stub, so no invite was ever emailed and `invitesEmailed` was always `false`. They now ride the transactional seam: the org's sender address and the requester's email Connection, with a per-signer ledger key so a retry never re-sends. `invitesEmailed` is `true` only when every signer's invite was accepted, and the signer's done screen promises the certificate email only when the org can send one.
+- **Direct-host feeds carry the active workspace (ADR 1158 extension, #6232).** Kanban board events, notifications, channel presence and messages, and voice transcripts go straight to the backend host. They now send the `x-openwop-workspace-selection` header, so a signed-in caller in a shared workspace streams that workspace, not their personal one.
+- **A site-tier, sign-in-required route can be the app home (#6245).** `resolveAppHome` accepts a `site` route whose `auth` is `required` (or omitted), so a white-label's `VITE_BRAND_APP_HOME_PATH` can point at a signed-in desk like DeckTalk's `/app/*`.
+
+### Tests and tooling
+
+- **The replay-safety fixture scrubs shell provider keys instead of refusing (ADR 1002, #6249).** A developer shell with `GOOGLE_API_KEY` or a similar key exported no longer turns the four `ai-replay-safety` files red, and the keys still never reach the run.
+- **`reelNeedsKey` waits for the reel button under load (ADR 1039 D2, #6263).**
+- **Docs:** v2 phase-1 sweep of the current docs, skills, scripts and UI copy (#6254); ADR 1160 (#6259); the release manager files user questions in the decision queue (#6257); Campaign Studio acceptance open items tracked (#6243).
+
+#### Upgrading from 0.20.0
+
+- **Required stop:** no. **Rolling-safe:** yes. `node scripts/upgrade-plan.mjs 0.20.0` gives one step, no stop:
+  1. back up the database (and object store);
+  2. 0.20.0 instances may keep running during 0.21.0's migrations;
+  3. start 0.21.0 (sqlite 54 → 54, postgres 52 → 52, app 26 → 27);
+  4. check that `/readiness` reports version 0.21.0.
+- **Migrations:** app-migration 27 (`stamp-legacy-roster-autonomy`) runs once at first boot. It writes an explicit `autonomyLevel: "auto"` onto every roster agent that has no level stored, so those agents keep running heartbeat work automatically exactly as before. It touches only rows with no level, so expect one write per legacy agent and zero on a fresh install. Rolling back is safe without a reverse migration: older code reads an explicit `auto` as auto and an explicit `review` as review. This migration makes the next release a minor.
+- **New agents now default to `review` (ADR 1159).** An agent created without an autonomy level proposes each heartbeat pick for approval instead of running it. The hire and create screens default to review, and every write stores the level explicitly. API callers that want an autonomous agent must send `autonomyLevel: "auto"`.
+- **E-sign invites and completion emails really go out now (#6248).** Before this release none were sent. After it, any org with a sender address, whose requester has an email Connection, emails every signer their signing link and, once all have signed, the certificate link. An org without either keeps today's behaviour: the request is created, `invitesEmailed` is `false`, and the requester shares the link by hand. Check your sender addresses before deploying if a signer should not receive mail.
+- **Canvas org enforcement (ADR 1160 P1).** Only canvases created since P0 (#6260) carry an org, and these open only through their own org: another org's path answers 404. A member of a different org loses access, which is intended. An MCP principal now needs membership in the org of a UI-created canvas. Public share links are unaffected. Minting a share link or a present-remote token needs write access in the canvas's org. P1 writes no data, so a revert is the rollback.
+- **Deploy the new SPA together with this backend if any board, or any member's assigned list, holds more than 2,000 cards.** An older SPA reads the agent board and "Assigned to me" unpaged, and against this backend those reads fail above 2,000. The SPA's main board view pages above 500 cards, so it is unaffected either way.
+- **API and CLI callers:** a script that reads a board or `/assigned` without `limit` gets the 400 above 2,000 cards. Page with `limit` and `cursor`, or upgrade to `@openwop/cli` 2.2.0 or later.
+- **Client portal turns (ADR 1099 P2).** Nothing changes while `projects.client-portal` is off, which is the default; leave it off in production until P4 ships the portal UI. Two optional knobs cap turns per day: `OPENWOP_COLLAB_TURNS_PER_GRANT_DAY` (default 50) and `OPENWOP_COLLAB_TURNS_PER_TENANT_DAY` (default 500).
+- **Entry bundle (#6250).** The host entry is about 2.8 kB gzip smaller. An adopter whose entry budget was tight (casavoga's was 445 B over after 0.20.0) gets that room back with no change of its own.
+- **Config:** nothing to change. The two client-portal caps above are optional.
+- **Steps:** back up the database, deploy the new backend image and then the frontend, and check that `/readiness` reports `"version": "0.21.0"`.
+
 ## [0.20.0] — 2026-11-24
 
 A MINOR release under ADR 0052. **Nothing is breaking for API callers:** no route,

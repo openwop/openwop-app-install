@@ -96,7 +96,8 @@ const RUN_MINTERS: Record<string, [number, string]> = {
   'features/channel-ingress/ingress.ts': [1, 'resolveLaunchWorkflow (openwop-app.conversation, launched as the paired owner; ADR 1042 D7)'],
   'host/workforceService.ts': [1, 'seeds historical records for host-defined workforces; executes nothing'],
   'host/workforceEval.ts': [1, 'eval record under the fixed EVAL_SUITE_ID; executes no workflow definition'],
-  'host/anonymousActor.ts': [1, 'synthetic anon-surface run, no workflow definition'],
+  // ADR 1099 D5 — moved from host/anonymousActor.ts with the turn it creates.
+  'host/scopedToolTurn.ts': [1, 'synthetic non-member surface run (anon widget, ADR 1099 collaborator turn), no workflow definition'],
   'features/agent-deployments/service.ts': [1, 'ADR 1005 / RFC 0254 §D deployment-management run under the fixed workflowId openwop-app.agent-deployment; it stands for a transition and executes no workflow definition'],
   'host/evals/createEvalRun.ts': [1, 'ADR 0889 eval run under the synthetic eval:<suite> workflowId; drives an agent resolved by resolveAgentForTenant, executes no workflow definition'],
   'routes/artifactTypeSeam.ts': [1, 'test seam with its own inline definition'],

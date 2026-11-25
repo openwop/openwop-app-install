@@ -29,7 +29,8 @@ import { createLogger } from '../observability/logger.js';
 
 const log = createLogger('host.laneFirewall');
 
-export type FirewallLane = 'chat' | 'run' | 'dispatch' | 'voice' | 'anon';
+/** `collab` (ADR 1099 D5): a collaborator's turn on the one resource their grant names. */
+export type FirewallLane = 'chat' | 'run' | 'dispatch' | 'voice' | 'anon' | 'collab';
 
 export interface LaneFirewallInput {
   tenantId: string;

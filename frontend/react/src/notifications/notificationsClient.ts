@@ -241,6 +241,12 @@ export function subscribeToNotifications(handlers: NotificationStreamHandlers): 
     while (!closed) {
       let connectedAt: number | null = null;
       try {
+        // ADR 1158 — the feed is the ACTIVE workspace's: carry it to the direct
+        // host, which never sees this origin's session cookie. Re-read per
+        // connect, so a reconnect after the token's 10 minutes renews it. Loaded on
+        // connect, not imported: this client is on the entry path, the helper is not.
+        const { directHostSelectionHeaders } = await import('../client/directHostSelection.js');
+        const selection = await directHostSelectionHeaders();
         const res = await fetch(url, {
           method: 'GET',
           headers: {
@@ -253,6 +259,7 @@ export function subscribeToNotifications(handlers: NotificationStreamHandlers): 
             // the tenant filter shows none of their notifications until that
             // session promotes. Anon (no token) still rides the cookie below.
             ...authedHeaders(),
+            ...selection,
           },
           // Cookie mode (prod, cross-origin Cloud Run) also rides the
           // `openwop.session` cookie as a fallback for anon callers.

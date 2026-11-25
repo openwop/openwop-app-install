@@ -55,7 +55,8 @@ afterEach(() => {
 });
 
 async function member(tenantId: string, persona = 'Sally'): Promise<{ entry: RosterEntry; board: KanbanBoard; cardId: string }> {
-  const entry = await createRosterEntry({ tenantId, persona, agentRef: { agentId: 'host:demo-sales' }, workflows: ['wf-1'] });
+  // An `auto` member: these cases are about re-runs and ranking stamps, not the gate (ADR 1159 made `review` the default).
+  const entry = await createRosterEntry({ tenantId, persona, agentRef: { agentId: 'host:demo-sales' }, workflows: ['wf-1'], autonomyLevel: 'auto' });
   const board = await createBoard({ tenantId, name: `${persona} board`, rosterId: entry.rosterId, triggerWorkflowId: 'wf-1' });
   const todo = board.columns.find((c) => c.id === 'todo')!;
   const card = await createCard({ boardId: board.id, columnId: todo.id, title: 'Do the thing' });

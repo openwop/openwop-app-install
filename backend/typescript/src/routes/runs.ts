@@ -62,6 +62,7 @@ import { boundParamConflicts } from '../host/chainParamBinding.js';
 import { createAgentEvalRun, callerFromRequest } from '../host/evals/createEvalRun.js';
 import { requireAgentEvalsEnabled } from '../host/evals/access.js';
 import { isAgentEvalRun } from '../host/evals/agentEvalRun.js';
+import { isCollaboratorTurnRun } from '../host/collaboratorTurn.js';
 import { isHostManagedRun } from '../host/hostRunInterrupts.js';
 import { launchSubjectOf } from '../features/featureRoute.js';
 import { approvalGatesWithGroupRole, validateApproverResolvability } from '../host/approverResolution.js';
@@ -1963,6 +1964,11 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       }
       if (isAgentEvalRun(sourceRun)) {
         throw new OpenwopError('conflict', 'An eval run cannot be forked; start a new eval run (with configurable.baselineRunId to compare).', 409, { runId: sourceRun.runId, reason: 'eval_run_not_forkable' });
+      }
+      // ADR 1099 D5 — an outside collaborator's turn is never re-run by a member
+      // (replay or branch would dispatch the outsider's message as the member).
+      if (isCollaboratorTurnRun(sourceRun)) {
+        throw new OpenwopError('conflict', 'A project collaborator\'s conversation cannot be forked.', 409, { runId: sourceRun.runId, reason: 'collab_run_not_forkable' });
       }
       // Partial on the wire: `fromSeq` is omittable for replay mode (see
       // the replay-mode default below), so don't pretend the inbound body

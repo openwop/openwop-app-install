@@ -83,6 +83,8 @@ export const projectsFeature: BackendFeature = {
       },
     });
   },
+  // ADR 1099 D5 (P2) — the Project Guide, the agent a project's collaborator talks to.
+  requiredPacks: ['vendor.openwop-app.projects.agents'],
   // No `toggleDefault` — always-on. The collaborative surfaces (members /
   // visibility / chat, ADR 0054) are also always-on as of 2026-06-16 (§ Correction
   // in registerRoutes); WRITE stays org-scoped, READ honors project visibility.

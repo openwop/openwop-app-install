@@ -77,11 +77,15 @@ export interface RosterEntry {
    *  (Pre-0313 this was opt-in: absent/0 meant manual-only.) */
   heartbeatIntervalMs?: number;
   /** How much autonomy this member has when its heartbeat picks up work.
-   *  `auto` (default) — start the proposed run immediately (today's behavior).
-   *  `review` — "agents propose, humans dispose": the heartbeat does NOT start
-   *  the run; it queues a pending approval (host/approvalService.ts) that a
-   *  human must affirmatively claim before the run starts. Host-extension only;
-   *  the normative manifest inventory is unaffected. Absent ⇒ `auto`. */
+   *  `review` (default) — "agents propose, humans dispose": the heartbeat does
+   *  NOT start the run; it queues a pending approval (host/approvalService.ts)
+   *  that a human must affirmatively claim before the run starts.
+   *  `guided` — propose only high-priority picks; run the rest.
+   *  `auto` — start the picked run immediately. Opt-in only.
+   *  Host-extension only; the normative manifest inventory is unaffected.
+   *  Every write persists the level explicitly; absent ⇒ `review` (fail
+   *  closed). Rows written before the default changed were stamped `auto` by
+   *  app-migration 27 so their behaviour did not change. */
   autonomyLevel?: 'auto' | 'guided' | 'review';
   /** The seed role template this member was created from (e.g. `sales-ops`,
    *  `chief-of-staff`). Set by the demo seed from `exampleAgents.json`; absent for
@@ -152,9 +156,9 @@ export async function listNormativeRoster(tenantId: string): Promise<NormativeRo
 }
 
 export function autonomyOf(entry: RosterEntry): 'auto' | 'guided' | 'review' {
-  if (entry.autonomyLevel === 'review') return 'review';
+  if (entry.autonomyLevel === 'auto') return 'auto';
   if (entry.autonomyLevel === 'guided') return 'guided';
-  return 'auto';
+  return 'review';
 }
 
 // ADR 0379 P2 (PR-A) — TENANT-QUALIFIED key: deterministic per-persona
@@ -232,9 +236,8 @@ export async function createRosterEntry(input: {
     description: input.description,
     avatarUrl: input.avatarUrl,
     ...(input.heartbeatIntervalMs !== undefined ? { heartbeatIntervalMs: input.heartbeatIntervalMs } : {}),
-    // Persist non-default levels; `auto`/absent normalize to undefined (the
-    // default) so stock entries stay shape-stable.
-    autonomyLevel: input.autonomyLevel === 'review' || input.autonomyLevel === 'guided' ? input.autonomyLevel : undefined,
+    // Always persist the level; an omitted level is `review` (fail closed).
+    autonomyLevel: input.autonomyLevel ?? 'review',
     ...(input.roleKey !== undefined ? { roleKey: input.roleKey } : {}),
     createdAt: now,
     updatedAt: now,
@@ -362,9 +365,7 @@ function applyRosterPatch(
     else entry.avatarUrl = patch.avatarUrl;
   }
   if (patch.autonomyLevel !== undefined) {
-    // Normalize: non-default levels persist; 'auto' is the absent default.
-    if (patch.autonomyLevel === 'review' || patch.autonomyLevel === 'guided') entry.autonomyLevel = patch.autonomyLevel;
-    else delete entry.autonomyLevel;
+    entry.autonomyLevel = patch.autonomyLevel;
   }
   entry.updatedAt = nowIso();
   return entry;
@@ -399,6 +400,25 @@ export async function deleteRosterEntry(tenantId: string, rosterId: string): Pro
 }
 
 /** Test-only: drop all roster entries. */
+/**
+ * App-migration 27 — before the default changed to `review`, an `auto` level was
+ * stored as ABSENT (the hire and create screens defaulted to `auto`), so an absent
+ * row means "this agent runs autonomously today". Stamp an explicit `auto` on
+ * every such row so the new fail-closed reading of absent changes no existing
+ * agent's behaviour. Idempotent and concurrency-safe: rows that already carry a
+ * level are skipped, and a lost compare-and-swap means another writer (or a
+ * concurrent boot) already set one. Returns the number of rows stamped.
+ */
+export async function stampLegacyAutonomyLevels(): Promise<number> {
+  let stamped = 0;
+  for (const current of await roster.list()) {
+    if (current.autonomyLevel !== undefined) continue;
+    if (await roster.compareAndSwap(current, { ...current, autonomyLevel: 'auto' })) stamped += 1;
+  }
+  if (stamped > 0) await bumpRosterVersion();
+  return stamped;
+}
+
 export async function __resetRosterStore(): Promise<void> {
   await roster.__clear();
   await rosterVersion.__clear();

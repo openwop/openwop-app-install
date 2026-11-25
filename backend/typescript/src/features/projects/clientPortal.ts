@@ -14,7 +14,10 @@
  *  - a grant reaches the project only while the project is still in the grant's
  *    org. A project moved to another org, or deleted, is a uniform 404;
  *  - the projection is closed and minimal (the name and the status). What else a
- *    client may see is the firm's choice, made per field in P3 (answer 4).
+ *    client may see is the firm's choice, made per field in P3 (answer 4);
+ *  - P2: the collaborator can ask the project's agent about it
+ *    (`vendor.openwop-app.projects.agents`), which reads it through ONE client tool,
+ *    `openwop:client.project.overview`, the same projection.
  *
  * Who may invite and grant stays the default, `host:members:manage` on the org,
  * re-checked for the granter on every use. A project delete revokes its grants.
@@ -25,10 +28,14 @@ import { getOrg } from '../../host/accessControlService.js';
 import { listGrants, registerGrantResourceKind, revokeGrant } from '../../host/externalCollaborators.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { registerSubjectDependent } from '../../host/subjectDependents.js';
+import { registerClientProjectTool } from '../../host/clientProjectTools.js';
 import { getProject, listProjects, type Project } from './projectsService.js';
 
 export const PROJECT_GRANT_KIND = 'project';
 export const PROJECTS_CLIENT_PORTAL_TOGGLE = 'projects.client-portal';
+/** ADR 1099 D5 (P2) — the agent a project's collaborator talks to, and its one tool. */
+export const PROJECT_CLIENT_AGENT_ID = 'vendor.openwop-app.projects.agents.client-guide';
+export const PROJECT_OVERVIEW_TOOL = 'openwop:client.project.overview';
 /** The actor a project delete revokes its grants as. */
 const DELETE_ACTOR = 'system:project-delete';
 
@@ -36,6 +43,14 @@ const DELETE_ACTOR = 'system:project-delete';
 async function projectInOrg(tenantId: string, orgId: string, id: string): Promise<Project | null> {
   const p = await getProject(tenantId, id);
   return p && p.tenantId === tenantId && p.orgId === orgId ? p : null;
+}
+
+/** The closed projection a collaborator sees: the name and the status (P1). What
+ *  else a client may see is the firm's choice, per field, in P3. */
+async function projectView(tenantId: string, orgId: string, id: string): Promise<{ title: string; body: Record<string, unknown> } | null> {
+  const p = await projectInOrg(tenantId, orgId, id);
+  if (!p) return null;
+  return { title: p.name, body: { kind: 'project', name: p.name, ...(p.charter?.status ? { status: p.charter.status } : {}) } };
 }
 
 async function clientPortalOn(tenantId: string): Promise<boolean> {
@@ -51,13 +66,25 @@ export function registerProjectClientPortal(): void {
       async orgOpen(tenantId, orgId) { return (await getOrg(orgId))?.tenantId === tenantId; },
     },
     async exists(tenantId, orgId, id) { return (await projectInOrg(tenantId, orgId, id)) !== null; },
-    async project(tenantId, orgId, id) {
-      const p = await projectInOrg(tenantId, orgId, id);
-      if (!p) return null;
-      return { title: p.name, body: { kind: 'project', name: p.name, ...(p.charter?.status ? { status: p.charter.status } : {}) } };
-    },
+    project: (tenantId, orgId, id) => projectView(tenantId, orgId, id),
     async list(tenantId, orgId) {
       return (await listProjects(tenantId)).filter((p) => p.orgId === orgId).map((p) => ({ id: p.id, title: p.name }));
+    },
+    turnAgentId: PROJECT_CLIENT_AGENT_ID,
+  });
+
+  // The project's one client tool: the same projection the collaborator's page shows.
+  registerClientProjectTool({
+    id: PROJECT_OVERVIEW_TOOL,
+    kind: PROJECT_GRANT_KIND,
+    featureId: PROJECTS_CLIENT_PORTAL_TOGGLE,
+    effect: 'read',
+    action: 'view',
+    description: 'Read the project this person was given access to: its name and its status. Takes no input.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    async run(scope) {
+      const view = await projectView(scope.tenantId, scope.orgId, scope.resourceId);
+      return view ? view.body : { error: 'not_found', message: 'The project is no longer available.' };
     },
   });
 

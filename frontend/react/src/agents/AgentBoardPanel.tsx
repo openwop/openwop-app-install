@@ -12,7 +12,7 @@ import { confirm } from '../ui/confirm.js';
 import {
   createCard,
   deleteCard,
-  getBoard,
+  getWholeBoard,
   patchCard,
   subscribeBoardEvents,
   type KanbanBoard,
@@ -36,7 +36,7 @@ export function AgentBoardPanel({ boardId, persona, avatarUrl, roleTheme, workfl
 
   const refresh = useCallback(async () => {
     try {
-      const data = await getBoard(boardId);
+      const data = await getWholeBoard(boardId);
       setBoard(data.board);
       setCards(data.cards);
     } catch (err) {

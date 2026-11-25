@@ -44,6 +44,11 @@ const CLASSIFIED: Record<string, 'MODEL_FACING' | 'PROGRAMMATIC'> = {
   'host/agentToolProvider.ts': 'PROGRAMMATIC',
   // Wraps/forwards the provider into runChatToolLoop — the loop fences.
   'host/anonymousActor.ts': 'PROGRAMMATIC',
+  // ADR 1099 D5 — the shared non-member turn: passes the provider INTO runChatToolLoop.
+  'host/scopedToolTurn.ts': 'PROGRAMMATIC',
+  // ADR 1099 D5 (P2) — the collaborator turn: its executeTool wrapper is handed to
+  // runScopedToolTurn, which passes it INTO runChatToolLoop; the loop fences.
+  'host/collaboratorTurn.ts': 'PROGRAMMATIC',
   // Passes the provider INTO runChatToolLoop; never builds a model message.
   'host/conversationToolLoop.ts': 'PROGRAMMATIC',
   'host/agentRunnerNode.ts': 'PROGRAMMATIC',

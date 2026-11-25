@@ -1,0 +1,41 @@
+{
+  "name": "vendor.openwop-app.projects.agents",
+  "version": "1.0.1",
+  "kind": "node",
+  "description": "Project client guide (ADR 1099 D5): the agent a firm's outside collaborator (a client, a builder) talks to about the ONE project a grant gives them. It reads the project only through the client tools the host compiles for that grant (openwop:client.project.overview in P2); it never sees member tools, other projects, or the firm's workspace. Pure-agent pack.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": [
+    "feature",
+    "projects",
+    "client-portal",
+    "collaborator"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <3.0.0"
+  },
+  "agents": [
+    {
+      "agentId": "vendor.openwop-app.projects.agents.client-guide",
+      "persona": "Project Guide",
+      "label": "Project Guide",
+      "description": "Answers an outside collaborator's questions about the one project they were given access to, from what the project's client tools return. It does not act for the firm, promise anything on its behalf, or read anything else in the firm's workspace.",
+      "modelClass": "general",
+      "systemPromptRef": "prompts/client-guide.md",
+      "toolAllowlist": [
+        "openwop:client.project.overview"
+      ],
+      "memoryShape": {
+        "scratchpad": false,
+        "conversation": false,
+        "longTerm": false
+      },
+      "x-confidence": "surfaced",
+      "a2aExposed": false
+    }
+  ],
+  "runtime": {
+    "language": "remote",
+    "entry": "pack.json"
+  }
+}

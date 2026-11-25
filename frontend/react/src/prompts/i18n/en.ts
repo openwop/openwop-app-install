@@ -24,7 +24,7 @@ export const messages = {
   tierOnePosture: '({{posture}}):',
   tierOneFlagged_one: 'schema-hint prompt flagged against',
   tierOneFlagged_other: 'schema-hint prompts flagged against',
-  tierOneLinkText: 'structured-output-subset.md',
+  tierOneLinkText: 'host-services.md § Structured output',
   tierOneFindingHint: 'Inline chips on each offender point to the specific finding.',
 
   // Key-figure band
@@ -55,7 +55,7 @@ export const messages = {
   // Card actions
   editLabel: 'Edit {{name}}',
   deleteLabel: 'Delete {{name}}',
-  tierOneFindingTitle: 'Tier-1 subset finding — see structured-output-subset.md',
+  tierOneFindingTitle: 'Tier-1 subset finding — see host-services.md § Structured output',
 
   // Delete modal
   deleteModalLabel: 'Delete {{name}}',

@@ -80,19 +80,26 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
+// The reel button renders only after the brief, then RendersSection's three reads
+// (templates, renders, assets), have resolved. Under a loaded gate that chain has
+// taken longer than Testing Library's 1 s default (it redded TRAIN 515c and a
+// casavoga gate), so the finds wait up to 5 s inside a 10 s test.
+const SETTLE = { timeout: 5000 };
+
 describe('ADR 1039 D2 — reel outcomes on the briefs page', () => {
   it('no Replicate key: a persistent needs-key state with a vault link, no toast', async () => {
     generateReel.mockRejectedValue(Object.assign(new Error('Reels need a Replicate key.'), { code: 'credential_required' }));
     mount();
-    await screen.findByDisplayValue('Spring hero');
-    await act(async () => { fireEvent.click(await screen.findByRole('button', { name: /generate reel/i })); });
-    expect(await screen.findByText(/nothing was started or charged/i)).toBeTruthy();
+    await screen.findByDisplayValue('Spring hero', {}, SETTLE);
+    const button = await screen.findByRole('button', { name: /generate reel/i }, SETTLE);
+    await act(async () => { fireEvent.click(button); });
+    expect(await screen.findByText(/nothing was started or charged/i, {}, SETTLE)).toBeTruthy();
     const link = screen.getByRole('link', { name: /open the secrets vault/i });
     expect(link.getAttribute('href')).toBe('/access?tab=connections');
     expect(toast.error).not.toHaveBeenCalled();
     // Grade-ux H1 — a notice mounted with its text already inside is silent, so it is spoken.
     expect(vi.mocked(announce).mock.calls.some(([m]) => /nothing was started or charged/i.test(String(m)))).toBe(true);
-  });
+  }, 10_000);
 
   it('a failed reel run toasts a translated reason from its error code, never the raw provider text', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout'] });

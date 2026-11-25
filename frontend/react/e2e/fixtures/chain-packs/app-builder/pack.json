@@ -444,7 +444,7 @@
           },
           {
             "id": "materialize",
-            "typeId": "core.openwop.kanban.work-items.materialize@1.2.0",
+            "typeId": "core.openwop.kanban.work-items.materialize@1.3.0",
             "name": "Create reusable work items",
             "position": { "x": 600, "y": 0 },
             "config": { "requireApproval": true },

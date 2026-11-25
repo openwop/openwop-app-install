@@ -13,7 +13,7 @@
 import { createLogger } from '../observability/logger.js';
 import { getRunArtifact } from './runArtifactStore.js';
 import { OpenwopError } from '../types.js';
-import { createCanvasForTenant, type CanvasRecordView } from './canvasSurface.js';
+import { canvasForLegacyIdemKey, createCanvasForTenant, fromArtifactOrgKey, type CanvasRecordView } from './canvasSurface.js';
 import type { Subject } from './subject.js';
 
 const log = createLogger('host.canvasFromArtifact');
@@ -27,6 +27,8 @@ export async function seedCanvasFromArtifact(
   tenantId: string,
   artifactKey: string,
   opts?: {
+    /** ADR 1160 D1 — the org the working copy belongs to (the editor's path org). */
+    orgId?: string;
     ownerSubject?: Subject;
     projectId?: string;
     /** Private editor copies are per caller/org, without changing legacy keys. */
@@ -72,11 +74,19 @@ export async function seedCanvasFromArtifact(
 
   // Idempotency: a deterministic key derived from the artifact key, so re-opening
   // the same artifact returns the same working copy (never a second canvas).
+  // ADR 1160 D1 — keyed by org, so two orgs opening one artifact get two copies.
+  // A copy made before ADR 1160 (the tenant-wide key) is reused while it is still
+  // tenant-shared or already in this org, so the next open does not duplicate it.
+  if (!opts?.idempotencyScope && opts?.orgId) {
+    const legacy = await canvasForLegacyIdemKey(tenantId, `from-artifact:${artifactKey}`);
+    if (legacy && (legacy.orgId === undefined || legacy.orgId === opts.orgId)) return legacy;
+  }
   const idempotencyKey = opts?.idempotencyScope
     ? `private-artifact:${JSON.stringify([opts.idempotencyScope, artifactKey])}`
-    : `from-artifact:${artifactKey}`;
+    : opts?.orgId ? fromArtifactOrgKey(opts.orgId, artifactKey) : `from-artifact:${artifactKey}`;
   const canvas = await createCanvasForTenant(tenantId, {
     canvasTypeId,
+    ...(opts?.orgId ? { orgId: opts.orgId } : { orgId: null, orgWhy: 'system:seed-without-org' }),
     ...(record.title ? { name: record.title } : {}),
     ...(opts?.projectId ? { projectId: opts.projectId } : {}),
     ...(opts?.ownerSubject ? { ownerSubject: opts.ownerSubject } : {}),

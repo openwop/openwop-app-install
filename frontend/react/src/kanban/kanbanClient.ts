@@ -17,6 +17,7 @@
  */
 
 import { authedHeaders, config, fetchOpts } from '../client/config.js';
+import { directHostSelectionHeaders } from '../client/directHostSelection.js';
 
 export interface KanbanColumn {
   id: string;
@@ -188,6 +189,28 @@ export async function getBoard(boardId: string, page?: BoardPageParams): Promise
   return (await res.json()) as KanbanBoardRead;
 }
 
+/** ADR 1155 P5b — the most cards a page holds, and so the page size the whole reads use. */
+const WHOLE_READ_PAGE = 100;
+
+/** Every card of a board, read a page at a time: a host refuses an unpaged read of a
+ *  board above 2,000 cards. An older host ignores `limit` and returns every card in
+ *  the first response, with no `nextCursor`. */
+export async function getWholeBoard(boardId: string): Promise<Pick<KanbanBoardRead, 'board' | 'cards' | 'workItems'>> {
+  const first = await getBoard(boardId, { limit: WHOLE_READ_PAGE });
+  const cards = [...first.cards];
+  const workItems = [...(first.workItems ?? [])];
+  const seen = new Set<string>();
+  for (let cursor = first.nextCursor; cursor; ) {
+    if (seen.has(cursor)) throw new Error(`getBoard repeated page cursor ${cursor}`);
+    seen.add(cursor);
+    const page = await getBoard(boardId, { limit: WHOLE_READ_PAGE, cursor });
+    cards.push(...page.cards);
+    workItems.push(...(page.workItems ?? []));
+    cursor = page.nextCursor;
+  }
+  return { board: first.board, cards, workItems };
+}
+
 /** Start a manually-dispatched reusable WorkItem. The selected workflow remains
  * a tenant-owned Builder workflow; the backend reserves and delivers it through
  * the normal run lifecycle instead of creating a Kanban-specific runner. */
@@ -323,7 +346,10 @@ export function subscribeBoardEvents(boardId: string, onChange: () => void): () 
       try {
         const res = await fetch(
           `${streamBase}/boards/${encodeURIComponent(boardId)}/events`,
-          fetchOpts({ headers: authedHeaders({ accept: 'text/event-stream' }), signal }),
+          // ADR 1158 — the direct host never sees this origin's cookie, so the
+          // active workspace rides the selection header (a non-org board's
+          // access is decided by the resolved tenant).
+          fetchOpts({ headers: { ...authedHeaders({ accept: 'text/event-stream' }), ...(await directHostSelectionHeaders()) }, signal }),
         );
         if (res.ok && res.body) {
           backoffMs = 5_000;
@@ -370,9 +396,22 @@ export async function deleteCard(cardId: string): Promise<void> {
  *  with its origin-board name. A derived view — these are the same records the
  *  origin boards render. */
 export async function listAssignedToMe(): Promise<AssignedCard[]> {
-  const res = await fetch(`${base}/assigned`, fetchOpts({ headers: authedHeaders() }));
-  if (!res.ok) throw new Error(`listAssignedToMe returned ${res.status}`);
-  return ((await res.json()) as { cards: AssignedCard[] }).cards;
+  // ADR 1155 P5b — read a page at a time; the host refuses an unpaged read above
+  // 2,000 cards. An older host ignores `limit` and answers with every card at once.
+  const cards: AssignedCard[] = [];
+  const seen = new Set<string>();
+  let cursor: string | undefined;
+  do {
+    const query = new URLSearchParams({ limit: String(WHOLE_READ_PAGE), ...(cursor ? { cursor } : {}) });
+    const res = await fetch(`${base}/assigned?${query.toString()}`, fetchOpts({ headers: authedHeaders() }));
+    if (!res.ok) throw new Error(`listAssignedToMe returned ${res.status}`);
+    const body = (await res.json()) as { cards: AssignedCard[]; nextCursor?: string };
+    cards.push(...body.cards);
+    cursor = body.nextCursor;
+    if (cursor !== undefined && seen.has(cursor)) throw new Error(`listAssignedToMe repeated page cursor ${cursor}`);
+    if (cursor !== undefined) seen.add(cursor);
+  } while (cursor);
+  return cards;
 }
 
 /** ADR 0049 — assign a card to a person, address it to a role, or unassign

@@ -24,6 +24,12 @@
  * checks in `resolveAppHome`, the `loading` wait in `AppHomeRedirect`, or the
  * `/open-app` hop in `appHomeHref`, or the hop refusal in `resolveAppHome` /
  * `appHomeHref`, each turns a named case red.
+ *
+ * 2026-11-24 (decktalk-7d): a `site` route with `auth: 'required'` (DeckTalk's
+ * `/app/*` desk) is a signed-in home too; it used to fall back to `/dashboard`
+ * silently. Red when the site-tier admission is dropped (the desk cases), when it
+ * ignores `auth` (the optional case), or when an omitted `auth` stops counting as
+ * required (the omitted case).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, waitFor } from '@testing-library/react';
@@ -31,7 +37,8 @@ import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom';
 import type { UseAuth } from '../../../auth/useAuth.js';
 import type { FeatureRoute } from '../../../chrome/featureTypes.js';
 import { appHomePath, resolveBrandFromEnv } from '../../../brand/defaults.js';
-import { appHomeHref, resolveAppHome, type AppHomeAccess } from '../../../chrome/appHome.js';
+import { APP_HOME_ENTRY, appHomeHref, resolveAppHome, type AppHomeAccess } from '../../../chrome/appHome.js';
+import { SearchIcon } from '../../../ui/icons/index.js';
 
 const auth = vi.hoisted(() => ({ useAuth: vi.fn<() => UseAuth>() }));
 vi.mock('../../../auth/useAuth.js', () => ({ useAuth: auth.useAuth }));
@@ -56,6 +63,12 @@ import { OpenAppLink } from '../../site/OpenAppLink.js';
 const CORE_PAGE: FeatureRoute = { path: '/inbox', element: <div />, tier: 'workspace', archetype: 'standard-index' };
 const DECKTALK: FeatureRoute = { ...CORE_PAGE, path: '/decktalk', ownerFeatureId: 'decktalk' };
 const ADMIN_PAGE: FeatureRoute = { path: '/admin/things', element: <div />, tier: 'admin', archetype: 'admin' };
+// DeckTalk's real shape (decktalk-7d): its signed-in desk is a SITE-tier route
+// behind the sign-in wall, nav-owned by the `decktalk` feature.
+const DECKTALK_DESK: FeatureRoute = {
+  path: '/app/projects', element: <div />, tier: 'site', auth: 'required', archetype: 'standard-index',
+  nav: { group: 'DeckTalk', label: 'Projects', icon: SearchIcon, featureId: 'decktalk' },
+};
 
 function LocationProbe(): JSX.Element {
   const loc = useLocation();
@@ -138,6 +151,30 @@ describe('resolveAppHome: a configured path is used only when the visitor can us
     ['toggle read failed', '/decktalk', DECKTALK, { ...on, resolutionFailed: true }],
   ])('%s → /dashboard', (_name, configured, route, acc) => {
     expect(resolveAppHome(configured, route, acc)).toBe('/dashboard');
+  });
+});
+
+describe('resolveAppHome: a site-tier desk behind the sign-in wall is a signed-in home (DeckTalk)', () => {
+  const on: AppHomeAccess = { enabled: (id) => (id === 'decktalk' ? true : undefined), locked: () => false, resolutionFailed: false };
+  const HOME = '/app/projects';
+  it('"Open app" goes through the checked entry', () => {
+    expect(appHomeHref(HOME)).toBe(APP_HOME_ENTRY);
+  });
+  it('auth required, feature on → the desk', () => {
+    expect(resolveAppHome(HOME, DECKTALK_DESK, on)).toBe(HOME);
+  });
+  it('auth omitted counts as required (fail-closed by omission) → the desk', () => {
+    const { auth: _omit, ...omitted } = DECKTALK_DESK;
+    expect('auth' in omitted).toBe(false);
+    expect(resolveAppHome(HOME, omitted, on)).toBe(HOME);
+  });
+  it.each<[string, FeatureRoute, AppHomeAccess]>([
+    ['feature off', DECKTALK_DESK, { ...on, enabled: () => false }],
+    ['feature locked', DECKTALK_DESK, { ...on, locked: () => true }],
+    ['toggle read failed', DECKTALK_DESK, { ...on, resolutionFailed: true }],
+    ['auth optional (a public-capable page, not a signed-in desk)', { ...DECKTALK_DESK, auth: 'optional' }, on],
+  ])('%s → /dashboard', (_name, route, acc) => {
+    expect(resolveAppHome(HOME, route, acc)).toBe('/dashboard');
   });
 });
 

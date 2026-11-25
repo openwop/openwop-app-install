@@ -24,7 +24,7 @@ export const messages = {
   tierOnePosture: '({{posture}}) :',
   tierOneFlagged_one: 'prompt indice de schéma signalé par rapport à',
   tierOneFlagged_other: 'prompts indice de schéma signalés par rapport à',
-  tierOneLinkText: 'structured-output-subset.md',
+  tierOneLinkText: 'host-services.md § Structured output',
   tierOneFindingHint: 'Des puces en ligne sur chaque élément concerné pointent vers la constatation spécifique.',
 
   // Key-figure band
@@ -55,7 +55,7 @@ export const messages = {
   // Card actions
   editLabel: 'Modifier {{name}}',
   deleteLabel: 'Supprimer {{name}}',
-  tierOneFindingTitle: 'Constatation du sous-ensemble Tier-1 — voir structured-output-subset.md',
+  tierOneFindingTitle: 'Constatation du sous-ensemble Tier-1 — voir host-services.md § Structured output',
 
   // Delete modal
   deleteModalLabel: 'Supprimer {{name}}',

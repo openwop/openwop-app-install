@@ -45,6 +45,14 @@ function oneNotificationThenClose(): ReadableStream<Uint8Array> {
   });
 }
 
+/** The first connect loads the ADR 1158 selection helper with a dynamic import
+ *  (it is kept off the entry chunk), so wait for that load, then flush. */
+async function settleConnect(): Promise<void> {
+  await vi.advanceTimersByTimeAsync(0);
+  await vi.dynamicImportSettled();
+  await vi.advanceTimersByTimeAsync(0);
+}
+
 describe('subscribeToNotifications (fetch-stream reconnect)', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
@@ -69,7 +77,7 @@ describe('subscribeToNotifications (fetch-stream reconnect)', () => {
     const stop = subscribeToNotifications({ onNotification, onOpen, onError });
 
     // Flush the initial connect + read + clean-close.
-    await vi.advanceTimersByTimeAsync(0);
+    await settleConnect();
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(onOpen).toHaveBeenCalledTimes(1);
     expect(onNotification).toHaveBeenCalledTimes(1);
@@ -98,7 +106,7 @@ describe('subscribeToNotifications (fetch-stream reconnect)', () => {
 
     const stop = subscribeToNotifications({ onNotification: vi.fn(), onOpen, onError });
 
-    await vi.advanceTimersByTimeAsync(0);
+    await settleConnect();
     // 410 → never opens, surfaces a transient error, schedules a retry.
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(onOpen).not.toHaveBeenCalled();

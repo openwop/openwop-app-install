@@ -75,7 +75,7 @@ import { requestOrigin } from '../host/requestOrigin.js';
 import type { HostAdapterSuite } from '../host/index.js';
 import type { Storage } from '../storage/storage.js';
 import { OpenwopError, type UserAgentRecord } from '../types.js';
-import { agentVisibleToTenant, resolveAgentForTenant } from '../host/agentVisibility.js';
+import { agentVisibleToTenant, isCollaboratorOnlyAgent, resolveAgentForTenant } from '../host/agentVisibility.js';
 import { sendError, sendErrorWithMintedIds, sendErrorBody } from '../middleware/errorEnvelope.js';
 import { assetServeUrl } from '../host/assetServePath.js';
 import { currentRevision } from '../host/userAgentRevisions.js';
@@ -173,7 +173,9 @@ async function listVisibleAgents(
   storage: Storage | undefined,
   tenant: string | undefined,
 ): Promise<AgentInventoryEntry[]> {
-  const entries = getAgentRegistry().list().filter((a) => visibleTo(a, tenant)).map(toEntry);
+  // ADR 1099 D5 — a collaborator-only agent (every tool a client tool) is not
+  // offered to members: in their chat it would have no tools at all.
+  const entries = getAgentRegistry().list().filter((a) => visibleTo(a, tenant) && !isCollaboratorOnlyAgent(a)).map(toEntry);
   if (storage && tenant && tenant !== '*') {
     const known = new Set(entries.map((e) => e.agentId));
     for (const r of await storage.listUserAgents(tenant)) {

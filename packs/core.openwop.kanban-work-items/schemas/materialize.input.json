@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.kanban-work-items/1.2.0/materialize.input.json",
+  "$id": "https://packs.openwop.dev/core.openwop.kanban-work-items/1.3.0/materialize.input.json",
   "title": "KanbanWorkItemsMaterializeInput",
   "type": "object",
   "required": ["boardId", "proposal"],
@@ -63,6 +63,13 @@
               "assignmentReason": { "type": "string", "maxLength": 500 },
               "sourceLabel": { "type": "string", "maxLength": 200 },
               "labels": { "type": "array", "maxItems": 20, "items": { "type": "string", "minLength": 1, "maxLength": 64 } },
+              "facets": {
+                "type": "object",
+                "maxProperties": 8,
+                "propertyNames": { "pattern": "^[a-z][a-z0-9_-]{0,31}$" },
+                "additionalProperties": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$" },
+                "description": "ADR 1155 D1: stable grouping keys for the card (stage, room, system). At most 8 lower-case keys, each value 1-64 characters with no control characters. Written at create and rewritten by refresh, like the other source-owned facts."
+              },
               "execution": {
                 "type": "object",
                 "properties": {

@@ -70,6 +70,7 @@ async function makeAgentWithTask(over: Partial<Parameters<typeof createRosterEnt
     persona: 'Sally',
     agentRef: { agentId: 'host:demo-sales' },
     workflows: ['wf-1'],
+    autonomyLevel: 'auto', // explicit since ADR 1159 made `review` the default
     ...over,
   });
   const board = await createBoard({
@@ -96,6 +97,13 @@ describe('heartbeatService — autonomous daemon', () => {
     const entry = await makeAgentWithTask(); // no interval -> host default applies
     expect(await processDueHeartbeats(deps, listRosterTenants, NOW)).toBe(1);
     expect(await heartbeatRuns(entry.rosterId)).toHaveLength(1);
+  });
+
+  it('ADR 1159: a member created with NO autonomy level is gated — its pick starts no run', async () => {
+    const entry = await makeAgentWithTask({ autonomyLevel: undefined }); // the create default, not the fixture's auto
+    expect(entry.autonomyLevel).toBe('review');
+    await processDueHeartbeats(deps, listRosterTenants, NOW);
+    expect(await heartbeatRuns(entry.rosterId)).toHaveLength(0);
   });
 
   it('ADR 0313 D1: OPENWOP_HEARTBEAT_DEFAULT_MS=0 restores the opt-in world (manual only)', async () => {
@@ -184,7 +192,7 @@ describe('ADR 0313 D2 — the bare-card fallback (always through the propose gat
   afterEach(() => registerAgentTurnFallback(null));
 
   async function makeAgentWithBareCard(sourceConversationId?: string) {
-    const entry = await createRosterEntry({ tenantId: TENANT, persona: 'Bare Bob', agentRef: { agentId: 'host:bare-bob' }, workflows: [] });
+    const entry = await createRosterEntry({ tenantId: TENANT, persona: 'Bare Bob', agentRef: { agentId: 'host:bare-bob' }, workflows: [], autonomyLevel: 'auto' });
     const board = await createBoard({ tenantId: TENANT, name: 'Bob board', rosterId: entry.rosterId }); // NO trigger
     const todo = board.columns.find((c) => c.id === 'todo')!;
     await createCard({ boardId: board.id, columnId: todo.id, title: 'Summarize the incident log', description: 'Focus on the last 24h.', ...(sourceConversationId ? { sourceConversationId } : {}) });

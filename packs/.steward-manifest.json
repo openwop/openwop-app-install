@@ -217,9 +217,9 @@
       "digest": "672e7f1231b913f974c7798cf1bf52fffa0e1ec074ce9c5ae6eba35a8ceffcc2"
     },
     "core.openwop.kanban-work-items": {
-      "version": "1.2.0",
+      "version": "1.3.0",
       "files": 6,
-      "digest": "33fefe7ff38da949fe3a6435408142630ebd441cc2436ff9d7a6aca2f18ea733"
+      "digest": "e92399226802a0c025c293ce62c30cc00a1e02ed92d26f5534f26c7713327db1"
     },
     "core.openwop.mcp": {
       "version": "1.1.3",
@@ -1010,6 +1010,11 @@
       "version": "1.0.2",
       "files": 2,
       "digest": "bb8fbe1cd69699350a4cba87ba6fb226c745304a2929f834f8fb233fbd171b07"
+    },
+    "vendor.openwop-app.projects.agents": {
+      "version": "1.0.1",
+      "files": 2,
+      "digest": "abe8d3f22c85893c42fcbe13a07ae43c59fc6405c9ce19eaa2d7118abe0566f3"
     },
     "vendor.openwop-app.promotions.agents": {
       "version": "1.0.3",

@@ -17,6 +17,18 @@
 import { canonicalAgentId } from '../executor/agentIdAliases.js';
 import { getAgentRegistry, type ResolvedAgentManifest } from '../executor/agentRegistry.js';
 
+/**
+ * ADR 1099 D5 — an agent that runs ONLY in the collaborator lane: its allowlist is
+ * non-empty and every entry is a client tool (`openwop:client.*`). Those tools
+ * resolve only in a collaborator turn, so in a member's chat the agent has none.
+ * Member listings leave it out (user decision 2026-11-25); it stays installed,
+ * resolvable by id, and served to the collaborator turn by `resolveServedAgent`.
+ */
+export function isCollaboratorOnlyAgent(a: Pick<ResolvedAgentManifest, 'toolAllowlist'>): boolean {
+  const tools = a.toolAllowlist ?? [];
+  return tools.length > 0 && tools.every((t) => t.startsWith('openwop:client.'));
+}
+
 export function agentVisibleToTenant(a: ResolvedAgentManifest, tenant: string | undefined): boolean {
   if (!a.ownerTenant) return true;
   if (tenant === '*') return true;

@@ -232,7 +232,7 @@ const USER_NAMED = [
   'executor/executor.ts', 'routes/runs.ts', 'host/runCredentials.ts', 'host/chatByokConfig.ts',
   'host/conversationToolLoop.ts', 'host/exchange/dispatchTurn.ts', 'host/headlessAi.ts', 'host/promptCompose.ts',
   'features/media/imageGenRoutes.ts', 'features/voice/routes.ts', 'features/voice/realtime/routes.ts',
-  'features/chat-widget/widgetCredential.ts', 'features/campaign-ops/agentBindingService.ts',
+  'host/outsiderTurnCredential.ts', 'features/campaign-ops/agentBindingService.ts', // ADR 1099 D5: moved from chat-widget/widgetCredential.ts
   // ADR 1031 P2 — feature-owned rows live in `<feature>/ratchetTables.json`.
   ...declaredPathList('adr0779.userNamedSecretReaders'),
 ];

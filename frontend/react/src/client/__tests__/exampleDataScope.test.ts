@@ -16,7 +16,8 @@
  * (on its call count, not a timeout); not setting `changed` or removing the JSON-lane
  * progress checks reds the stale-completion case (double guard: the outer `assertCurrent`
  * still rejects, so "no progress emitted" is the load-bearing assertion); the
- * `rememberTenant` opt-out reds the cache-boundary cases.
+ * `rememberTenant` opt-out reds the cache-boundary cases; removing the `assertCurrent` after
+ * the workspace client loads reds the load-time auth-change case.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { listMyWorkspaces } from '../workspaceClient.js';
@@ -119,11 +120,21 @@ describe('example-data workspace intent', () => {
       : Promise.resolve(json(result)));
     vi.stubGlobal('fetch', fetcher);
     const pending = runExampleDataSeedStream({ steps: ['demo-walkthroughs'] }, onEvent());
+    // The workspace client loads on use, so the scope read starts after a tick.
+    await vi.waitFor(() => { if (!resolveScope) throw new Error('Scope request did not start'); });
     fireAuthChanged();
-    if (!resolveScope) throw new Error('Scope request did not start');
-    resolveScope(json({ active: 'ws:old' }));
+    resolveScope!(json({ active: 'ws:old' }));
     await expect(pending).rejects.toThrow('workspace changed');
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('makes no scope read after an auth change while the workspace client loads', async () => {
+    const fetcher = vi.fn(async (): Promise<Response> => json({ active: 'ws:old' }));
+    vi.stubGlobal('fetch', fetcher);
+    const pending = runExampleDataSeedStream({ steps: ['demo-walkthroughs'] }, onEvent());
+    fireAuthChanged();
+    await expect(pending).rejects.toThrow('workspace changed');
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it('rejects a stale successful JSON completion without emitting progress for the new workspace', async () => {

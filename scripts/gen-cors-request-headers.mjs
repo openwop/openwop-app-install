@@ -35,8 +35,9 @@ const { parse } = require('yaml');
 const ARTIFACTS = dirname(require.resolve('@openwop/spec-artifacts/package.json'));
 // TODO(2.45.0 pin): switch the source to `spec/v2/path-manifest.json`'s per-operation
 // `requestHeaders`; at 2.44.5 the manifest does not carry them, so openapi.yaml is it.
-// v1 is served until its EOS (2026-12-04); at the v1 cut, drop its spec here and
-// the set shrinks to v2's naturally.
+// v1 is retired (2026-10-04, RFC 0234) and `/v1/*` answers 410, so the v1 spec
+// below is now dead input: dropping it is v2 migration plan phase 3 (it needs the
+// generated header list re-derived and diffed, not just this line removed).
 const SPECS = ['api/openapi.yaml', 'api/v2/openapi.yaml'];
 const METHODS = ['get', 'put', 'post', 'delete', 'patch', 'head', 'options', 'trace'];
 

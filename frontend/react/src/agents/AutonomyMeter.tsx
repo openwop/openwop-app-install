@@ -20,12 +20,12 @@ const LEVELS = {
 } as const;
 
 export function AutonomyMeter({ autonomyLevel, showLabel = true }: {
-  /** The roster entry's host-ext field; absent ⇒ `auto`. */
+  /** The roster entry's host-ext field; absent ⇒ `review` (fail closed). */
   autonomyLevel: 'auto' | 'guided' | 'review' | undefined;
   showLabel?: boolean;
 }): JSX.Element {
   const { t } = useTranslation('agents');
-  const meta = LEVELS[autonomyLevel === 'review' || autonomyLevel === 'guided' ? autonomyLevel : 'auto'];
+  const meta = LEVELS[autonomyLevel === 'auto' || autonomyLevel === 'guided' ? autonomyLevel : 'review'];
   const label = t(meta.labelKey);
   const gloss = t(meta.glossKey);
   return (

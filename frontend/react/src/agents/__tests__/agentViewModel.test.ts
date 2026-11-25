@@ -35,7 +35,7 @@ vi.mock('../../kanban/kanbanClient.js', async (orig) => ({
   ...(await orig<typeof import('../../kanban/kanbanClient.js')>()),
   listBoards: vi.fn(async () => m.boards),
   listBoardsWithCards: vi.fn(async () => m.boards),
-  getBoard: vi.fn(async (boardId: string) => ({
+  getWholeBoard: vi.fn(async (boardId: string) => ({
     board: m.boards.find((b) => b.id === boardId)!,
     cards: m.oneBoardCards,
   })),
@@ -193,7 +193,7 @@ describe('loadAgentView — single agent', () => {
     expect(await loadAgentView('missing')).toBeNull();
   });
 
-  it('hydrates one agent from getBoard cards', async () => {
+  it('hydrates one agent from getWholeBoard cards', async () => {
     m.oneEntry = entry();
     m.boards = [board(STD_COLUMNS)];
     m.oneBoardCards = [card('working')];

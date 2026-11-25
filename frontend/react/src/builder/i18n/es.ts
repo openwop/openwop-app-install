@@ -153,7 +153,7 @@ export const messages = {
 
   // ── Publish-help banner ─────────────────────────────────────────────────
   publishHeading: 'Publicar {{slug}} en packs.openwop.dev',
-  publishIntro: 'El envío al registro se basa en PR (manifiesto {{size}}). La publicación desde el navegador está desactivada de forma intencionada: la firma Ed25519 se realiza en el momento de la fusión del PR por los responsables del registro, según PUBLISHING.md + spec/v1/registry-operations.md.',
+  publishIntro: 'El envío al registro se basa en PR (manifiesto {{size}}). La publicación desde el navegador está desactivada de forma intencionada: la firma Ed25519 se realiza en el momento de la fusión del PR por los responsables del registro, según PUBLISHING.md.',
   publishStepDownload: 'Descargar manifest.json',
   publishStepDownloadNote: '(quizá quiera renombrar {{slug}} y reemplazar los valores totalmente vinculados por marcadores de posición {{placeholder}} antes de enviarlo).',
   publishStepForkPre: 'Bifurcar',

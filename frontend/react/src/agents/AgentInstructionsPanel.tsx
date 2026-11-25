@@ -169,7 +169,7 @@ export function AgentInstructionsPanel({ entry, onChanged }: { entry: RosterEntr
           rosterId={entry.rosterId}
           roleKey={entry.roleKey}
           persona={entry.persona}
-          autonomyLevel={entry.autonomyLevel ?? 'auto'}
+          autonomyLevel={entry.autonomyLevel ?? 'review'}
         />
       </div>
     </div>

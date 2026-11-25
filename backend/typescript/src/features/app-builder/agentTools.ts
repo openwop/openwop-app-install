@@ -37,7 +37,7 @@ import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { resolveFeatureToggle, untrustedToolError } from '../../host/agentToolKit.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
-import { getCanvasForCaller } from '../../host/canvasSurface.js';
+import { getCanvasForCaller, canvasEditorLink } from '../../host/canvasSurface.js';
 import { APP_BUILDER_CANVAS_TYPE, projectComponentCatalog } from './componentCatalog.js';
 import { renderDesign } from './renderCore.js';
 
@@ -153,7 +153,7 @@ export function registerAppBuilderAgentTools(): void {
           canvasId,
           version: canvas.version,
           app: canvas.state,
-          url: `/app-builder/${encodeURIComponent(canvasId)}`,
+          url: canvasEditorLink('/app-builder', canvasId, canvas.orgId ?? gate.orgId),
         }),
       };
     },
@@ -208,6 +208,7 @@ export function registerAppBuilderAgentTools(): void {
         producedBy,
         runId: scope.runId,
         actingUserId: gate.actingUserId,
+        org: { orgId: gate.orgId },
       });
       if (!result.ok) return toolError(result.error, result.message, result.extra);
       return {

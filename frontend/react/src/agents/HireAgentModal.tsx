@@ -21,7 +21,7 @@ export function HireAgentModal({ onClose }: { onClose: () => void }): JSX.Elemen
   const { t } = useTranslation('agents');
   const navigate = useNavigate();
   const [roleKey, setRoleKey] = useState<string | null>(null);
-  const [autonomy, setAutonomy] = useState<'auto' | 'guided' | 'review'>('auto');
+  const [autonomy, setAutonomy] = useState<'auto' | 'guided' | 'review'>('review');
 
   const go = (): void => {
     const params = new URLSearchParams();

@@ -129,7 +129,7 @@ export function RosterPage(): JSX.Element {
   // Flip a member between autonomy levels: `auto` runs heartbeat picks
   // immediately; `review` routes them to the approval inbox for human sign-off.
   const onToggleAutonomy = async (r: RosterEntry) => {
-    const next = r.autonomyLevel === 'review' ? 'auto' : 'review';
+    const next = (r.autonomyLevel ?? 'review') === 'review' ? 'auto' : 'review';
     try {
       await updateRosterEntry(r.rosterId, { autonomyLevel: next });
       await refresh();
@@ -160,7 +160,7 @@ export function RosterPage(): JSX.Element {
 
   const personaOf = (rosterId: string): string => roster.find((r) => r.rosterId === rosterId)?.persona ?? rosterId;
 
-  const autonomyOf = (r: RosterEntry): 'auto' | 'guided' | 'review' => r.autonomyLevel ?? 'auto';
+  const autonomyOf = (r: RosterEntry): 'auto' | 'guided' | 'review' => r.autonomyLevel ?? 'review';
 
   // The figures band: count agents and the two posture buckets. Tiles double as
   // filters over the roster table (DESIGN.md §4.5 "stats are filters").

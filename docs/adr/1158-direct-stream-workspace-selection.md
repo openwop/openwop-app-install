@@ -60,6 +60,51 @@ write. No header carried the selection, and the run-event stream's token
   wherever a route depends on the active workspace. Out of scope here; each can
   adopt `selectionToken` the same way.
 
+> **EXTENDED 2026-11-24 — the other direct-host callers now carry it too (user
+> decision, in session).** The trade-off above named them. Each was read against
+> its backend route:
+>
+> | Caller | Backend route | Resolves the active workspace? | Changed |
+> |---|---|---|---|
+> | `kanban/kanbanClient.ts` `subscribeBoardEvents` | `GET …/kanban/boards/:boardId/events` | yes: `authorizeBoard` falls back to `board.tenantId === tenantOf(req)` for a non-org board | yes |
+> | `notifications/notificationsClient.ts` `subscribeToNotifications` | `GET …/notifications/stream` | yes: `resolveTenantFromReq` filters the feed | yes |
+> | `client/channelsClient.ts` `subscribeChannelPresence` | `GET …/channels/:channelId/presence` | yes: `assertChannelAccess(tenantOf(req), …)` | yes |
+> | `client/channelsClient.ts` `subscribeChannelMessages` | `GET …/channels/:channelId/stream` | yes: `assertChannelAccess(tenantOf(req), …)` | yes |
+> | `chat/voice/voiceClient.ts` `subscribeVoiceTranscripts` | `GET …/voice/realtime/messages/stream` | yes: `getChatSession(tenantOf(req), …)` | yes |
+> | `client/streamsClient.ts` (run events) | `GET /runs/:id/events` | no: bound to one run by `runStreamToken` | no |
+> | `canvas/CanvasPresentPage.tsx`, `canvas/PresentRemotePage.tsx` (EventSource) | `…/present/:token/events` | no: a public presentation token | no |
+> | `canvas/useCollab.ts`, `builder/collab/workflowCollabSession.ts` (WebSocket) | `…/canvas-collab`, `…/workflow-collab` | no: a ticket minted on the same origin | no |
+> | `features/claude-code/*` (WebSocket) | the viewer socket | no: a pairing ticket | no |
+>
+> All five changed callers are `fetch` streams, so the header travels; none needed
+> a query parameter. They share ONE helper, `client/directHostSelection.ts`
+> `directHostSelectionHeaders()`: it reads `/me/workspaces`, caches the header
+> until a minute before the token's own expiry (re-read on the next reconnect, so
+> a session-long feed renews it), drops the cache on every auth change, and does
+> not send a read that straddled one. It sends nothing, and makes no read, when
+> the request carries no bearer (the host reads the header on the bearer lane
+> only) or when the SSE base is the API's own host (the cookie already travels).
+> Tests: `client/__tests__/directHostSelection.test.ts`,
+> `client/__tests__/directHostStreamsSelection.test.ts`,
+> `client/__tests__/directHostSelectionStorm.test.ts`.
+>
+> **When the selection cannot be read** (for the security reviewer). The helper
+> fails CLOSED. When the `/me/workspaces` read throws, or straddles an auth
+> change, it throws `WorkspaceSelectionUnavailableError`. Each of the five callers
+> calls it inside the `try` its fetch already sits in, so the throw takes the same
+> path a failed fetch takes: no request goes out, and the stream backs off and
+> retries. The notification feed reports `onError` and channel presence reports
+> `connected: false`, their existing "reconnecting" states.
+> - Before this change, every direct stream silently used the home workspace.
+> - Failing open would keep that silent wrong-workspace read.
+> - Failing closed costs a personal-workspace user a reconnect while
+>   `/me/workspaces` itself is failing, which is when the app is degraded anyway.
+> - **No read storm.** All five streams fail at once when the read is down. They
+>   share one in-flight read. After a failure the helper rejects at once, without
+>   reading, for a cool-down of 2 s that doubles per failure up to 60 s. A success
+>   or an auth change resets it. Each caller's own backoff (½–1 s minimum, 5 s for
+>   kanban) still runs, so no stream retries at once.
+
 ## Implementation record
 
 | Phase | Commit | Tests |

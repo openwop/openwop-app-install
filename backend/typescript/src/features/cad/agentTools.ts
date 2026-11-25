@@ -37,7 +37,7 @@ import { resolveFeatureToggle, untrustedToolError } from '../../host/agentToolKi
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { getNodeRegistry } from '../../executor/nodeRegistry.js';
-import { createCanvasForTenant, updateCanvasForTenant, getCanvasForCaller, canvasWriteAllowed } from '../../host/canvasSurface.js';
+import { createCanvasForTenant, updateCanvasForTenant, getCanvasForCaller, canvasWriteAllowed, canvasEditorLink } from '../../host/canvasSurface.js';
 import { resolveAuthorizedFocus } from '../../host/conversationFocus.js';
 import { validateCadDoc, CAD_SOLID_KINDS } from './validateCadDoc.js';
 
@@ -179,7 +179,7 @@ export function registerCadAgentTools(): void {
           canvasId,
           version: canvas.version,
           model: canvas.state,
-          url: `/cad/${encodeURIComponent(canvasId)}`,
+          url: canvasEditorLink('/cad', canvasId, canvas.orgId ?? gate.orgId),
         }),
       };
     },
@@ -254,7 +254,7 @@ export function registerCadAgentTools(): void {
               canvasId: result.canvasId,
               version: result.newVersion,
               solidCount,
-              url: `/cad/${encodeURIComponent(result.canvasId)}`,
+              url: canvasEditorLink('/cad', result.canvasId, existing.orgId ?? gate.orgId),
               note: 'Model updated. Tell the user what changed and give them the url.',
             }),
           };
@@ -278,6 +278,7 @@ export function registerCadAgentTools(): void {
         : undefined;
       const created = await createCanvasForTenant(scope.tenantId, {
         canvasTypeId: CAD_CANVAS_TYPE,
+        orgId: gate.orgId, // ADR 1160 D1
         ...(name ? { name } : {}),
         ownerSubject: { kind: 'user', id: gate.actingUserId },
         initialState: payload,
@@ -289,7 +290,7 @@ export function registerCadAgentTools(): void {
           canvasId: created.canvasId,
           version: created.version,
           solidCount,
-          url: `/cad/${encodeURIComponent(created.canvasId)}`,
+          url: canvasEditorLink('/cad', created.canvasId, created.orgId ?? gate.orgId),
           note: 'Model created. Tell the user the name and that they can open and edit it at the url.',
         }),
       };

@@ -206,7 +206,7 @@ export const messages = {
   compareEllipsis: 'Compare…',
   deleteRunHistoryTitle: 'Permanently delete this run and its history',
   deleteRun: 'Delete run',
-  downloadBundleTitle: "Download a JSON bundle of this run's events for support / triage (spec/v1/debug-bundle.md)",
+  downloadBundleTitle: "Download a JSON bundle of this run's events for support / triage",
   downloadBundle: 'Download bundle',
   // RunDetailPage — redesigned summary (/polish-screens)
   loadingRun: 'Loading run…',

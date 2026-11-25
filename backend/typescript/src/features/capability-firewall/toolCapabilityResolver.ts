@@ -48,6 +48,10 @@ const CLASSIFICATION: ReadonlyArray<readonly [string, ToolCapabilityDescriptor]>
   // records to a peer host. The classes equal the treat-as-risky fallback it already got,
   // so no tenant rule loses coverage (under `skip` it now gains it).
   ['openwop:destination-sync.run', { safetyTier: 'write', egress: 'host-mediated' }],
+  // ADR 1099 D5 — the client-project tools a collaborator turn may call. Reads of the one
+  // resource the grant names, scoped by the host from the grant (never model input), no
+  // egress. Proposals (P3) are held as approvals, so they write nothing at call time.
+  ['openwop:client.project', { safetyTier: 'read', egress: 'none' }],
 ];
 
 /** Resolve a tool name to its capability descriptor, or null when unclassified. */

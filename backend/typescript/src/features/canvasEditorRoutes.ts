@@ -131,7 +131,7 @@ export interface CanvasEditorRouteHelpers {
    *  subjectAccess seam. `need` is REQUIRED (ADR 0886 D1): a write verb passes
    *  `'write'`, decided in the OWNER's org — the path org's write is not enough.
    *  Unreadable ⇒ 404; readable but not writable ⇒ 403. */
-  loadCanvas: (tenantId: string, canvasId: string, caller: string | undefined, need: 'read' | 'write') => Promise<CanvasRecordView>;
+  loadCanvas: (tenantId: string, pathOrgId: string | undefined, canvasId: string, caller: string | undefined, need: 'read' | 'write') => Promise<CanvasRecordView>;
   notFound: (id: string) => OpenwopError;
 }
 
@@ -211,7 +211,7 @@ export function registerCanvasEditorRoutes(deps: RouteDeps, cfg: CanvasEditorRou
   /** Grade pass 2026-07-07 (F4): every editor route PINS the canvas type —
    *  operating on ANY tenant canvas despite a shape-only claim was the bug.
    *  Wrong-type = uniform 404 (no existence leak). */
-  async function loadCanvas(tenantId: string, canvasId: string, caller: string | undefined, need: 'read' | 'write'): Promise<CanvasRecordView> {
+  async function loadCanvas(tenantId: string, pathOrgId: string | undefined, canvasId: string, caller: string | undefined, need: 'read' | 'write'): Promise<CanvasRecordView> {
     const canvas = await getCanvasForTenant(tenantId, canvasId);
     if (!canvas || canvas.canvasTypeId !== cfg.canvasTypeId) {
       // Uniform 404 to the caller; a structured trace for the operator (grade
@@ -219,6 +219,10 @@ export function registerCanvasEditorRoutes(deps: RouteDeps, cfg: CanvasEditorRou
       if (canvas) log.warn('canvas type-pin miss', { expected: cfg.canvasTypeId, actual: canvas.canvasTypeId, canvasId });
       throw notFound(canvasId);
     }
+    // ADR 1160 D2 — a canvas is reached only through its OWN org's path, even by
+    // a member of both orgs, so the path org's `access` answer and the canvas's
+    // home cannot disagree. Uniform 404 (no existence leak).
+    if (canvas.orgId && canvas.orgId !== pathOrgId) throw notFound(canvasId);
     // ADR 0610 D3′ / CPC-15 — a project/user-owned canvas is membership-scoped:
     // the org gate is not sufficient. Consult the ONE subjectAccess seam (READ
     // minimum). A null result (org-owned / no membership resolver) ⇒ org gate
@@ -286,10 +290,12 @@ export function registerCanvasEditorRoutes(deps: RouteDeps, cfg: CanvasEditorRou
         // create (the FE also disables the button in-flight), so a network retry
         // converges to one canvas instead of a duplicate "Untitled".
         const idempotencyKey = typeof body.idempotencyKey === 'string' && body.idempotencyKey
-          ? cfg.defaultOwnerToCaller ? `private-blank:${JSON.stringify([cfg.canvasTypeId, orgId, user.userId, body.idempotencyKey])}` : `blank:${body.idempotencyKey}`
+          // ADR 1160 D1 — org-keyed, so a retry key never returns another org's canvas.
+          ? cfg.defaultOwnerToCaller ? `private-blank:${JSON.stringify([cfg.canvasTypeId, orgId, user.userId, body.idempotencyKey])}` : `blank-org:${JSON.stringify([orgId, body.idempotencyKey])}`
           : undefined;
         const canvas = await createCanvasForTenant(tenantId, {
           canvasTypeId: cfg.canvasTypeId,
+          orgId,
           name,
           ...(projectId ? { projectId } : {}),
           ...(owner ? { ownerSubject: owner } : {}),
@@ -325,6 +331,7 @@ export function registerCanvasEditorRoutes(deps: RouteDeps, cfg: CanvasEditorRou
       // gates), and through the type's seed validator: a run artifact is model
       // output, never trusted state.
       const canvas = await seedCanvasFromArtifact(tenantId, artifactKey, {
+        orgId,
         canvasTypeId: cfg.canvasTypeId,
         ...(cfg.validateSeed ? { validate: cfg.validateSeed } : {}),
         ...(owner ? { ownerSubject: owner } : {}),
@@ -352,7 +359,7 @@ export function registerCanvasEditorRoutes(deps: RouteDeps, cfg: CanvasEditorRou
       // these same checks (`authorizePresentRemote`), so losing membership,
       // write on the canvas, or the feature ends the remote at once.
       const { user, orgId, tenantId } = await authz(req, 'workspace:write');
-      const canvas = await loadCanvas(tenantId, req.params.canvasId, user.userId, 'write');
+      const canvas = await loadCanvas(tenantId, orgId, req.params.canvasId, user.userId, 'write');
       if (!presentOutlineFor(canvas.canvasTypeId, canvas.state as Record<string, unknown>)) {
         throw new OpenwopError('invalid_request', `canvas type '${canvas.canvasTypeId}' has no present mode`, 400);
       }
@@ -363,7 +370,7 @@ export function registerCanvasEditorRoutes(deps: RouteDeps, cfg: CanvasEditorRou
   app.get(`${ORG}/canvases/:canvasId`, async (req, res, next) => {
     try {
       const { user, orgId, tenantId } = await authz(req, 'workspace:read');
-      const canvas = await loadCanvas(tenantId, req.params.canvasId, user.userId, 'read');
+      const canvas = await loadCanvas(tenantId, orgId, req.params.canvasId, user.userId, 'read');
       // ADR 0886 (SL2UX-1) — the editor's view-only signal, from the SAME two
       // rules every write verb enforces: write in the path org (the mint
       // `requireOrgScope` makes) AND write on the owner subject, in its own org.
@@ -376,9 +383,9 @@ export function registerCanvasEditorRoutes(deps: RouteDeps, cfg: CanvasEditorRou
 
   app.patch(`${ORG}/canvases/:canvasId`, async (req, res, next) => {
     try {
-      const { user, tenantId } = await authz(req, 'workspace:write');
+      const { user, tenantId, orgId } = await authz(req, 'workspace:write');
       const body = (req.body ?? {}) as Record<string, unknown>;
-      await loadCanvas(tenantId, req.params.canvasId, user.userId, 'write');
+      await loadCanvas(tenantId, orgId, req.params.canvasId, user.userId, 'write');
       const state = body.state;
       if (!state || typeof state !== 'object' || Array.isArray(state)) {
         throw new OpenwopError('invalid_request', '`state` (the canvas object) is required', 400);
@@ -408,8 +415,8 @@ export function registerCanvasEditorRoutes(deps: RouteDeps, cfg: CanvasEditorRou
   // links. One choke; this call is deliberately gone rather than duplicated.
   app.delete(`${ORG}/canvases/:canvasId`, async (req, res, next) => {
     try {
-      const { user, tenantId } = await authz(req, 'workspace:write');
-      await loadCanvas(tenantId, req.params.canvasId, user.userId, 'write');
+      const { user, tenantId, orgId } = await authz(req, 'workspace:write');
+      await loadCanvas(tenantId, orgId, req.params.canvasId, user.userId, 'write');
       const deleted = await deleteCanvasForTenant(tenantId, req.params.canvasId);
       if (!deleted) throw notFound(req.params.canvasId);
       // ADR 0334 DATA-1 / ADR 0359 grade pass (DATA-B2): the lifecycle seam now
@@ -424,8 +431,8 @@ export function registerCanvasEditorRoutes(deps: RouteDeps, cfg: CanvasEditorRou
   // Light rows (no snapshot payloads) — the editor's History modal list.
   app.get(`${ORG}/canvases/:canvasId/versions`, async (req, res, next) => {
     try {
-      const { user, tenantId } = await authz(req, 'workspace:read');
-      await loadCanvas(tenantId, req.params.canvasId, user.userId, 'read');
+      const { user, tenantId, orgId } = await authz(req, 'workspace:read');
+      await loadCanvas(tenantId, orgId, req.params.canvasId, user.userId, 'read');
       const rows = await listCanvasVersions(tenantId, req.params.canvasId);
       res.json({ versions: rows.map((v) => ({ versionId: v.versionId, version: v.version, capturedBy: v.capturedBy, capturedAt: v.capturedAt })) });
     } catch (err) { next(err); }
@@ -434,8 +441,8 @@ export function registerCanvasEditorRoutes(deps: RouteDeps, cfg: CanvasEditorRou
   // One full snapshot (for the client-side change summary).
   app.get(`${ORG}/canvases/:canvasId/versions/:versionId`, async (req, res, next) => {
     try {
-      const { user, tenantId } = await authz(req, 'workspace:read');
-      await loadCanvas(tenantId, req.params.canvasId, user.userId, 'read');
+      const { user, tenantId, orgId } = await authz(req, 'workspace:read');
+      await loadCanvas(tenantId, orgId, req.params.canvasId, user.userId, 'read');
       const v = await getCanvasVersion(tenantId, req.params.canvasId, req.params.versionId);
       if (!v) throw notFound(req.params.versionId);
       res.json({ versionId: v.versionId, version: v.version, capturedBy: v.capturedBy, capturedAt: v.capturedAt, snapshot: v.snapshot });
@@ -445,8 +452,8 @@ export function registerCanvasEditorRoutes(deps: RouteDeps, cfg: CanvasEditorRou
   // NON-DESTRUCTIVE restore — writes the snapshot as a NEW head version.
   app.post(`${ORG}/canvases/:canvasId/versions/:versionId/restore`, async (req, res, next) => {
     try {
-      const { user, tenantId } = await authz(req, 'workspace:write');
-      await loadCanvas(tenantId, req.params.canvasId, user.userId, 'write');
+      const { user, tenantId, orgId } = await authz(req, 'workspace:write');
+      await loadCanvas(tenantId, orgId, req.params.canvasId, user.userId, 'write');
       // DATA-D6: validate the snapshot against the type's schema before it
       // restores (a drifted/old snapshot must not blind-restore into the public
       // viewer). errors → 422 (nothing mutated); warnings ride back in `result`.

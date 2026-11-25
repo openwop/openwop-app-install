@@ -14,13 +14,12 @@
  * @see docs/adr/0402-crm-booking-and-esign.md §b
  */
 
-import { renderTransactional } from '../../host/transactionalEmail.js';
+import { sendTransactional, transactionalEmailReady } from '../../host/transactionalEmail.js';
 import { SIGN_REQUEST_KIND, SIGN_COMPLETED_KIND, SIGN_LEGAL_NOTICE, type SignEmailData } from './signTemplates.js';
 import { createHmac } from 'node:crypto';
 import { OpenwopError } from '../../types.js';
 import { createLogger } from '../../observability/logger.js';
 import { getNotificationEmitter } from '../../notifications/emitter.js';
-import { activeProvider, emailTransportConfigured } from '../email/emailService.js';
 import { crmMutated, type CrmEmitOptions } from './emit.js';
 import { renderTarget, hashCanonical, SIGN_TARGET_KINDS, type SignTarget } from './signTargets.js';
 import { getSignatureProvider } from './signProviders.js';
@@ -167,6 +166,10 @@ export interface RequestSignatureInput {
  * signature request reported success with no email in existence, and the only
  * trace was a server log the requester never sees. The API can now say
  * "created — share the link yourself" instead of implying delivery.
+ *
+ * #6135: the invites now go through the transactional seam (the org's sender address
+ * and the requester's email Connection), and `invitesEmailed` is true only when every
+ * signer's send was accepted.
  */
 export async function requestSignature(input: RequestSignatureInput): Promise<SignRequest & { invitesEmailed: boolean }> {
   if (!SIGN_TARGET_KINDS.includes(input.target.kind as SignTarget['kind'])) {
@@ -237,22 +240,24 @@ export async function requestSignature(input: RequestSignatureInput): Promise<Si
 
   crmMutated({ entity: 'sign-request', verb: 'created', tenantId: req.tenantId, orgId: req.orgId, actor: input.createdBy, entityId: req.signRequestId, ...(input.origin ? { origin: input.origin } : {}) });
 
-  // Email each signer their signing link (best-effort; console stub no-ops). Skip
-  // when no public origin is configured — a brokered provider would otherwise send
-  // a schemeless `/sign/<token>` link the signer cannot open (the operator sets
-  // OPENWOP_PUBLIC_BASE_URL, or the HTTP route derives it from the request).
+  // Email each signer their signing link through the ONE transactional seam (#6135:
+  // the org's sender address + the requester's email Connection). Skip when no public
+  // origin is configured — the email would otherwise carry a schemeless `/sign/<token>`
+  // link the signer cannot open (the operator sets OPENWOP_PUBLIC_BASE_URL, or the
+  // HTTP route derives it from the request).
   const origin = input.baseUrl.trim();
-  // Honest up front: no public origin OR no real transport ⇒ nothing was emailed.
-  const invitesEmailed = Boolean(origin) && emailTransportConfigured();
-  if (!invitesEmailed && origin) {
-    log.warn('sign invite emails not delivered — no email transport configured', { signRequestId: req.signRequestId });
-  }
+  // `invitesEmailed` is what the sends returned, not a guess: true only when every
+  // signer's invite was accepted by a real transport.
+  let invitesEmailed = false;
   if (origin) {
+    const results: boolean[] = [];
     for (const signer of req.signers) {
       const token = signerTokens.get(signer.signerId);
-      if (!token) continue;
-      void emailSigner(signer.email, req.title, `${origin}/sign/${token}`);
+      if (!token) { results.push(false); continue; }
+      results.push(await emailSigner(req, signer.signerId, signer.email, `${origin}/sign/${token}`));
     }
+    invitesEmailed = results.length > 0 && results.every(Boolean);
+    if (!invitesEmailed) log.warn('sign invite emails not all delivered — no sender address or email connection, or a send failed', { signRequestId: req.signRequestId, sent: results.filter(Boolean).length, signers: results.length });
   } else {
     log.warn('sign invite emails skipped — no public base URL configured', { signRequestId: req.signRequestId });
   }
@@ -280,23 +285,30 @@ function publicOriginFromEnv(): string {
   return process.env.OPENWOP_PUBLIC_BASE_URL?.trim().replace(/\/+$/, '') ?? '';
 }
 
+/** The send context for a request's mail: its org's sender address, the requester's
+ *  email Connection, and a per-signer ledger key so a retry never re-sends. */
+function signMailContext(req: SignRequest, key: string): { tenantId: string; orgId: string; actingUserId: string; idempotencyKey: string } {
+  return { tenantId: req.tenantId, orgId: req.orgId, actingUserId: req.createdBy, idempotencyKey: `crm-sign:${req.signRequestId}:${key}` };
+}
+
 /** R2 S1R2-2 — the COMPLETION email is not an invite: everyone has signed, and
  *  the link is the signed certificate, not a request to act. */
-async function emailSignerCompletion(to: string, title: string, certUrl: string): Promise<void> {
+async function emailSignerCompletion(req: SignRequest, signerId: string, to: string, certUrl: string): Promise<void> {
   try {
-    const m = renderTransactional<SignEmailData>(SIGN_COMPLETED_KIND, { title, url: certUrl });
-    await activeProvider().send({ to, subject: m.subject, body: m.text });
+    const out = await sendTransactional<SignEmailData>(SIGN_COMPLETED_KIND, { to, data: { title: req.title, url: certUrl }, context: signMailContext(req, `completed:${signerId}`) });
+    if (!out.sent) log.warn('sign completion email not sent', { signRequestId: req.signRequestId, ...(out.reason ? { reason: out.reason } : {}) });
   } catch (err) {
     log.warn('sign completion email failed', { error: err instanceof Error ? err.message : String(err) });
   }
 }
 
-async function emailSigner(to: string, title: string, url: string): Promise<void> {
+async function emailSigner(req: SignRequest, signerId: string, to: string, url: string): Promise<boolean> {
   try {
-    const m = renderTransactional<SignEmailData>(SIGN_REQUEST_KIND, { title, url });
-    await activeProvider().send({ to, subject: m.subject, body: m.text });
+    const out = await sendTransactional<SignEmailData>(SIGN_REQUEST_KIND, { to, data: { title: req.title, url }, context: signMailContext(req, `invite:${signerId}`) });
+    return out.sent;
   } catch (err) {
     log.warn('signer invite email failed', { error: err instanceof Error ? err.message : String(err) });
+    return false;
   }
 }
 
@@ -437,7 +449,8 @@ export async function signRequest(input: SignInput): Promise<{ status: SignReque
   // dated by the signer's own clock is not a record of anything.
   // R2 S1R2-3 — the done screen must not promise an email that cannot be
   // delivered: no transport or no public origin ⇒ no certificate email, ever.
-  const certificateEmailPlanned = emailTransportConfigured() && Boolean((input.baseUrl ?? '').trim() || publicOriginFromEnv());
+  const certificateEmailPlanned = Boolean((input.baseUrl ?? '').trim() || publicOriginFromEnv())
+    && await transactionalEmailReady({ tenantId: after.tenantId, orgId: after.orgId, actingUserId: after.createdBy });
   return { status: after.status, signedAt, certificateEmailPlanned };
 }
 
@@ -560,7 +573,7 @@ async function finalizeCertificate(req: SignRequest, targetMarkdown: string, bas
       });
     } catch (err) { log.warn('sign-complete notification failed', { signRequestId: req.signRequestId, error: err instanceof Error ? err.message : String(err) }); }
     if (origin) {
-      for (const s of req.signers) void emailSignerCompletion(s.email, req.title, `${origin}${certUrl}`);
+      for (const s of req.signers) void emailSignerCompletion(req, s.signerId, s.email, `${origin}${certUrl}`);
     } else {
       log.warn('sign completion emails skipped — no public base URL configured', { signRequestId: req.signRequestId });
     }

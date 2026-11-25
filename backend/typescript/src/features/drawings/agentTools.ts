@@ -30,7 +30,7 @@ import { resolveFeatureToggle, untrustedToolError } from '../../host/agentToolKi
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { getNodeRegistry } from '../../executor/nodeRegistry.js';
-import { createCanvasForTenant, updateCanvasForTenant, getCanvasForCaller, canvasWriteAllowed } from '../../host/canvasSurface.js';
+import { createCanvasForTenant, updateCanvasForTenant, getCanvasForCaller, canvasWriteAllowed, canvasEditorLink } from '../../host/canvasSurface.js';
 import { validateDrawingDoc, DRAWING_SHAPE_KINDS } from './validateDrawingDoc.js';
 
 export const DRAWINGS_GET_DESIGN_TOOL_ID = 'openwop:drawings.get-design';
@@ -164,7 +164,7 @@ export function registerDrawingsAgentTools(): void {
           canvasId,
           version: canvas.version,
           drawing: canvas.state,
-          url: `/drawings/${encodeURIComponent(canvasId)}`,
+          url: canvasEditorLink('/drawings', canvasId, canvas.orgId ?? gate.orgId),
         }),
       };
     },
@@ -236,7 +236,7 @@ export function registerDrawingsAgentTools(): void {
               canvasId: result.canvasId,
               version: result.newVersion,
               shapeCount,
-              url: `/drawings/${encodeURIComponent(result.canvasId)}`,
+              url: canvasEditorLink('/drawings', result.canvasId, existing.orgId ?? gate.orgId),
               note: 'Drawing updated. Tell the user what changed and give them the url.',
             }),
           };
@@ -260,6 +260,7 @@ export function registerDrawingsAgentTools(): void {
         : undefined;
       const created = await createCanvasForTenant(scope.tenantId, {
         canvasTypeId: DRAWING_CANVAS_TYPE,
+        orgId: gate.orgId, // ADR 1160 D1
         ...(title ? { name: title } : {}),
         ownerSubject: { kind: 'user', id: gate.actingUserId },
         initialState: payload,
@@ -271,7 +272,7 @@ export function registerDrawingsAgentTools(): void {
           canvasId: created.canvasId,
           version: created.version,
           shapeCount,
-          url: `/drawings/${encodeURIComponent(created.canvasId)}`,
+          url: canvasEditorLink('/drawings', created.canvasId, created.orgId ?? gate.orgId),
           note: 'Drawing created. Tell the user the title and that they can open and edit it at the url.',
         }),
       };

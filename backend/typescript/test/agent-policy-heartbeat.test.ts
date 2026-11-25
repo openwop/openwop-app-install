@@ -57,7 +57,7 @@ afterEach(() => {
   __resetHostExtPersistence();
 });
 
-/** A member (default autonomy = `auto`) with a board carrying one To Do card
+/** An `auto` member (explicit since ADR 1159 made `review` the default) with a board carrying one To Do card
  *  whose pick triggers `WF`. Card priority overridable. */
 let ivySeq = 0;
 async function makeAgentWithTask(over: { priority?: 'low' | 'normal' | 'high' } = {}): Promise<RosterEntry> {
@@ -68,6 +68,7 @@ async function makeAgentWithTask(over: { priority?: 'low' | 'normal' | 'high' } 
     persona: `Ivy ${++ivySeq}`,
     agentRef: { agentId: 'host:it-service-desk' },
     workflows: [WF],
+    autonomyLevel: 'auto',
   });
   const board = await createBoard({ tenantId: TENANT, name: 'Ivy board', rosterId: entry.rosterId, triggerWorkflowId: WF });
   const todo = board.columns.find((c) => c.id === 'todo' || c.name.toLowerCase() === 'to do')!;

@@ -144,7 +144,7 @@ export function AgentCreateWizard(): JSX.Element {
 
   // Step 5 — schedule + heartbeat + autonomy
   const [heartbeat, setHeartbeat] = useState('manual');
-  const [autonomy, setAutonomy] = useState<'auto' | 'guided' | 'review'>('auto');
+  const [autonomy, setAutonomy] = useState<'auto' | 'guided' | 'review'>('review');
   const [modelClass, setModelClass] = useState<WizardModelClass>('chat');
   const [scheduleWorkflowId, setScheduleWorkflowId] = useState('');
   const [scheduleCadence, setScheduleCadence] = useState(CADENCE_PRESETS[2]!.key); // weekdays
@@ -299,7 +299,7 @@ export function AgentCreateWizard(): JSX.Element {
         workflows,
         label: roleTitle.trim(),
         ...(heartbeatIntervalMs > 0 ? { heartbeatIntervalMs } : {}),
-        ...(autonomy !== 'auto' ? { autonomyLevel: autonomy } : {}),
+        autonomyLevel: autonomy,
       });
       // 3. board with the 4 standard lanes; To Do triggers the first workflow.
       if (createBoardEnabled) {

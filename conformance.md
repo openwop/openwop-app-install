@@ -1,5 +1,13 @@
 # Conformance evidence — openwop-app reference host
 
+> **Historical record, measured at protocol major 1.** The per-RFC entries below were
+> captured while this host served v1 (suite 1.x, `/v1/…` paths, `protocolVersions:
+> ["1.1"]`). They are kept unedited as evidence of what was witnessed then; v1 is
+> retired and this host now speaks v2 only. **Current results** are the major-2
+> bundle in `../openwop/INTEROP-MATRIX.md` (568 pass / 7 fail / 11 skipped at suite
+> 2.49.1, 2026-11-15) and the deploy-day major-2 ratchet
+> (`scripts/check-conformance-major2.sh`). New evidence entries are written at major 2.
+
 Per-RFC evidence that this reference host actually serves the capabilities it
 advertises at `/.well-known/openwop`. Each entry pins the advertisement, the
 implementing seam, the automated witness (a test in the suite), and a real

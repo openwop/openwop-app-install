@@ -153,7 +153,7 @@ export const messages = {
 
   // ── Publish-help banner ─────────────────────────────────────────────────
   publishHeading: 'Publicar {{slug}} em packs.openwop.dev',
-  publishIntro: 'A submissão ao registry é baseada em PR (manifesto de {{size}}). A publicação no navegador está intencionalmente desativada — a assinatura Ed25519 ocorre no momento do merge do PR, feita pelos mantenedores do registry, conforme PUBLISHING.md + spec/v1/registry-operations.md.',
+  publishIntro: 'A submissão ao registry é baseada em PR (manifesto de {{size}}). A publicação no navegador está intencionalmente desativada — a assinatura Ed25519 ocorre no momento do merge do PR, feita pelos mantenedores do registry, conforme PUBLISHING.md.',
   publishStepDownload: 'Baixar manifest.json',
   publishStepDownloadNote: '(você pode querer renomear {{slug}} + substituir valores totalmente vinculados por marcadores {{placeholder}} antes de enviar).',
   publishStepForkPre: 'Faça um fork de',

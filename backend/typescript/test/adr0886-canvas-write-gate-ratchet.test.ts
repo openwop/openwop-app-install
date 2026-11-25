@@ -49,7 +49,7 @@ const DEFINITION = /export\s+async\s+function\s+(updateCanvasForTenant|deleteCan
  *  starting `system:` is a lane with no human caller to gate (a cascade, a
  *  retention sweep, a seed) or one gated upstream; its reason is the review. */
 const HOST_REVIEWED: Record<string, [number, string]> = {
-  'features/canvasEditorRoutes.ts': [3, "loadCanvas(tenantId, req.params.canvasId, user.userId, 'write')"],
+  'features/canvasEditorRoutes.ts': [3, "loadCanvas(tenantId, orgId, req.params.canvasId, user.userId, 'write')"],
   'host/canvasSurface.ts': [2, "assertCanvasRunAccess(scope, await load(canvasId), 'write')"],
   'host/dataBinding.ts': [1, "assertCanvasRunAccess(scope, canvas, 'write')"],
   'features/slides/agentTools.ts': [1, 'canvasWriteAllowed('],

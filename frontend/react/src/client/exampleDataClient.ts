@@ -8,8 +8,6 @@
  */
 import { authedHeaders, config, fetchOpts, onAuthChange } from './config.js';
 
-import { listMyWorkspaces, WORKSPACE_SELECTION_HEADER } from './workspaceClient.js';
-
 const base = `${config.baseUrl}/host/openwop-app/example-data`;
 // Streaming seeds hit Cloud Run DIRECTLY (like SSE) — the Firebase `/api` rewrite
 // caps ~60s and buffers, which is exactly what breaks the full reseed. ADR 0292.
@@ -27,6 +25,10 @@ export async function withExampleDataScope<T>(
     if (changed) throw new Error('The workspace changed. Review the selected example data and try again.');
   };
   try {
+    // Loaded here, not statically: the roster client imports this module from the
+    // entry chunk, and the workspace client need not ride with it.
+    const { listMyWorkspaces, WORKSPACE_SELECTION_HEADER } = await import('./workspaceClient.js');
+    assertCurrent(); // an auth change while it loaded: no scope read at all
     const workspace = await listMyWorkspaces({ rememberTenant: false });
     assertCurrent();
     if (typeof workspace.active !== 'string' || !workspace.active) throw new Error('The active workspace could not be confirmed. Reload and try again.');

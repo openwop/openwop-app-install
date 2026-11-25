@@ -1,5 +1,5 @@
 import { Button } from '../ui/Button.js';
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 import { setNavSource } from './navSource.js';
@@ -9,7 +9,7 @@ import { useBrand } from '../brand/BrandProvider.js';
 import { SignInButton } from '../auth/SignInButton.js';
 import { useAccountPresence } from '../auth/accountPresence.js';
 import { NotificationBell } from '../notifications/NotificationBell.js';
-import { WorkspaceSwitcher } from './WorkspaceSwitcher.js';
+import { WorkspaceSwitcherLink } from './WorkspaceSwitcherLink.js';
 import { ChevronLeftIcon, ChevronRightIcon, MoreHorizontalIcon, SearchIcon, SettingsIcon } from '../ui/icons/index.js';
 import { LanguageSwitcher } from '../i18n/LanguageSwitcher.js';
 import { ThemeToggle } from '../ui/ThemeToggle.js';
@@ -25,6 +25,10 @@ import { readExpandedHeaders, toggleExpandedHeader } from './navConfig/navCollap
 import { AgentsNavItem } from './PinnedAgentsNav.js';
 import { NavRailItemContent, NavRailSection } from './NavRailPrimitives.js';
 import { navHint, navLabel } from './navText.js';
+
+// The switcher and the workspace client load in their own chunk; its static link
+// shows meanwhile, the same affordance the switcher shows before workspaces load.
+const WorkspaceSwitcher = lazy(() => import('./WorkspaceSwitcher.js').then((m) => ({ default: m.WorkspaceSwitcher })));
 
 const COLLAPSE_KEY = 'openwop.sidebar.collapsed';
 
@@ -184,7 +188,7 @@ export function Sidebar({ netOpen, onToggleNet }: { netOpen: boolean; onToggleNe
           {/* Workspace switcher (ADR 0015 — workspace-as-tenant): lists the
               caller's workspaces, switches the active one, creates new ones.
               Falls back to a static link to /orgs before workspaces load. */}
-          <WorkspaceSwitcher />
+          <Suspense fallback={<WorkspaceSwitcherLink />}><WorkspaceSwitcher /></Suspense>
         </div>
 
         {/* Discoverable entry to the ⌘K command palette (the hotkey also works

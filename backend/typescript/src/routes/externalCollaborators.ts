@@ -23,6 +23,8 @@ import {
   usableGrantsForUser, type ExternalCollaborator, type GrantUse,
 } from '../host/externalCollaborators.js';
 import { startCollaboratorExpiryNotices } from '../host/externalCollaboratorExpiry.js';
+import { runCollaboratorTurn } from '../host/collaboratorTurn.js';
+import type { Storage } from '../storage/storage.js';
 
 /** What a collaborator sees of a usable grant: the grant kind's surface switch on
  *  the GRANT's tenant (ADR 1099 D1; for campaign-ops kinds, its two toggles), then
@@ -64,7 +66,7 @@ async function requireAnySurface(tenantId: string, orgId: string): Promise<void>
   if (!(await anySurfaceAdmits(tenantId, orgId))) throw new OpenwopError('not_found', 'Not found.', 404, {});
 }
 
-export function registerExternalCollaboratorRoutes(app: Express): void {
+export function registerExternalCollaboratorRoutes(app: Express, storage: Storage): void {
   startCollaboratorExpiryNotices();
 
   // ── The collaborator's side (ADR 0958 P2). A signed-in person in THEIR OWN home
@@ -103,6 +105,19 @@ export function registerExternalCollaboratorRoutes(app: Express): void {
         grant: { grantId: use.grant.grantId, resourceKind: use.grant.resource.kind, actions: use.grant.actions, expiresAt: use.grant.expiresAt },
         title: shown.title, clientName: shown.clientName, resource: shown.body,
       });
+    } catch (err) { next(err); }
+  });
+
+  /** ADR 1099 D5 (P2) — one turn with the agent of the granted resource's kind.
+   *  Signed in to the collaborator's own account; no member session in the firm. */
+  app.post('/host/openwop-app/collab/grants/:grantId/turn', async (req, res, next) => {
+    try {
+      res.set('Cache-Control', 'no-store'); // ADR 0887 S4
+      const user = await resolveCallerUser(req);
+      const turn = await runCollaboratorTurn({ storage, grantId: req.params.grantId, userId: user.userId, message: (req.body ?? {}).message });
+      if (turn.failed) throw new OpenwopError('service_unavailable', 'The project assistant could not answer. Try again.', 503, {});
+      // The run is the firm's: its id is never handed to the outsider.
+      res.json({ reply: turn.reply });
     } catch (err) { next(err); }
   });
 
@@ -201,7 +216,7 @@ export function registerExternalCollaboratorRoutes(app: Express): void {
       // client portal mints under its own). Unknown kind falls through to
       // `grantAccess`'s 400.
       if (kind && typeof r.kind === 'string' && !(await kindCollaborationOn(r.kind, tenantId))) throw new OpenwopError('not_found', 'Not found.', 404, {});
-      const grant = await grantAccess({ tenantId, orgId, collaboratorId: req.params.collaboratorId, resource: body.resource, actions: body.actions, expiresInDays: body.expiresInDays, createdBy: userId });
+      const grant = await grantAccess({ tenantId, orgId, collaboratorId: req.params.collaboratorId, resource: body.resource, actions: body.actions, expiresInDays: body.expiresInDays, audience: body.audience, createdBy: userId });
       res.status(201).json({ grant });
     } catch (err) { next(err); }
   });

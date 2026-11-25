@@ -276,11 +276,13 @@ const CLASSIFIED: Record<string, { source: MetadataSource; why: string }> = {
       '`eval.baselineRunId`, never its metadata. `storage.getRun(run.runId)` re-reads the run just inserted ' +
       'to hand to the runner, after the insert.',
   },
-  'host/anonymousActor.ts': {
+  // ADR 1099 D5 — moved from host/anonymousActor.ts with the turn it creates.
+  'host/scopedToolTurn.ts': {
     source: 'FRESH',
     why:
-      'Bare `storage.insertRun` (ADR 0604 TOCC-1, recorded not fixed) with `metadata: { principalKind, ' +
-      'anonPrincipal }`. Deliberately bypasses the seam, so it has no decision to inherit OR to freeze.',
+      'Bare `storage.insertRun` (ADR 0604 TOCC-1, recorded not fixed) with the lane\'s own metadata: the anon ' +
+      'lane passes `{ principalKind, anonPrincipal }`, the collaborator lane `{ collabPrincipal, grantId, resource }`. ' +
+      'Deliberately bypasses the seam, so it has no decision to inherit OR to freeze.',
   },
   'routes/anonSurfaceSeam.ts': {
     source: 'FRESH',
@@ -344,7 +346,7 @@ describe('ADR 0604 H1 — every run-creation site declares where its metadata ca
     // vacuously green — the exact shape of gate this repo has been burned by.
     expect(creators).toContain('routes/runs.ts');
     expect(creators).toContain('routes/workflowDebug.ts');
-    expect(creators).toContain('host/anonymousActor.ts'); // a bare-insertRun lane
+    expect(creators).toContain('host/scopedToolTurn.ts'); // a bare-insertRun lane (ADR 1099 D5: moved from anonymousActor.ts)
     // MEASURED 2026-10-22 at 2404797bf: 26 creators (was asserted >= 20, far below
     // the truth); 28 at d5b98aafaa (w115). A floor at the measured count catches a
     // walk that silently loses files.

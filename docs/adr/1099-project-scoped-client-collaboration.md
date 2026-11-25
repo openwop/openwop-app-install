@@ -284,6 +284,43 @@ A′, accepted by the user on 2026-11-11.
 | P0c | Per-viewer projections and a recipient check, found while CasaVoga drafted its purchase-order kind. A grant names one id, so a second vendor's grant never projected the first vendor's PO. But a kind could not show each recipient only its own rows of a SHARED resource (`project` had no viewer), and nothing stopped a member granting one vendor's PO to another. `project(tenantId, orgId, id, viewer?)` now receives `{collaboratorId, grantId}` on every collaborator read (`projectForGrant`). A `requiresViewer` kind's projection is never called without one, and `grantResourceKind()` hands out only the guarded projection, so no host path reaches it. `mayGrantTo` runs at mint: false or a fault is 400 `grant_recipient_refused`. All three are optional; existing kinds are unchanged. | `adr1099-p0c-project-viewer.test.ts`, with four sabotages, each red: the guard ignoring `requiresViewer`, `projectForGrant` with no viewer, the read route projecting without a viewer, no `mayGrantTo` at mint |
 | P1 | D3: the `project` grant kind (`features/projects/clientPortal.ts`), actions `view` and `comment`, under its own surface: the `projects.client-portal` sub-toggle (tenant bucket, default off; projects are always-on, so it is the only switch) and "the org exists in this tenant". A grant reaches the project only while the project is still in the grant's org. The projection is closed: the name and the charter status; what else a client sees is the firm's choice per field, in P3 (answer 4). Who may invite and grant stays the default, `host:members:manage`. A project delete revokes its live grants through the `host/subjectDependents` seam (`collaboratorGrants`), and the delete confirm names them. D4: the 0958 D1 amendment is written into ADR 0958 (it admits nothing until P2's lane exists). The firm's UI is a **Client access** project tab over the P0b host routes: invite a client or another firm (a builder) and grant this project in one step, give someone already invited access, take access back behind a confirm. The collaborator's grant page renders a project. No new route: everything rides the P0b host routes and the 0958 collaborator pages. | `adr1099-p1-project-grant.test.ts` (the lifecycle: invite, accept, the projection only, a builder granted the same shape, only view and comment, another org's and another tenant's project 404, revoke / expiry / the granter demoted each 404, an editor neither invites nor grants, a project delete revokes and the preview counts, the switch off refuses the picker, the invite and the mint and darkens a live grant); `adr0839-projects-delete-dependents` updated for the new key; frontend `projectClientAccessTab.test.tsx` |
 
+| P2 (in progress, unmerged) | D5. **Extraction:** `host/scopedToolTurn.ts` is the default-deny turn both non-member lanes run (`runAnonReadTurn` calls it; the anonymous lane is unchanged), and `host/outsiderTurnCredential.ts` is the ADR 1018 D8 credential rule lifted from chat-widget (the widget keeps thin wrappers). **Client tools:** `host/clientProjectTools.ts` `registerClientProjectTool`, read-only until P3, ids `openwop:client.<kind>.*` (classified by the capability firewall's `openwop:client.project` row), schemas that name a scope key refused, scope keys in model input dropped. **Audience** (decided 2026-11-23): `registerGrantAudience`, stored at mint, passed as `viewer.audience` and `ClientToolScope.audience`. **The lane:** `host/collaboratorTurn.ts` `runCollaboratorTurn` and `POST /host/openwop-app/collab/grants/:grantId/turn`: `checkGrantUse`, the kind's switch, a `turnAgentId`, the firm's credential (refused is 503), day caps per grant (50) and per tenant (500, `OPENWOP_COLLAB_TURNS_PER_{GRANT,TENANT}_DAY`, 429), the message fenced, a run owned by `collab:<collaboratorId>` (issuer `urn:openwop-app:collaborator`, no `principalKind`), tools resolved only from the client registry, `checkGrantUse` again before every call, each decision audited (`collab-turn.tool`). One turn, no history: a client-supplied history would let a client write the assistant's turns; the thread is P3 (D7). **Project:** the Project Guide agent (`vendor.openwop-app.projects.agents`) and `openwop:client.project.overview` (the P1 projection). | `adr1099-p2-collab-turn.test.ts` (exact tools, scope keys dropped, revoke between calls, the owner, 429, refusals), four sabotages each red: the pack allowlist instead of `clientToolsFor`, no `withoutScopeKeys`, no per-call re-check, `anonOwnerStamp`; `adr1099-p2-audience.test.ts`; the anonymous-actor suite unchanged |
+
+> **P2 review (casavoga-c9, 2026-11-25, static, no must-fix) and what changed:**
+> 1. *Scope-key stripping was shallow and case-exact.* A tool schema with
+>    `filter: { projectId }` or `project_id` passed registration. Both checks now run at
+>    every depth (properties, items, combinators, `$defs`) and in any spelling
+>    (lower-case, `_`/`-` removed). Correction to the review: the model's input IS
+>    validated against `inputSchema` before a tool runs (`runChatToolLoop`,
+>    `agentDispatch.ts:1569`); stripping is defence on top of that.
+> 2. *`mayGrantTo` never saw the audience*, so a builder could be minted `client`.
+>    `GrantRecipient.audience` now carries it at mint and at renew.
+> 3. *No fork/replay witness.* A member could fork a collaborator's run (the route had
+>    no rule for it). `POST /runs/{id}:fork` now refuses it, 409
+>    `collab_run_not_forkable` (`isCollaboratorTurnRun`), for replay and branch.
+> 4. *Erasure.* A collaborator turn writes no run events, so its run holds ids only
+>    (`collabPrincipal`, `grantId`, the resource), as do the `collab-turn.tool` audit
+>    rows. A collaborator's erasure deletes the collaborator record and keeps the
+>    revoked grants as the firm's record of what it shared (ADR 0958 P5); these rows
+>    follow the same rule. When P3 keeps a thread, that thread holds the person's
+>    words and gets an erase hook (P5).
+> Nits taken: caps are claimed last (a turn refused for any other reason spends
+> nothing) and the firm's cap before the grant's; a lost CAS race is 503 "busy", not
+> the daily 429; the route no longer returns the firm's `runId`; the model test seam
+> works only under vitest. Kept: lane `api-key` (the RFC 0165 §B.3 floor, as for
+> sessions); non-text content read as empty (as in the widget); audience labels shown
+> as slugs until a feature supplies display names; "no audience is the least view" is
+> proven in P3, when the first projection reads it.
+
+> **Open item for P4 (found by `agent-allowlist-resolution`, TRAIN 526 follow-up):** the
+> Project Guide is a pack agent, so it is LISTED to the firm's members too. In member
+> chat its one tool, `openwop:client.project.overview`, does not resolve (client tools
+> resolve only in the collaborator lane), so a member who opens it gets an agent with no
+> tools whose prompt names one. No agent-manifest flag hides an agent from the member
+> picker today. P4, which ships the portal UI, either adds that flag or scopes the
+> listing. Until then the agent is listed to every member whatever the
+> `projects.client-portal` switch says; opened there it can read nothing, because it
+> has no tools in that lane.
 
 ### Open decision (2026-11-22): an explicit `audience` on a project grant
 
@@ -297,3 +334,38 @@ invite time from labels features register (CasaVoga: client, builder, architect)
 passed to the projection and to every client-project tool, so a builder's grant
 can never read rows meant for the client. Upstream stays party-agnostic. CasaVoga
 prefers the explicit label. **Not built in P1; awaiting the user's decision.**
+
+> **DECIDED 2026-11-23 (the user): yes, the explicit label, built in P2.** A grant
+> without an `audience` gets the least-privileged view by default. That default holds
+> wherever the label is read, so a missing or stale mapping can never widen what a
+> builder sees. Labels are registered by features. Upstream knows none of them and
+> only carries the label to the projection and to every client tool
+> (`ClientToolScope.audience`). The collaborator kind is not enough: "architect" is
+> neither kind, and the view is a per-project choice, not a property of the person.
+
+### Decided (2026-11-23): who answers a client, and when the switch goes on
+
+- **The agent is a feature-owned pack** (`feature.projects.agents`), not a core pack.
+  The agent loader (`packs/agentLoader.ts`) reads `agents[]` from any local pack whose
+  agent ids carry the pack's name. `scripts/sync-packs.sh` sweeps only `core.openwop.*`
+  and `vendor.*`, so a `feature.*` pack is never removed. The agent is coupled to this
+  host's `openwop:client.project.*` tools, so it is not a reusable registry agent. A
+  core pack kept only in this repo would be deleted by a sync, the way
+  `lead-concierge` would be. It is the first `feature.*` pack that declares an agent.
+
+  > **CORRECTED 2026-11-24 (P2): the pack is `vendor.openwop-app.projects.agents`, not
+  > `feature.projects.agents`.** The decision stands (a feature-owned pack, not a core
+  > one); the name above was wrong. ADR 0763 renamed every `feature.*.agents` pack to
+  > `vendor.openwop-app.<feature>.agents`, because `feature.*` is outside the spec's
+  > pack-name scopes (PMC-6) and feature agent packs are mounted from the image
+  > (`DEFAULT_LOCAL_PACK_PREFIXES`), not installed from the registry. So this is not
+  > "the first `feature.*` pack that declares an agent": there are about sixty such
+  > packs, all `vendor.openwop-app.*`. The sync point above was also stated loosely:
+  > `sync-packs.sh` does sweep `vendor.*`, but its guard refuses a run that would delete
+  > a vendored family canon does not carry, so the pack is not silently removed.
+  > The agent id is `vendor.openwop-app.projects.agents.client-guide`. The kind names it
+  > (`GrantResourceKind.turnAgentId`), and `projects` declares the pack in `requiredPacks`.
+
+- **`projects.client-portal` stays off in production until P4 ships.** Until then a
+  client sees only the name and the status, while an invite already creates real
+  outside access. It may be turned on for one adopter's own test tenant on request.

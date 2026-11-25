@@ -31,7 +31,7 @@ import { resolveFeatureToggle, untrustedToolError } from '../../host/agentToolKi
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { getNodeRegistry } from '../../executor/nodeRegistry.js';
-import { createCanvasForTenant, updateCanvasForTenant, getCanvasForCaller, canvasWriteAllowed } from '../../host/canvasSurface.js';
+import { createCanvasForTenant, updateCanvasForTenant, getCanvasForCaller, canvasWriteAllowed, canvasEditorLink } from '../../host/canvasSurface.js';
 import { SLIDES_CANVAS_TYPE } from './blockCatalog.js';
 import { SLIDE_ID_RE, validateSlidesDoc } from './validateSlidesDoc.js';
 import { slidesCatalogProjection } from './surface.js';
@@ -253,7 +253,7 @@ export function registerSlidesAgentTools(): void {
           canvasId,
           version: canvas.version,
           deck: canvas.state,
-          url: `/slides/${encodeURIComponent(canvasId)}`,
+          url: canvasEditorLink('/slides', canvasId, canvas.orgId ?? gate.orgId),
         }),
       };
     },
@@ -337,7 +337,7 @@ export function registerSlidesAgentTools(): void {
               canvasId: applied.canvasId,
               version: applied.newVersion,
               slideCount,
-              url: `/slides/${encodeURIComponent(applied.canvasId)}`,
+              url: canvasEditorLink('/slides', applied.canvasId, existing.orgId ?? gate.orgId),
               note: 'Deck updated. Tell the user what changed and that Compare in the editor shows exactly which slides changed.',
             }),
           };
@@ -358,6 +358,7 @@ export function registerSlidesAgentTools(): void {
         : undefined;
       const created = await createCanvasForTenant(scope.tenantId, {
         canvasTypeId: SLIDES_CANVAS_TYPE,
+        orgId: gate.orgId, // ADR 1160 D1
         ...(typeof deck.title === 'string' ? { name: deck.title } : {}),
         ownerSubject: { kind: 'user', id: gate.actingUserId },
         initialState: deck as never,
@@ -369,7 +370,7 @@ export function registerSlidesAgentTools(): void {
           canvasId: created.canvasId,
           version: created.version,
           slideCount,
-          url: `/slides/${encodeURIComponent(created.canvasId)}`,
+          url: canvasEditorLink('/slides', created.canvasId, created.orgId ?? gate.orgId),
           note: 'Deck created. Tell the user the deck title and that they can open, present, and edit it at the url.',
         }),
       };

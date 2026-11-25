@@ -35,7 +35,7 @@ import { registerFeatureAgentTool } from '../../host/agentToolProvider.js';
 import { listOrgs, resolveEffectiveAccess } from '../../host/accessControlService.js';
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { getNodeRegistry } from '../../executor/nodeRegistry.js';
-import { createCanvasForTenant, getCanvasForCaller, canvasWriteAllowed, updateCanvasForTenant } from '../../host/canvasSurface.js';
+import { createCanvasForTenant, getCanvasForCaller, canvasWriteAllowed, updateCanvasForTenant, canvasEditorLink } from '../../host/canvasSurface.js';
 import type { SubjectCaller } from '../../host/subjectAccess.js';
 import { OpenwopError } from '../../types.js';
 import { validateCampaignDoc } from './validateCampaignDoc.js';
@@ -100,13 +100,15 @@ interface RenderCampaignArgs {
   /** Who is asking — an update may only touch a canvas this caller may read
    *  (the shared canvas predicate; ADR 0610 D3′). */
   caller: SubjectCaller;
+  /** ADR 1160 D1 — the org a created canvas belongs to (the resolved tool org). */
+  orgId: string;
 }
 
 type RenderCampaignResult =
   | { ok: true; canvasId: string; version: number; channelCount: number; url: string; created: boolean; warnings?: { path: string; message: string }[] }
   | { ok: false; error: string; message: string; extra?: Record<string, unknown> };
 
-const canvasUrl = (canvasId: string): string => `/campaign-studio/${encodeURIComponent(canvasId)}`;
+const canvasUrl = (canvasId: string, orgId: string | null | undefined): string => canvasEditorLink('/campaign-studio', canvasId, orgId);
 
 /** normalize (the ONE render node) → closed-world validate → CAS-persist. Shared
  *  by create + update; mirrors app-builder's `renderDesign` pipeline. */
@@ -195,7 +197,7 @@ async function renderCampaign(tenantId: string, args: RenderCampaignArgs): Promi
         snapshot: { capturedBy: args.capturedBy },
       });
       if (!applied) return { ok: false, error: 'not_found', message: `Campaign '${args.canvasId}' not found in this workspace.` };
-      return { ok: true, canvasId: applied.canvasId, version: applied.newVersion, channelCount, url: canvasUrl(applied.canvasId), created: false, ...(warnings.length ? { warnings } : {}) };
+      return { ok: true, canvasId: applied.canvasId, version: applied.newVersion, channelCount, url: canvasUrl(applied.canvasId, existing.orgId ?? args.orgId), created: false, ...(warnings.length ? { warnings } : {}) };
     } catch (e) {
       if (e instanceof OpenwopError && e.code === 'canvas_version_conflict') {
         return { ok: false, error: 'canvas_version_conflict', message: 'Someone edited this campaign since you read it — call get-design again and re-apply your changes on the new version.' };
@@ -213,13 +215,14 @@ async function renderCampaign(tenantId: string, args: RenderCampaignArgs): Promi
     : undefined;
   const created = await createCanvasForTenant(tenantId, {
     canvasTypeId: CAMPAIGN_CANVAS_TYPE,
+    orgId: args.orgId,
     ...(typeof payload.name === 'string' ? { name: payload.name } : {}),
     ownerSubject: args.ownerSubject,
     initialState: payload,
     metadata: { producedBy: args.producedBy, ...(args.runId ? { runId: args.runId } : {}) },
     ...(idempotencyKey ? { idempotencyKey } : {}),
   });
-  return { ok: true, canvasId: created.canvasId, version: created.version, channelCount, url: canvasUrl(created.canvasId), created: true, ...(warnings.length ? { warnings } : {}) };
+  return { ok: true, canvasId: created.canvasId, version: created.version, channelCount, url: canvasUrl(created.canvasId, created.orgId ?? args.orgId), created: true, ...(warnings.length ? { warnings } : {}) };
 }
 
 export function registerCampaignStudioAgentTools(): void {
@@ -266,7 +269,7 @@ export function registerCampaignStudioAgentTools(): void {
           canvasId,
           version: canvas.version,
           campaign: canvas.state,
-          url: canvasUrl(canvasId),
+          url: canvasUrl(canvasId, canvas.orgId ?? gate.orgId),
         }),
       };
     },
@@ -318,6 +321,7 @@ export function registerCampaignStudioAgentTools(): void {
         runId: scope.runId,
         capturedBy: gate.actingUserId,
         caller: { subject: gate.actingUserId },
+        orgId: gate.orgId,
       });
       if (!result.ok) return toolError(result.error, result.message, result.extra);
       return {

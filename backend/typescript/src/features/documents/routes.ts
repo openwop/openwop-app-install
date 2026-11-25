@@ -109,11 +109,12 @@ export function registerDocumentsRoutes(deps: RouteDeps): void {
   // for ANY canvas type, so the picker doesn't depend on editor toggles.
   app.get(`${ORG}/canvas-sources`, async (req, res, next) => {
     try {
-      const { user, tenantId } = await authz(req, 'workspace:read');
+      const { user, orgId, tenantId } = await authz(req, 'workspace:read');
       const q = typeof req.query.q === 'string' ? req.query.q.trim().toLowerCase() : '';
       // Only canvases THIS caller may read (the shared predicate) — a private
-      // project's canvases are not offered to non-members.
-      const rows = await listCanvasesForCaller(tenantId, { subject: user.userId });
+      // project's canvases are not offered to non-members. ADR 1160 D2: this
+      // org's canvases and the tenant-shared ones, never another org's.
+      const rows = await listCanvasesForCaller(tenantId, { subject: user.userId }, { orgId });
       // The picker shows the newest slice, not an unbounded dump — a canvas-
       // heavy tenant would otherwise ship thousands of rows into a modal.
       // `q` (ADR 0316) searches the WHOLE tenant set before the cap, so the
@@ -134,11 +135,11 @@ export function registerDocumentsRoutes(deps: RouteDeps): void {
   // absent/cross-tenant). Relocated verbatim from the removed canvases feature.
   app.delete(`${ORG}/canvases/:canvasId`, async (req, res, next) => {
     try {
-      const { user, tenantId } = await authz(req, 'workspace:write');
+      const { user, orgId, tenantId } = await authz(req, 'workspace:write');
       // The shared predicate: a non-member may not delete a member-scoped canvas
-      // (uniform 404 — same as absent).
+      // (uniform 404 — same as absent). ADR 1160 D2: only through its own org's path.
       const canvas = await getCanvasForCaller(tenantId, req.params.canvasId, { subject: user.userId });
-      if (!canvas) throw new OpenwopError('not_found', `canvas '${req.params.canvasId}' not found`, 404);
+      if (!canvas || (canvas.orgId && canvas.orgId !== orgId)) throw new OpenwopError('not_found', `canvas '${req.params.canvasId}' not found`, 404);
       // ADR 0886 D1 — deleting is a write on the owner, decided in its own org.
       if (!(await canvasWriteAllowed(tenantId, canvas, { subject: user.userId }))) {
         throw new OpenwopError('forbidden_scope', 'Missing required scope: workspace:write on the canvas owner', 403, { requiredScope: 'workspace:write' });

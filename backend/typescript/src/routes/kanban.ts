@@ -72,6 +72,7 @@ import {
   FACET_KEY_RE,
   KANBAN_PAGE_DEFAULT,
   KANBAN_PAGE_MAX,
+  KANBAN_UNPAGED_MAX,
   type KanbanBoardPageQuery,
 } from '../host/kanbanService.js';
 import { getRosterEntry } from '../host/rosterService.js';
@@ -128,6 +129,18 @@ function rethrowCardCommandError(err: unknown): never {
   if (code === 'kanban_card_not_found') throw new OpenwopError('not_found', 'Card not found.', 404);
   if (code === 'kanban_card_conflict') throw new OpenwopError('conflict', err instanceof Error ? err.message : 'Card changed concurrently.', 409);
   throw err;
+}
+
+/** ADR 1155 OQ-2 / P5b — an unpaged read of more than `KANBAN_UNPAGED_MAX` cards is a
+ *  typed 400 with no cards. A truncated 200 would let an old client render part of a
+ *  board as the whole of it. */
+function pageRequired(what: string, total: number): OpenwopError {
+  return new OpenwopError(
+    'validation_error',
+    `${what} has ${total} cards, more than ${KANBAN_UNPAGED_MAX} can be read in one response. Read it in pages with limit and cursor.`,
+    400,
+    { reason: 'kanban_board_page_required', total, cap: KANBAN_UNPAGED_MAX },
+  );
 }
 
 /** ADR 1155 D3 — the paged board read's query, or null when the caller did not ask for
@@ -512,7 +525,11 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
         if (lvl !== 'none') visible.push(card);             // readable membership/org board
       }
       // ADR 1155 D3 — `limit` pages the list; without it the response is unchanged.
-      if (req.query.limit === undefined) { res.json({ cards: visible }); return; }
+      if (req.query.limit === undefined) {
+        if (visible.length > KANBAN_UNPAGED_MAX) throw pageRequired('Your assigned list', visible.length);
+        res.json({ cards: visible });
+        return;
+      }
       const rawLimit = typeof req.query.limit === 'string' ? req.query.limit : undefined;
       const limit = rawLimit === '' ? KANBAN_PAGE_DEFAULT : Number(rawLimit);
       const cursor = typeof req.query.cursor === 'string' && req.query.cursor.length > 0 ? req.query.cursor : undefined;
@@ -538,6 +555,9 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
       }
       const pageQuery = parseBoardPageQuery(req);
       if (!pageQuery) {
+        // ADR 1155 P5b — a one-card page counts the board before reading it whole.
+        const { total } = await listBoardCardsPage(board, { limit: 1, sort: 'order' });
+        if (total > KANBAN_UNPAGED_MAX) throw pageRequired('This board', total);
         res.json({
           board,
           cards: await listCards(board.id),

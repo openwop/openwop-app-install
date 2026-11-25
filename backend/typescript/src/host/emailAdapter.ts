@@ -21,6 +21,7 @@ import { sendViaSmtp } from './smtpSend.js';
 import { consultRecipientEgressGuard, type EgressPurpose } from './recipientEgressGuard.js';
 import { bindChainSender, resolveChainPurpose, takeChainSendBudget } from './chainEmailPolicy.js';
 import { resolveConnectionCredential } from '../features/connections/connectionsService.js';
+import { emailHeaderFieldProblem, formatFromLine } from './emailHeaderFields.js';
 
 // ADR 0655 D8 — a ledger reservation older than this is a crashed send, not an
 // in-flight one; it is released on read so the retry can reach the provider.
@@ -73,12 +74,18 @@ export type EmailAdapterDeps = BrokeredEgressDeps & {
 /** Args the integration pack passes to `ctx.email.send`. */
 export interface EmailSendArgs {
   from: string;
+  /** #6135 — the sender display name; `from` stays the bare address. Each provider gets
+   *  it in its own shape (SendGrid `from.name`, Postmark `"Name" <addr>`, SMTP an
+   *  address object). A control character refuses the send (`email_header_invalid`). */
+  fromName?: string;
   to: string | string[];
   cc?: string | string[];
   bcc?: string | string[];
   subject: string;
   text?: string;
   html?: string;
+  /** One bare address. A control character, a display name or a list refuses the send
+   *  (`email_header_invalid`, #6135). */
   replyTo?: string;
   /** The email provider to send through (node `config.provider`). */
   provider?: string;
@@ -90,8 +97,10 @@ export interface EmailSendArgs {
   /** ADR 0848 D7 — RFC 8058 one-click unsubscribe. A CLOSED-WORLD field, never a free
    *  header map (a workflow author could otherwise set `Bcc`/`Reply-To`/forged headers):
    *  it yields exactly `List-Unsubscribe` + `List-Unsubscribe-Post`, and only for an
-   *  `https:` URL on the host's `/public-email/u/` path (anything else is dropped). The
-   *  integration pack does not pass it; the campaign send does. Not in the ledger key. */
+   *  `https:` URL on the host's `/public-email/u/` path, or (#6135) any path on the
+   *  deployment's own `OPENWOP_PUBLIC_BASE_URL` origin, so a feature can serve its own
+   *  opt-out. Anything else is dropped. The integration pack does not pass it; the
+   *  campaign send and the transactional seam do. Not in the ledger key. */
   listUnsubscribe?: { url: string };
 }
 export interface EmailSendResult {
@@ -112,13 +121,21 @@ export function listUnsubscribeHeaders(args: Pick<EmailSendArgs, 'listUnsubscrib
   if (!raw) return undefined;
   let u: URL;
   try { u = new URL(raw); } catch { log.warn('list_unsubscribe_dropped', { reason: 'unparseable' }); return undefined; }
-  // https only, no credentials, the host's own unsubscribe path, and nothing that could
-  // break out of the `<…>` header value.
-  if (u.protocol !== 'https:' || u.username || u.password || !/\/public-email\/u\/[^/]+$/.test(u.pathname) || /[\s<>,]/.test(raw)) {
+  // https only, no credentials, the host's own unsubscribe path or (#6135) the
+  // deployment's own origin, and nothing that could break out of the `<…>` header value.
+  const hostPath = /\/public-email\/u\/[^/]+$/.test(u.pathname);
+  if (u.protocol !== 'https:' || u.username || u.password || !(hostPath || isOwnOrigin(u)) || /[\s<>,]/.test(raw)) {
     log.warn('list_unsubscribe_dropped', { reason: 'not_a_host_unsubscribe_url' });
     return undefined;
   }
   return { 'List-Unsubscribe': `<${raw}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' };
+}
+
+/** Is `u` on this deployment's own public origin (`OPENWOP_PUBLIC_BASE_URL`)? Unset ⇒ no. */
+function isOwnOrigin(u: URL): boolean {
+  const base = process.env.OPENWOP_PUBLIC_BASE_URL?.trim();
+  if (!base) return false;
+  try { const b = new URL(base); return b.protocol === 'https:' && b.origin === u.origin; } catch { return false; }
 }
 
 /** SendGrid base — overridable for tests / a SendGrid-compatible proxy. */
@@ -141,7 +158,7 @@ function sendgridBody(args: EmailSendArgs): Record<string, unknown> {
   const headers = listUnsubscribeHeaders(args);
   return {
     personalizations: [personalization],
-    from: { email: args.from },
+    from: { email: args.from, ...(args.fromName !== undefined ? { name: args.fromName } : {}) },
     ...(args.replyTo ? { reply_to: { email: args.replyTo } } : {}),
     subject: args.subject,
     content,
@@ -168,7 +185,7 @@ function postmarkStream(purpose: EgressPurpose): string {
 function postmarkBody(args: EmailSendArgs, purpose: EgressPurpose): Record<string, unknown> {
   const lu = listUnsubscribeHeaders(args);
   return {
-    From: args.from,
+    From: formatFromLine(args.from, args.fromName),
     To: toCsv(args.to),
     ...(args.cc !== undefined ? { Cc: toCsv(args.cc) } : {}),
     ...(args.bcc !== undefined ? { Bcc: toCsv(args.bcc) } : {}),
@@ -300,6 +317,13 @@ export function makeEmailAdapter(deps: EmailAdapterDeps): EmailAdapter {
         ?? (await resolveEmailProvider({ tenantId: deps.tenantId, actingUserId: deps.actingUserId, orgId: deps.orgId, purpose: args.purpose ?? 'marketing' }))
         ?? defaultProvider(args.purpose ?? 'marketing');
       if (!isKnownProvider(provider)) return { sent: false, provider, error: 'email_provider_unsupported' };
+      // #6135 — a sender name or Reply-To that could break a header line is refused
+      // before the ledger, the guard or any provider sees it.
+      const headerProblem = emailHeaderFieldProblem(args);
+      if (headerProblem) {
+        log.info('email_header_refused', { tenantId: deps.tenantId, field: headerProblem });
+        return { sent: false, provider, error: 'email_header_invalid' };
+      }
 
       // ADR 0193 Phase 1 — dedup BEFORE the provider call (HTTP or SMTP): a replay
       // / :fork / retry of the same node returns the recorded send, never a second

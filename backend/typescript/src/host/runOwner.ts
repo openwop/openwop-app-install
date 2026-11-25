@@ -80,6 +80,8 @@ export const ANON_SUBJECT_ISSUER = 'urn:openwop-app:anon-surface';
 export const API_KEY_SUBJECT_ISSUER = 'urn:openwop-app:api-key';
 export const ENV_KEY_SUBJECT_ISSUER = 'urn:openwop-app:env-key';
 export const TEST_SEAM_SUBJECT_ISSUER = 'urn:openwop-app:test-seam';
+/** ADR 1099 D5 — an outside collaborator acting through a grant (not a member). */
+export const COLLAB_SUBJECT_ISSUER = 'urn:openwop-app:collaborator';
 /** RFC 0165 §B.5 — refuse, never truncate, beyond this depth. */
 export const SUBJECT_ACTOR_MAX_DEPTH = 4;
 
@@ -139,6 +141,17 @@ export function anonOwnerStamp(anonPrincipal: string): RunOwnerStamp {
     principalKind: 'anonymous',
     subject: { issuer: ANON_SUBJECT_ISSUER, subjectId: anonPrincipal, lane: 'api-key', kind: 'anonymous' },
   };
+}
+
+/**
+ * ADR 1099 D5 — a collaborator turn's run: principal `collab:<collaboratorId>`, a
+ * person (`kind: 'user'`) the host attests itself, so lane `api-key` (the §B.3 floor,
+ * as for sessions). `principalKind` is deliberately ABSENT: the collaborator is
+ * neither the RFC 0132 anonymous actor nor a member user of the run's tenant.
+ */
+export function collabOwnerStamp(collaboratorId: string): RunOwnerStamp {
+  const principal = `collab:${collaboratorId}`;
+  return { principal, subject: { issuer: COLLAB_SUBJECT_ISSUER, subjectId: opaquePrincipal(principal), lane: 'api-key', kind: 'user' } };
 }
 
 /** RFC 0165 §B.3 — the synthesized subject for a run that carries no stamp. */

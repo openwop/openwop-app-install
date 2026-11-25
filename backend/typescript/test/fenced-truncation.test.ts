@@ -361,6 +361,11 @@ describe('CALL-SITE RATCHET — every handler of fenced text is classified', () 
       kind: 'PRODUCES',
       why: 'RFC 0124 per-variable wrap — applies the angle fence to each substituted value. Never truncates.',
     },
+    // ADR 1099 D5 — the collaborator turn fences the outsider's message.
+    'host/collaboratorTurn.ts': {
+      kind: 'PRODUCES',
+      why: 'Fences an outside collaborator\'s message (a firm\'s client) before it reaches a model. Never truncates fenced text; an over-long message is refused (400), never cut.',
+    },
     'features/chat-widget/publicGateway.ts': {
       kind: 'PRODUCES',
       why: 'Fences anonymous public-widget input before it reaches a model. Never truncates fenced text.',

@@ -1059,7 +1059,8 @@ export async function materializeCanvasToDocument(tenantId: string, orgId: strin
   // The shared predicate: only a caller who may READ the canvas may copy its
   // content into an org document (uniform 404 on refusal).
   const canvas = await getCanvasForCaller(tenantId, canvasId, { subject: actor });
-  if (!canvas) throw new OpenwopError('not_found', 'Canvas not found.', 404, { canvasId });
+  // ADR 1160 D2 — a canvas is copied only into a document of its OWN org.
+  if (!canvas || (canvas.orgId && canvas.orgId !== orgId)) throw new OpenwopError('not_found', 'Canvas not found.', 404, { canvasId });
   // ADR 0820 G5 — copying a canvas into a Document is a READ of that canvas, so
   // it needs the canvas TYPE's feature (toggle + plan), not only `documents`:
   // otherwise a documents-only plan materializes any slides/cad/app-builder

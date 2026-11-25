@@ -74,11 +74,15 @@ import { stripComments } from './helpers/stripComments.js';
 const EXEMPT: ReadonlyMap<string, string> = new Map([
   // 2026-10-31 (ADR 1018 D8): MOVED, not added — the widget's two managed doors left
   // `publicGateway.ts` for the one credential resolver's module, which the gateway calls.
-  ['features/chat-widget/widgetCredential.ts',
-    'the public chat widget is ANONYMOUS by design (ADR 0693 OQ1) — there is no subject, and a '
-    + 'design that required one would break the widget. The pooled tenant bucket is the correct '
-    + 'meter here: the operator is paying for visitors they cannot identify. Covers BOTH doors in '
-    + 'this file (chat round and tools round) — EXEMPT is keyed by file, not by call site.'],
+  // 2026-11-23 (ADR 1099 D5): MOVED, not added — the two doors left the widget for the
+  // host outsider-turn credential module, shared with the collaborator turn.
+  ['host/outsiderTurnCredential.ts',
+    'a turn for someone who is NOT a member of the tenant. The public chat widget is ANONYMOUS '
+    + 'by design (ADR 0693 OQ1), so there is no subject. The ADR 1099 collaborator turn is a '
+    + 'person from another tenant, and their home-tenant id must never be aliased into the firm\'s '
+    + 'tenant (ADR 1099 answer 5), so it passes none either. The pooled tenant bucket is the correct '
+    + 'meter: the tenant pays for outsiders it chose to serve. Covers BOTH doors in this file (chat '
+    + 'round and tools round) — EXEMPT is keyed by file, not by call site.'],
   // 2026-10-05 (ADR 0821 D5 follow-up): two rows DELETED, not relaxed.
   //  - `host/headlessAi.ts` now forwards `options.actingSubject` into its managed
   //    dispatch, so the walker sees it pass (the anti-rot leg below demanded removal).

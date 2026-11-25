@@ -22,7 +22,7 @@ schedule, integration, public route, or admin surface:
   wire shape, workflow-definition shape, schedule wire shape, or normative
   `MUST`, that belongs in the upstream OpenWOP RFC/spec process before or with
   the host implementation. Host-local product APIs live under
-  `/v1/host/openwop-app/*` and remain non-normative.
+  `/host/openwop-app/*` and remain non-normative.
 - **Never hard-code a workflow.** A workflow ships as a **chain** (nodes + edges,
   an RFC 0013 workflow-chain pack, built-loader-loaded → builder-editable +
   `/`-runnable) or as a **stack** (todos on a kanban board, ADR 0311; a chain can
@@ -132,7 +132,7 @@ New work should normally enter through one of these seams:
 | Money obligation to a third party (shares, commissions, bounties) | `host/obligationLedger.ts` — accrual/reversal rows + evidence-gated payout runs (ADR 0447); adapters convert to integer minor units; the host never moves money |
 | Capability token (bearer secret or public link) | LINK-shaped ⇒ a `sharing` resolver (ADR 0013); BEARER-shaped ⇒ a feature store on `host/capabilityToken.ts` (hash at rest, tenant in content, uniform 404). Hand-rolled `createHash` token stores trip `test/capability-token-tripwire.test.ts` (ADR 0448) |
 | Standing agent instances / named coworkers | `rosterService`, agent workspace routes, heartbeat daemon |
-| Agent config + capability activation | `agentProfile` host-ext (`/v1/host/openwop-app/agents/:id/profile`) + `AgentProfile.capabilities` (ADR 0031) |
+| Agent config + capability activation | `agentProfile` host-ext (`/host/openwop-app/agents/:id/profile`) + `AgentProfile.capabilities` (ADR 0031) |
 | New third-party provider | RFC 0095 connection pack under `examples/connection-packs/<id>/pack.json` (ADR 0033) — no code |
 | Schedules / recurring work | scheduler routes, `schedulingService`, `scheduleDaemon` |
 | Human approvals | approval service/routes and interrupt/approval-gate primitives |
@@ -305,7 +305,7 @@ is expected to follow this shape:
 ```text
 backend/typescript/src/features/<id>/
 ├── feature.ts        # BackendFeature: id, routes, toggle, packs, surface
-├── routes.ts         # /v1/host/openwop-app/<id>/*, backend-gated
+├── routes.ts         # /host/openwop-app/<id>/*, backend-gated
 ├── <id>Service.ts    # domain logic and durable data access
 └── surface.ts        # optional ctx.features.<id> workflow API
 
@@ -332,7 +332,7 @@ run lifecycle endpoints, stream modes, interrupts, replay/fork behavior,
 capability discovery, auth profiles, host capabilities, BYOK semantics, pack
 execution, canonical errors, and workflow definitions.
 
-Product features may add host-extension routes under `/v1/host/openwop-app/*`.
+Product features may add host-extension routes under `/host/openwop-app/*`.
 Those routes can be rich and durable, but they are not allowed to mutate the
 OpenWOP wire by accident. When a host-extension pattern becomes generally
 needed by OpenWOP clients, promote it through an RFC rather than quietly
@@ -394,7 +394,7 @@ Mirrors the MyndHyve `HostAdapterSuite` triage. Each slot has a neutral implemen
 | `connectorInvoker` | ⛔ | throws `host_capability_missing` |
 | `providerPolicyResolver` | ⛔ | throws `host_capability_missing` |
 
-A pack that declares `peerDependencies: ["host.connectors"]` will be refused at register-time when its required surface is `throw-on-use`. This is the OpenWOP `host.*` capability contract working as designed (see `spec/v1/host-capabilities.md`).
+A pack that declares `peerDependencies: ["host.connectors"]` will be refused at register-time when its required surface is `throw-on-use`. This is the OpenWOP `host.*` capability contract working as designed (see `spec/v2/core/packs.md`, `peerDependencies`).
 
 ## Boundary discipline
 
@@ -486,7 +486,7 @@ A vertical slice from chat input → real provider dispatch → streamed tokens 
 
 - `ChatTab.tsx` — state machine that routes between BYOK wizard (no key) and `ChatSidebar` (key present).
 - `ChatSidebar.tsx` + `ChatHeader` + `MessageFeed` + `MessageBubble` + `ChatInput` + `WelcomeCard` — the sidebar UI.
-- `useChatSession.ts` — message thread state + per-turn dispatch. Each turn = one `POST /v1/runs` with `workflowId: 'openwop-app.chat.turn'`. Subscribes to SSE; appends `output.chunk` deltas to the in-flight assistant bubble; on `node.suspended` fetches the open interrupt and renders the matching card via the registry.
+- `useChatSession.ts` — message thread state + per-turn dispatch. Each turn = one `POST /runs` with `workflowId: 'openwop-app.chat.turn'`. Subscribes to SSE; appends `output.chunk` deltas to the in-flight assistant bubble; on `node.suspended` fetches the open interrupt and renders the matching card via the registry.
 - **Card registry** (`chat/registry/`) is the extensibility seam. Adopters call `registerCard({cardType, Component, ...})` from any module to add their own card type. Built-in registrations cover the 4 interrupt kinds (approval / clarification / refinement / cancellation). Cards wrap in `CardErrorBoundary` so a broken third-party card doesn't crash the panel.
 
 BE-side: `vendor.openwop-app.chat-responder` node calls Anthropic / OpenAI / Google providers via raw `fetch` (no SDK deps). Each token delta becomes an `output.chunk` event through `ctx.emit()` — strip-on-persist applies automatically.
@@ -528,10 +528,10 @@ inventing a parallel stream:
 
 ### Host-extension HTTP routes (vendor-prefixed)
 
-Per `spec/v1/host-extensions.md` §"Canonical prefixes", anything outside the OpenWOP v1 wire contract MUST be vendor-prefixed. This app's additions:
+Anything outside the OpenWOP v2 wire contract MUST be vendor-prefixed (the `x-host-` / `/host/<vendor>/` convention; its prose still lives in frozen `spec/v1/host-extensions.md` until the v2 corpus re-homes it, plan phase 2). This app's additions:
 
-- `GET / POST / DELETE /v1/host/openwop-app/byok/secrets[/:ref]` — runtime BYOK key management (replaces the env-only flow).
-- `GET /v1/host/openwop-app/runs/:id/interrupts` — authed list of open interrupts with their resume tokens. Necessary because `node.suspended` events strip the token from the public event log so SSE / webhook fanout can't leak a resolution capability. Strong candidate for future RFC promotion — every host that strips tokens needs this surface.
+- `GET / POST / DELETE /host/openwop-app/byok/secrets[/:ref]` — runtime BYOK key management (replaces the env-only flow).
+- `GET /host/openwop-app/runs/:id/interrupts` — authed list of open interrupts with their resume tokens. Necessary because `node.suspended` events strip the token from the public event log so SSE / webhook fanout can't leak a resolution capability. Strong candidate for future RFC promotion — every host that strips tokens needs this surface.
 
 ### BYOK persistence (`backend/.../byok/`)
 
@@ -549,7 +549,7 @@ On boot the server runs three layered pack-loading steps:
    - **Shadow-if-newer** (default; opt out with `OPENWOP_STRICT_REGISTRY=true`) — when the repo manifest version is greater than the registry-installed version, rename the installed dir aside (`<name>.registry-<oldVersion>`) and symlink the repo dir in its place. Logged loudly; reversible by deleting the symlink and `mv`-ing the `.registry-*` dir back.
 3. **`seedDefaultHostSurfaces()`** + **`initInMemorySurfaces({ dataDir })`** — declares the full RFC 0014–0019 surface list with `supported=false` defaults, then wires in-memory adapters (`src/host/inMemorySurfaces.ts`) and flips each wired surface to `supported=true`.
 
-The catalog endpoint (`GET /v1/host/openwop-app/node-catalog`) cross-references each node's typeId against `bootstrap/hostSurfaceMap.ts` to compute `requiresHostSurfaces` + `missingHostSurfaces`. The UI dims palette items whose surfaces aren't advertised and shows a warning banner in the inspector; runs of those nodes return a friendly `host_capability_missing` envelope (augmented in `packs/tarballLoader.ts`).
+The catalog endpoint (`GET /host/openwop-app/node-catalog`) cross-references each node's typeId against `bootstrap/hostSurfaceMap.ts` to compute `requiresHostSurfaces` + `missingHostSurfaces`. The UI dims palette items whose surfaces aren't advertised and shows a warning banner in the inspector; runs of those nodes return a friendly `host_capability_missing` envelope (augmented in `packs/tarballLoader.ts`).
 
 ### In-memory host surfaces (non-durable)
 

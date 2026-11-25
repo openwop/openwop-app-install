@@ -96,6 +96,15 @@ export async function makeBrokeredCampaignProvider(deps: BrokeredProviderDeps): 
   };
 }
 
+/** #6135 — the readiness half of `sendBrokeredTransactionalEmail`: a sender address is
+ *  configured for the org and the acting human (or their org) has an email Connection.
+ *  It does not send, and a `true` is not a delivery. */
+export async function brokeredTransactionalEmailReady(input: { tenantId: string; orgId: string; actingUserId: string }): Promise<boolean> {
+  const settings = await getEmailSettings(input.tenantId, input.orgId);
+  if (!settings?.senderAddress) return false;
+  return (await resolveEmailProvider({ tenantId: input.tenantId, actingUserId: input.actingUserId, orgId: input.orgId, purpose: 'transactional' })) !== null;
+}
+
 /**
  * One-off TRANSACTIONAL sender over the same spine (ecommerce gap plan §5B B4 —
  * commerce order confirmations). Unlike `makeBrokeredCampaignProvider` this
@@ -112,6 +121,10 @@ export async function sendBrokeredTransactionalEmail(input: {
   subject: string;
   text: string;
   idempotencyKey?: string;
+  /** #6135 — passed through to the adapter, which checks and formats them per provider. */
+  fromName?: string;
+  replyTo?: string;
+  listUnsubscribe?: { url: string };
 }): Promise<boolean> {
   try {
     const settings = await getEmailSettings(input.tenantId, input.orgId);
@@ -134,6 +147,9 @@ export async function sendBrokeredTransactionalEmail(input: {
       from, to: input.to, subject: input.subject, text: input.text, provider,
       purpose: 'transactional', // ADR 0655 D1 — receipts/invoices reach a bounced address's owner; never an erased one
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
+      ...(input.fromName !== undefined ? { fromName: input.fromName } : {}),
+      ...(input.replyTo !== undefined ? { replyTo: input.replyTo } : {}),
+      ...(input.listUnsubscribe ? { listUnsubscribe: input.listUnsubscribe } : {}),
     });
     return out.sent;
   } catch {

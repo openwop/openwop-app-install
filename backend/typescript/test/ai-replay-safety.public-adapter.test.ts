@@ -7,18 +7,45 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   assertAnswer, assertMissing, capture, createHarness, getInvocationLog, inLane,
-  BYOK_REF, MODEL, PATHS, ReplayEffectError, SYSTEM, TOOLS, type Harness, type Input, type Lane, type PublicPath,
+  BYOK_REF, MODEL, MUST_BE_ABSENT, PATHS, ReplayEffectError, SYSTEM, TOOLS, type Harness, type Input, type Lane, type PublicPath,
 } from './support/aiReplaySafety.js';
 import { programMock, hasPendingMockProgram, receivedMaxTokens } from '../src/providers/dispatchMock.js';
 
 let h: Harness;
-beforeAll(async () => { h = await createHarness(); });
+// A developer shell with provider keys, a policy and a sabotage key exported. The
+// harness must scrub them for its own run and restore them on close (#6206 follow-up).
+const SHELL: Record<string, string> = {
+  GOOGLE_API_KEY: 'shell-google-key-must-not-leak', OPENAI_API_KEY: 'shell-openai-key-must-not-leak',
+  OPENWOP_AI_POLICY_GOOGLE: 'disabled', OPENWOP_SABOTAGE_LLM_KEY: 'shell-sabotage-must-not-leak',
+};
+const shellBefore = new Map(Object.keys(SHELL).map(name => [name, process.env[name]]));
+beforeAll(async () => {
+  Object.assign(process.env, SHELL);
+  h = await createHarness();
+});
 afterEach(() => {
   vi.restoreAllMocks();
   process.env.OPENWOP_LLM_CACHE_KEY_RECIPE_2 = 'false';
   if (h) h.assertDrained();
 });
-afterAll(async () => { if (h) await h.close(); });
+afterAll(async () => {
+  if (h) await h.close();
+  // close restores the shell exactly, then this file restores the real shell.
+  for (const [name, value] of Object.entries(SHELL)) expect(process.env[name], name).toBe(value);
+  for (const [name, value] of shellBefore) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+});
+
+describe('a developer shell does not leak into the fixture run', () => {
+  it('scrubs every MUST_BE_ABSENT key and still runs on the fixture credentials', async () => {
+    for (const name of MUST_BE_ABSENT) {
+      if (name === 'GOOGLE_API_KEY') expect(process.env[name], 'the managed key is the fixture own').not.toBe(SHELL.GOOGLE_API_KEY);
+      else expect(process.env[name], name).toBeUndefined();
+    }
+    // A live call reaches the closed transport, which throws on any credential but the
+    // fixture's; a leaked OPENWOP_AI_POLICY_GOOGLE=disabled would refuse it instead.
+    for (const path of PATHS) await positive(await h.lane(path), { text: 'shell scrub ' + path }, 'SCRUBBED_' + path);
+  });
+});
 
 async function positive(lane: Lane, input: Input, answer: string) {
   const before = h.requests.length;

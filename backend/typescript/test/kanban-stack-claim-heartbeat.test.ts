@@ -82,6 +82,7 @@ async function agentWithDefaultBoard(): Promise<{ entry: RosterEntry; board: Kan
     persona: `Stacker ${++seq}`,
     agentRef: { agentId: 'host:it-service-desk' },
     workflows: [WF],
+    autonomyLevel: 'auto', // explicit since ADR 1159 made `review` the default
   });
   const board = await createBoard({ tenantId: TENANT, name: 'Default lanes', rosterId: entry.rosterId });
   return { entry, board };
@@ -127,7 +128,7 @@ describe('ADR 0774 D1/D2 — the pick on a default board', () => {
 
   it('refuses a board with a To Do lane but no in-progress lane rather than re-running forever', async () => {
     const entry = await createRosterEntry({
-      tenantId: TENANT, persona: `NoLane ${++seq}`, agentRef: { agentId: 'host:it-service-desk' }, workflows: [WF],
+      tenantId: TENANT, persona: `NoLane ${++seq}`, agentRef: { agentId: 'host:it-service-desk' }, workflows: [WF], autonomyLevel: 'auto',
     });
     const board = await createBoard({
       tenantId: TENANT, name: 'Two lanes', rosterId: entry.rosterId,

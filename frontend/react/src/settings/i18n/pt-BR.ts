@@ -51,6 +51,9 @@ export const messages = {
   noTypesBody: 'Este host não anuncia nenhum dado de exemplo carregável.',
   seedDisabledNotice: 'A carga de dados de exemplo está desativada nesta implantação (OPENWOP_DEMO_SEED_ENABLED). Você ainda pode limpar os dados carregados anteriormente.',
   selectAria: 'Selecionar {{label}}',
+  selectAll: 'Selecionar tudo',
+  selectNone: 'Desmarcar tudo',
+  selectHint: 'Selecione os tipos de dados de exemplo para carregar ou limpar. Nada fica selecionado até você escolher.',
   countPresent: '{{n}} presente(s)',
 
   // ExampleDataPage — actions
@@ -65,8 +68,7 @@ export const messages = {
   clearExampleData: 'Limpar dados de exemplo',
   clearTitle: 'Remover entidades de exemplo (seus próprios agentes não são afetados)',
   clearing: 'Limpando…',
-  clearConfirm: 'Limpar {{label}}? Isso remove as entidades de exemplo do seu tenant (seus próprios agentes não são afetados).',
-  clearAllFallback: 'todos os dados de exemplo',
+  clearConfirm: 'Limpar {{label}} de {{workspace}}? Isso remove essas entidades de exemplo desse espaço de trabalho (seus próprios agentes não são afetados).',
 
   // ExampleDataPage — results
   dryRunNotice: 'Simulação — nada foi gravado.',

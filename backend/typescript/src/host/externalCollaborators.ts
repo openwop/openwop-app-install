@@ -97,6 +97,12 @@ export interface CollaboratorGrant {
    *  granter check follows the member who last vouched for it (the ADR 0887 D5
    *  link-adoption precedent). The grant id never changes. */
   renewedAt?: string;
+  /** ADR 1099 (decided 2026-11-23) — which party this grant is for (e.g. a client or a
+   *  builder on the same project), from the labels features register for the kind
+   *  (`registerGrantAudience`). Set at mint, never changed. Absent ⇒ the kind must
+   *  show its least-privileged view. Upstream gives labels no meaning; it carries
+   *  them to the projection and to every client tool. */
+  audience?: string;
 }
 
 declarePiiFields('externalCollaborators.collaborator', ['email', 'displayName', 'company']);
@@ -171,14 +177,29 @@ export interface GrantResourceKind {
    *  Absent ⇒ `host:members:manage`, as before. Floored at registration
    *  (`GRANT_SCOPE_FLOOR`): never a read-only scope. */
   grantScope?: Scope;
+  /** ADR 1099 D5 (P2) — the agent a collaborator talks to about one resource of this
+   *  kind (`collaboratorTurn.ts`). Absent ⇒ the kind takes no collaborator chat. The
+   *  agent sees only the client tools registered for this kind
+   *  (`clientProjectTools.ts`), never its pack's allowlist. */
+  turnAgentId?: string;
 }
 const kinds = new Map<string, GrantResourceKind>();
 
 /** ADR 1099 P0c — who is reading a projection: the collaborator and the grant. */
-export interface GrantViewer { collaboratorId: string; grantId: string }
+export interface GrantViewer {
+  collaboratorId: string;
+  grantId: string;
+  /** The grant's `audience`, when it has one. Absent ⇒ the least-privileged view. */
+  audience?: string;
+}
 /** ADR 1099 P0c — who a grant is being minted for (`mayGrantTo`). Ids and the
  *  firm's own labels only; never the email. */
-export interface GrantRecipient { collaboratorId: string; kind: string; displayName: string; company?: string }
+export interface GrantRecipient {
+  collaboratorId: string; kind: string; displayName: string; company?: string;
+  /** The `audience` the grant is minted (or renewed) with. A kind refuses a label that
+   *  does not fit this recipient (a builder minted as `client`), at mint AND at renew. */
+  audience?: string;
+}
 
 /** ADR 1099 P0c — the ONE way to call a kind's projection: a `requiresViewer`
  *  kind without a viewer is `null`, before the kind's code runs. */
@@ -187,6 +208,44 @@ function guardedProject(def: GrantResourceKind): GrantResourceKind['project'] {
     if (def.requiresViewer && !(viewer && viewer.collaboratorId && viewer.grantId)) return null;
     return def.project(tenantId, orgId, id, viewer);
   };
+}
+
+// ── audiences (ADR 1099, decided 2026-11-23) ──
+
+const AUDIENCE_LABEL = /^[a-z][a-z0-9-]{0,39}$/;
+/** kind → label → the feature that registered it. */
+const audiences = new Map<string, Map<string, string>>();
+
+/** A feature offers `label` as a party a `kind` grant may be for (CasaVoga: `client`,
+ *  `builder`, `architect` on `project`). What a label may see is that feature's
+ *  projection and tools; upstream only carries it. */
+export function registerGrantAudience(kind: string, label: string, featureId: string): void {
+  if (!AUDIENCE_LABEL.test(label)) throw new Error(`grant audience "${label}": lower-case letters, digits and dashes, at most 40`);
+  const forKind = audiences.get(kind) ?? new Map<string, string>();
+  const prior = forKind.get(label);
+  if (prior && prior !== featureId) throw new Error(`grant audience "${label}" on ${kind} is already registered by ${prior}`);
+  forKind.set(label, featureId);
+  audiences.set(kind, forKind);
+}
+
+/** The labels a grant of `kind` may carry, sorted. */
+export function grantAudiencesFor(kind: string): string[] {
+  return [...(audiences.get(kind)?.keys() ?? [])].sort();
+}
+
+function parseAudience(kindName: string, raw: unknown): string | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  const offered = grantAudiencesFor(kindName);
+  if (typeof raw !== 'string' || !offered.includes(raw)) {
+    throw new OpenwopError('validation_error', offered.length > 0
+      ? `\`audience\` must be one of: ${offered.join(', ')}.`
+      : `A ${kindName} grant takes no \`audience\`.`, 400, { field: 'audience' });
+  }
+  return raw;
+}
+
+export function __resetGrantAudiencesForTests(): void {
+  audiences.clear();
 }
 
 const DEFAULT_GRANT_SCOPE: Scope = 'host:members:manage';
@@ -254,8 +313,10 @@ export async function kindCollaborationOn(kindName: string, tenantId: string): P
   return surface ? safely(() => surface.enabledFor(tenantId)) : false;
 }
 /** ADR 1099 D1 — does ANY surface take collaboration in this tenant and org (both
- *  its switch and its org rule)? For the steps that have no grant kind yet: an
- *  invite's acceptance. */
+ *  its switch and its org rule)? For the signed-in steps that have no grant kind
+ *  yet: creating a collaborator and an invite's acceptance. Its switch counts: a
+ *  surface whose feature is off admits no org, even when its org rule is "the
+ *  org exists". */
 export async function anySurfaceAdmits(tenantId: string, orgId: string): Promise<boolean> {
   for (const s of allSurfaces()) {
     if (await safely(() => s.enabledFor(tenantId)) && await safely(() => s.orgOpen(tenantId, orgId))) return true;
@@ -282,7 +343,13 @@ async function kindOrgOpen(kind: GrantResourceKind, tenantId: string, orgId: str
   const surface = surfaceOf(kind);
   return surface ? safely(() => surface.orgOpen(tenantId, orgId)) : false;
 }
-/** ADR 1099 D1 — the org rule of ANY surface (collaborator creation has no kind). */
+
+/** ADR 1099 D1 — the org rule of ANY surface, WITHOUT its switch. Only for the
+ *  link-only lanes: a link-only collaborator (an ADR 0924 client approver, an ADR
+ *  0957 report reader) never signs in, so the signed-in collaboration switch
+ *  (`enabledFor`) does not govern it; its owning feature's own route gates it,
+ *  and `grantAccess` re-checks the KIND's owner and org rule before minting. A
+ *  signed-in invite (`createCollaborator`) uses `anySurfaceAdmits`. */
 async function anyOrgOpen(tenantId: string, orgId: string): Promise<boolean> {
   for (const s of allSurfaces()) if (await safely(() => s.orgOpen(tenantId, orgId))) return true;
   return false;
@@ -292,6 +359,14 @@ function audit(tenantId: string, payload: Record<string, unknown>): Promise<void
   // Ids only — never the email (ADR 0958 D7).
   return appendAudit(tenantId, AUDIT_KIND_GOVERNANCE_DECISION, { domain: AUDIT_DOMAIN, ...payload })
     .then(() => undefined, (err: unknown) => { log.warn('extcollab_audit_failed', { tenantId, error: err instanceof Error ? err.message : String(err) }); });
+}
+
+/** ADR 1099 D5 — a collaborator turn's tool decision, in the same audit domain as
+ *  the grant it ran under. Ids and the tool id only; never the message or a result. */
+export function auditCollaboratorToolCall(tenantId: string, d: {
+  grantId: string; collaboratorId: string; orgId: string; runId: string; tool: string; allowed: boolean; reason: string;
+}): Promise<void> {
+  return audit(tenantId, { action: 'collab-turn.tool', ...d });
 }
 
 // ── collaborators ──
@@ -320,7 +395,7 @@ export async function listCollaborators(tenantId: string, orgId: string): Promis
 export async function createCollaborator(input: {
   tenantId: string; orgId: string; kind: unknown; email: unknown; displayName: unknown; company?: unknown; createdBy: string;
 }): Promise<ExternalCollaborator> {
-  if (!(await anyOrgOpen(input.tenantId, input.orgId))) throw notFound();
+  if (!(await anySurfaceAdmits(input.tenantId, input.orgId))) throw notFound();
   if (typeof input.kind !== 'string' || !(COLLABORATOR_KINDS as readonly string[]).includes(input.kind)) {
     throw new OpenwopError('validation_error', `\`kind\` must be one of: ${COLLABORATOR_KINDS.join(', ')}.`, 400, { field: 'kind' });
   }
@@ -510,6 +585,8 @@ export async function listGrants(tenantId: string, orgId: string, collaboratorId
 export async function grantAccess(input: {
   tenantId: string; orgId: string; collaboratorId: string;
   resource: unknown; actions: unknown; expiresInDays?: unknown; createdBy: string;
+  /** ADR 1099 — one of the kind's registered audience labels, or absent. */
+  audience?: unknown;
 }): Promise<CollaboratorGrant> {
   // Checked first, before any validation, so a closed org answers 404 to every
   // request (unchanged); the kind's own surface is re-checked once it is known.
@@ -538,11 +615,12 @@ export async function grantAccess(input: {
     }
     days = input.expiresInDays;
   }
+  const audience = parseAudience(kindName, input.audience);
   if (!(await ownerOn(kind, input.tenantId)) || !(await kindOrgOpen(kind, input.tenantId, input.orgId)) || !(await kind.exists(input.tenantId, input.orgId, id))) throw notFound();
   // ADR 1099 P0c — the kind may refuse this recipient (a fault refuses too).
   const mayGrantTo = kind.mayGrantTo;
   if (mayGrantTo) {
-    const recipient: GrantRecipient = { collaboratorId: collaborator.collaboratorId, kind: collaborator.kind, displayName: collaborator.displayName, ...(collaborator.company ? { company: collaborator.company } : {}) };
+    const recipient: GrantRecipient = { collaboratorId: collaborator.collaboratorId, kind: collaborator.kind, displayName: collaborator.displayName, ...(collaborator.company ? { company: collaborator.company } : {}), ...(audience ? { audience } : {}) };
     if (!(await safely(() => mayGrantTo(input.tenantId, input.orgId, id, recipient)))) {
       throw new OpenwopError('validation_error', `This ${kindName} cannot be granted to this collaborator.`, 400, { field: 'collaboratorId', reason: 'grant_recipient_refused' });
     }
@@ -556,9 +634,10 @@ export async function grantAccess(input: {
     expiresAt: new Date(now.getTime() + days * DAY_MS).toISOString(),
     status: 'active',
     createdBy: input.createdBy, createdAt: now.toISOString(),
+    ...(audience ? { audience } : {}),
   };
   if (!(await grants.compareAndSwap(null, row))) throw new OpenwopError('conflict', 'Try again.', 409, {});
-  await audit(input.tenantId, { action: 'grant.create', grantId: row.grantId, collaboratorId: row.collaboratorId, orgId: row.orgId, resource: row.resource, actions: row.actions, by: row.createdBy });
+  await audit(input.tenantId, { action: 'grant.create', grantId: row.grantId, collaboratorId: row.collaboratorId, orgId: row.orgId, resource: row.resource, actions: row.actions, ...(row.audience ? { audience: row.audience } : {}), by: row.createdBy });
   return row;
 }
 
@@ -597,7 +676,7 @@ export async function extendGrant(input: {
     || !(await kindOrgOpen(kind, input.tenantId, input.orgId)) || !(await kind.exists(input.tenantId, input.orgId, cur.resource.id))) throw notFound();
   const mayGrantTo = kind.mayGrantTo;
   if (mayGrantTo) {
-    const recipient: GrantRecipient = { collaboratorId: collaborator.collaboratorId, kind: collaborator.kind, displayName: collaborator.displayName, ...(collaborator.company ? { company: collaborator.company } : {}) };
+    const recipient: GrantRecipient = { collaboratorId: collaborator.collaboratorId, kind: collaborator.kind, displayName: collaborator.displayName, ...(collaborator.company ? { company: collaborator.company } : {}), ...(cur.audience ? { audience: cur.audience } : {}) };
     if (!(await safely(() => mayGrantTo(input.tenantId, input.orgId, cur.resource.id, recipient)))) {
       throw new OpenwopError('validation_error', `This ${cur.resource.kind} cannot be granted to this collaborator.`, 400, { field: 'collaboratorId', reason: 'grant_recipient_refused' });
     }
@@ -940,12 +1019,15 @@ export async function notifyExpiringGrants(
  * panel still offers the others. No authority of its own: the route calls it
  * after the same `host:members:manage` check the grant route makes.
  */
-export async function listGrantableResources(tenantId: string, orgId: string): Promise<Array<{ kind: string; actions: GrantAction[]; items: Array<{ id: string; title: string }> }>> {
-  const out: Array<{ kind: string; actions: GrantAction[]; items: Array<{ id: string; title: string }> }> = [];
+export async function listGrantableResources(tenantId: string, orgId: string): Promise<Array<{ kind: string; actions: GrantAction[]; audiences?: string[]; items: Array<{ id: string; title: string }> }>> {
+  // ADR 1099 — `audiences` appears only on a kind that registered labels, so the
+  // response of every other kind is byte-identical to before (TRAIN 528).
+  const out: Array<{ kind: string; actions: GrantAction[]; audiences?: string[]; items: Array<{ id: string; title: string }> }> = [];
   for (const [kind, def] of [...kinds].sort(([a], [b]) => a.localeCompare(b))) {
     if (def.systemMintOnly || !def.list || !(await ownerOn(def, tenantId))) continue;
     try {
-      out.push({ kind, actions: [...def.actions], items: await def.list(tenantId, orgId) });
+      const labels = grantAudiencesFor(kind);
+      out.push({ kind, actions: [...def.actions], ...(labels.length > 0 ? { audiences: labels } : {}), items: await def.list(tenantId, orgId) });
     } catch (err) {
       log.warn('extcollab_grantable_list_failed', { kind, error: err instanceof Error ? err.message : String(err) });
     }
@@ -964,7 +1046,12 @@ export function grantResourceKind(kind: string): GrantResourceKind | undefined {
 /** ADR 1099 P0c — project a usable grant's resource FOR its collaborator. */
 export async function projectForGrant(use: GrantUse): Promise<{ title: string; body: Record<string, unknown> } | null> {
   const def = kinds.get(use.grant.resource.kind);
-  return def ? guardedProject(def)(use.tenantId, use.orgId, use.grant.resource.id, { collaboratorId: use.collaborator.collaboratorId, grantId: use.grant.grantId }) : null;
+  return def ? guardedProject(def)(use.tenantId, use.orgId, use.grant.resource.id, viewerOf(use)) : null;
+}
+
+/** Who is reading through a usable grant: the collaborator, the grant, its audience. */
+export function viewerOf(use: GrantUse): GrantViewer {
+  return { collaboratorId: use.collaborator.collaboratorId, grantId: use.grant.grantId, ...(use.grant.audience ? { audience: use.grant.audience } : {}) };
 }
 
 /**

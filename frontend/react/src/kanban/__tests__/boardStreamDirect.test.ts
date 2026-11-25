@@ -22,6 +22,10 @@ vi.mock('../../client/config.js', () => ({
   fetchOpts: (init?: RequestInit) => ({ ...(init ?? {}), credentials: 'include' }),
 }));
 
+// ADR 1158 — the selection read has its own tests (client/__tests__/directHost*);
+// here a session with no shared workspace active sends no header.
+vi.mock('../../client/directHostSelection.js', () => ({ directHostSelectionHeaders: async () => ({}) }));
+
 import { subscribeBoardEvents } from '../kanbanClient.js';
 
 describe('subscribeBoardEvents', () => {

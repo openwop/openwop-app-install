@@ -58,7 +58,7 @@ export function AgentDetailsEditor({
   const [label, setLabel] = useState(entry.label ?? '');
   const [description, setDescription] = useState(entry.description ?? '');
   const [heartbeatMs, setHeartbeatMs] = useState<number>(entry.heartbeatIntervalMs ?? 0);
-  const [autonomy, setAutonomy] = useState<'review' | 'guided' | 'auto'>(entry.autonomyLevel ?? 'auto');
+  const [autonomy, setAutonomy] = useState<'review' | 'guided' | 'auto'>(entry.autonomyLevel ?? 'review');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

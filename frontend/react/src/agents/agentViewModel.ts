@@ -9,7 +9,7 @@
  */
 
 import { listRoster, getRosterEntry, getFleetActivity, type RosterEntry } from './rosterClient.js';
-import { listBoards, listBoardsWithCards, getBoard, isAgentBoard, type KanbanBoard, type KanbanCard } from '../kanban/kanbanClient.js';
+import { listBoards, listBoardsWithCards, getWholeBoard, isAgentBoard, type KanbanBoard, type KanbanCard } from '../kanban/kanbanClient.js';
 import { listJobs, type ScheduledJob } from './scheduleClient.js';
 import { columnLaneKind } from '../kanban/laneKind.js';
 
@@ -165,7 +165,7 @@ export async function loadAgentView(rosterId: string): Promise<AgentView | null>
   let cards: KanbanCard[] = [];
   if (board) {
     try {
-      cards = (await getBoard(board.id)).cards;
+      cards = (await getWholeBoard(board.id)).cards;
     } catch {
       /* ignore */
     }

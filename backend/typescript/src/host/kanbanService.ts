@@ -1243,6 +1243,9 @@ const byColumnThenOrder = (a: KanbanCard, b: KanbanCard): number => a.columnId.l
 
 export const KANBAN_PAGE_MAX = 100;
 export const KANBAN_PAGE_DEFAULT = 50;
+/** ADR 1155 OQ-2 / P5b — above this many cards, an unpaged board read and an unpaged
+ *  "assigned to me" read are refused (`kanban_board_page_required`), never truncated. */
+export const KANBAN_UNPAGED_MAX = 2000;
 
 export interface KanbanBoardPageQuery {
   /** 1–100. */

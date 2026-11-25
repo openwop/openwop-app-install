@@ -24,7 +24,7 @@ export const messages = {
   tierOnePosture: '({{posture}}):',
   tierOneFlagged_one: 'prompt de dica de esquema sinalizado contra',
   tierOneFlagged_other: 'prompts de dica de esquema sinalizados contra',
-  tierOneLinkText: 'structured-output-subset.md',
+  tierOneLinkText: 'host-services.md § Structured output',
   tierOneFindingHint: 'Chips inline em cada infrator apontam para a constatação específica.',
 
   // Key-figure band
@@ -55,7 +55,7 @@ export const messages = {
   // Card actions
   editLabel: 'Editar {{name}}',
   deleteLabel: 'Excluir {{name}}',
-  tierOneFindingTitle: 'Constatação do subconjunto Tier-1 — veja structured-output-subset.md',
+  tierOneFindingTitle: 'Constatação do subconjunto Tier-1 — veja host-services.md § Structured output',
 
   // Delete modal
   deleteModalLabel: 'Excluir {{name}}',

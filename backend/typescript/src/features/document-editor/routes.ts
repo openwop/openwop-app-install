@@ -101,8 +101,8 @@ export function registerDocumentEditorRoutes(deps: RouteDeps): void {
           // The ACTIVE workspace's tenant, not `user.tenantId` (the caller's HOME
           // tenant): in a shared workspace the canvas lives under the former, so
           // the export 404'd for every member there (DE87CD-15).
-          const { user, tenantId } = await authz(req, 'workspace:read');
-          const canvas = await loadCanvas(tenantId, req.params.canvasId, user.userId, 'read');
+          const { user, tenantId, orgId } = await authz(req, 'workspace:read');
+          const canvas = await loadCanvas(tenantId, orgId, req.params.canvasId, user.userId, 'read');
           const format = String((req.body ?? {}).format ?? 'markdown');
           if (!(DOC_EXPORT_FORMATS as readonly string[]).includes(format)) {
             throw new OpenwopError('validation_error', `Unsupported export format \`${format}\` — one of: ${DOC_EXPORT_FORMATS.join(', ')}.`, 400, { field: 'format' });

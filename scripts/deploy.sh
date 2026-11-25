@@ -410,9 +410,10 @@ if [ "$DO_BACKEND" -eq 1 ]; then
     # suite says why: `--target-major` DEFAULTS to the host's own
     # `preferredVersion` (RFC 0179), else max(protocolVersions[]). So the certify
     # bundle already certifies the major this host ADVERTISES — forcing 2 would
-    # make the public claim disagree with the advertisement while `/v1` is still
-    # served and preferred until the EOS clock (2026-12-04, ADR 0669's cut
-    # switch). Certifying a major you do not prefer is the same class of
+    # make the public claim disagree with the advertisement. Since v1 was retired
+    # (2026-10-04, RFC 0234; ADR 0812) this host advertises only "2.0", so the
+    # default already IS major 2 and forcing it would change nothing. Keep relying
+    # on the default: certifying a major you do not prefer is the same class of
     # dishonest claim as advertising a capability you do not honour.
     #
     # What deploy day actually needs is that no build ships with an unlisted v2

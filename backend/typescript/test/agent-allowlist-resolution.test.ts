@@ -16,6 +16,10 @@
  * runs: `agentRunnerNode.ts` `availableTools: offerTools ?? builtinAgentToolIds()`),
  * so an entry outside it is a lie to the model in every transport.
  *
+ * ADR 1099 D5 — a THIRD lane: the collaborator turn compiles ONLY the client-tool
+ * registry (`clientProjectToolIds()`), never this universe. An `openwop:client.*`
+ * entry must therefore resolve THERE, and nowhere else counts for it.
+ *
  * Escape hatch: an entry may be listed in RUN_ONLY_EXEMPTIONS below with a
  * rationale — for agents dispatched ONLY by a workflow whose `offerTools`
  * explicitly widens the surface with a caller-resolved tool. Keep this list
@@ -36,6 +40,7 @@ import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { builtinAgentToolIds, PROJECTABLE_COMPUTE_NODE_TYPE_IDS } from '../src/host/agentToolProvider.js';
+import { clientProjectToolIds } from '../src/host/clientProjectTools.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const PACKS_DIR = join(here, '../../..', 'packs');
@@ -98,6 +103,7 @@ describe('agent-pack toolAllowlist entries resolve to real conversational tools 
   it('every allowlisted id is offerable by the live tool provider (or documented run-only)', () => {
     expect(readManifests().unparsable, 'pack.json files that do not parse are unchecked').toEqual([]);
     const universe = new Set(builtinAgentToolIds());
+    const clientTools = new Set(clientProjectToolIds());
     const failures: string[] = [];
     let agentCount = 0;
     let entryCount = 0;
@@ -108,7 +114,7 @@ describe('agent-pack toolAllowlist entries resolve to real conversational tools 
         const agentId = agent.agentId ?? agent.id ?? '<unnamed>';
         const exempt = new Set(RUN_ONLY_EXEMPTIONS[agentId]?.entries ?? []);
         for (const entry of agent.toolAllowlist ?? []) {
-          if (universe.has(entry) || exempt.has(entry)) continue;
+          if (entry.startsWith('openwop:client.') ? clientTools.has(entry) : (universe.has(entry) || exempt.has(entry))) continue;
           failures.push(`${pack} :: ${agentId} :: ${entry}`);
         }
       }
