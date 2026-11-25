@@ -38,6 +38,7 @@ import { fenceUntrustedBlock } from './untrustedContent.js';
 import { toolRoundResult } from '../aiProviders/aiProvidersHost.js';
 import { toolError } from './agentToolKit.js';
 import { sanitizeFreeText } from '../byok/textRedaction.js';
+import { holdProposals } from './collabProposals.js';
 import { createLogger } from '../observability/logger.js';
 
 const log = createLogger('host.collaboratorTurn');
@@ -54,6 +55,9 @@ export function isCollaboratorTurnRun(run: { workflowId?: string; metadata?: Rec
 }
 const DEFAULT_TURNS_PER_GRANT_DAY = 50;
 const DEFAULT_TURNS_PER_TENANT_DAY = 500;
+/** Propose calls per grant per day (each holds at most MAX_PROPOSALS_PER_CALL items),
+ *  so one collaborator cannot flood the firm's approvals inbox. */
+const DEFAULT_PROPOSE_CALLS_PER_GRANT_DAY = 20;
 const MAX_ROUNDS = 4;
 
 const notFound = (): OpenwopError => new OpenwopError('not_found', 'Not found.', 404, {});
@@ -220,6 +224,17 @@ export async function runCollaboratorTurn(rawInput: CollaboratorTurnInput): Prom
       }
       await audit(runId, tool.id, true, 'grant-allowed');
       try {
+        if (tool.effect === 'propose') {
+          // ADR 1099 D6 — nothing is written: each item is held for a member's review.
+          const day = new Date().toISOString().slice(0, 10);
+          const limit = capFromEnv('OPENWOP_COLLAB_PROPOSE_CALLS_PER_GRANT_DAY', DEFAULT_PROPOSE_CALLS_PER_GRANT_DAY);
+          if ((await claimTurn(`propose:${live.grant.grantId}:${day}`, live.tenantId, limit)) !== 'claimed') {
+            await audit(runId, tool.id, false, 'propose-capped');
+            return toolError('proposals_capped', 'This person has sent as many proposals as they can today. Tell them the firm will review what they sent, and they can send more tomorrow.');
+          }
+          const held = await holdProposals(live, tool, scopeOf(live), withoutScopeKeys(call.input ?? {}), runId);
+          return { content: JSON.stringify({ status: 'pending_review', held: held.held, alreadySent: held.duplicates, message: 'These were sent to the firm for review and are NOT recorded yet. Tell the person the firm will review them.' }) };
+        }
         const result = await tool.run(scopeOf(live), withoutScopeKeys(call.input ?? {}));
         return { content: JSON.stringify(result ?? null) };
       } catch (err) {

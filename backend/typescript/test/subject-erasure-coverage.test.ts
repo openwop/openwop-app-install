@@ -259,6 +259,7 @@ const REVIEWED_EXEMPT = new Map<string, Exemption>([
   ['a2a:task', { reason: 'no-subject: agent-to-agent task state (taskId/runId/state + the remote PEER principal and protocol version, ADR 0552 P2); the peer principal is a cross-host machine identity, not a data subject; tenant-bound and purged on ADR 0284 tenant teardown', tenantTeardownClaim: true }],
   ['a2a:msgclaim', { reason: 'no-subject: RFC 0150 §A idempotency claim binding (tenant, remote peer principal, A2A messageId) to the task it opened — no content, no human subject; the peer principal is a cross-host machine identity. `tenantId` is denormalized onto the row precisely so ADR 0284 tenant teardown reaches it (ADR 0552 P2)', tenantTeardownClaim: true }],
   ['access-teams', { reason: 'no-subject: org-structure config (team name/description); no subject identifier' }],
+  ['access-org-deleted-retry', { reason: 'no-subject: (tenant, deleted orgId, hook id) + attempt counts and timestamps for an org-deleted hook that failed (ADR 1161 D4); no person, no error text; tenant-indexed, so ADR 0284 tenant teardown reaches it', tenantTeardownClaim: true }],
   ['access-custom-roles', { reason: 'no-subject: role definition (name/description/scopes); no subject identifier' }],
   ['cdp:audit-head', { reason: 'no-subject: audit-chain head pointer (hash-only); part of the tamper-evident log' }],
   ['codeexec:budget', { reason: 'no-subject: per-tenant execution counters' }],

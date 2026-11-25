@@ -28,7 +28,7 @@ import {
 import { listSeedTemplates } from './seedTemplates.js';
 import { markdownToHtml } from './render.js';
 import { listArtifactTypes } from '../../host/artifactTypes.js';
-import { getCanvasForTenant, deleteCanvasForTenant, listCanvasesForCaller, getCanvasForCaller, canvasWriteAllowed } from '../../host/canvasSurface.js';
+import { deleteCanvasForTenant, listCanvasesForCaller, getCanvasForCaller, canvasWriteAllowed } from '../../host/canvasSurface.js';
 
 const FEATURE = { toggleId: 'documents', label: 'Documents & Templates' };
 const ORG = '/host/openwop-app/documents/orgs/:orgId';
@@ -259,7 +259,10 @@ export function registerDocumentsRoutes(deps: RouteDeps): void {
       // point at another tenant's canvas.
       if (body.promotedCanvasId !== undefined) {
         const cid = body.promotedCanvasId;
-        if (typeof cid !== 'string' || !(await getCanvasForTenant(tenantId, cid))) {
+        // ADR 1160 D3 — a canvas this caller may READ, in this document's org
+        // (it was existence-only, so any tenant canvas could be linked).
+        const promoted = typeof cid === 'string' ? await getCanvasForCaller(tenantId, cid, { subject: user.userId }) : null;
+        if (!promoted || (promoted.orgId && promoted.orgId !== orgId)) {
           throw new OpenwopError('validation_error', '`promotedCanvasId` must reference a canvas you own.', 400, { field: 'promotedCanvasId' });
         }
       }

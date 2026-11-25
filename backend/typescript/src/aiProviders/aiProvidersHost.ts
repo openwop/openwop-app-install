@@ -1788,7 +1788,7 @@ async function callImageGenerator(
       }
       // Map the plain dispatch Error onto the taxonomy WITHOUT echoing the key
       // (the dispatcher never includes it) — status-bearing message retained.
-      throw new AiProviderError('provider_unavailable', err instanceof Error ? err.message : 'image dispatch failed', { provider });
+      throw new AiProviderError(err instanceof Error ? imageVendorErrorCode(err.message) : 'provider_unavailable', err instanceof Error ? err.message : 'image dispatch failed', { provider });
     }
     const images: ImageGenerationResult['images'] = [];
     for (const raw of raws) {
@@ -1890,7 +1890,7 @@ async function dispatchImageOp(
     if (err instanceof Error && err.name === 'AbortError') {
       throw new AiProviderError('provider_timed_out', `Image ${op} call exceeded the configured timeout.`, { provider, op });
     }
-    throw new AiProviderError('provider_unavailable', err instanceof Error ? err.message : `image ${op} dispatch failed`, { provider, op });
+    throw new AiProviderError(err instanceof Error ? imageVendorErrorCode(err.message) : 'provider_unavailable', err instanceof Error ? err.message : `image ${op} dispatch failed`, { provider, op });
   }
   const images: ImageGenerationResult['images'] = [];
   for (const raw of raws) {
@@ -1899,6 +1899,22 @@ async function dispatchImageOp(
   }
   await recordMediaUsage(scope.tenantId, 'images', images.length);
   return { images, totalTimeMs: Date.now() - startedAt, usage: { images: images.length } };
+}
+
+/**
+ * A native image dispatcher throws `<vendor>_<op>_<status>: <snippet>`. A vendor
+ * REFUSAL of the request (400/404/422) is not an outage: it is the model or a field
+ * the vendor will not take, and reads as that (e.g. a retired default model:
+ * "The model 'gpt-image-1' does not exist"). 429 is a rate limit. Everything else
+ * (auth, 5xx, a network fault) stays `provider_unavailable`, as before.
+ */
+export function imageVendorErrorCode(message: string): AiProviderErrorCode {
+  const status = Number(/_(\d{3}):/.exec(message)?.[1]);
+  if (status === 429) return 'provider_rate_limited';
+  if (status === 400 || status === 404 || status === 422) {
+    return /\bmodel\b[\s\S]{0,160}?\b(does not exist|not found|not supported|is unavailable|unknown|invalid)\b/i.test(message) ? 'model_not_supported' : 'invalid_request';
+  }
+  return 'provider_unavailable';
 }
 
 async function callImageEditor(scope: AdapterScope, req: ImageEditRequest): Promise<ImageGenerationResult> {

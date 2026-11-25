@@ -39,7 +39,7 @@ import {
   getAssistantActionApprovalHandler,
   getContentApprovalHandler,
   getEmailSendApprovalHandler, getFunnelPublishApprovalHandler,
-  getAnonSurfaceWriteApprovalHandler,
+  getAnonSurfaceWriteApprovalHandler, getCollabProposalApprovalHandler,
   getStrategyActivationApprovalHandler,
   getCampaignChangeSetApprovalHandler,
   getPlaybookRolloutApprovalHandler,
@@ -567,6 +567,14 @@ const KIND_DISPATCH = {
     getHandler: getAnonSurfaceWriteApprovalHandler,
     notComposedLabel: 'Anonymous surface',
     audit: (a, o) => ({ action: o === 'approved' ? 'anon.surface.write.approved' : 'anon.surface.write.rejected', resource: `widget:${a.anonSurfaceWrite?.widgetId ?? a.approvalId}`, payload: { ...baseAuditPayload(a), tool: a.anonSurfaceWrite?.tool.name } }),
+  },
+  // ADR 1099 D6 (P3) — collab-proposal: one item an outside collaborator proposed.
+  // The handler (host/collabProposals.ts) applies it through the client tool on
+  // approve (CAS first); reject writes nothing.
+  'collab-proposal': {
+    getHandler: getCollabProposalApprovalHandler,
+    notComposedLabel: 'Project collaboration',
+    audit: (a, o) => ({ action: o === 'approved' ? 'collab.proposal.approved' : 'collab.proposal.rejected', resource: `${a.collabProposal?.resource.kind ?? 'resource'}:${a.collabProposal?.resource.id ?? a.approvalId}`, payload: { ...baseAuditPayload(a), orgId: a.orgId, grantId: a.collabProposal?.grantId, tool: a.collabProposal?.toolId } }),
   },
   // ADR 0473 — composed-workflow: the propose→review→approve-to-run gate. The
   // registered handler (host/workflowComposeTool.ts) EXECUTES on approve — CAS

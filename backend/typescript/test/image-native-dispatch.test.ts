@@ -6,7 +6,7 @@
  * integration through the real adapter (secrets → resolveCredential → native
  * dispatch → Media asset), plus the key-never-echoed error contract.
  *
- * TST-DGC-6. Red when gpt-image-1 is sent `response_format`, when a non-2xx
+ * TST-DGC-6. Red when a GPT image model is sent `response_format`, when a non-2xx
  * error message carries the key, when an empty Imagen response succeeds, when
  * Imagen's `sampleCount` ignores `n` (the fixture asks for 2), when the BYOK
  * native path is skipped, and when a vendor 401 maps to another code
@@ -16,9 +16,9 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
-import { createAiProvidersAdapter } from '../src/aiProviders/aiProvidersHost.js';
+import { createAiProvidersAdapter, imageVendorErrorCode } from '../src/aiProviders/aiProvidersHost.js';
 import type { HostAdapterSuite } from '../src/host/index.js';
-import { dispatchImagesOpenAI, dispatchImagesGoogle } from '../src/providers/dispatchImages.js';
+import { DEFAULT_OPENAI_IMAGE_MODEL, dispatchImagesOpenAI, dispatchImagesGoogle } from '../src/providers/dispatchImages.js';
 
 const PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 
@@ -50,7 +50,13 @@ const call0 = (): { url: string; init: RequestInit } => {
 };
 
 describe('dispatchImagesOpenAI (unit)', () => {
-  it('shapes the request for gpt-image-1 (b64 by default — NO response_format) and parses data[].b64_json', async () => {
+  it('defaults to OpenAI\'s current successor model (gpt-image-1 was shut down 2026-10-23)', () => {
+    // Pinned as a literal on purpose: changing the default must be a decision
+    // someone makes against OpenAI's deprecations page, not a silent drift.
+    expect(DEFAULT_OPENAI_IMAGE_MODEL).toBe('gpt-image-2.6-sunburst');
+  });
+
+  it('shapes the request for the default GPT image model (b64 by default — NO response_format) and parses data[].b64_json', async () => {
     fetchMock.mockImplementation(respond(200, { data: [{ b64_json: PNG_B64 }] }));
     const out = await dispatchImagesOpenAI({ apiKey: 'sk-secret', prompt: 'a red square', n: 1 });
     expect(out).toEqual([{ base64: PNG_B64, mimeType: 'image/png' }]);
@@ -58,8 +64,8 @@ describe('dispatchImagesOpenAI (unit)', () => {
     expect(url).toBe(OPENAI_IMAGES_URL);
     expect(new Headers(init.headers).get('authorization')).toBe('Bearer sk-secret');
     const body = JSON.parse(String(init.body));
-    expect(body).toMatchObject({ model: 'gpt-image-1', prompt: 'a red square', n: 1 });
-    expect(body.response_format).toBeUndefined(); // gpt-image-1 REJECTS it
+    expect(body).toMatchObject({ model: 'gpt-image-2.6-sunburst', prompt: 'a red square', n: 1 });
+    expect(body.response_format).toBeUndefined(); // unsupported for GPT image models
   });
 
   it('dall-e models get response_format b64_json + the size param threads', async () => {
@@ -130,6 +136,23 @@ describe('callImageGenerator native path (integration)', () => {
     await expect(adapter.callImageGenerator({ prompt: 'x', provider: 'google' }))
       .rejects.toMatchObject({ code: 'host_capability_missing' });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('a vendor refusal of the model maps to model_not_supported, not an outage (the gpt-image-1 shutdown)', async () => {
+    fetchMock.mockImplementation(respond(404, { error: { message: "The model 'gpt-image-1' does not exist", type: 'invalid_request_error' } }));
+    globalThis.fetch = fetchMock;
+    await expect(adapter.callImageGenerator({ prompt: 'x', provider: 'openai', credentialRef: 'my-openai', model: 'gpt-image-1' }))
+      .rejects.toMatchObject({ code: 'model_not_supported' });
+  });
+
+  it('classifies native image vendor errors by status', () => {
+    expect(imageVendorErrorCode("openai_images_404: {\"error\":{\"message\":\"The model 'gpt-image-2.6-sunburst' does not exist\"}}")).toBe('model_not_supported');
+    expect(imageVendorErrorCode('openai_images_edit_400: {"error":{"message":"Invalid value for image"}}')).toBe('invalid_request');
+    expect(imageVendorErrorCode('replicate_model_unavailable_404: model "a/b" is unavailable (deprecated or wrong id)')).toBe('model_not_supported');
+    expect(imageVendorErrorCode('google_imagen_429: quota')).toBe('provider_rate_limited');
+    expect(imageVendorErrorCode('openai_images_401: bad key')).toBe('provider_unavailable');
+    expect(imageVendorErrorCode('openai_images_503: busy')).toBe('provider_unavailable');
+    expect(imageVendorErrorCode('fetch failed')).toBe('provider_unavailable');
   });
 
   it('a vendor 401 maps onto the taxonomy (provider_unavailable) without the key', async () => {

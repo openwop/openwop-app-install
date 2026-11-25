@@ -64,6 +64,9 @@ export const APPROVAL_KINDS = [
   // ADR 0945 × 0942 — a person's approval to publish ONE asset at ONE fidelity verdict.
   'creative-publish-review',
   'funnel-publish',
+  // ADR 1099 D6 (P3) — one item an outside collaborator proposed through a client
+  // tool; nothing is written until a member approves it.
+  'collab-proposal',
 ] as const;
 /** The kinds the HOST owns — the `APPROVAL_KINDS` tuple. Host tables
  *  (`APPROVAL_AUDIENCE`, `KIND_DISPATCH`) are complete over exactly these. */
@@ -182,6 +185,26 @@ export interface PendingApproval {
     capturedName?: string;
     capturedEmail?: string;
     capturedNote?: string;
+  };
+  /** ADR 1099 D6 (P3) — when `kind: 'collab-proposal'`, ONE item an outside
+   *  collaborator proposed through a client `propose` tool (an answer, a choice).
+   *  Nothing is written until a member approves; then the tool's `apply` runs with
+   *  the grant's scope. Reuses top-level `orgId` (the decide bar is `workspace:write`
+   *  in that org). `summary` and `payload` are the collaborator's words. */
+  collabProposal?: {
+    grantId: string;
+    collaboratorId: string;
+    resource: { kind: string; id: string };
+    toolId: string;
+    /** Display grouping (the adopter's submission or session id). */
+    groupKey: string;
+    /** The tool's own key: the same key on the same grant and tool is one approval. */
+    idempotencyKey: string;
+    summary: string;
+    payload: Record<string, unknown>;
+    /** The firm's run the proposal was made in (the audit anchor). */
+    runId: string;
+    audience?: string;
   };
   /** CHAT-FIRST-PORT-AUDIT D3 — when `kind: 'strategy-checkin'`, this approval
    *  gates the confirm/dismiss of an AGENT-proposed strategy check-in (the ADR
@@ -1165,6 +1188,21 @@ export async function redactApprovalProposal(
 }
 
 /**
+ * ADR 1099 D6 (P3) — a REJECTED collaborator proposal keeps no copy of the
+ * collaborator's words: its `proposal`, `summary` and `payload` are redacted. The ids
+ * and the idempotency key stay, so the row remains an audit record and a rerun of the
+ * same item still adds nothing. Only a resolved `collab-proposal` row is touched.
+ * Idempotent. Returns true when the row changed.
+ */
+export async function redactRejectedCollabProposal(tenantId: string, approvalId: string): Promise<boolean> {
+  const a = await approvals.get(approvalId);
+  if (!a || a.tenantId !== tenantId || a.kind !== 'collab-proposal' || !a.collabProposal || a.status !== 'rejected') return false;
+  if (a.proposal === ERASED_SUBJECT_SENTINEL && a.collabProposal.summary === ERASED_SUBJECT_SENTINEL) return false;
+  await approvals.put({ ...a, proposal: ERASED_SUBJECT_SENTINEL, collabProposal: { ...a.collabProposal, summary: ERASED_SUBJECT_SENTINEL, payload: {} } });
+  return true;
+}
+
+/**
  * ADR 0464 — the ONE store-level `SubjectEraser` for the approvals store. Applies
  * every registered kind redactor to the subject across pending + resolved rows.
  */
@@ -1293,6 +1331,13 @@ registerApprovalRedactor('commerce-listing-publish', { idFields: [], textFields:
 // depth-capable getPath/setPath). `onSubjectMatch:'cancel'` flips a still-pending
 // hold to rejected so the (now sentinel-stringified) args can never be executed by
 // A4 for a gone visitor; a resolved row stays a redacted audit record.
+// ADR 1099 D6 (P3) — the collaborator is the subject; their summary and payload are
+// their words. `cancel` so a pending proposal from an erased collaborator never applies.
+registerApprovalRedactor('collab-proposal', {
+  idFields: ['collabProposal.collaboratorId'],
+  textFields: ['collabProposal.summary', 'collabProposal.payload', 'proposal'],
+  onSubjectMatch: 'cancel',
+});
 registerApprovalRedactor('anon-surface-write', {
   idFields: ['anonSurfaceWrite.principal'],
   textFields: ['anonSurfaceWrite.capturedName', 'anonSurfaceWrite.capturedEmail', 'anonSurfaceWrite.capturedNote', 'anonSurfaceWrite.tool.args', 'anonSurfaceWrite.tool.destination'],
@@ -1839,6 +1884,54 @@ export async function createAnonSurfaceWriteApproval(input: {
   if (!created) return (await approvals.get(approvalId)) ?? approval; // lost create race → the winner's row
   await indexApproval(approval);
   return approval;
+}
+
+/** ADR 1099 D6 (P3) — the collab-proposal decision handler, registered by
+ *  `host/collabProposals.ts` at boot. It applies on APPROVE (CAS first) and writes
+ *  nothing on REJECT. */
+export type CollabProposalApprovalHandler = AnonSurfaceWriteApprovalHandler;
+let collabProposalApprovalHandler: CollabProposalApprovalHandler | null = null;
+export function registerCollabProposalApprovalHandler(fn: CollabProposalApprovalHandler): void {
+  collabProposalApprovalHandler = fn;
+}
+export function getCollabProposalApprovalHandler(): CollabProposalApprovalHandler | null {
+  return collabProposalApprovalHandler;
+}
+
+/**
+ * ADR 1099 D6 (P3) — hold ONE collaborator proposal, IDEMPOTENTLY. The id is
+ * derived from the grant, the tool and the tool's idempotency key, and created by
+ * `compareAndSwap(null, …)`: a rerun of the same interview, or two instances racing,
+ * find the same row and add nothing. Returns whether THIS call created it.
+ */
+export async function createCollabProposalApproval(input: {
+  tenantId: string;
+  orgId: string;
+  proposal: NonNullable<PendingApproval['collabProposal']>;
+}): Promise<{ approval: PendingApproval; created: boolean }> {
+  const p = input.proposal;
+  const key = createHash('sha256').update(`${p.toolId}\u0000${p.idempotencyKey}`, 'utf8').digest('hex').slice(0, 32);
+  const approvalId = `appr:collab:${p.grantId}:${key}`;
+  const existing = await approvals.get(approvalId);
+  if (existing) return { approval: existing, created: false };
+  const approval: PendingApproval = {
+    approvalId,
+    tenantId: input.tenantId,
+    rosterId: '',
+    persona: '',
+    workflowId: '',
+    proposal: p.summary,
+    kind: 'collab-proposal',
+    orgId: input.orgId,
+    collabProposal: p,
+    status: 'pending',
+    createdAt: nowIso(),
+  };
+  if (!(await approvals.compareAndSwap(null, approval))) {
+    return { approval: (await approvals.get(approvalId)) ?? approval, created: false };
+  }
+  await indexApproval(approval);
+  return { approval, created: true };
 }
 
 /**

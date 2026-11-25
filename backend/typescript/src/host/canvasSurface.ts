@@ -13,7 +13,9 @@
  * registry note says so. The other three nodes run for real.
  */
 
-import { resolveEffectiveAccess, runOrgScopeSubject } from './accessControlService.js';
+import { getOrg, listOrgs, resolveEffectiveAccess, runOrgScopeSubject } from './accessControlService.js';
+import { appendAudit, AUDIT_KIND_GOVERNANCE_DECISION } from './auditChainService.js';
+import { resolveSubjectOrg } from './subjectOrgScope.js';
 import { hasWorkflowScope } from './workflowWriteAuthority.js';
 import { canvasTypeValidator, isPrivilegedCanvasType, resolveCanvasTypeAccess } from './canvasTypeOwnership.js';
 import { randomUUID } from 'node:crypto';
@@ -817,6 +819,60 @@ export async function eraseSubjectCanvas(tenantId: string, subjectKey: string): 
       updatedAt: new Date().toISOString(),
     });
   }
+}
+
+/** ADR 1160 D4 — place a tenant-shared canvas in an org. A compare-and-swap that
+ *  only SETS an unset `orgId` (a placed canvas is never re-homed here); the org
+ *  must be one of the tenant's, and a project-owned canvas only goes to its
+ *  project's org. Audited with ids only (`by` is a user id or `system:<reason>`).
+ *  The row's content, version and `updatedAt` are untouched. */
+export type CanvasOrgClaim = 'claimed' | 'already' | 'conflict' | 'not_found' | 'wrong_org';
+export async function claimCanvasOrg(tenantId: string, canvasId: string, orgId: string, by: string): Promise<CanvasOrgClaim> {
+  const org = await getOrg(orgId);
+  if (!org || org.tenantId !== tenantId) return 'wrong_org';
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const c = await canvases.get(canvasId);
+    if (!c || c.tenantId !== tenantId) return 'not_found';
+    if (c.orgId) return c.orgId === orgId ? 'already' : 'conflict';
+    if (c.ownerSubject?.kind === 'project') {
+      const projectOrg = await resolveSubjectOrg(tenantId, c.ownerSubject);
+      if (projectOrg !== orgId) return 'wrong_org';
+    }
+    if (await canvases.compareAndSwap(c, { ...c, orgId })) {
+      await appendAudit(tenantId, AUDIT_KIND_GOVERNANCE_DECISION, { domain: 'canvas', action: 'canvas.org-claim', canvasId, orgId, by })
+        .catch((err: unknown) => log.warn('canvas_org_claim_audit_failed', { tenantId, canvasId, error: err instanceof Error ? err.message : String(err) }));
+      return 'claimed';
+    }
+  }
+  return 'conflict';
+}
+
+/** ADR 1160 D4 — where each tenant-shared canvas of a tenant would go, WITHOUT
+ *  writing: a one-org tenant's canvases to that org, a project-owned canvas to its
+ *  project's org, and everything else left shared (never guessed from the
+ *  creator). Counts and ids only. `applyCanvasOrgPlan` performs it; the
+ *  production run of that is a data write that needs the user's go. */
+export interface CanvasOrgPlan { tenantId: string; unstamped: number; place: Array<{ canvasId: string; orgId: string; why: 'one-org-tenant' | 'project-owned' }>; leftShared: number }
+export async function planCanvasOrgBackfill(tenantId: string): Promise<CanvasOrgPlan> {
+  const orgs = await listOrgs(tenantId);
+  const only = orgs.length === 1 ? orgs[0]!.orgId : undefined;
+  const plan: CanvasOrgPlan = { tenantId, unstamped: 0, place: [], leftShared: 0 };
+  for (const c of await canvases.listForTenantIndexed(tenantId)) {
+    if (c.tenantId !== tenantId || c.orgId) continue;
+    plan.unstamped++;
+    if (c.ownerSubject?.kind === 'project') {
+      const projectOrg = await resolveSubjectOrg(tenantId, c.ownerSubject);
+      if (projectOrg && orgs.some((o) => o.orgId === projectOrg)) { plan.place.push({ canvasId: c.canvasId, orgId: projectOrg, why: 'project-owned' }); continue; }
+    }
+    if (only) plan.place.push({ canvasId: c.canvasId, orgId: only, why: 'one-org-tenant' });
+    else plan.leftShared++;
+  }
+  return plan;
+}
+export async function applyCanvasOrgPlan(plan: CanvasOrgPlan, by: `system:${string}`): Promise<Record<CanvasOrgClaim, number>> {
+  const out: Record<CanvasOrgClaim, number> = { claimed: 0, already: 0, conflict: 0, not_found: 0, wrong_org: 0 };
+  for (const p of plan.place) out[await claimCanvasOrg(plan.tenantId, p.canvasId, p.orgId, by)]++;
+  return out;
 }
 
 /** Register the canvas DSAR eraser (idempotent — the seam dedupes by reference).

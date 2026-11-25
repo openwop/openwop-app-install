@@ -18,6 +18,43 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-11-25
+
+A MINOR release under ADR 0052, for new features (ADR 1099 P3a, ADR 1161, ADR 1160 P3's primitives). There is **no migration** (sqlite 54 / postgres 52, app-migration 27), and **no route, env var or config key is removed or renamed**. The urgent part is #6269: every OpenAI image generation or edit without an explicit model has failed since OpenAI shut down `gpt-image-1` on 2026-10-23. Read "Upgrading from 0.21.0" for two behaviour changes:
+
+- OpenAI images default to `gpt-image-2.6-sunburst`, and a vendor refusal now answers its real error instead of `provider_unavailable` (#6269);
+- the remaining canvas lanes decide in the canvas's org (ADR 1160 P2), so a few cross-org paths stop working for P0-stamped canvases.
+
+### Security
+
+- **The stray canvas lanes decide in the canvas's own org (ADR 1160 P2, #6265).** The collab ticket, claim-seed and upgrade now use `canvasReadAllowed`, as the REST editor does (before: the owner half only). A present-remote token's org must be the canvas's. A share link's org must be the canvas's, at mint and in the publisher re-check that keeps a public link serving. Comments on `canvas_document` / `canvas_slides` require the path org to be the canvas's, then `canvasReadAllowed`. A document's `promotedCanvasId` must be a canvas the caller may read in the document's org. An app-builder sync binding from another org no longer writes the canvas. The ui-plugin `demo-artifact` checks `artifacts:read`. `test/adr1160-canvas-raw-read-ratchet.test.ts` pins every raw canvas read per file. `ctx.canvas.invoke` is not an access lane (its id is only a causation tag), so it is unchanged.
+
+### Added
+
+- **A collaborator's proposals write nothing before a member approves them (ADR 1099 P3a, #6273).** A client tool may declare `effect: 'propose'`. In a collaborator turn its `run` returns proposals, and each becomes one approval of the new host kind `collab-proposal` (audience: `workspace:write` in the project's org). Approval ids are derived from grant, tool and idempotency key, so rerunning an interview adds nothing. Limits: 10 proposals per call, 20 propose calls per grant per day (`OPENWOP_COLLAB_PROPOSE_CALLS_PER_GRANT_DAY`), payload ≤ 16 KB with scope keys dropped. Deciding goes through the shared claim and reject routes: the decider needs `workspace:write` and passes the tool's optional `mayDecide` (403 `collab_not_decider`). Approve re-checks the grant (409 `collab_grant_ended` when it has ended) and then calls the tool's `apply`; an `apply` that throws reopens the row. Reject writes nothing and redacts the summary and payload. A collaborator's erasure redacts their proposals and cancels the pending ones.
+- **`onOrgDeleted` hooks (ADR 1161, #6272).** A feature can register a hook that removes its own per-org rows that carry no `orgId` (which `deleteOrg`'s refuse-while-populated guard cannot see). Hooks run after the org is deleted, each in its own try. A failure is logged, audited with ids only (`org.deleted.hook-failed`), and never blocks the delete or the other hooks. Failures are retried by the default-window sweep, which gives up after 10 attempts (`org.deleted.hook-gave-up`), and skips legal holds and an org id that exists again. No feature registers a hook in this release; this is the seam CasaVoga's per-org rows will use.
+- **`claimCanvasOrg` and the canvas backfill plan (ADR 1160 P3, code only, #6266).** `claimCanvasOrg` places an unplaced, tenant-shared canvas in an org by CAS: it never re-homes a placed canvas, refuses another tenant's org and a project-owned canvas outside its project's org, leaves content, version and `updatedAt` alone, and is audited. `planCanvasOrgBackfill` is a dry run (counts and ids only) that places only what is certain: a one-org tenant's canvases and project-owned canvases. `applyCanvasOrgPlan` performs a plan. **Nothing runs the backfill in this release.**
+
+### Fixed
+
+- **OpenAI image generation and edits work again (#6269).** `gpt-image-1` was shut down on 2026-10-23, and the default still named it, so every call without an explicit model failed with "The model 'gpt-image-1' does not exist". The default is now `gpt-image-2.6-sunburst`; the request contract is unchanged. A vendor refusal is no longer reported as an outage: a 400, 404 or 422 that names a missing model is `model_not_supported`, another 400, 404 or 422 is `invalid_request`, and a 429 is `provider_rate_limited`. A 401, a 5xx or a network fault is still `provider_unavailable`. All three are existing codes, and the image routes map them onto existing route codes: `invalid_request` to 400 `invalid_request`, `provider_rate_limited` to 429 `rate_limited`, and `model_not_supported` to the same 502 `host_capability_missing` as before, each with the provider code in `details.providerCode`. Edits now send the documented `image[]` field.
+
+#### Upgrading from 0.21.0
+
+- **Required stop:** no. **Rolling-safe:** yes. `node scripts/upgrade-plan.mjs 0.21.0` gives one step, no stop:
+  1. back up the database (and object store);
+  2. 0.21.0 instances may keep running alongside 0.22.0;
+  3. start 0.22.0 (sqlite 54 → 54, postgres 52 → 52, app 27 → 27);
+  4. check that `/readiness` reports version 0.22.0.
+- **Migrations:** none.
+- **OpenAI images (#6269).** No action. A host that pins its own image model is unaffected. Every image vendor refusal used to come back as 502 `host_capability_missing` with `details.providerCode: "provider_unavailable"`. Now a bad request is 400 `invalid_request`, a rate limit is 429 `rate_limited`, and a missing model is still 502 with `providerCode: "model_not_supported"`, so a client that retried every image failure as an outage now sees the refusal. The first live edit call is the check that OpenAI accepts the `image[]` field.
+- **Canvas org enforcement, the remaining lanes (ADR 1160 P2).** Only canvases stamped since P0 (#6260) are affected. For those, a share link, present-remote token, app-builder sync binding or comment thread made through another org's path stops working, and a member who could read someone else's user-owned document or deck through comments or collab (but not through the editor) loses that inconsistent access. Public links minted through the canvas's own org keep serving. P2 writes no data, so a revert is the rollback.
+- **Canvas backfill (ADR 1160 P3).** Code only. Unplaced canvases stay tenant-shared until an operator runs a plan, which is a separate, approved data write.
+- **Org deletion (ADR 1161).** No change yet: the hook seam ships with no hooks registered. When a feature registers one, a failed hook never blocks the delete and is retried by the sweep.
+- **Collaborator proposals (ADR 1099 P3a).** Nothing changes while `projects.client-portal` is off, which is the default; leave it off in production until P4.
+- **Config:** nothing to change. `OPENWOP_COLLAB_PROPOSE_CALLS_PER_GRANT_DAY` (default 20) is optional.
+- **Steps:** back up the database, deploy the new backend image and then the frontend, and check that `/readiness` reports `"version": "0.22.0"`.
+
 ## [0.21.0] — 2026-11-25
 
 A MINOR release under ADR 0052, because it adds **app-migration 27**. **No route, env var or config key is removed or renamed.** Read "Upgrading from 0.20.0" for five behaviour changes:

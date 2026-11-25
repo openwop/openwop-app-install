@@ -54,6 +54,9 @@ import { ERASED, subjectKeyForms } from './subjectErasureRedaction.js';
 import { isPersonalTenantId } from './requestSubject.js';
 import { delegationOf, isConfiguredOperatorIssuerFor, isDelegatedSubject, isNarrowingDeclaration, keyPolicyMode, notifyIssuerRemoved, notifySubjectRekeyed, reportKeyPolicy } from './delegatedSubject.js';
 import { isSessionAuthorityRegistered, resolveSessionSubject } from './sessionAuthority.js';
+import { appendAudit, AUDIT_KIND_GOVERNANCE_DECISION } from './auditChainService.js';
+import { registerDefaultWindowSweep } from './retentionPurger.js';
+import { getRetentionHold } from './retentionHold.js';
 
 const accessLog = createLogger('host.accessControl');
 
@@ -873,6 +876,10 @@ export async function deleteOrg(
   for (const g of orgGroups) await groups.delete(g.groupId);
   for (const r of orgRoles) await customRoles.delete(r.roleId);
   await orgs.delete(orgId);
+  // ADR 1161 — the features' own per-org rows go AFTER the org row: a hook that
+  // fails leaves unreachable rows (retried by the sweep), never a live org with
+  // half its data gone. Best-effort; never blocks or reverses the delete.
+  await runOrgDeletedHooks({ tenantId: org.tenantId, orgId });
   return { org: true, teams: orgTeams.length, members: orgMembers.length, groups: orgGroups.length, roles: orgRoles.length };
 }
 
@@ -1215,6 +1222,84 @@ export async function runMemberAuthorityLostHooks(lost: MemberAuthorityLost): Pr
     }
   }
 }
+
+// ── ADR 1161 — org-deleted hooks ─────────────────────────────────────────────
+/**
+ * A feature that keeps per-org rows WITHOUT an `orgId` field (so the
+ * refuse-while-populated guard in {@link deleteOrg} cannot see them, e.g. a row
+ * keyed by a hash of tenant and org) registers a hook that removes them. Hooks
+ * are for a feature's own derived or configuration rows; business content
+ * carries `orgId`, so the guard refuses to delete an org still holding it.
+ *
+ * Contract: idempotent (a hook may run again for the same org), per-org only,
+ * returns how many rows it removed. A hook that throws is logged and audited,
+ * does not stop the other hooks or the delete, and is retried by the default-
+ * window sweep ({@link retryFailedOrgDeletedHooks}) up to
+ * {@link ORG_DELETED_HOOK_MAX_ATTEMPTS} times.
+ */
+export interface OrgDeleted { tenantId: string; orgId: string }
+export type OrgDeletedHook = (deleted: OrgDeleted) => Promise<number | void>;
+const orgDeletedHooks: Array<{ id: string; hook: OrgDeletedHook }> = [];
+/** Register by id (a repeated boot registration is ignored). */
+export function onOrgDeleted(id: string, hook: OrgDeletedHook): void {
+  if (!orgDeletedHooks.some((h) => h.id === id)) orgDeletedHooks.push({ id, hook });
+}
+/** Test-only: forget registered hooks. */
+export function __resetOrgDeletedHooksForTests(): void { orgDeletedHooks.length = 0; }
+
+/** A hook run that failed, kept until it succeeds or runs out of attempts. Ids only. */
+interface OrgDeletedRetry { key: string; tenantId: string; orgId: string; hookId: string; attempts: number; firstFailedAt: string; lastFailedAt: string; gaveUp?: true }
+const orgDeletedRetries = new DurableCollection<OrgDeletedRetry>('access-org-deleted-retry', (r) => r.key, undefined, (r) => r.tenantId);
+export const ORG_DELETED_HOOK_MAX_ATTEMPTS = 10;
+const retryKey = (d: OrgDeleted, hookId: string): string => `${d.tenantId}:${d.orgId}:${hookId}`;
+
+async function recordOrgDeletedHookFailure(d: OrgDeleted, hookId: string, err: unknown, prior: OrgDeletedRetry | null): Promise<void> {
+  const now = nowIso();
+  const attempts = (prior?.attempts ?? 0) + 1;
+  const gaveUp = attempts >= ORG_DELETED_HOOK_MAX_ATTEMPTS;
+  accessLog.error('org_deleted_hook_failed', { hook: hookId, tenantId: d.tenantId, orgId: d.orgId, attempts, gaveUp, error: err instanceof Error ? err.message : String(err) });
+  await orgDeletedRetries.put({ key: retryKey(d, hookId), tenantId: d.tenantId, orgId: d.orgId, hookId, attempts, firstFailedAt: prior?.firstFailedAt ?? now, lastFailedAt: now, ...(gaveUp ? { gaveUp: true as const } : {}) }).catch(() => undefined);
+  // The audit chain is DSAR-exempt: ids only, never the error text.
+  await appendAudit(d.tenantId, AUDIT_KIND_GOVERNANCE_DECISION, { domain: 'org', action: gaveUp ? 'org.deleted.hook-gave-up' : 'org.deleted.hook-failed', orgId: d.orgId, hook: hookId, attempts })
+    .catch((e: unknown) => accessLog.warn('org_deleted_hook_audit_failed', { hook: hookId, tenantId: d.tenantId, error: e instanceof Error ? e.message : String(e) }));
+}
+
+async function runOneOrgDeletedHook(d: OrgDeleted, id: string, hook: OrgDeletedHook, prior: OrgDeletedRetry | null): Promise<boolean> {
+  try {
+    const n = await hook(d);
+    if (typeof n === 'number' && n > 0) accessLog.info('org_deleted_cascade', { hook: id, tenantId: d.tenantId, orgId: d.orgId, count: n });
+    if (prior) await orgDeletedRetries.delete(prior.key).catch(() => false);
+    return true;
+  } catch (err) {
+    await recordOrgDeletedHookFailure(d, id, err, prior);
+    return false;
+  }
+}
+
+/** Run every hook for a deleted org. Never throws. */
+export async function runOrgDeletedHooks(d: OrgDeleted): Promise<void> {
+  for (const { id, hook } of orgDeletedHooks) await runOneOrgDeletedHook(d, id, hook, null);
+}
+
+/** ADR 1161 — the default-window sweep: re-run each failed hook for its deleted
+ *  org until it succeeds or reaches {@link ORG_DELETED_HOOK_MAX_ATTEMPTS}. A row
+ *  for an org that exists again (an id reused) or a hook no longer registered
+ *  is left alone. Skips tenants under legal hold (ADR 0951 D3). */
+export async function retryFailedOrgDeletedHooks(): Promise<{ deleted: number; failed: number }> {
+  let deleted = 0; let failed = 0;
+  for (const r of await orgDeletedRetries.list()) {
+    if (r.gaveUp) continue;
+    if (await getRetentionHold(r.tenantId)) continue;
+    if (await orgs.get(r.orgId)) continue;
+    const h = orgDeletedHooks.find((x) => x.id === r.hookId);
+    if (!h) continue;
+    if (await runOneOrgDeletedHook({ tenantId: r.tenantId, orgId: r.orgId }, h.id, h.hook, r)) deleted++; else failed++;
+  }
+  return { deleted, failed };
+}
+registerDefaultWindowSweep({ feature: 'org-deleted-hook-retry', sweep: () => retryFailedOrgDeletedHooks() });
+/** Test-only: the pending and given-up retry rows. */
+export async function __listOrgDeletedRetriesForTests(): Promise<OrgDeletedRetry[]> { return orgDeletedRetries.list(); }
 
 /** Delete a member and remove it from any group's `memberIds`. Enforces the
  *  ≥1-owner invariant atomically (post-write re-check + compensating restore);

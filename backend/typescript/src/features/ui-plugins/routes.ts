@@ -199,6 +199,9 @@ export function registerUiPluginsFeatureRoutes(deps: RouteDeps): void {
   // A real artifact for the viewer to read over ui-plugin/1 (tenant-scoped, idempotent).
   app.post(`${BASE}/demo-artifact`, async (req, res, next) => {
     try {
+      // ADR 1160 OQ-4 — the same scope as the ui-plugin/1 RPC that reads it: a
+      // caller who may not read artifacts does not get one written for them.
+      await requireProtocolScope(req, 'artifacts:read');
       const tenantId = tenantOf(req);
       const canvas = await ensureCanvasForTenant(tenantId, demoArtifactId(tenantId), {
         canvasTypeId: DEMO_CANVAS_TYPE,

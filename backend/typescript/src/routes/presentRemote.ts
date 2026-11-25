@@ -53,6 +53,10 @@ async function authorizePresentRemote(token: string): Promise<{ claims: PresentR
   const refused = (reason: string): null => { log.info('present_remote_refused', { reason, canvasId: claims.canvasId }); return null; };
   const canvas = await getCanvasForTenant(claims.tenantId, claims.canvasId);
   if (!canvas) return refused('canvas_gone');
+  // ADR 1160 D3 — a token minted through another org's path does not reach a
+  // canvas that belongs to an org (the mint now 404s there; this covers tokens
+  // minted before it did).
+  if (canvas.orgId && canvas.orgId !== claims.orgId) return refused('canvas_in_another_org');
   if (!presentOutlineFor(canvas.canvasTypeId, canvas.state as Record<string, unknown>)) return refused('no_present_mode');
   const access = await resolveCanvasTypeAccess(canvas.canvasTypeId, { tenantId: claims.tenantId, userId: claims.userId });
   if (!access.allowed) return refused('feature_off');

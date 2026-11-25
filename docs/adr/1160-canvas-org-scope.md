@@ -1,7 +1,7 @@
 # ADR 1160 — A canvas belongs to one workspace (org), and every lane checks it
 
-Status: Accepted (2026-11-25, the user: "ADR, then build"). P0 implemented
-(#6260); P1 in progress; see the phased plan.
+Status: Accepted (2026-11-25, the user: "ADR, then build"). P0 (#6260) and P1
+(#6262) implemented; P2 in progress; see the phased plan.
 
 A canvas gets an `orgId`, stamped when it is created. The shared read and write
 predicates in `host/canvasSurface.ts` check the caller's access in THAT org, and
@@ -153,7 +153,7 @@ are there. Each lane gets one treatment:
 | campaign-studio `loadPlan` and `planLinks` | project-org check (the only canvas↔org check on main) | **P**. The project rule becomes the D2 rule |
 | Agent tools: get-design and render for app-builder, cad, drawings, slides and campaign-studio; `conversationFocus` | `getCanvasForCaller` (+ write) | **P**. Render stamps `gate.orgId` on create (D1) |
 | Run lanes: `ctx.canvas.read`/`write`, `ctx.features['app-builder']`, `dataBinding.applyBinding`, MCP nodes | `assertCanvasRunAccess` / `getCanvasForCaller` with `actingUserId` | **P**. The acting user is checked in the canvas's org. A run with no acting person is `preAuthorized` only where it is today |
-| `ctx.canvas.invoke` | **no target check** (`canvasSurface.ts:919`) | **F**: load `targetCanvasId` and `assertCanvasRunAccess(…, 'read')` before dispatch |
+| `ctx.canvas.invoke` | no target check (`canvasSurface.ts:919`) | **Not a lane** (corrected in P2): `targetCanvasId` is only a causation tag on the child run (`metadata.causationCanvasId`) and the circuit-breaker key. No canvas data reaches the child, and callers pass ids of canvases that do not exist. The child run's own `ctx.canvas` calls are gated |
 | Collab ticket, claim-seed and WebSocket upgrade (`collabServer.ts:238/266/484`) | `collabCanvasReadable` (raw `resolveSubjectAccess`) | **F**: `canvasReadAllowed` / `canvasWriteAllowed`. The room's own persists stay S (authorized at join) |
 | Present remote (`routes/presentRemote.ts:48`) | `assertOrgScope(claims.orgId)` + owner rule | **F**: also require `claims.orgId === canvas.orgId` when it is set (a token minted through another org's path is refused) |
 | ui-plugin `artifact.read`/`write` (`routes/uiPlugins.ts:73-139`) | `canvasReadAllowed` / `WriteAllowed` | **P** |
@@ -254,8 +254,8 @@ capability or endpoint contract changes.
 | Phase | Commit | Tests |
 |---|---|---|
 | P0 | #6260 (`8961fb54e`) | `src/host/__tests__/canvasOrgStamp.test.ts`, `test/adr1160-canvas-create-org-ratchet.test.ts` |
-| P1 | (this PR) | `test/adr1160-p1-canvas-org-enforced.test.ts`; the five render-tool tests assert the `?org=` link |
-| P2 | | |
+| P1 | #6262 (`d77aed292`) | `test/adr1160-p1-canvas-org-enforced.test.ts`; the five render-tool tests assert the `?org=` link |
+| P2 | (this PR) | `test/adr1160-p2-lane-fixes.test.ts`, `test/adr1160-canvas-raw-read-ratchet.test.ts` |
 | P3 | | |
 
 ## Open questions

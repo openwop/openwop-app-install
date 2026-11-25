@@ -29,8 +29,7 @@ import type { Duplex } from 'node:stream';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { base64urlDecode, base64urlEncode, readSessionSecret, readCookie, COOKIE_NAME } from '../../middleware/cookieSession.js';
 import { credentialedOriginAllowed, originPolicy } from '../../middleware/cors.js';
-import { canvasWriteAllowed, getCanvasForTenant, type CanvasRecordView } from '../canvasSurface.js';
-import { resolveSubjectAccess, levelSatisfies } from '../subjectAccess.js';
+import { canvasReadAllowed, canvasWriteAllowed, getCanvasForTenant, type CanvasRecordView } from '../canvasSurface.js';
 import { resolveCallerUser } from '../../features/users/usersGuards.js';
 import { resolveOne } from '../featureToggles/service.js';
 import { DurableCollection } from '../hostExtPersistence.js';
@@ -114,9 +113,9 @@ export async function deleteCollabSeedClaim(tenantId: string, roomId: string): P
  *  org subjects, so pass it UN-stripped, exactly as REST `loadCanvas(user.userId)`
  *  does; a bare hash matches nothing and denies every legitimate joiner. */
 async function collabCanvasReadable(tenantId: string, canvas: CanvasRecordView, caller: string | undefined): Promise<boolean> {
-  if (!canvas.ownerSubject) return true;
-  const level = await resolveSubjectAccess(tenantId, canvas.ownerSubject, caller);
-  return level === null || levelSatisfies(level, 'read');
+  // ADR 1160 D3 — THE canvas read predicate (org, owner and the user-owner rule),
+  // not a second copy of half of it: the REST editor `loadCanvas` asks the same.
+  return canvasReadAllowed(tenantId, canvas, { subject: caller });
 }
 /** ADR 0886 D2 — the ticket/claim-seed doors' WRITE gate. A room is read-write
  *  (its derive writes `host.canvas`), so joining one IS a write — the workflow

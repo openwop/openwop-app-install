@@ -56,7 +56,9 @@ describe('dispatchImageEditOpenAI', () => {
     const form = call.init?.body as FormData;
     expect(form).toBeInstanceOf(FormData);
     expect(form.get('prompt')).toBe('replace the sky');
-    expect(form.get('image')).toBeInstanceOf(Blob);
+    // The field OpenAI's multipart example uses; a bare `image` is not documented for GPT image models.
+    expect(form.get('image[]')).toBeInstanceOf(Blob);
+    expect(form.get('image')).toBeNull();
     expect(form.get('mask')).toBeInstanceOf(Blob);
     // The key never leaks into a form field.
     expect([...form.entries()].some(([, v]) => typeof v === 'string' && v.includes('sk-edit-key'))).toBe(false);

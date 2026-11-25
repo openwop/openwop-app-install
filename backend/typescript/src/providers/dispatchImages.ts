@@ -17,9 +17,10 @@
  *
  * Vendor endpoints (validated against the provider discovery docs, not SDKs —
  * the provider-wire-verify lesson):
- *  - OpenAI Images: POST {base}/images/generations — `gpt-image-1` returns
- *    base64 by default (and REJECTS `response_format`); `dall-e-*` models need
- *    `response_format: 'b64_json'`.
+ *  - OpenAI Images: POST {base}/images/generations — the GPT image models
+ *    (`gpt-image-*`) always return base64 `data[].b64_json` and do not support
+ *    `response_format` (OpenAI's reference: "Unsupported for GPT image models");
+ *    the retired `dall-e-*` models needed `response_format: 'b64_json'`.
  *  - Google Imagen (Gemini API): POST {base}/models/{model}:predict with the
  *    `x-goog-api-key` header — `instances[{prompt}]` + `parameters.sampleCount`,
  *    replies `predictions[{bytesBase64Encoded, mimeType?}]`.
@@ -28,7 +29,14 @@
 const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 const GOOGLE_GENAI_DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
 
-const DEFAULT_OPENAI_IMAGE_MODEL = 'gpt-image-1';
+/** The OpenAI image model used when a caller names none. `gpt-image-1` was shut
+ *  down on 2026-10-23, after which every default call failed with "The model
+ *  'gpt-image-1' does not exist". `gpt-image-2.6-sunburst` is the successor OpenAI's
+ *  deprecations page recommends (checked 2026-11-25:
+ *  https://developers.openai.com/api/docs/deprecations). It is on the Images API,
+ *  returns base64 by default, and takes the standard sizes this app sends
+ *  (1024x1024, 1536x1024, 1024x1536). Re-check that page before moving it. */
+export const DEFAULT_OPENAI_IMAGE_MODEL = 'gpt-image-2.6-sunburst';
 const DEFAULT_GOOGLE_IMAGE_MODEL = 'imagen-3.0-generate-002';
 
 /** Providers this module can dispatch natively with a plain vendor API key. */
@@ -73,8 +81,8 @@ export async function dispatchImagesOpenAI(args: DispatchImagesArgs): Promise<Di
       prompt: args.prompt,
       n: args.n,
       ...(args.size ? { size: args.size } : {}),
-      // gpt-image-1 returns b64 by default and REJECTS response_format; the
-      // dall-e models default to `url` and need the explicit b64 ask.
+      // GPT image models return b64 by default and do not support
+      // response_format; the retired dall-e models needed the explicit b64 ask.
       ...(model.startsWith('dall-e') ? { response_format: 'b64_json' } : {}),
     }),
     ...(args.signal ? { signal: args.signal } : {}),
@@ -211,14 +219,18 @@ export interface DispatchImageEditArgs {
 }
 
 /** OpenAI `/images/edits` — multipart (image + optional mask + prompt).
- *  gpt-image-1 returns b64 by default. Throws plain Error, never the key. */
+ *  GPT image models return b64 by default. Throws plain Error, never the key. */
 export async function dispatchImageEditOpenAI(args: DispatchImageEditArgs): Promise<DispatchedImage[]> {
   const baseUrl = (process.env.OPENAI_BASE_URL ?? OPENAI_DEFAULT_BASE_URL).replace(/\/$/, '');
   const model = args.model ?? DEFAULT_OPENAI_IMAGE_MODEL;
   const form = new FormData();
   form.append('model', model);
   form.append('prompt', args.prompt ?? '');
-  form.append('image', new Blob([Buffer.from(args.imageBase64, 'base64')], { type: args.mimeType }), 'image.png');
+  // `image[]`, the field OpenAI's multipart example for /images/edits uses (its schema
+  // is JSON `images: [{file_id|image_url}]`; a bare `image` field is not documented
+  // for the GPT image models). The first live edit call is the real check; a refusal
+  // reaches the caller typed (`imageVendorErrorCode`).
+  form.append('image[]', new Blob([Buffer.from(args.imageBase64, 'base64')], { type: args.mimeType }), 'image.png');
   if (args.maskBase64) {
     form.append('mask', new Blob([Buffer.from(args.maskBase64, 'base64')], { type: 'image/png' }), 'mask.png');
   }

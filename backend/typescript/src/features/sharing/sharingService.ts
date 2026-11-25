@@ -178,11 +178,15 @@ const ORG_SCOPED_ENTITLEMENT = async (): Promise<OpenwopError | null> => null;
 /** ADR 0887 D1 — the canvas entitlement, shared by both canvas types. Order keeps
  *  the mint's codes (architect L2): read refusal 404 → write 403 `forbidden_scope`
  *  → user-owner 403 `forbidden`. */
-async function canvasEntitlement(typeId: string, tenantId: string, resourceId: string, subject: string, mode: 'publish' | 'read'): Promise<OpenwopError | null> {
+async function canvasEntitlement(typeId: string, tenantId: string, orgId: string, resourceId: string, subject: string, mode: 'publish' | 'read'): Promise<OpenwopError | null> {
   const exists = await getCanvasForTenant(tenantId, resourceId); // UNFILTERED existence (H2)
   if (!exists || exists.canvasTypeId !== typeId) return null;
   const c = await getCanvasForCaller(tenantId, resourceId, { subject });
   if (!c) return notFound(resourceId);
+  // ADR 1160 D3 — a link is minted, and keeps serving, only in the canvas's own
+  // org: a link from another org's path is absent (a stamped canvas moved out of
+  // the link's org stops serving through the publisher re-check, `mode: 'read'`).
+  if (c.orgId && c.orgId !== orgId) return notFound(resourceId);
   if (mode === 'read') return null;
   // ADR 0886 D1 — publishing a live public link is a WRITE on the owner,
   // decided in the owner's org (a reader of a project's canvas, or a writer
@@ -248,7 +252,7 @@ const RESOLVERS: Record<ResourceType, ShareResolver> = {
       const c = await getCanvasForTenant(tenantId, resourceId);
       if (!c || c.canvasTypeId !== 'canvas.app-builder') throw notFound(resourceId);
     },
-    entitlement: (tenantId, _orgId, resourceId, subject, mode) => canvasEntitlement('canvas.app-builder', tenantId, resourceId, subject, mode),
+    entitlement: (tenantId, orgId, resourceId, subject, mode) => canvasEntitlement('canvas.app-builder', tenantId, orgId, resourceId, subject, mode),
     async load(tenantId, _orgId, resourceId) {
       const c = await getCanvasForTenant(tenantId, resourceId);
       if (!c || c.canvasTypeId !== 'canvas.app-builder') return null;
@@ -553,7 +557,7 @@ const RESOLVERS: Record<ResourceType, ShareResolver> = {
       const c = await getCanvasForTenant(tenantId, resourceId);
       if (!c || c.canvasTypeId !== 'canvas.slides') throw notFound(resourceId);
     },
-    entitlement: (tenantId, _orgId, resourceId, subject, mode) => canvasEntitlement('canvas.slides', tenantId, resourceId, subject, mode),
+    entitlement: (tenantId, orgId, resourceId, subject, mode) => canvasEntitlement('canvas.slides', tenantId, orgId, resourceId, subject, mode),
     async load(tenantId, _orgId, resourceId) {
       const c = await getCanvasForTenant(tenantId, resourceId);
       if (!c || c.canvasTypeId !== 'canvas.slides') return null;

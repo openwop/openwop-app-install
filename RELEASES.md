@@ -48,6 +48,27 @@ upgrade is neither: list it in `breakingConfig`.
 
 ## Version log
 
+### v0.22.0 — 2026-11-25
+
+- **Required stop:** no. **Rolling-safe:** yes.
+- **Schema:** sqlite 54 / postgres 52 (unchanged) · **App migrations:** 27 (unchanged).
+- **Urgent fix:** OpenAI image generation and edits work again. The default model was
+  `gpt-image-1`, which OpenAI shut down on 2026-10-23; it is now
+  `gpt-image-2.6-sunburst` (#6269).
+- **Security:** the remaining canvas lanes (collab, present-remote, share links,
+  comments, promoted documents, app-builder sync, the demo artifact) decide in the
+  canvas's own org (ADR 1160 P2, #6265).
+- **Breaking:** none. No route, env var or config key is removed or renamed.
+  Behaviour changes:
+  - image vendor refusals answer their real code (400 or 429) instead of always 502 (#6269);
+  - cross-org paths to a P0-stamped canvas stop working (ADR 1160 P2).
+- **Config:** none required. Optional `OPENWOP_COLLAB_PROPOSE_CALLS_PER_GRANT_DAY`.
+- Added: a collaborator's proposals are held for a member's approval (ADR 1099 P3a,
+  #6273), behind `projects.client-portal` (default off); `claimCanvasOrg` and the
+  backfill plan, code only (ADR 1160 P3, #6266); the `onOrgDeleted` hook seam, with
+  no hooks registered yet (ADR 1161, #6272).
+- [CHANGELOG §0.22.0](./CHANGELOG.md#0220--2026-11-25)
+
 ### v0.21.0 — 2026-11-25
 
 - **Required stop:** no. **Rolling-safe:** yes.

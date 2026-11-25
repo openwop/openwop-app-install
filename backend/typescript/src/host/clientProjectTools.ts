@@ -12,8 +12,14 @@
  * put in the input. `checkGrantUse` runs again before every call (in the lane), so a
  * grant revoked mid-conversation refuses the next call.
  *
- * P2 admits `effect: 'read'` only. `propose` (held as an approval, applied on approve)
- * is P3 (D6/D7); registering one is refused until the hold exists.
+ * Two effects:
+ *  - `read`: `run` returns what the model reads;
+ *  - `propose` (P3, D6): `run` returns `{ proposals }`, and NOTHING is written. Each
+ *    proposal is held as one `collab-proposal` approval; a member approves or rejects
+ *    it, and only on approve does the host call the tool's `apply` with the grant's
+ *    scope. One proposal per item (an answered question, a choice), grouped for
+ *    display by `groupKey`; the same `idempotencyKey` on the same grant and tool is
+ *    one approval, so rerunning an interview adds nothing.
  */
 import type { GrantAction } from './externalCollaborators.js';
 import type { AgentToolDef } from './agentDispatch.js';
@@ -32,7 +38,7 @@ export interface ClientToolScope {
   audience?: string;
 }
 
-export interface ClientProjectTool {
+interface ClientToolBase {
   /** The tool id the model sees. Must start with `openwop:client.<kind>.` so the
    *  capability firewall classifies it (`toolCapabilityResolver.ts`). */
   id: string;
@@ -40,14 +46,74 @@ export interface ClientProjectTool {
   kind: string;
   /** The feature that owns it (for the audit and for removal). */
   featureId: string;
-  effect: 'read';
   /** The grant action every call is checked against. */
   action: GrantAction;
   description: string;
   /** The model-facing input schema. Must not name a scope key (see SCOPE_KEYS). */
   inputSchema: Record<string, unknown>;
+}
+
+export interface ClientReadTool extends ClientToolBase {
+  effect: 'read';
   /** The tool's work, on the grant's scope. Returns what the model reads. */
   run: (scope: ClientToolScope, input: Record<string, unknown>) => Promise<unknown>;
+}
+
+/** One item a collaborator proposes. Becomes one approval. */
+export interface ClientProposal {
+  /** Display grouping: the adopter's submission or session id. ≤ 200 chars. */
+  groupKey: string;
+  /** Same key, same grant, same tool ⇒ the same approval (a rerun adds nothing).
+   *  E.g. `<submissionId>:<field>`. ≤ 200 chars. */
+  idempotencyKey: string;
+  /** What the member reviews, in a sentence. ≤ 500 chars. */
+  summary: string;
+  /** What `apply` receives on approve. JSON, ≤ 16 KB; scope keys are dropped. */
+  payload: Record<string, unknown>;
+}
+
+export interface ClientProposeTool extends ClientToolBase {
+  effect: 'propose';
+  /** Build the proposals from the model's input. Must write NOTHING. */
+  run: (scope: ClientToolScope, input: Record<string, unknown>) => Promise<{ proposals: ClientProposal[] }>;
+  /** Called once, after a member approves. `scope` is rebuilt from the grant the
+   *  proposal was made under. Should be idempotent on `ctx.approvalId`. Throwing
+   *  reopens the approval (it never reads as approved when nothing landed). */
+  apply: (scope: ClientToolScope, payload: Record<string, unknown>, ctx: { approvalId: string; decidedBy: string }) => Promise<void>;
+  /** Optional: who may decide (approve OR reject) this tool's proposals, beyond
+   *  `workspace:write` in the org (e.g. only the project's lead designer). Checked
+   *  before anything changes; `false` or a fault is a 403 `collab_not_decider`.
+   *  Absent ⇒ any `workspace:write` member of the org. */
+  mayDecide?: (scope: ClientToolScope, ctx: { userId: string }) => Promise<boolean>;
+  /** Who decides, for the refusal and the review card ("the project's lead designer"). */
+  deciderLabel?: string;
+}
+
+export type ClientProjectTool = ClientReadTool | ClientProposeTool;
+
+export const MAX_PROPOSALS_PER_CALL = 10;
+const MAX_KEY_CHARS = 200;
+const MAX_SUMMARY_CHARS = 500;
+const MAX_PAYLOAD_BYTES = 16 * 1024;
+
+/** A tool's proposals, checked; throws a host sentence naming what is wrong. */
+export function checkProposals(toolId: string, out: unknown): ClientProposal[] {
+  const list = (out as { proposals?: unknown })?.proposals;
+  if (!Array.isArray(list)) throw new Error(`client tool ${toolId}: run must return { proposals: [...] }`);
+  if (list.length > MAX_PROPOSALS_PER_CALL) throw new Error(`client tool ${toolId}: at most ${MAX_PROPOSALS_PER_CALL} proposals per call`);
+  return list.map((p, i) => {
+    const o = (p ?? {}) as Record<string, unknown>;
+    const str = (k: string, max: number): string => {
+      const v = o[k];
+      if (typeof v !== 'string' || !v.trim() || v.length > max) throw new Error(`client tool ${toolId}: proposal ${i} needs a ${k} of 1 to ${max} characters`);
+      return v;
+    };
+    const payload = o.payload;
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error(`client tool ${toolId}: proposal ${i} needs a payload object`);
+    const clean = withoutScopeKeys(payload as Record<string, unknown>);
+    if (Buffer.byteLength(JSON.stringify(clean), 'utf8') > MAX_PAYLOAD_BYTES) throw new Error(`client tool ${toolId}: proposal ${i} payload is over ${MAX_PAYLOAD_BYTES} bytes`);
+    return { groupKey: str('groupKey', MAX_KEY_CHARS), idempotencyKey: str('idempotencyKey', MAX_KEY_CHARS), summary: str('summary', MAX_SUMMARY_CHARS), payload: clean };
+  });
 }
 
 /** Keys the host owns. A schema naming one is refused at registration; the same keys in
@@ -86,7 +152,9 @@ export function registerClientProjectTool(tool: ClientProjectTool): void {
   // The kind is in the id so the capability firewall's prefix row for that kind
   // (`openwop:client.project`) classifies it; any other id falls to treat-as-risky.
   if (!tool.id.startsWith(`openwop:client.${tool.kind}.`)) throw new Error(`client tool ${tool.id}: ids start with openwop:client.${tool.kind}.`);
-  if ((tool.effect as string) !== 'read') throw new Error(`client tool ${tool.id}: only read tools are supported until ADR 1099 P3`);
+  const effect = (tool as { effect: string }).effect;
+  if (effect !== 'read' && effect !== 'propose') throw new Error(`client tool ${tool.id}: effect must be 'read' or 'propose'`);
+  if (tool.effect === 'propose' && typeof tool.apply !== 'function') throw new Error(`client tool ${tool.id}: a propose tool needs apply()`);
   const named = [...new Set(schemaPropertyNames(tool.inputSchema).filter(isScopeKey))];
   if (named.length > 0) throw new Error(`client tool ${tool.id}: the input schema names host-owned scope keys (${named.join(', ')})`);
   const prior = tools.get(tool.id);
@@ -100,6 +168,10 @@ export function clientToolsFor(kind: string, actions: readonly string[]): Client
 }
 
 /** Every registered client tool id (the agent-prompt tool-id lint reads this). */
+export function clientProjectTool(id: string): ClientProjectTool | undefined {
+  return tools.get(id);
+}
+
 export function clientProjectToolIds(): string[] {
   return [...tools.keys()];
 }

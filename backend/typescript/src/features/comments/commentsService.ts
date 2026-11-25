@@ -25,7 +25,7 @@ import { getBrief as getCreativeBrief } from '../creative-briefs/creativeBriefsS
 import { getList as getPriorityList, listRankedIdeas } from '../priority-matrix/priorityMatrixService.js';
 import { getCollection } from '../kb/kbService.js';
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
-import { getCanvasForTenant } from '../../host/canvasSurface.js';
+import { canvasReadAllowed, getCanvasForTenant } from '../../host/canvasSurface.js';
 import { getConversationMeta } from '../../host/conversationStore.js';
 import { isVisibleToAsync } from '../../host/conversationVisibility.js';
 import { listMembers } from '../../host/accessControlService.js';
@@ -336,11 +336,13 @@ const TARGETS: Record<ResourceType, CommentTarget> = {
   // canvas resolves only for a caller who may READ that subject.
   canvas_document: {
     featureId: 'document-editor',
-    async validate(tenantId, _orgId, resourceId, caller) {
+    async validate(tenantId, orgId, resourceId, caller) {
       const canvasId = resourceId.split('#')[0] ?? '';
       const c = await getCanvasForTenant(tenantId, canvasId);
       if (!c || c.canvasTypeId !== 'canvas.document') return null;
-      if (c.ownerSubject && !(await subjectReadAllowed(tenantId, c.ownerSubject, caller))) return null;
+      // ADR 1160 D3 — THE canvas read predicate (org, owner, user-owner rule) and
+      // the canvas's own org, as the editor's `loadCanvas` decides it.
+      if ((c.orgId && c.orgId !== orgId) || !(await canvasReadAllowed(tenantId, c, caller))) return null;
       const st = c.state && typeof c.state === 'object' && !Array.isArray(c.state) ? (c.state as Record<string, unknown>) : {};
       const title = typeof st.title === 'string' && st.title ? st.title : (c.name || 'Document');
       return { title, ownerId: '', restricted: Boolean(c.ownerSubject) };
@@ -355,13 +357,14 @@ const TARGETS: Record<ResourceType, CommentTarget> = {
   // own ids; the Slide Designer render tool preserves them, ADR 0886 D5).
   canvas_slides: {
     featureId: 'slides',
-    async validate(tenantId, _orgId, resourceId, caller) {
+    async validate(tenantId, orgId, resourceId, caller) {
       const parts = resourceId.split('#');
       if (parts.length > 2) return null;
       const [canvasId = '', slideId] = parts;
       const c = await getCanvasForTenant(tenantId, canvasId);
       if (!c || c.canvasTypeId !== 'canvas.slides') return null;
-      if (c.ownerSubject && !(await subjectReadAllowed(tenantId, c.ownerSubject, caller))) return null;
+      // ADR 1160 D3 — as `canvas_document`.
+      if ((c.orgId && c.orgId !== orgId) || !(await canvasReadAllowed(tenantId, c, caller))) return null;
       const st = c.state && typeof c.state === 'object' && !Array.isArray(c.state) ? (c.state as Record<string, unknown>) : {};
       const deckTitle = typeof st.title === 'string' && st.title ? st.title : (c.name || 'Slide deck');
       let title = deckTitle;

@@ -82,6 +82,8 @@ export const APPROVAL_AUDIENCE: Record<HostApprovalKind, Audience> = {
   // The visitor's captured PII rides `proposal`; the fallthrough would hand it to every
   // member of the surface tenant.
   'anon-surface-write': { orgScope: 'workspace:write' },
+  // ADR 1099 D6 — a collaborator's proposal is the project org's business.
+  'collab-proposal': { orgScope: 'workspace:write' },
   // Field sales — each its OWN scope. One shared scope here would widen three audiences.
   'dealer-registration': { orgScope: 'host:dealers:manage' },
   'territory-model-transition': { orgScope: 'host:territories:manage' },

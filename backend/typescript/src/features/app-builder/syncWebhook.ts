@@ -180,7 +180,10 @@ async function processVerifiedPush(
   const after = typeof payload.after === 'string' ? payload.after : '';
 
   const canvas = await getCanvasForTenant(binding.tenantId, binding.canvasId);
-  if (!canvas || canvas.canvasTypeId !== 'canvas.app-builder') {
+  // ADR 1160 D3 — a binding made in another org than the canvas's does not
+  // write it (the bind route's own `loadCanvas` now 404s such a canvas; this
+  // covers bindings made before it did). Same answer as a gone canvas.
+  if (!canvas || canvas.canvasTypeId !== 'canvas.app-builder' || (canvas.orgId && binding.orgId && canvas.orgId !== binding.orgId)) {
     await conclude(binding, args.deliveryId, 'ignored', { detail: 'canvas gone' });
     return { status: 200, outcome: 'ignored', detail: 'canvas gone' };
   }

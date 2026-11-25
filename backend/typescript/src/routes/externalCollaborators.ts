@@ -24,6 +24,7 @@ import {
 } from '../host/externalCollaborators.js';
 import { startCollaboratorExpiryNotices } from '../host/externalCollaboratorExpiry.js';
 import { runCollaboratorTurn } from '../host/collaboratorTurn.js';
+import { registerCollabProposalGate } from '../host/collabProposals.js';
 import type { Storage } from '../storage/storage.js';
 
 /** What a collaborator sees of a usable grant: the grant kind's surface switch on
@@ -68,6 +69,7 @@ async function requireAnySurface(tenantId: string, orgId: string): Promise<void>
 
 export function registerExternalCollaboratorRoutes(app: Express, storage: Storage): void {
   startCollaboratorExpiryNotices();
+  registerCollabProposalGate(); // ADR 1099 D6 — a member decides each collaborator proposal
 
   // ── The collaborator's side (ADR 0958 P2). A signed-in person in THEIR OWN home
   // tenant; every answer is derived from a grant they are bound to, so nothing here
