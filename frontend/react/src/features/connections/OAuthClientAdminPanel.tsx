@@ -4,7 +4,7 @@
  * (client id + secret) through the UI instead of `OPENWOP_OAUTH_*` env vars, so
  * enabling Google / Slack is self-service with no redeploy.
  *
- * Gating: the backend is the authority. We call `listOAuthClients()`; a 403
+ * Gating: the backend is the authority. We call `listOAuthClientsWithRedirects()`; a 403
  * (ForbiddenError) means the caller isn't a superadmin, so the whole panel
  * renders nothing — it never appears for a non-operator. The client SECRET is
  * write-only (sealed server-side, never read back), mirroring the `/keys` BYOK UX.
@@ -18,7 +18,7 @@ import { confirm } from '../../ui/confirm.js';import { toast } from '../../ui/to
 import { KeyIcon } from '../../ui/icons/index.js';
 import {
   listProviders,
-  listOAuthClients,
+  listOAuthClientsWithRedirects,
   setOAuthClient,
   deleteOAuthClient,
   ForbiddenError,
@@ -26,30 +26,27 @@ import {
   type OAuthClientConfig,
 } from './connectionsClient.js';
 
-/** The browser-reachable redirect URI the operator must register with the
- *  provider — the host builds the same path off `OPENWOP_OAUTH_CALLBACK_BASE_URL`
- *  (defaulting to this origin's `/api`). Shown as copy-paste guidance. */
-function redirectUriHint(provider: string): string {
-  const origin = typeof window !== 'undefined' ? window.location.origin : '';
-  return `${origin}/api/host/openwop-app/connections/${provider}/callback`;
-}
-
 export function OAuthClientAdminPanel(): JSX.Element | null {
   const { t } = useTranslation('connections');
   const [hidden, setHidden] = useState(false); // true ⇒ not a superadmin
   const [loading, setLoading] = useState(true);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [configs, setConfigs] = useState<OAuthClientConfig[]>([]);
+  // The redirect URI each provider must register: the SERVER's own
+  // `redirectUri()`, never a client-side guess (a guessed one failed at the
+  // provider on an adopter's production).
+  const [redirectUris, setRedirectUris] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState<Record<string, { clientId: string; clientSecret: string }>>({});
   const [busy, setBusy] = useState<string | null>(null);
 
   const load = useCallback(() => {
     setError(null);
-    void Promise.all([listProviders(), listOAuthClients()])
-      .then(([provs, cfgs]) => {
+    void Promise.all([listProviders(), listOAuthClientsWithRedirects()])
+      .then(([provs, { clients, redirectUris: uris }]) => {
         setProviders(provs);
-        setConfigs(cfgs);
+        setConfigs(clients);
+        setRedirectUris(uris);
       })
       .catch((err) => {
         if (err instanceof ForbiddenError) { setHidden(true); return; }
@@ -131,10 +128,12 @@ export function OAuthClientAdminPanel(): JSX.Element | null {
                   {cfg?.configured ? t('configured') : t('notConfigured')}
                 </span>
               </div>
-              <label className="u-grid u-gap-1">
-                <span className="u-label-sm">{t('redirectUriLabel', { label: p.label })}</span>
-                <input type="text" readOnly value={redirectUriHint(p.id)} onFocus={(e) => e.currentTarget.select()} />
-              </label>
+              {redirectUris[p.id] ? (
+                <label className="u-grid u-gap-1">
+                  <span className="u-label-sm">{t('redirectUriLabel', { label: p.label })}</span>
+                  <input type="text" readOnly value={redirectUris[p.id]} onFocus={(e) => e.currentTarget.select()} />
+                </label>
+              ) : null}
               <label className="u-grid u-gap-1">
                 <span className="u-label-sm">{cfg ? t('clientIdLabelCurrent', { clientId: cfg.clientId }) : t('clientIdLabel')}</span>
                 <input

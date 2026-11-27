@@ -1,6 +1,6 @@
 {
   "_comment": "ADR 0052 §D2/§D7 — machine-readable release manifest and the single source of truth for REQUIRED UPGRADE STOPS. /cut-app-release PREPENDS each immutable vX.Y.Z release into `releases` (newest first) and sets `latest`. An upgrade tool reads `releases` to compute which required stops sit between a customer's current version and the target. `latest` names the newest stable (the moving alias the /install/ download points at). `requiredStop` (land on this version before going past it) and `rollingSafe` (the previous binary may keep running against this version's schema; false ⇒ stop every old instance first, even when skipping past it) are separate constraints (ADR 0052 §D2a); `node scripts/upgrade-plan.mjs <from> [<to>]` computes the plan. The per-entry field shape is documented in `_releaseShape` — that is a SCHEMA EXAMPLE, never a real release; do not parse it as one.",
-  "latest": "0.22.0",
+  "latest": "0.23.0",
   "_releaseShape": {
     "version": "X.Y.Z",
     "date": "YYYY-MM-DD",
@@ -17,6 +17,21 @@
     "notes": "CHANGELOG.md#xyz"
   },
   "releases": [
+    {
+      "version": "0.23.0",
+      "date": "2026-11-27",
+      "requiredStop": false,
+      "requiredStopReason": null,
+      "rollingSafe": true,
+      "rollingUnsafeReason": null,
+      "schemaVersion": {
+        "sqlite": 54,
+        "postgres": 52
+      },
+      "appMigrationVersion": 27,
+      "breakingConfig": [],
+      "notes": "CHANGELOG.md#0230--2026-11-27"
+    },
     {
       "version": "0.22.0",
       "date": "2026-11-25",

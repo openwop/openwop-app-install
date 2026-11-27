@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { locateRepoSchemasDir } from '../src/host/_repoPath.js';
+import { locateRepoSchemasV2Dir } from '../src/host/_repoPath.js';
 import { V2_TENANT_ID, fromWireRunId, toWireRunId } from '../src/host/v2Ids.js';
 import { mintAnonSession } from '../src/middleware/cookieSession.js';
 
@@ -45,7 +45,7 @@ function tenantSegmentOf(boundPattern: string): string {
 
 const ids = JSON.parse(
   readFileSync(
-    join(locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'run-event.schema.json'), 'v2', 'ids.schema.json'),
+    join(locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url))), 'ids.schema.json'),
     'utf8',
   ),
 ) as { $defs: Record<string, { pattern?: string }> };

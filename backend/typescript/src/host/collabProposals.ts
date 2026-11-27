@@ -56,6 +56,7 @@ export async function holdProposals(use: GrantUse, tool: ClientProposeTool, scop
         payload: p.payload,
         runId,
         ...(scope.audience ? { audience: scope.audience } : {}),
+        ...(use.collaborator.displayName ? { collaboratorLabel: use.collaborator.displayName.slice(0, 120) } : {}),
       },
     });
     if (r.created) held += 1; else duplicates += 1;

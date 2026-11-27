@@ -1,7 +1,9 @@
 /**
  * ADR 0958 P2 — the collaborator's pages. A vendor, freelancer or client reviewer
  * signs in to THEIR OWN account; these pages show only what an agency granted
- * them, read through the server's one per-use check. No chat, no agency nav.
+ * them, read through the server's one per-use check. No agency nav. ADR 1099 P4:
+ * a grant whose kind names an agent shows the portal chat (the shared
+ * ConversationView on the collaborator lane), and the sections features add.
  *
  *  - `CollabHomePage` — "Shared with me": every grant usable now, across agencies.
  *  - `CollabGrantPage` — one granted resource (an approved brief, a campaign).
@@ -27,6 +29,7 @@ import {
   acceptInvite, CollabError, getGrant, INTAKE_ACCEPT, INTAKE_LICENSES, INTAKE_MAX_BYTES, INTAKE_MAX_FILES, listIntakes, listShared, readInvite,
   sendIntake, withdrawIntake, type GrantView, type IntakeLicense, type IntakeView, type InviteView, type SharedItem,
 } from './collabClient.js';
+import { PortalChat, PortalSections } from './ProjectPortal.js';
 
 type TFn = ReturnType<typeof useTranslation>['t'];
 const KIND_KEYS: Record<string, string> = { 'creative-brief': 'kindCreativeBrief', campaign: 'kindCampaign', project: 'kindProject' };
@@ -112,19 +115,28 @@ export function CollabGrantPage(): JSX.Element {
       .catch((e: unknown) => setState(e instanceof CollabError && e.status === 404 ? 'gone' : 'failed'));
   }, [grantId]);
   useEffect(load, [load]);
+  // ADR 1099 D10 — an answered turn can change what a section shows: re-read them.
+  const [sectionNonce, setSectionNonce] = useState(0);
+  const onAnswered = useCallback(() => setSectionNonce((n) => n + 1), []);
 
   const back = <Link to="/collab" className="btn btn-ghost btn-sm">{t('backToShared')}</Link>;
   if (state === 'loading') return <StateCard loading title={t('loading')} />;
   if (state === 'gone') return <StateCard title={t('goneTitle')} body={t('goneBody')} action={back} />;
   if (state === 'failed' || !view) return <StateCard announce title={t('loadFailedTitle')} body={t('loadFailedBody')} action={<Button onClick={load}>{t('retry')}</Button>} />;
+  // ADR 1099 P4 — the portal page: the project view, the sections features add
+  // (D10), then the conversation with the project agent (D9). Single column, so on
+  // a phone the sections stack above the chat; the skip link reaches the chat.
   return (
     <div className="u-grid u-gap-4">
+      {view.chat ? <a className="skip-link" href="#portal-chat">{t('portalSkipToChat')}</a> : null}
       <div>{back}</div>
       <PageHeader eyebrow={view.clientName ?? t('fromAgency')} title={view.title} lede={t('accessUntil', { date: formatDate(view.grant.expiresAt) })} />
       <section className="surface-card u-grid u-gap-3" aria-label={view.title}>
         <ResourceBody view={view} t={t} />
       </section>
       {view.grant.resourceKind === 'campaign' && view.grant.actions.includes('upload') ? <IntakeSection grantId={view.grant.grantId} /> : null}
+      <PortalSections grantId={view.grant.grantId} kind={view.grant.resourceKind} nonce={sectionNonce} />
+      {view.chat ? <PortalChat grantId={view.grant.grantId} onAnswered={onAnswered} /> : null}
     </div>
   );
 }

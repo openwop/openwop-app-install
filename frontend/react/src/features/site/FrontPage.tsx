@@ -28,6 +28,7 @@ import i18n from '../../i18n/index.js';
 import { brand } from '../../brand/brand.js';
 import { isStockOpenwopBrand } from '../../brand/defaults.js';
 import { Skeleton } from '../../ui/Skeleton.js';
+import { PublicPageLoading } from './PublicPageLoading.js';
 import { useDemoMode } from '../../client/useDemoMode.js';
 import { RenderSections } from '../cms/SectionRenderer.js';
 import type { Section } from '../cms/cmsClient.js';
@@ -277,7 +278,7 @@ export function FrontPage({ orgId, slug, surface, embed }: { orgId: string; slug
     return () => { document.title = prev; };
   }, [blocked]);
 
-  if (state.kind === 'loading') return <div className="u-p-4" role="status" aria-label={t('common:loading')}><Skeleton /></div>;
+  if (state.kind === 'loading') return <PublicPageLoading />;
 
   if (state.kind === 'notFound' || state.kind === 'error' || blocked) {
     const notFound = state.kind === 'notFound' || blocked;

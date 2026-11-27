@@ -33,7 +33,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
-import { locateRepoSchemasDir } from '../host/_repoPath.js';
+import { locateRepoSchemasV2Dir } from '../host/_repoPath.js';
 import { runUnderContract } from '../storage/eventEraAdapter.js';
 import { projectV2RunIds, toWireRunId } from '../host/v2Ids.js';
 import { createLogger } from '../observability/logger.js';
@@ -174,8 +174,8 @@ export const HOST_OWN_UNVERSIONED_MOUNTS: readonly string[] = [
 
 function readV2PathManifestOperations(): unknown {
   const manifestPath = join(
-    locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json'),
-    'v2', 'path-manifest.json',
+    locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url))),
+    'path-manifest.json',
   );
   const raw = JSON.parse(readFileSync(manifestPath, 'utf8')) as unknown;
   return Array.isArray(raw)
@@ -276,8 +276,8 @@ export function isVendorPath(path: string): boolean {
  */
 function assertVendorOrgNotReserved(): void {
   const manifestPath = join(
-    locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json'),
-    'v2', 'path-manifest.json',
+    locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url))),
+    'path-manifest.json',
   );
   const raw = JSON.parse(readFileSync(manifestPath, 'utf8')) as unknown;
   const ops: unknown = Array.isArray(raw)
@@ -344,8 +344,8 @@ const REMOVED_RETRY_KEYS: readonly string[] = ['retryAfter', 'retryAfterMs', 're
  */
 const V2_REGISTERED_CODES: ReadonlySet<string> = (() => {
   try {
-    const dir = locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json');
-    const doc = JSON.parse(readFileSync(join(dir, 'v2', 'error-envelope.schema.json'), 'utf8')) as {
+    const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
+    const doc = JSON.parse(readFileSync(join(dir, 'error-envelope.schema.json'), 'utf8')) as {
       properties?: { error?: { oneOf?: Array<{ enum?: string[] }> } };
     };
     return new Set(doc.properties?.error?.oneOf?.flatMap((b) => b.enum ?? []) ?? []);

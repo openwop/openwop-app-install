@@ -24,7 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { DurableCollection, keyableTenant as validTenant, registerTenantPurgeHook } from './hostExtPersistence.js';
 import { scanPrefix } from './durable/durableStore.js';
 import { registerKvAgeOut } from './kvAgeOut.js';
-import { locateRepoSchemasDir } from './_repoPath.js';
+import { locateRepoSchemasV2Dir } from './_repoPath.js';
 import { createLogger } from '../observability/logger.js';
 import type { HostEventEnvelope } from './hostEventTypes.js';
 
@@ -81,7 +81,7 @@ let cachedWire: boolean | undefined;
 export function rfc0250WireAvailable(): boolean {
   if (cachedWire !== undefined) return cachedWire;
   try {
-    const dir = join(locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json'), 'v2');
+    const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
     const schema = JSON.parse(readFileSync(join(dir, 'capabilities.schema.json'), 'utf8')) as {
       properties?: { hostEvents?: { properties?: Record<string, unknown> } };
     };

@@ -27,11 +27,11 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { GENERIC_HTTP_CONSUMER, isGovernedWriteProvider } from '../../host/governedWriteProviders.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import Ajv2020, { type ValidateFunction } from 'ajv/dist/2020.js';
-import addFormats from 'ajv-formats';
+import type { ValidateFunction } from 'ajv/dist/2020.js';
+import { compileV2Schema } from '../../host/v2SchemaCompile.js';
 import { OpenwopError, type OpenwopErrorCode } from '../../types.js';
 import { createLogger } from '../../observability/logger.js';
-import { locateRepoSchemasDir } from '../../host/_repoPath.js';
+import { locateRepoSchemasV2Dir } from '../../host/_repoPath.js';
 import { isParkedPackDirName } from '../../bootstrap/mountLocalPacks.js';
 import { semverGte } from '../../util/semver.js';
 import { verifyMcpReachOnRegistration } from './oauthFlow.js';
@@ -111,7 +111,11 @@ function assertProviderIdentity(manifest: ConnectionPackManifest, prevVersion: s
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SCHEMAS_DIR = locateRepoSchemasDir(__dirname, 'connection-pack-manifest.schema.json');
+// RFC 0266 — judged by the v2 schema (`$ref`s `ids.schema.json`); the frozen flat
+// v1 copy is no longer vendored. The v2 schema's only additions over v1 are the
+// `openwop-` extension prefix and an optional v2 `signing` block: all 27 in-tree
+// and conformance-fixture connection manifests validate under both (measured).
+const SCHEMAS_V2_DIR = locateRepoSchemasV2Dir(__dirname, 'connection-pack-manifest.schema.json');
 
 /** §B.2 normative secret-property blocklist (spec/v1/connection-packs.md clause 2). */
 const SECRET_PROPS = new Set([
@@ -122,12 +126,7 @@ const SECRET_PROPS = new Set([
 let _validator: ValidateFunction | null = null;
 function manifestValidator(): ValidateFunction {
   if (_validator) return _validator;
-  const ajv = new Ajv2020({ allErrors: true, strict: false });
-  addFormats(ajv);
-  const schema = JSON.parse(
-    readFileSync(join(SCHEMAS_DIR, 'connection-pack-manifest.schema.json'), 'utf8'),
-  ) as Record<string, unknown>;
-  _validator = ajv.compile(schema);
+  _validator = compileV2Schema(SCHEMAS_V2_DIR, 'connection-pack-manifest.schema.json');
   return _validator;
 }
 
@@ -382,10 +381,10 @@ function ajvErrors(v: ValidateFunction): string {
 
 /** Default pack roots: the in-tree `examples/connection-packs/` (when present)
  *  plus an operator dir via `OPENWOP_CONNECTION_PACKS_DIR`. Non-existent roots
- *  are skipped by the loader. `SCHEMAS_DIR` is `<repo>/schemas`, so its parent
- *  is the repo root. */
+ *  are skipped by the loader. `SCHEMAS_V2_DIR` is `<repo>/schemas/v2`, so its
+ *  grandparent is the repo root. */
 export function defaultConnectionPackRoots(): string[] {
-  const repoRoot = dirname(SCHEMAS_DIR);
+  const repoRoot = dirname(dirname(SCHEMAS_V2_DIR));
   return [
     join(repoRoot, 'examples', 'connection-packs'),
     process.env.OPENWOP_CONNECTION_PACKS_DIR ?? '',

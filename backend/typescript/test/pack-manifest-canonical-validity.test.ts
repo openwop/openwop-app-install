@@ -26,10 +26,16 @@
  *
  * #5993: form-content packs validate against the v2 schema the host LOADS them
  * under (a `FormField.when` condition, RFC 0177 §E.4, is legal there and absent
- * from the frozen v1). The `when` case pins the v1 refusal to that one key, and the
- * undefined-key case pins both schemas' refusal to that one key, so neither can
- * pass on an unrelated error. Dropping `when` from v2, or opening either schema's
- * FormField to unknown keys, reds them.
+ * from the frozen v1). The `when` case pins that v2 admits it, and the
+ * undefined-key case pins v2's refusal to that one key, so neither can pass on an
+ * unrelated error. Dropping `when` from v2, or opening its FormField to unknown
+ * keys, reds them.
+ *
+ * RFC 0266 — every schema here is read from `schemas/v2/`. The flat v1 tree is no
+ * longer vendored, so the two v1 halves this file carried (the frozen v1 refusing
+ * `when`, and the v1 artifact-type residue) are gone; the v1 refusal of `when` was
+ * history, not a rule this host enforces. The artifact-type residue is pinned
+ * against v2, where it is the same: the `artifactTypeId` namespace and nothing else.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
@@ -112,23 +118,19 @@ describe('form-content packs validate against the schema the host loads them und
     templates: Array<{ fields: Array<Record<string, unknown>> }>;
   };
 
-  it('a field with a `when` condition (RFC 0177 §E.4) validates under v2, and the frozen v1 refuses it', () => {
+  it('a field with a `when` condition (RFC 0177 §E.4) validates under v2', () => {
     const manifest = starter();
     const fields = manifest.templates[0]!.fields;
     expect(fields.length, 'the starter form needs two fields for a condition').toBeGreaterThan(1);
     fields[1]!.when = { type: 'truthy', left: String(fields[0]!.id) };
     const v2 = compile(ENFORCED['form-content']!);
     expect(v2(manifest), JSON.stringify(v2.errors?.slice(0, 3))).toBe(true);
-    const v1 = compile('form-content-pack-manifest.schema.json');
-    expect(v1(manifest), 'v1 should not define `when`').toBe(false);
-    // Refused for `when` and nothing else: the unmodified starter is v1-valid.
-    expect(v1.errors?.map((e) => [e.instancePath, e.keyword, e.params.additionalProperty])).toEqual([['/templates/0/fields/1', 'additionalProperties', 'when']]);
   });
 
   it('a field neither schema defines is still refused (sabotage witness)', () => {
     const manifest = starter();
     manifest.templates[0]!.fields[0]!.notAFormFieldKey = true;
-    for (const file of [ENFORCED['form-content']!, 'form-content-pack-manifest.schema.json']) {
+    for (const file of [ENFORCED['form-content']!]) {
       const validate = compile(file);
       expect(validate(manifest), `${file} accepted an undefined FormField key`).toBe(false);
       // Exactly that key, on that field: not some other error the starter happens to carry.
@@ -149,7 +151,7 @@ describe('form-content packs validate against the schema the host loads them und
  */
 describe('artifact-type packs: the residual canonical gap is EXACTLY the id namespace', () => {
   it('each residual pack fails on `artifactTypeId` and on nothing else', () => {
-    const validate = compile('artifact-type-pack-manifest.schema.json');
+    const validate = compile('v2/artifact-type-pack-manifest.schema.json');
     for (const dir of RESIDUAL_ID_NAMESPACE_ONLY) {
       const manifestPath = join(PACKS, dir, 'pack.json');
       expect(existsSync(manifestPath), `${dir}: pack.json is missing`).toBe(true);
@@ -192,7 +194,7 @@ describe('artifact-type packs: the residual canonical gap is EXACTLY the id name
     const carrier = (manifest.artifactTypes ?? []).find((at) => 'x-openwop-app.canvas' in at);
     expect(carrier, '`x-openwop-app.canvas` is gone from the pack — the extension it guards was dropped').toBeDefined();
 
-    const validate = compile('artifact-type-pack-manifest.schema.json');
+    const validate = compile('v2/artifact-type-pack-manifest.schema.json');
     validate(manifest);
     const extensionErrors = (validate.errors ?? []).filter(
       (e) => e.keyword === 'additionalProperties' || String(e.instancePath).includes('x-openwop-app'),

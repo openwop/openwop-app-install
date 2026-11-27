@@ -1,7 +1,8 @@
 {
-  "testCorpusV1Refs": 283,
+  "testCorpusV1Refs": 280,
   "ownV1PathRefs": 0,
   "keptV1Lines": 9,
   "spaOpenWopVersionHeaders": 4,
-  "backendVersionedOwnUrls": 0
+  "backendVersionedOwnUrls": 0,
+  "flatSchemaReads": 0
 }

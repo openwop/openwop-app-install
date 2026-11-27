@@ -166,7 +166,7 @@ import {
   type RetryReason,
 } from '../host/envelopeReliabilityEmit.js';
 import { ASSET_SERVE_PATH } from '../host/assetServePath.js';
-import { listSelectableProviderIds } from '../providers/catalog.js';
+import { defaultTranscriptionModel, listSelectableProviderIds } from '../providers/catalog.js';
 
 /**
  * Is the deterministic `mock` provider routable?
@@ -587,9 +587,11 @@ async function transcribeManaged(
   if (process.env.OPENWOP_VOICE_MOCK === 'true') {
     return `live transcript (${Buffer.from(contentBase64, 'base64').length} bytes)`;
   }
+  const provider = req.provider && req.provider !== 'mock' ? req.provider : 'google';
   const aiResult = await callAI(scope, {
-    provider: req.provider && req.provider !== 'mock' ? req.provider : 'google',
-    model: req.model ?? 'gemini-2.5-flash',
+    provider,
+    // #6242 — the catalog's quick-class default, never a literal the catalog can drop.
+    model: req.model ?? defaultTranscriptionModel(provider),
     messages: [
       { role: 'system', content: AUDIO_TRANSCRIPTION_SYSTEM_PROMPT },
       { role: 'user', content: [

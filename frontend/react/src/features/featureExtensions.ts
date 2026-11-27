@@ -2,7 +2,8 @@
  * ADR 1031 P2 — the reader for feature declarations that only LAZY surfaces use:
  * dashboard tiles (`dashboard/allTiles.ts`), review renderers
  * (`chat/reviews/reviewArtifactRenderers.tsx`), review-card sections
- * (`chat/reviews/ReviewCard.tsx`), chat run-header workflow names
+ * (`chat/reviews/ReviewCard.tsx`), portal sections (`features/collab/CollabPages.tsx`),
+ * chat run-header workflow names
  * (`chat/hooks/chatSession/useTurnTransport.ts`) and card-owned BYOK ref prefixes
  * (`byok/KeysPage.tsx`).
  *
@@ -24,6 +25,7 @@ import {
   applyFeatureNavMessages,
   FRONTEND_FEATURES,
   type FeatureLazyExtensions,
+  type FeaturePortalSection,
   type FeatureReviewArtifactRenderer,
   type FeatureReviewCardSection,
   type FrontendFeature,
@@ -63,6 +65,18 @@ export function featureReviewArtifactRenderers(): FeatureReviewArtifactRenderer[
 /** ADR 1031 P2 — review-card sections, rendered after the host's own. */
 export function featureReviewCardSections(): FeatureReviewCardSection[] {
   return LOADED.flatMap(({ ext }) => [...(ext.reviewCardSections ?? [])]);
+}
+
+/** ADR 1099 D10 — portal sections, for `collab/CollabGrantPage`. A duplicate
+ *  (kind, id) keeps the first registration, in registry order. */
+export function featurePortalSections(): FeaturePortalSection[] {
+  const seen = new Set<string>();
+  return LOADED.flatMap(({ ext }) => [...(ext.portalSections ?? [])]).filter((s) => {
+    const key = `${s.kind}\u0000${s.id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 /** ADR 1031 P2 — a feature's display name for `workflowId` in `lng`, falling back

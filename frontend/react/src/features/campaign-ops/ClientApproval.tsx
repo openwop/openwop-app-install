@@ -5,7 +5,9 @@
  *    switch between "the agency approves" and "the client approves". Shown only
  *    while the client approval portal is on.
  *  - `SendToClient` (on an in-review change): makes a private link per approver
- *    and shows each once, to copy and send. Sending again replaces the old links.
+ *    and emails it (ADR 0924 P2c), showing each link's delivery honestly; with no
+ *    email set up, shows each once to copy and send. Sending again replaces the
+ *    old links.
  *
  * The client never gets an account: the link is the whole of their access, and
  * it ends when the change is decided, the approver is removed or seven days pass.
@@ -124,11 +126,17 @@ export function SendToClient({ orgId, changeSetId, disabled }: { orgId: string; 
       </div>
       {links ? (
         <div className="u-grid u-gap-2">
-          <p className="u-m-0 u-fs-13 u-text-muted">{t('sendToClientHelp')}</p>
+          <p className="u-m-0 u-fs-13 u-text-muted">{links.some((l) => l.delivery?.channel === 'email') ? t('sendToClientHelpEmailed') : t('sendToClientHelp')}</p>
           <ul className="u-list-plain u-grid u-gap-2 u-m-0">
             {links.map((l) => (
               <li key={l.approverId} className="u-grid u-gap-1">
                 <span className="u-fs-13">{l.displayName} · {l.email}</span>
+                {l.delivery?.channel === 'email' && l.delivery.status === 'sent'
+                  ? <span className="u-fs-12 u-text-muted">{t('linkEmailed', { email: l.email })}</span> : null}
+                {l.delivery?.status === 'failed'
+                  ? <Notice variant="error" announce={t('linkNotDelivered')}>{t('linkNotDelivered')}</Notice> : null}
+                {l.delivery?.channel === 'copy' ? <span className="u-fs-12 u-text-muted">{t('linkCopyOnly')}</span> : null}
+                {l.verified ? <span className="u-fs-12 u-text-muted">{t('linkVerifiedNote', { email: l.email })}</span> : null}
                 <div className="u-flex u-flex-wrap u-items-end u-gap-2">
                   <TextField label={t('linkFor', { name: l.displayName })} value={l.url} readOnly onFocus={(e) => e.currentTarget.select()} className="u-minw-240" />
                   <Button size="sm" variant="secondary" onClick={() => copy(l)}>{copied === l.approverId ? t('linkCopied') : t('linkCopy')}</Button>

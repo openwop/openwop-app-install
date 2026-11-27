@@ -66,7 +66,7 @@ import { scheduledJobReadable } from '../host/scheduledJobReadGates.js';
 import { isFeatureReservedJobId, reservedJobOwner, scheduledJobCadenceRefusal } from '../host/scheduledJobFireGates.js';
 import { keyDeclarationPermits } from '../host/protocolAuthorization.js';
 import { callerHoldsTenantScope, callerOwnerSpellings, requireTenantWrite } from '../features/featureRoute.js';
-import { CALLER_LINKAGE_KEYS } from '../host/runLinkage.js';
+import { CALLER_AI_DEFAULT_KEYS, CALLER_LINKAGE_KEYS } from '../host/runLinkage.js';
 import { APPROVER_SCOPE_KEYS } from '../host/runDispatch.js';
 
 interface Deps {
@@ -100,7 +100,7 @@ function tenantOf(req: Request): string {
 // client may not set it on a job either (the same rule as `POST /runs`).
 const RESERVED_JOB_METADATA_KEYS = new Set<string>(['actingUserId', 'heartbeat', 'schedule', 'kanban', 'approval', 'assistantLoop', 'disabledReason', 'orgScopeSubject', 'personalTenant', 'goalId', 'purpose', 'openwop-app.campaignOps',
   // ADR 0985 (review M2) — the chat tools' marker: their per-user caps count it.
-  'tool', ...CALLER_LINKAGE_KEYS, ...APPROVER_SCOPE_KEYS]);
+  'tool', ...CALLER_LINKAGE_KEYS, ...CALLER_AI_DEFAULT_KEYS, ...APPROVER_SCOPE_KEYS]);
 
 /** ADR 0908 D2 — the refusal for a goal's continuation job, naming its owner. */
 /** ADR 0985 D3 — the 409 for a job under a feature-reserved prefix names the

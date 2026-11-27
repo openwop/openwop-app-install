@@ -200,6 +200,13 @@ const REVIEWED_EXEMPT = new Map<string, Exemption>([
   // ADR 1099 D5 (P2) — the collaborator-turn day caps: `{ cKey, turns, tenantId,
   // updatedAt }`, keyed `grant:<grantId>:<day>` or `tenant:<tenantId>:<day>`. A count,
   // never a message, a person or an email; aged out after 2 days (kvAgeOut).
+  // ADR 1099 P3d — a collaborator's conversation with the agent: `{ grantId, tenantId,
+  // orgId, collaboratorId, messages[] }`. Its subject is an OUTSIDE collaborator, not a
+  // member of the tenant, so a member DSAR cannot reach it by design. It is erased by
+  // the collaborator path instead: a CollaboratorEraseHook (eraseExternalCollaboratorSubject,
+  // the person's own erasure or the firm's by email) and a CollaboratorPurgeHook (org
+  // teardown), plus a 30-day kvAgeOut and the collaborator's own clear. Tenant-indexed.
+  ['collab:turn:memory', { reason: 'ADR 1099 P3d collaborator conversation — subject is an outside collaborator, erased via the collaborator erase and purge hooks (eraseExternalCollaboratorSubject), not a member SubjectEraser; also aged out after 30 days and clearable by the collaborator', tenantTeardownClaim: true }],
   ['collab:turn:day', { reason: 'ADR 1099 P2 collaborator-turn day counter — a grant or tenant id, a day and a turn count; no subject, message or actor; kvAgeOut deletes it after 2 days' }],
   ['workflow:spend-day', { reason: 'ADR 0482 per-(tenant, workflow, day) spend counter — counts + alert flags only, no subject content; purged on ADR 0284 tenant teardown', tenantTeardownClaim: true }],
   // ADR 0738 P2 — core Kanban's executable projection stores only tenant-scoped

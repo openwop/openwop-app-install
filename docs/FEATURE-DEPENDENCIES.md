@@ -10,9 +10,9 @@
 | Bucket | Count | Meaning |
 |---|---|---|
 | Declared (`dependsOn`) | 16 | real hard deps, disable-lock active |
-| Undeclared → always-on target | 119 | correctly undeclared — an always-on dep can never lock (ADR 0439) |
+| Undeclared → always-on target | 120 | correctly undeclared — an always-on dep can never lock (ADR 0439) |
 | **[1] Primitive** (undeclared → toggleable) | **0** | misfiled cross-cutting infra → **extract to a `host/` seam** |
-| **[2] Soft-read** (undeclared → toggleable) | **109** | domain read, target vacuous-when-off → **leave documented** (no lock) |
+| **[2] Soft-read** (undeclared → toggleable) | **110** | domain read, target vacuous-when-off → **leave documented** (no lock) |
 | **[3] Hard-dep** (undeclared → toggleable) | **0** | target refuses when off → **declare `dependsOn`** |
 
 The goal (ADR 0446) is **not** "drive the total to zero." It is: extract the **[1]**
@@ -113,6 +113,7 @@ _None._
 | `campaign-orchestration` | `email` | static | emailService | emailService self-gates ONLY inside its CRM merge-lifecycle subscriber (emailFeatureLive → relink work-avoidance, #3326); all 33 exported send/read functions are ungated, so no consumer breaks when email is off ⇒ [2] (ADR 0446 F file-vs-symbol, target-level) |
 | `crm` | `email` | static | emailService, engagementService | emailService self-gates ONLY inside its CRM merge-lifecycle subscriber (emailFeatureLive → relink work-avoidance, #3326); all 33 exported send/read functions are ungated, so no consumer breaks when email is off ⇒ [2] (ADR 0446 F file-vs-symbol, target-level) |
 | `orgs` | `email` | static | emailService, brokeredProvider | emailService self-gates ONLY inside its CRM merge-lifecycle subscriber (emailFeatureLive → relink work-avoidance, #3326); all 33 exported send/read functions are ungated, so no consumer breaks when email is off ⇒ [2] (ADR 0446 F file-vs-symbol, target-level) |
+| `sharing` | `email` | static | emailService | emailService self-gates ONLY inside its CRM merge-lifecycle subscriber (emailFeatureLive → relink work-avoidance, #3326); all 33 exported send/read functions are ungated, so no consumer breaks when email is off ⇒ [2] (ADR 0446 F file-vs-symbol, target-level) |
 | `bi` | `entities` | static | entitiesService | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `cms` | `entities` | static | entitiesService, kernelAdapter | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |
 | `commerce` | `entities` | static | entitiesService, systemIndex, kernelAdapter | domain read; target vacuous-when-off — leave documented / ctx.features if coupling bites |

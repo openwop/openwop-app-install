@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 import { createApp } from '../src/index.js';
 import { orgsFromDeclaration, reservedOrgs } from '../src/host/specDeclaration.js';
-import { locateRepoSchemasDir } from '../src/host/_repoPath.js';
+import { locateRepoSchemasV2Dir } from '../src/host/_repoPath.js';
 
 /**
  * `spec/v2/core/persistence.md` §"The reader rule" — an era-2 event type the
@@ -160,7 +160,7 @@ describe('the vendor-org registry refuses to read as empty', () => {
     // `example` is asserted explicitly because it is `reserved: true` and a
     // future reader filtering reserved orgs would red the corpus control leg.
     const orgs = orgsFromDeclaration(
-      JSON.parse(readFileSync(join(locateRepoSchemasDir(fileURLToPath(new URL('.', import.meta.url)), 'run-event.schema.json'), 'v2', 'declaration.json'), 'utf8')) as { extensions?: Record<string, unknown> },
+      JSON.parse(readFileSync(join(locateRepoSchemasV2Dir(fileURLToPath(new URL('.', import.meta.url))), 'declaration.json'), 'utf8')) as { extensions?: Record<string, unknown> },
     );
     expect(orgs.has('openwop-app'), 'RFC 0180 — this host is a registered org from spec-artifacts 2.0.12').toBe(true);
     expect(orgs.has('example'), 'the corpus control leg seeds example.thing-happened').toBe(true);

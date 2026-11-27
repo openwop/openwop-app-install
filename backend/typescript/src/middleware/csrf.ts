@@ -54,21 +54,51 @@ function refererOrigin(referer: string | undefined): string | undefined {
   }
 }
 
+/**
+ * The one origin check: a request carrying the session COOKIE whose Origin (or
+ * Referer) is not on the credentialed allowlist is refused. `null` = allowed.
+ * Shared by the global guard and by `requireSameSiteForSession`, so the two
+ * cannot drift.
+ */
+function cookieOriginRefusal(req: Parameters<RequestHandler>[0]): OpenwopError | null {
+  // Only the ambient session COOKIE is CSRF-able; bearer/apiKey callers are not.
+  const hasSessionCookie = readCookie(req.header('cookie'), COOKIE_NAME) !== undefined;
+  if (!hasSessionCookie) return null;
+  const origin = req.header('origin') || refererOrigin(req.header('referer'));
+  if (!origin) return null; // same-origin / non-browser client
+  // ADR 0833 D4 — the same answer the credentialed WebSocket upgrades get.
+  if (!credentialedOriginAllowed(origin, req)) {
+    return new OpenwopError('forbidden', 'Cross-site request blocked (origin not allowed).', 403, { code: 'csrf_origin_rejected' });
+  }
+  return null;
+}
+
 export function csrfOriginGuard(): RequestHandler {
   return (req, _res, next) => {
     if (SAFE_METHODS.has(req.method)) return next();
     // Cross-origin-by-design public surfaces (embed/forms/consent/analytics/webhooks).
     if (isPublicPath(req.path)) return next();
-    // Only the ambient session COOKIE is CSRF-able; bearer/apiKey callers are not.
-    const hasSessionCookie = readCookie(req.header('cookie'), COOKIE_NAME) !== undefined;
-    if (!hasSessionCookie) return next();
-    const origin = req.header('origin') || refererOrigin(req.header('referer'));
-    if (!origin) return next(); // same-origin / non-browser client
-    // ADR 0833 D4 — the same answer the credentialed WebSocket upgrades get.
-    if (!credentialedOriginAllowed(origin, req)) {
-      next(new OpenwopError('forbidden', 'Cross-site request blocked (origin not allowed).', 403, { code: 'csrf_origin_rejected' }));
-      return;
-    }
+    const refusal = cookieOriginRefusal(req);
+    if (refusal) { next(refusal); return; }
+    next();
+  };
+}
+
+/**
+ * ADR 0924 P2c (security read, item 3) — the origin check for a PUBLIC path that
+ * nevertheless ACTS on the ambient session cookie. The global guard skips public
+ * paths, because most are meant to be POSTed cross-site with no session. A
+ * route that reads `__session` as authority (the recipient-bound approval
+ * decision, and the ADR 1141 code verify that binds a session) is not one of
+ * those, so it mounts this explicitly. Same rule, same allowlist: no session
+ * cookie, or no Origin and no Referer, passes; a cookie-carrying request from a
+ * foreign origin is 403 `csrf_origin_rejected`.
+ */
+export function requireSameSiteForSession(): RequestHandler {
+  return (req, _res, next) => {
+    if (SAFE_METHODS.has(req.method)) return next();
+    const refusal = cookieOriginRefusal(req);
+    if (refusal) { next(refusal); return; }
     next();
   };
 }

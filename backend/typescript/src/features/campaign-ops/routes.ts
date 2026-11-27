@@ -13,6 +13,8 @@
  *    are the same 404.
  */
 import type { Request } from 'express';
+import { liveSessionSidOf } from '../../middleware/auth.js';
+import { requireSameSiteForSession } from '../../middleware/csrf.js';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { assertOrgScope, resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
@@ -473,9 +475,10 @@ export function registerCampaignOpsRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
-  /** Mint one link per active approver for an in-review change set. The URLs are
-   *  returned once; the operator sends them (no email in v1). The sender is the
-   *  agency authority the approved change is written under. */
+  /** Mint one link per active approver for an in-review change set and email it
+   *  (ADR 0924 P2c: recipient-bound with a one-time code when the workspace can
+   *  send one; the copy fallback otherwise). Each link's delivery is returned. The
+   *  sender is the agency authority the approved change is written under. */
   app.post(`${BASE}/clients/:orgId/change-sets/:changeSetId/approval-links`, async (req, res, next) => {
     try {
       const { tenantId, userId, client } = await authorizeClient(req, 'workspace:write');
@@ -487,9 +490,12 @@ export function registerCampaignOpsRoutes(deps: RouteDeps): void {
   // The client approver's decision. Public (PUBLIC_PATH_PREFIXES); the token is
   // the authority and the source of tenant, org and change set. The package
   // itself is read through the sharing viewer (`/shared/:token`).
-  app.post('/host/openwop-app/public-campaign-approval/:token/decision', async (req, res, next) => {
+  app.post('/host/openwop-app/public-campaign-approval/:token/decision', requireSameSiteForSession(), async (req, res, next) => {
     try {
-      res.json(await decideFromPortal({ token: req.params.token, ip: clientIp(req), body: req.body, deps: { storage: deps.storage, hostSuite: deps.hostSuite } }));
+      // ADR 0924 P2c — the browser session a recipient-bound link was verified on
+      // (ADR 1141 D2, the same `sid` the sharing viewer reads).
+      const sid = await liveSessionSidOf(req);
+      res.json(await decideFromPortal({ token: req.params.token, ip: clientIp(req), body: req.body, deps: { storage: deps.storage, hostSuite: deps.hostSuite }, ...(sid ? { viewer: { sid } } : {}) }));
     } catch (err) { next(err); }
   });
 

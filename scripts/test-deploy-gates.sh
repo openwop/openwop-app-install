@@ -315,6 +315,7 @@ check "  ...and PASSES again once it is gone (the refusal was the route, not the
 FBBIN="$TMP/fbbin"; mkdir -p "$FBBIN"
 cat > "$FBBIN/firebase" <<'FBEOF'
 #!/usr/bin/env bash
+printf '%s\n' "$*" > "${FIREBASE_FAKE_ARGS:-/dev/null}"
 printf '%s\n' "${FIREBASE_FAKE_OUT:-}"
 exit "${FIREBASE_FAKE_RC:-0}"
 FBEOF
@@ -338,6 +339,31 @@ run_preflight_fb_backend() { ( cd "$REPO" && PATH="$FBBIN:$PATH" BASE="$STUB" \
   bash "$ROOT/scripts/preflight-deploy.sh" --backend-only >/dev/null 2>&1; echo $? ); }
 check "  ...but --backend-only does NOT need a Firebase identity (no Firebase half to protect)" 0 "$(run_preflight_fb_backend openwop-dev "Error: not logged in" 1)"
 check "  ...and --backend-only narrows ONLY that gate: a dirty tree still refuses" 1 "$( ( cd "$REPO" && touch dirty-backend-only && PATH="$FBBIN:$PATH" BASE="$STUB" OPENWOP_DEPLOY_ACCOUNT=deployer@example.com OPENWOP_DEPLOY_FIREBASE_PROJECT=openwop-dev FIREBASE_FAKE_OUT="Error: not logged in" FIREBASE_FAKE_RC=1 bash "$ROOT/scripts/preflight-deploy.sh" --backend-only >/dev/null 2>&1; echo $?; rm -f dirty-backend-only ) )"
+
+# ── Gate 7, service-account keys (2026-11-27) ──────────────────────────────
+# A key file is the whole identity for firebase-tools: it reads it through ADC.
+# The first service-account deploy refused because preflight ALSO passed
+# `--account <sa email>`, so the CLI looked for a user token for that address
+# and reported "Account … not found" although the key could deploy. The arms
+# below pin both halves of the fix: no --account with ADC, and a key that names
+# a DIFFERENT account than deploy.env refuses instead of deploying as either.
+KEYDIR="$TMP/adc"; mkdir -p "$KEYDIR"
+printf '{\n  "type": "service_account",\n  "client_email": "deployer@example.com"\n}\n' > "$KEYDIR/match.json"
+printf '{\n  "type": "service_account",\n  "client_email": "someone-else@example.com"\n}\n' > "$KEYDIR/mismatch.json"
+run_preflight_adc() { ( cd "$REPO" && PATH="$FBBIN:$PATH" BASE="$STUB" \
+  OPENWOP_DEPLOY_ACCOUNT="deployer@example.com" \
+  OPENWOP_DEPLOY_FIREBASE_PROJECT=openwop-dev FIREBASE_FAKE_OUT="$FB_TABLE" \
+  FIREBASE_FAKE_ARGS="$1" GOOGLE_APPLICATION_CREDENTIALS="$2" \
+  bash "$ROOT/scripts/preflight-deploy.sh" >/dev/null 2>&1; echo $? ); }
+
+check "PASSES when a service-account key names the deploy identity (ADC, Gate 7)" 0 "$(run_preflight_adc "$TMP/fbargs-match" "$KEYDIR/match.json")"
+if grep -q -- "--account" "$TMP/fbargs-match" 2>/dev/null; then
+  bad "  ...and MUST NOT pass --account to firebase when ADC names the identity (the 2026-11-27 refusal)"
+else
+  ok "  ...and does NOT pass --account to firebase when ADC names the identity"
+fi
+check "REFUSES a key whose client_email is NOT the deploy account" 1 "$(run_preflight_adc "$TMP/fbargs-mm" "$KEYDIR/mismatch.json")"
+check "  ...and REFUSES an unreadable key rather than guessing (fail closed)" 1 "$(run_preflight_adc "$TMP/fbargs-no" "$TMP/does-not-exist.json")"
 
 # ── the preflight's OWN gcloud reads must use the deploy identity ──────────
 # Gate 7 above exists because `firebase deploy` took its identity from ambient

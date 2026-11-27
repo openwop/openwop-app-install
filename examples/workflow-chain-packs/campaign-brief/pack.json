@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.workflows.campaign-brief",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "kind": "workflow-chain",
   "description": "Campaign-brief messaging-kernel + market-intel workflows, migrated from the deprecated builtins (ADR 0472 P4). chainIds keep the original ids; outputRoles restored at registration.",
   "keywords": [
@@ -92,7 +92,7 @@
     },
     {
       "chainId": "campaign-studio.market-intel",
-      "version": "1.2.0",
+      "version": "1.2.1",
       "label": "Market intelligence",
       "description": "Extract voice-of-customer → angles → targeting, then approve the intel.",
       "parameters": {
@@ -140,7 +140,7 @@
           },
           {
             "id": "generate_angles",
-            "typeId": "feature.campaign-brief.nodes.generate-angles@1.1.0",
+            "typeId": "feature.campaign-brief.nodes.generate-angles@1.1.1",
             "inputs": {
               "briefId": "{{params.briefId}}",
               "provider": "{{params.provider}}",
@@ -149,7 +149,7 @@
           },
           {
             "id": "build_targeting",
-            "typeId": "feature.campaign-brief.nodes.build-targeting@1.1.0",
+            "typeId": "feature.campaign-brief.nodes.build-targeting@1.1.1",
             "inputs": {
               "briefId": "{{params.briefId}}",
               "platform": "{{params.platform}}",

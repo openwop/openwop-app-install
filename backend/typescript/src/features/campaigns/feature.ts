@@ -32,4 +32,17 @@ export const campaignsFeature: BackendFeature = {
     bucketUnit: 'tenant',
     salt: 'campaigns',
   },
+  // ADR 1154 D9 — the guided flow rides the console's toggle: readers check the
+  // parent (`campaigns`) and this id. The id is a literal so the distribution
+  // generator sees it.
+  extraToggleDefaults: [{
+    id: 'campaigns.guided',
+    label: 'Campaign Studio guided flow',
+    description:
+      'Shows each campaign as one path: Brief, Plan, Create, Review, Launch, Measure, with the next thing to do. Needs the Campaign Studio console. Off until a workspace opts in.',
+    category: 'Marketing',
+    status: 'off',
+    bucketUnit: 'tenant',
+    salt: 'campaigns-guided',
+  }],
 };

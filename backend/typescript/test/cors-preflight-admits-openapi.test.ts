@@ -4,8 +4,8 @@
  * method, every request header the OpenAPI declares for that operation, and
  * `Authorization` + `Content-Type`.
  *
- * Derived from the pinned `@openwop/spec-artifacts` OpenAPI of BOTH served
- * majors, so the next spec header reds this test on the pin bump rather than a
+ * Derived from the pinned `@openwop/spec-artifacts` v2 OpenAPI (the only served
+ * major; RFC 0266 §D: no v1 corpus input), so the next spec header reds this test on the pin bump rather than a
  * certify cut. Three arms:
  *   1. every operation's preflight, through the real app, admits its method and
  *      declared headers (the leg's own shape);
@@ -14,7 +14,7 @@
  *
  * Tracker TST-CQB-2 (w68). Sabotage-witnessed: red when the served allow-list
  * reflects the requested headers, when PATCH leaves Allow-Methods, when a header
- * leaves the generated SPEC half (X-Pack-Signing-Method, If-None-Match), and when
+ * leaves the generated SPEC half (If-None-Match), and when
  * the de-dupe filter drops OpenWOP-Dedup.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -51,7 +51,7 @@ function operations(major: 1 | 2, rel: string): Op[] {
   }
   return out;
 }
-const OPS = [...operations(1, 'api/openapi.yaml'), ...operations(2, 'api/v2/openapi.yaml')];
+const OPS = operations(2, 'api/v2/openapi.yaml');
 const lower = (xs: readonly string[]) => new Set(xs.map((h) => h.toLowerCase()));
 
 let server: http.Server;
@@ -71,10 +71,10 @@ afterAll(async () => {
 
 describe('cors-preflight-admits — the preflight admits what the OpenAPI declares', () => {
   it('fixture guard: the pinned OpenAPI has operations with declared headers', () => {
-    // Floors near the measured truth (2026-10-29, w68, spec-artifacts 2.46.33):
-    // 127 operations across both majors, 90 of them declaring a header.
-    expect(OPS.length).toBeGreaterThanOrEqual(121);
-    expect(OPS.filter((o) => o.headers.length > 0).length).toBeGreaterThanOrEqual(87);
+    // Floors near the measured truth (2026-11-25, spec-artifacts 2.49.x, v2 only):
+    // 69 operations, every one declaring a header.
+    expect(OPS.length).toBeGreaterThanOrEqual(66);
+    expect(OPS.filter((o) => o.headers.length > 0).length).toBeGreaterThanOrEqual(66);
   });
 
   it('every operation\'s preflight admits its method, its declared headers, Authorization and Content-Type', async () => {

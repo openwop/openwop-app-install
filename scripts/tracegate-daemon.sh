@@ -83,6 +83,13 @@ mkdir -p "$LEDGER"
 # install_agent sets OPENWOP_TRACEGATE_STDOUT_IS_LOG=1; by hand, tee as before.
 logpipe() { if [ "${OPENWOP_TRACEGATE_STDOUT_IS_LOG:-}" = 1 ]; then cat; else tee -a "$LOG"; fi; }
 say() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | logpipe; }
+# epoch_date EPOCH [DATE_ARGS…] — `date` for a Unix epoch on GNU and BSD alike. GNU takes
+# `-d @N`; BSD (macOS) takes `-r N`, which on GNU means a reference FILE ("date: N: No
+# such file or directory" on every Linux runner). BSD rejects `-d` outright, so GNU first.
+epoch_date() { local e="$1"; shift; date -d "@$e" "$@" 2>/dev/null || date -r "$e" "$@"; }
+# PRIO — the background QoS prefix (see PRIORITY above): macOS's `taskpolicy -c utility`, or
+# nothing where there is no taskpolicy (Linux), where `exec taskpolicy …` would fail 127.
+PRIO=(); if command -v taskpolicy >/dev/null 2>&1; then PRIO=(taskpolicy -c utility); fi
 
 # ── yielding ──────────────────────────────────────────────────────────────────
 if [ -f "$ROOT/scripts/lib/ci-claims.sh" ]; then . "$ROOT/scripts/lib/ci-claims.sh"; else ci_claims_live() { :; }; fi
@@ -102,7 +109,10 @@ busy() {
   ( cd "$WORK" 2>/dev/null || cd "$ROOT"; bash "$ROOT/scripts/preflight-suite.sh" --check >/dev/null 2>&1 ) || return 0
   # Load above the core count is someone else's work; come back later.
   local load cores
-  load="$(sysctl -n vm.loadavg 2>/dev/null | awk '{print int($2)}')"; cores="$(sysctl -n hw.ncpu 2>/dev/null || echo 8)"
+  # macOS sysctl, else Linux /proc (read as preflight-suite.sh's load1/ncpu do): on Linux the
+  # sysctl reads were empty, so the daemon never yielded to load at all.
+  load="$( { sysctl -n vm.loadavg 2>/dev/null || cat /proc/loadavg 2>/dev/null; } | tr -d '{}' | awk '{print int($1)}')"
+  cores="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 8)"
   [ "${load:-0}" -gt "$cores" ] && return 0
   return 1
 }
@@ -126,8 +136,11 @@ broker_stale() {
   ours="$(shasum -a 256 "$ROOT/scripts/vendor/tracegate-ci/src/broker/core.mjs" 2>/dev/null | cut -d' ' -f1)"
   [ -n "$theirs" ] && [ -n "$ours" ] || return 1
   [ "$theirs" != "$ours" ] && { BROKER_STALE_WHY="pid $pid serves $core, which differs from this checkout's"; return 0; }
-  started="$(date -j -f '%a %b %d %T %Y' "$(ps -o lstart= -p "$pid" 2>/dev/null)" +%s 2>/dev/null || echo 0)"
-  mtime="$(stat -f %m "$core" 2>/dev/null || echo 0)"
+  # BSD first (macOS), then GNU; on Linux the BSD-only forms read 0 and silently disabled
+  # this check.
+  local lstart; lstart="$(ps -o lstart= -p "$pid" 2>/dev/null | tr -s ' ')"
+  started="$(LC_ALL=C date -j -f '%a %b %d %T %Y' "$lstart" +%s 2>/dev/null || LC_ALL=C date -d "$lstart" +%s 2>/dev/null || echo 0)"
+  mtime="$(stat -f %m "$core" 2>/dev/null || stat -c %Y "$core" 2>/dev/null || echo 0)"
   [ "$started" -gt 0 ] && [ "$mtime" -gt "$started" ] && { BROKER_STALE_WHY="pid $pid started before $core last changed"; return 0; }
   return 1
 }
@@ -207,7 +220,7 @@ recheck_misses() {
     if gate_live; then say "a gate appeared before re-checking $rel — yielding"; return 3; fi
     log="$LEDGER/daemon-logs/$(date -u +%Y%m%dT%H%M%SZ)-recheck-$(basename "$rel").log"
     say "re-running the MISS $rel alone at $h"
-    ( cd "$WORK/$dir" && exec taskpolicy -c utility nice -n 15 env OPENWOP_VITEST_NO_WAIT=1 \
+    ( cd "$WORK/$dir" && exec ${PRIO[@]+"${PRIO[@]}"} nice -n 15 env OPENWOP_VITEST_NO_WAIT=1 \
         $( [ "$lane" = backend ] && echo OPENWOP_SKIP_TESTCONTAINERS=1 ) node node_modules/vitest/vitest.mjs run --maxWorkers=1 "$rel" ) > "$log" 2>&1 &
     vp=$!
     while kill -0 "$vp" 2>/dev/null; do
@@ -253,7 +266,7 @@ run_lane() {
   for (( i = 0; i < n; i += BATCH )); do
     if gate_live; then say "a gate appeared — yielding"; rm -rf "$run"; return 3; fi
     local b="$run/b$i"; mkdir -p "$b"; cp "$run/predict.json" "$b/predict.json"
-    ( cd "$WORK/$dir" && exec taskpolicy -c utility nice -n 15 env OPENWOP_VITEST_NO_WAIT=1 OPENWOP_TRACEGATE_RECORD="$b" ${extra[@]+"${extra[@]}"} \
+    ( cd "$WORK/$dir" && exec ${PRIO[@]+"${PRIO[@]}"} nice -n 15 env OPENWOP_VITEST_NO_WAIT=1 OPENWOP_TRACEGATE_RECORD="$b" ${extra[@]+"${extra[@]}"} \
         node node_modules/vitest/vitest.mjs run --maxWorkers=2 "${files[@]:i:BATCH}" ) >> "$b/vitest.log" 2>&1 &
     local vp=$!
     while kill -0 "$vp" 2>/dev/null; do
@@ -329,7 +342,7 @@ PKG_RECORD_MAX_FAILS="${OPENWOP_PACKAGE_RECORD_MAX_FAILS:-2}"
 package_record_due() { # package_record_due → 0 with PKG_DUE set to the lanes due
   local lane last now since fails
   now="$(date +%s)"; PKG_DUE=""
-  since="$(date -u -r $((now - 72000)) +%Y-%m-%dT%H:%M:%SZ)"
+  since="$(epoch_date $((now - 72000)) -u +%Y-%m-%dT%H:%M:%SZ)"
   for lane in $PKG_RECORD_LANES; do
     last="$(cat "$PKG_LEDGER/record-$lane.last" 2>/dev/null || echo 0)"
     [ $((now - last)) -ge 72000 ] || continue
@@ -349,7 +362,7 @@ package_record() {
     say "package recording $lane at $(git -C "$WORK" rev-parse --short HEAD)"
     t0="$(date +%s)"; rc=0
     ( cd "$WORK" && TRACEGATE_PACKAGE_LEDGER="$PKG_LEDGER" TRACEGATE_PACKAGE_NO_LEASE=1 OPENWOP_VITEST_NO_WAIT=1 \
-        exec taskpolicy -c utility nice -n 15 bash scripts/tracegate-package.sh record "$lane" ) >> "$LEDGER/package-record.log" 2>&1 || rc=$?
+        exec ${PRIO[@]+"${PRIO[@]}"} nice -n 15 bash scripts/tracegate-package.sh record "$lane" ) >> "$LEDGER/package-record.log" 2>&1 || rc=$?
     printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(git -C "$WORK" rev-parse --short=12 HEAD)" "$lane" "$rc" "$(( $(date +%s) - t0 ))" >> "$PKG_LEDGER/record.tsv"
     if [ "$rc" = 0 ]; then date +%s > "$PKG_LEDGER/record-$lane.last"; say "package recording $lane done in $(( $(date +%s) - t0 ))s"
     else say "package recording $lane exited $rc (log $LEDGER/package-record.log); it is tried again next tick, at most $PKG_RECORD_MAX_FAILS failures per 20 h"; return 0; fi
@@ -464,7 +477,7 @@ uninstall_agent() {
 }
 status() {
   if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then echo "agent: installed ($PLIST)"; else echo "agent: not installed"; fi
-  echo "last nightly: $( [ -f "$LEDGER/nightly.last" ] && date -r "$(cat "$LEDGER/nightly.last")" || echo never)"
+  echo "last nightly: $( [ -f "$LEDGER/nightly.last" ] && epoch_date "$(cat "$LEDGER/nightly.last")" || echo never)"
   echo "pre-gated heads: $( [ -f "$DONE" ] && wc -l < "$DONE" | tr -d ' ' || echo 0)"
   [ -f "$LOG" ] && { echo "--- last log lines"; tail -8 "$LOG"; }
   node "$ROOT/scripts/tracegate.mjs" status

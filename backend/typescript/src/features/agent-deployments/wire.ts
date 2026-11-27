@@ -9,14 +9,14 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { locateRepoSchemasDir } from '../../host/_repoPath.js';
+import { locateRepoSchemasV2Dir } from '../../host/_repoPath.js';
 
 let cached: boolean | undefined;
 
 export function transitionRunIdOnWire(): boolean {
   if (cached !== undefined) return cached;
   try {
-    const dir = join(locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json'), 'v2');
+    const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
     cached = /"transitionRunId"/.test(readFileSync(join(dir, 'agent-deployment.schema.json'), 'utf8'));
   } catch {
     cached = false;

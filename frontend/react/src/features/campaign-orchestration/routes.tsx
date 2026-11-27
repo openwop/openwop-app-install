@@ -36,6 +36,14 @@ const routes: FeatureRoute[] = [
     tier: 'workspace', archetype: 'detail',
     parentPath: '/campaigns',
   },
+  {
+    // ADR 1154 D9 — one step of the campaign's guided path. The same page: it
+    // reads the step from the URL and, with the guided flow off, ignores it.
+    path: '/campaign-studio/campaigns/:campaignId/:step',
+    element: <CampaignDetailPage />,
+    tier: 'workspace', archetype: 'detail',
+    parentPath: '/campaigns',
+  },
 ];
 
 export const campaignOrchestrationFeature: FrontendFeature = { id: 'campaign-orchestration', routes };

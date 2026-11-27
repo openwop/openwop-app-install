@@ -33,8 +33,7 @@
  * MUST set the flag (the ADR 0420 P4 trigger).
  *
  * @see docs/adr/0152-workflow-chain-pack-loader.md
- * @see ../../../schemas/workflow-chain-pack-manifest.schema.json (RFC 0013 — v1-shaped + unsigned manifests)
- * @see ../../../schemas/v2/workflow-chain-pack-manifest.schema.json (RFC 0177 — v2-signed manifests; WHD-15)
+ * @see ../../../schemas/v2/workflow-chain-pack-manifest.schema.json (RFC 0013 / RFC 0177 — every manifest, RFC 0266)
  */
 
 import { normalizeEdgeLoopback } from '../executor/loopback.js';
@@ -44,14 +43,14 @@ import { createHash } from 'node:crypto';
 import { subWorkflowId } from './workflowId.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import Ajv2020, { type ValidateFunction } from 'ajv/dist/2020.js';
-import addFormats from 'ajv-formats';
+import type { ValidateFunction } from 'ajv/dist/2020.js';
+import { compileV2Schema } from './v2SchemaCompile.js';
 import { OpenwopError } from '../types.js';
 import { createLogger } from '../observability/logger.js';
 import { resolveDefaultPackDir } from '../packs/registryInstaller.js';
 import { loadPinnedKeyring, verifyPinned, type SigningRefs } from './packSignature.js';
 import { isPackRevoked } from './packRevocations.js';
-import { locateRepoSchemasDir } from './_repoPath.js';
+import { locateRepoSchemasV2Dir } from './_repoPath.js';
 import { validateWorkflowDefinition } from './workflowDefinitionValidation.js';
 import { canonicalize } from './auditChainService.js';
 import { mapEdgeCondition, type WireEdgeCondition } from './edgeConditionMapping.js';
@@ -118,7 +117,7 @@ export function isChainExpansionSeamServable(): boolean {
 
 const log = createLogger('host.workflowChainPackLoader');
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SCHEMAS_DIR = locateRepoSchemasDir(__dirname, 'workflow-chain-pack-manifest.schema.json');
+const SCHEMAS_V2_DIR = locateRepoSchemasV2Dir(__dirname, 'workflow-chain-pack-manifest.schema.json');
 
 // ── manifest shapes (the subset we consume; the schema is the authority) ──
 
@@ -253,55 +252,30 @@ export interface ChainPackLoadOutcome {
 // ── schema validators (lazy singletons, mirrors connectionPackLoader) ──
 const CHAIN_MANIFEST_SCHEMA = 'workflow-chain-pack-manifest.schema.json';
 
-/** Which corpus tree a chain-pack manifest is validated against. */
-export type ChainManifestSchemaTree = 'v1' | 'v2';
-
 /**
- * ADR 0713 / WHD-15 — a chain-pack manifest is validated against the schema of
- * the tree it was WRITTEN for, decided by the one field the two trees disagree
- * about irreconcilably: `signing`.
+ * RFC 0266 — every chain-pack manifest is validated against the v2 schema
+ * (`schemas/v2/workflow-chain-pack-manifest.schema.json`). The frozen flat v1
+ * copy is no longer vendored, so there is no second tree to route to.
  *
- * `spec/v2/core/packs.md` §Signing: `signing` is `{ keyId, scheme }`, both
- * REQUIRED, `scheme` MUST be `ed25519-canonical-json`, and "`publicKeyRef` does
- * not exist". The registry publishes exactly that inside every v2 chain
- * `pack.json`. The v1 `Signing` def is CLOSED to `{ publicKeyRef, signatureRef,
- * method }` and always will be, so no single schema admits both populations.
- *
- * So: a `signing` object carrying `keyId` or `scheme` CLAIMS the v2 shape and goes
- * to `schemas/v2/` WHOLE — a half-v2 block (`scheme` alone, or `keyId` beside a v1
- * `method`) is then refused by the schema that owns the shape, with its message,
- * instead of by v1's "must NOT have additional properties". A v1 block, or no
- * block, goes to the root (v1) schema exactly as it always has. The in-tree
- * vendored packs are all unsigned, so nothing in-tree changes route.
- *
- * ── What this replaced, and why it was safe to (history, kept on purpose) ──
- * Until corpus tag v2.32.0 the v2 schema ALSO carried the v1 `Signing` def, so
- * every registry-installed v2 chain pack was rejected
- * `workflow_chain_pack_manifest_invalid` (MEASURED on production revision 00705:
- * 16 of 16). ADR 0713 Phase 1b worked around it with `manifestForCorpusSchema`:
- * check the v2 block against the PROSE (`manifestSigningKeyId`), STRIP it, and
- * validate the remainder against the v1 schema. openwop#1367 fixed the corpus;
- * this routing is the host half, and it deleted that function.
- *
- * It is a reader repair, and ADR 0713's own production regression came from one
- * of those — so it was decided by measurement, not by reading the schema diff.
- * The v2 schema differs in MORE than `signing`: `engines` is closed; `typeId`,
- * `chainId` and `keyId` take the `ids.schema.json` grammars (typeId REQUIRES a
- * dotted namespace, chainId caps at 128 not 256); the extension prefix admits
- * `openwop-`. MEASURED with `scripts/adr0713-whd15-chain-schema-routing.ts`,
- * which states its predicate: the 62 in-tree chain packs (all unsigned) plus all
- * 81 published v2 chain packs (`openwop-registry` @ `c510721`, 81 of 191
- * tarballs, every one v2-signed) — ZERO verdicts differ, in either direction.
- * An installed `pack.json` is the verified tarball's, byte for byte (the ADR 0660
- * D3 re-hash in `registryInstaller` refuses anything else), so a
- * registry-INSTALLED population is a subset of the published one measured — an
- * inference from the installer, not a reading taken on the production host.
- *
- * The differences above are therefore real but UNPOPULATED: a future v2-signed
- * pack that violates one is refused here where strip-and-v1 would have admitted
- * it. That is the v2 tree's own rule arriving, not a regression — but it is a
- * change in what CAN serve, so re-run the script against a newer registry before
- * leaning on the zero.
+ * ── What this replaced (ADR 0713 / WHD-15, ADR 0766 D5; history kept on purpose) ──
+ * The loader used to route by shape: a v2 `signing` block (`keyId`/`scheme`) or an
+ * exact-pinned node reference (`typeId@x.y.z`) went to `schemas/v2/`, everything
+ * else to the root (v1) schema. MEASURED before deleting the v1 route:
+ *   - all 67 in-tree chain packs (`packs/` + `examples/workflow-chain-packs/`)
+ *     carry exact pins, so all 67 ALREADY routed to v2 and validate there; 0 of
+ *     them validate under v1 (the v1 FragmentNode.typeId pattern has no room for
+ *     `@`), so v1 judged none of them;
+ *   - the only manifests v1 still judged were UNPINNED ones, and every unpinned
+ *     chain is refused `workflow_chain_unpinned` after validation unless it is on
+ *     `UNPINNED_CHAIN_PACK_ALLOWLIST`, which is EMPTY. So in production no
+ *     manifest the v1 route admitted could register.
+ * A v1-shaped manifest is therefore rejected, not upgraded: an unpinned one is
+ * still refused `workflow_chain_unpinned` (the v2 typeId grammar admits an
+ * unpinned reference, so the pin rule, not the schema, names it), and a v1
+ * `signing` block (`publicKeyRef`/`signatureRef`/`method`) is refused by the v2
+ * `Signing` def. The published registry's chain packs are all v2-signed (ADR 0713,
+ * measured by `scripts/adr0713-whd15-chain-schema-routing.ts`, which compared the
+ * v1 and v2 verdicts and was deleted with the v1 route — see git history).
  *
  * The prose-side `manifestSigningKeyId` check is NOT kept at this gate: the v2
  * `Signing` def enforces all three of its conditions (non-empty `keyId`, `scheme`
@@ -309,67 +283,18 @@ export type ChainManifestSchemaTree = 'v1' | 'v2';
  * `test/adr0713-chain-loader-v2-signing.test.ts`, not assumed. The installer
  * still calls it; that is a different reader of a different document.
  */
-export function chainManifestSchemaTree(raw: unknown): ChainManifestSchemaTree {
-  const signing = (raw as { signing?: unknown } | null)?.signing;
-  if (signing && typeof signing === 'object' && ('keyId' in signing || 'scheme' in signing)) return 'v2';
-  // ADR 0766 D5 — an exact-pinned node reference (`typeId@x.y.z`) is a v2-only
-  // shape exactly as the v2 `signing` block is: the v1 FragmentNode.typeId
-  // pattern (`^[a-z][a-zA-Z0-9._-]*$`) has no room for `@`, so a pinned chain
-  // routed to v1 would be refused for being CORRECT. Any `@` in a node reference
-  // claims the v2 tree, where ids.schema.json's typeId grammar admits an exact
-  // pin and itself refuses a node-level range (`…@^1` fails its pattern). The
-  // range the schema CANNOT refuse — an external sub-chain `ref.version`, typed
-  // as a semver range — is refused by the pin rule after validation.
-  return manifestCarriesNodePin(raw) ? 'v2' : 'v1';
+/** The v1 signing fields present on a manifest's `signing` block (packs.md §Signing:
+ *  a v2 block is the closed `{ keyId, scheme }`; any of these fails it). */
+export function v1SigningFields(signing: unknown): string[] {
+  if (!signing || typeof signing !== 'object') return [];
+  return ['method', 'publicKeyRef', 'signatureRef'].filter((k) => k in (signing as Record<string, unknown>));
 }
 
-function manifestCarriesNodePin(raw: unknown): boolean {
-  const chains = (raw as { chains?: unknown } | null)?.chains;
-  if (!Array.isArray(chains)) return false;
-  return chains.some((c) => {
-    const nodes = (c as { dag?: { nodes?: unknown } } | null)?.dag?.nodes;
-    return Array.isArray(nodes) && nodes.some((n) => {
-      const node = n as { typeId?: unknown; compensation?: { nodeTypeId?: unknown } } | null;
-      return (typeof node?.typeId === 'string' && node.typeId.includes('@'))
-        || (typeof node?.compensation?.nodeTypeId === 'string' && node.compensation.nodeTypeId.includes('@'));
-    });
-  });
-}
-
-/** Register, under its own `$id`, every sibling schema `doc` reaches by a
- *  relative-filename `$ref` (the v2 chain schema names
- *  `ids.schema.json#/$defs/chainId`), transitively — or `ajv.compile` throws
- *  MissingRefError. Deliberately the CLOSURE and not "every file in the
- *  directory": this validator gates what serves, and an unrelated sibling that
- *  fails to register must not be able to take the chain loader down with it. */
-function registerSiblingRefs(ajv: Ajv2020, dir: string, doc: unknown, seen: Set<string>): void {
-  if (Array.isArray(doc)) { for (const x of doc) registerSiblingRefs(ajv, dir, x, seen); return; }
-  if (!doc || typeof doc !== 'object') return;
-  for (const [key, value] of Object.entries(doc)) {
-    if (key !== '$ref' || typeof value !== 'string') { registerSiblingRefs(ajv, dir, value, seen); continue; }
-    const file = value.split('#')[0] ?? '';
-    // A sibling is a bare filename: no scheme, no path. Anything else is either a
-    // local `#/…` pointer (empty `file`) or not ours to fetch.
-    if (file.length === 0 || file.includes('/') || seen.has(file)) continue;
-    seen.add(file);
-    const sibling = JSON.parse(readFileSync(join(dir, file), 'utf8')) as Record<string, unknown>;
-    ajv.addSchema(sibling);
-    registerSiblingRefs(ajv, dir, sibling, seen);
-  }
-}
-
-const _validators: Partial<Record<ChainManifestSchemaTree, ValidateFunction>> = {};
-function manifestValidator(tree: ChainManifestSchemaTree): ValidateFunction {
-  const cached = _validators[tree];
-  if (cached) return cached;
-  const dir = tree === 'v2' ? join(SCHEMAS_DIR, 'v2') : SCHEMAS_DIR;
-  const ajv = new Ajv2020({ allErrors: true, strict: false });
-  addFormats(ajv);
-  const schema = JSON.parse(readFileSync(join(dir, CHAIN_MANIFEST_SCHEMA), 'utf8')) as Record<string, unknown>;
-  registerSiblingRefs(ajv, dir, schema, new Set([CHAIN_MANIFEST_SCHEMA]));
-  const compiled = ajv.compile(schema);
-  _validators[tree] = compiled;
-  return compiled;
+let _validator: ValidateFunction | undefined;
+function manifestValidator(): ValidateFunction {
+  if (_validator) return _validator;
+  _validator = compileV2Schema(SCHEMAS_V2_DIR, CHAIN_MANIFEST_SCHEMA);
+  return _validator;
 }
 
 /** Presentational category for the builder gallery chip: the author-declared
@@ -512,7 +437,7 @@ export function validateChainComposition(chain: WorkflowChain): { code: string; 
  *  `workflow_chain_id_conflict` rejections. The loader kind-filters, so
  *  non-workflow-chain packs in the install dir are ignored. */
 export function defaultWorkflowChainPackRoots(): string[] {
-  const repoRoot = dirname(SCHEMAS_DIR);
+  const repoRoot = dirname(dirname(SCHEMAS_V2_DIR));
   // ADR 0626 P2 — `OPENWOP_WORKFLOW_CHAIN_EXAMPLES=0` drops root 3, the in-tree
   // demo gallery. Root 1 is a PRECEDENCE override, not an exclusive one: an
   // operator who pins their own chains still inherits every `examples/` chain
@@ -543,9 +468,6 @@ export function defaultWorkflowChainPackRoots(): string[] {
 export function loadWorkflowChainPacks(opts: { roots: string[] }): ChainPackLoadOutcome {
   const installed: ChainPackLoadResult[] = [];
   const errors: ChainPackLoadError[] = [];
-  // The v1 validator is compiled up front, as it always was: every in-tree pack
-  // needs it, and a host that cannot read its own root schema has nothing to load.
-  const validateV1 = manifestValidator('v1');
   // ADR 0427 — registry-installed packs verify against the pinned keyring at
   // load time; the other roots keep the R7 trusted-source posture.
   const registryInstallDir = resolveDefaultPackDir();
@@ -566,21 +488,33 @@ export function loadWorkflowChainPacks(opts: { roots: string[] }): ChainPackLoad
         continue;
       }
       if ((raw as { kind?: unknown }).kind !== 'workflow-chain') continue; // not ours
-      // WHD-15 — the manifest goes WHOLE to the schema of the tree it was written
-      // for (see `chainManifestSchemaTree`). The v2 validator is compiled on first
-      // need and a failure to compile it is COLLECTED, per pack: a host whose
-      // `schemas/v2/` is missing or uncompilable refuses v2-shaped packs by name —
-      // fail closed, never "strip the block and ask v1 instead", which is the
-      // workaround this replaced — while every v1-shaped pack keeps loading.
-      const tree = chainManifestSchemaTree(raw);
+      // A v1 signing block (`method` / `publicKeyRef` / `signatureRef`) is refused by
+      // name, not as a raw schema error, because the remedy is specific: a v1
+      // signature cannot be relabelled into v2 (packs.md §Signing: "re-signed, not
+      // relabeled"). Registry packs come v2-signed from the v2 tree; a pack authored
+      // outside the registry is migrated, then signed by the registry on submission.
+      const v1Fields = v1SigningFields((raw as { signing?: unknown }).signing);
+      if (v1Fields.length > 0) {
+        errors.push({
+          pack: entry,
+          code: 'workflow_chain_pack_signing_v1',
+          message: `chain pack carries a v1 signing block (${v1Fields.join(', ')}); this host verifies only `
+            + `v2 signatures (spec/v2/core/packs.md §Signing). Install the pack from the registry's v2 tree, `
+            + `or run \`npm run chains:migrate-v2 -- <pack-dir> --write\` (backend/typescript) and submit `
+            + `it to the registry, which signs it under ed25519-canonical-json.`,
+        });
+        continue;
+      }
+      // RFC 0266 — one schema, v2. Compiled on first need; a failure to compile it
+      // is COLLECTED per pack (fail closed, never thrown — boot must not abort).
       let validate: ValidateFunction;
       try {
-        validate = tree === 'v1' ? validateV1 : manifestValidator(tree);
+        validate = manifestValidator();
       } catch (e) {
         errors.push({
           pack: entry,
           code: 'workflow_chain_pack_schema_unavailable',
-          message: `cannot compile the ${tree} chain-pack manifest schema: ${e instanceof Error ? e.message : String(e)}`,
+          message: `cannot compile the v2 chain-pack manifest schema: ${e instanceof Error ? e.message : String(e)}`,
         });
         continue;
       }
@@ -825,17 +759,16 @@ function liveChain<T extends { packName: string; packVersion: string }>(entry: T
 
 /**
  * ADR 0959 P0 — validate chain documents that are NOT a host-installed pack (a tenant's
- * playbook version) by the SAME rules the loader applies to a pack: the manifest schema (v1 or v2, chosen as the loader chooses)
+ * playbook version) by the SAME rules the loader applies to a pack: the v2 manifest schema
  * over a one-off manifest, the sibling sub-chain cycle check, RFC 0133 composition, and the
  * RFC 0177 §E.1 node-pin rule — strictly (no legacy unpinned waiver: tenant data is new).
  * Returns the first problem, or null. No second schema, no second rule set.
  */
 export function validateChainDocuments(chains: unknown): { code: string; message: string } | null {
   const manifest = { name: 'private.playbooks.document', version: '0.0.0', kind: 'workflow-chain', engines: { openwop: '>=1.0.0 <3.0.0' }, chains };
-  // The loader's own tree choice: an exact-pinned node reference is a v2 shape (ADR 0766 D5).
   let validate: ValidateFunction;
   try {
-    validate = manifestValidator(chainManifestSchemaTree(manifest));
+    validate = manifestValidator();
   } catch (e) {
     return { code: 'workflow_chain_pack_schema_unavailable', message: e instanceof Error ? e.message : String(e) };
   }

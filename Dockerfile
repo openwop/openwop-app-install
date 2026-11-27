@@ -152,18 +152,19 @@ RUN if [ "$INCLUDE_CONFORMANCE_FIXTURES" != "true" ]; then \
       rm -rf ./conformance-fixtures; \
     fi
 
-# JSON Schemas, vendored at `apps/workflow-engine/schemas/` (kept in
-# sync from the canonical repo-root `schemas/` via
-# `scripts/sync-schemas.sh`). The bundled `lib/index.js` walks parents
-# from `/app/lib` via `host/_repoPath.ts::locateRepoSchemasDir()`
-# looking for a sibling `schemas/` containing sentinels like
-# `ai-envelope.schema.json` and `prompt-pack-manifest.schema.json`.
-# Landing them at `/app/schemas/` makes the walk resolve on the first
-# parent step. Without this, the module-load-time `SCHEMAS_DIR =
-# locateRepoSchemasDir(__dirname, ...)` constants in
-# `envelopeAcceptor.ts` and `promptPackLoader.ts` throw and the
-# revision fails to start.
-COPY --chown=node:node schemas ./schemas
+# JSON Schemas — ONLY the v2 tree (RFC 0266, v2 is self-contained). Vendored at
+# `schemas/v2/` from the canonical corpus by `scripts/sync-schemas.sh`; the frozen
+# flat v1 tree (`schemas/*.schema.json`) is not vendored and nothing reads it. The
+# bundled `lib/index.js` walks parents from `/app/lib` via
+# `host/_repoPath.ts::locateRepoSchemasV2Dir()`, looking for a sibling `schemas/`
+# whose `v2/` holds a sentinel (`ids.schema.json`, or a loader's own schema such
+# as `prompt-pack-manifest.schema.json`). Landing it at `/app/schemas/v2/` makes
+# the walk resolve on the first parent step. Without this, the module-load-time
+# `SCHEMAS_V2_DIR = locateRepoSchemasV2Dir(__dirname, ...)` constants in the
+# pack loaders (`promptPackLoader.ts`, `workflowChainPackLoader.ts`, …) throw and
+# the revision fails to start. `schemas/CORPUS_TAG` and `schemas/README.md` are
+# repo metadata, read at deploy time, never by the image.
+COPY --chown=node:node schemas/v2 ./schemas/v2
 
 # Local-mount pack source. `bootstrap/mountLocalPacks.ts` symlinks
 # `core.openwop.*` and `vendor.*` packs into the runtime pack dir at

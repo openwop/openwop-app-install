@@ -16,6 +16,10 @@
  * The rest stay ratchets: the test corpus still holds the 410/308 front's own
  * tests, which must keep calling `/v1` to prove it answers 410.
  *
+ * CORRECTED 2026-11-25 (RFC 0266): a third hard-zero gate, `flatSchemaReads` —
+ * shipped code reading the frozen flat v1 schema tree. The app vendors only
+ * `schemas/v2/` now. See the block above `measured`.
+ *
  * CORRECTED 2026-10-04 (ADR 0812): this used to say zero was FORBIDDEN until
  * the v1 EOS clock (2026-12-04). RFC 0234 (corpus 2.45.14) moved the floor to
  * 2026-10-04, app.openwop.dev retired v1 that day, and the product decision is to
@@ -119,7 +123,7 @@ const OWN_SCAN_DIRS = [
   ['backend/typescript/conformance', ['*.ts', '*.mjs'], NO_TESTS],
   ['frontend/react/src', TS, NO_TESTS],
 ];
-const HARD_ZERO = new Set(['ownV1PathRefs', 'backendVersionedOwnUrls']);
+const HARD_ZERO = new Set(['ownV1PathRefs', 'backendVersionedOwnUrls', 'flatSchemaReads']);
 
 const ownSegments = [...new Set(JSON.parse(readFileSync(join(ROOT, 'schemas/v2/path-manifest.json'), 'utf8')).operations
   .map((o) => o.path.split('/')[1]?.split(':')[0])
@@ -143,12 +147,49 @@ const testCorpus = [
   ...matches('frontend/react/e2e', V1_PATH, TS),
 ].filter((m) => !isDocCitation(m));
 
+/**
+ * RFC 0266 — the HARD gate on the CORPUS half of v1 reliance: shipped code (and
+ * the build scripts) reading the frozen flat v1 schema tree `schemas/*.schema.json`
+ * or `schemas/envelopes/`. That tree is no longer vendored (only `schemas/v2/` is),
+ * so a read of it is a module-load throw, or worse a fail-open loader that quietly
+ * stops validating. The RFC's acceptance criterion is a host whose build and
+ * runtime read no v1 corpus file, so the only legitimate count is ZERO.
+ *
+ * What counts, per code line (comments skipped, tests excluded — a test reading
+ * the frozen v1 schema as a HISTORY baseline is an assertion about the past):
+ *   - `locateRepoSchemasDir(` — the retired locator, whose callers passed a FLAT
+ *     sentinel (`'ai-envelope.schema.json'`) to find the dir; replaced by
+ *     `locateRepoSchemasV2Dir()`;
+ *   - a flat schema path spelled out: `schemas/<name>.schema.json`,
+ *     `'schemas', '<name>.schema.json'`, `schemas/envelopes`, including the npm
+ *     package's flat copy (`@openwop/spec-artifacts/schemas/<name>.schema.json`).
+ * `schemas/v2/<name>` never matches (`v2/` is not a schema filename). A dir held
+ * in a variable and joined later is NOT seen — the line-based limit every metric
+ * here has; `check-vendored-schemas.mjs` covers that half by refusing the flat
+ * tree itself, so such a read cannot find a file to read. MEASURED on the commit
+ * before this gate: 38.
+ */
+const FLAT_SCHEMA_READ = "locateRepoSchemasDir\\(|schemas(/|['\"`], *['\"`])(envelopes([/'\"`]|$)|[a-z0-9-]+\\.schema\\.json)";
+const JS = ['*.ts', '*.mjs', '*.js', '*.cjs'];
+const FLAT_SCAN_DIRS = [
+  ['backend/typescript/src', ['*.ts'], NO_TESTS],
+  ['backend/typescript/scripts', JS, NO_TESTS],
+  ['backend/typescript/sdk', JS, NO_TESTS],
+  ['backend/typescript/conformance', JS, NO_TESTS],
+  ['frontend/react/src', TS, NO_TESTS],
+  ['frontend/react/scripts', JS, NO_TESTS],
+  ['scripts', ['*.mjs', '*.js', '*.cjs'], ['--exclude=check-v1-reliance.mjs']],
+  ['packs', ['*.mjs', '*.js'], NO_TESTS],
+];
+const flatSchemaReads = FLAT_SCAN_DIRS.flatMap(([dir, inc, ex]) => scanSites(ROOT, dir, FLAT_SCHEMA_READ, inc, ex));
+
 const measured = {
   testCorpusV1Refs: testCorpus.length,
   ownV1PathRefs: ownV1.length,
   keptV1Lines: kept.length,
   spaOpenWopVersionHeaders: spaVersionHeader,
   backendVersionedOwnUrls: versionedOwnUrls.length,
+  flatSchemaReads: flatSchemaReads.length,
 };
 
 /**
@@ -218,6 +259,12 @@ if (ownV1.length > 0) {
   console.error('  v1 is deleted (ADR 0812). Use the unversioned path. If the string is not a');
   console.error('  call on the wire (a persisted key, a recogniser for an already-sent link),');
   console.error(`  mark the line \`ADR 0812 KEEP: <why>\` — it then counts in keptV1Lines.`);
+}
+if (flatSchemaReads.length > 0) {
+  console.error('✗ check-v1-reliance: shipped code reads the frozen flat v1 schema tree (RFC 0266):');
+  for (const m of flatSchemaReads) console.error(`    ${m.file}:${m.line}  ${m.match}`);
+  console.error('  Only schemas/v2/ is vendored. Locate it with locateRepoSchemasV2Dir() and');
+  console.error('  compile with compileV2Schema() (backend/typescript/src/host/v2SchemaCompile.ts).');
 }
 if (failed > 0) {
   console.error(`✗ check-v1-reliance: ${failed} metric(s) moved the WRONG WAY (v1 reliance up, or v2 adoption down).`);

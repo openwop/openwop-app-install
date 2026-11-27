@@ -42,7 +42,7 @@ export const PACK_PINS = {
   'feature.bi.nodes': '1.1.0',
   'feature.brand.nodes': '1.4.0',
   'feature.cad.nodes': '1.6.1',
-  'feature.campaign-brief.nodes': '1.7.1',
+  'feature.campaign-brief.nodes': '1.7.2',
   'feature.campaign-channels.nodes': '1.20.0',
   'feature.campaign-connectors.nodes': '1.7.0',
   'feature.campaign-intel.nodes': '1.8.0',

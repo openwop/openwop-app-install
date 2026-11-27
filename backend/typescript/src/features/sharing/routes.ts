@@ -35,6 +35,7 @@ import { requestShareCode, verifyShareCode } from './recipientVerification.js';
 import { clientIp } from '../../host/clientIp.js';
 import { mintAnonSession, setAnonSessionCookie } from '../../middleware/cookieSession.js';
 import { liveSessionSidOf } from '../../middleware/auth.js';
+import { requireSameSiteForSession } from '../../middleware/csrf.js';
 
 /** ADR 1141 D2 — the browser session a link's verification is bound to: the `sid`
  *  of the request's `__session` (signed-in or anonymous). The only cookie Firebase
@@ -142,7 +143,9 @@ export function registerSharingRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
-  app.post('/host/openwop-app/shared/:token/verification/verify', noStore, async (req, res, next) => {
+  // ADR 0924 P2c — verify binds a session; a foreign-origin, cookie-carrying
+  // request must not bind (or refresh) one (the global guard skips public paths).
+  app.post('/host/openwop-app/shared/:token/verification/verify', noStore, requireSameSiteForSession(), async (req, res, next) => {
     try {
       const body = (req.body ?? {}) as { code?: unknown };
       // A visitor with no session gets an anonymous one, which the verification

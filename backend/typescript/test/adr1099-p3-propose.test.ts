@@ -153,6 +153,8 @@ describe('ADR 1099 P3 — proposals write nothing before approval', () => {
     expect(pending).toHaveLength(2);
     expect(pending.map((a) => a.collabProposal?.idempotencyKey).sort()).toEqual(['intake-1:countertop', 'intake-1:sink']);
     expect(pending.every((a) => a.orgId === s.orgId && a.collabProposal?.groupKey === 'intake-1' && a.collabProposal?.grantId === s.grantId)).toBe(true);
+    // ADR 1099 P3b — the firm's own name for the sender, for the review card.
+    expect(pending.every((a) => a.collabProposal?.collaboratorLabel === 'The Garcias')).toBe(true);
     expect(JSON.stringify(seen[1]?.messages)).toContain('pending_review');
 
     // The same interview again: nothing new.
@@ -256,6 +258,7 @@ describe('ADR 1099 P3 — proposals write nothing before approval', () => {
     const after = await getApproval(a!.approvalId);
     expect(after?.status).toBe('rejected');
     expect(JSON.stringify(after?.collabProposal?.payload ?? {})).not.toContain('quartz');
+    expect(JSON.stringify(after?.collabProposal ?? {})).not.toContain('The Garcias');
   });
 
   it('malformed proposals are refused before anything is held', () => {

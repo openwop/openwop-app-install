@@ -25,3 +25,4 @@ export { ViewToggle, useViewMode, type CollectionView } from './ViewToggle.js';
 export { toast, Toaster, dismiss, type ToastVariant, type ToastItem } from './toast.js';
 export { Field, TextField, TextareaField, SelectField, FormError, type FieldProps } from './Field.js';
 export { Panel, Toolbar, MetadataRow, FormRow } from './layout.js';
+export { StepRail, type StepRailItem, type StepRailProps, type StepRailState } from './StepRail.js';

@@ -205,6 +205,9 @@ export interface PendingApproval {
     /** The firm's run the proposal was made in (the audit anchor). */
     runId: string;
     audience?: string;
+    /** ADR 1099 P3b — the name the FIRM gave this collaborator when inviting them
+     *  (`displayName`), for the review card. Redacted with the collaborator. */
+    collaboratorLabel?: string;
   };
   /** CHAT-FIRST-PORT-AUDIT D3 — when `kind: 'strategy-checkin'`, this approval
    *  gates the confirm/dismiss of an AGENT-proposed strategy check-in (the ADR
@@ -1198,6 +1201,8 @@ export async function redactRejectedCollabProposal(tenantId: string, approvalId:
   const a = await approvals.get(approvalId);
   if (!a || a.tenantId !== tenantId || a.kind !== 'collab-proposal' || !a.collabProposal || a.status !== 'rejected') return false;
   if (a.proposal === ERASED_SUBJECT_SENTINEL && a.collabProposal.summary === ERASED_SUBJECT_SENTINEL) return false;
+  // The collaborator's label is the FIRM's name for them, not their words: it stays,
+  // so the declined row still says who sent it.
   await approvals.put({ ...a, proposal: ERASED_SUBJECT_SENTINEL, collabProposal: { ...a.collabProposal, summary: ERASED_SUBJECT_SENTINEL, payload: {} } });
   return true;
 }
@@ -1335,7 +1340,7 @@ registerApprovalRedactor('commerce-listing-publish', { idFields: [], textFields:
 // their words. `cancel` so a pending proposal from an erased collaborator never applies.
 registerApprovalRedactor('collab-proposal', {
   idFields: ['collabProposal.collaboratorId'],
-  textFields: ['collabProposal.summary', 'collabProposal.payload', 'proposal'],
+  textFields: ['collabProposal.summary', 'collabProposal.payload', 'collabProposal.collaboratorLabel', 'proposal'],
   onSubjectMatch: 'cancel',
 });
 registerApprovalRedactor('anon-surface-write', {

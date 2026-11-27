@@ -1,27 +1,27 @@
 /**
- * ADR 0713 / WHD-15 — a host that cannot compile the v2 chain-pack schema fails
- * CLOSED for v2-shaped packs, and only for them.
+ * ADR 0713 / WHD-15, RFC 0266 — a host that cannot compile the v2 chain-pack
+ * schema fails CLOSED, per pack, and does not throw.
  *
- * Routing v2-signed manifests to `schemas/v2/` gave the chain loader a second
- * schema to depend on, and that one `$ref`s a sibling (`ids.schema.json`). So there
- * is now a state the loader could not be in before: the root schema reads fine and
- * the v2 one does not (a deploy carrying only part of `schemas/`, a sibling renamed
- * by a corpus bump). Three ways to get that wrong, all plausible:
+ * The v2 chain schema `$ref`s a sibling (`ids.schema.json`), so a deploy carrying
+ * only part of `schemas/v2/` (or a sibling renamed by a corpus bump) leaves the
+ * loader with a schema it cannot compile. Two ways to get that wrong:
  *
  *   - THROW — `loadWorkflowChainPacks` "never throws on a bad pack — boot must not
  *     abort", and an uncompilable schema is not even a bad pack;
- *   - fall back to strip-the-block-and-ask-v1 — the workaround WHD-15 deleted,
- *     reintroduced as an error path where nobody would look for it;
- *   - refuse EVERYTHING — taking the in-tree, unsigned packs down with a schema
- *     they are never validated against.
+ *   - fall back to the frozen v1 schema — which RFC 0266 removed from this host,
+ *     and which judged only manifests that could never register anyway.
  *
- * The schemas dir is substituted at the module seam the loader resolves it
- * through, so the real code path runs against a real directory that simply lacks
- * `v2/ids.schema.json`.
+ * CORRECTED (RFC 0266): this file used to pin that the UNSIGNED pack still loaded
+ * through the v1 route. That route is gone — every manifest is judged by v2 — so
+ * the unsigned pack is now refused by name with the same code. That is the
+ * intended fail-closed shape, not a regression.
  *
- * Tracker TST-BGF-18. Red when the loader falls back to the v1 schema for a
- * v2-signed pack (wrong code), or routes every pack to v2 (the unsigned pack is
- * refused too).
+ * The v2 dir is substituted at the module seam the loader resolves it through,
+ * so the real code path runs against a real directory that simply lacks
+ * `ids.schema.json`.
+ *
+ * Tracker TST-BGF-18. Red when the loader throws, or loads a pack it had no
+ * schema to judge.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -33,24 +33,24 @@ const CHAIN_SCHEMA = 'workflow-chain-pack-manifest.schema.json';
 // Hoisted: `vi.mock` factories run before this module's imports resolve, so the
 // directory the mock hands out has to exist by then.
 const seam = vi.hoisted(() => ({ schemasDir: '' }));
+const CHAIN_SCHEMA_SENTINEL = vi.hoisted(() => 'workflow-chain-pack-manifest.schema.json');
 
 vi.mock('../src/host/_repoPath.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../src/host/_repoPath.js')>();
   const { mkdtempSync: mkdtemp, mkdirSync: mkdir, cpSync: cp } = await import('node:fs');
   const { join: j } = await import('node:path');
   const { tmpdir: tmp } = await import('node:os');
-  const realDir = real.locateRepoSchemasDir(import.meta.dirname, 'workflow-chain-pack-manifest.schema.json');
-  // A `schemas/` holding the v1 chain schema and the v2 chain schema — but NOT the
-  // `ids.schema.json` the v2 one `$ref`s. v1 compiles; v2 cannot.
-  const partial = j(mkdtemp(j(tmp(), 'whd15-schemas-')), 'schemas');
-  mkdir(j(partial, 'v2'), { recursive: true });
-  cp(j(realDir, 'workflow-chain-pack-manifest.schema.json'), j(partial, 'workflow-chain-pack-manifest.schema.json'));
-  cp(j(realDir, 'v2', 'workflow-chain-pack-manifest.schema.json'), j(partial, 'v2', 'workflow-chain-pack-manifest.schema.json'));
+  const realDir = real.locateRepoSchemasV2Dir(import.meta.dirname, CHAIN_SCHEMA_SENTINEL);
+  // A `schemas/v2/` holding the chain schema — but NOT the `ids.schema.json` it
+  // `$ref`s, so it cannot compile.
+  const partial = j(mkdtemp(j(tmp(), 'whd15-schemas-')), 'schemas', 'v2');
+  mkdir(partial, { recursive: true });
+  cp(j(realDir, CHAIN_SCHEMA_SENTINEL), j(partial, CHAIN_SCHEMA_SENTINEL));
   seam.schemasDir = partial;
   return {
     ...real,
-    locateRepoSchemasDir: (fromDir: string, sentinel: string): string =>
-      sentinel === 'workflow-chain-pack-manifest.schema.json' ? partial : real.locateRepoSchemasDir(fromDir, sentinel),
+    locateRepoSchemasV2Dir: (fromDir: string, sentinel?: string): string =>
+      sentinel === CHAIN_SCHEMA_SENTINEL ? partial : real.locateRepoSchemasV2Dir(fromDir, sentinel),
   };
 });
 
@@ -79,42 +79,36 @@ beforeAll(() => {
   };
   write('v2-signed', chainPack('core.openwop.workflows.whd15-v2', 'whd15.v2-signed', { keyId: 'openwop-team-1', scheme: 'ed25519-canonical-json' }));
   write('unsigned', chainPack('core.openwop.workflows.whd15-unsigned', 'whd15.unsigned', undefined));
-  // ADR 0766 — this file's subject is schema ROUTING, not pins. Since a pin
-  // claims the v2 tree, the v1 route is reachable only by an UNPINNED manifest,
-  // which registers only when waived; the fixtures are waived for that reason.
+  // ADR 0766 — this file's subject is schema availability, not pins; the
+  // unpinned fixtures are waived so only the schema can refuse them.
   __setUnpinnedChainPackWaiversForTests(['core.openwop.workflows.whd15-v2', 'core.openwop.workflows.whd15-unsigned']);
   _resetChainRegistryForTest();
 });
 afterAll(() => {
   rmSync(root, { recursive: true, force: true });
-  if (seam.schemasDir) rmSync(join(seam.schemasDir, '..'), { recursive: true, force: true });
+  if (seam.schemasDir) rmSync(join(seam.schemasDir, '..', '..'), { recursive: true, force: true });
   _resetChainRegistryForTest();
   __setUnpinnedChainPackWaiversForTests(null);
 });
 
 describe('WHD-15 — the v2 chain-pack schema cannot be compiled', () => {
-  it('the substituted schemas dir really holds both chain schemas and really lacks the v2 sibling', () => {
-    // The premise of the fixture, not of the seam: that the directory is the
-    // half-vendored one described above. Whether the loader actually READS it is
-    // what the next test shows — against the real `schemas/`, v2 compiles and the
-    // `v2-signed` pack simply loads, so `schema_unavailable` cannot appear there.
+  it('the substituted v2 dir really holds the chain schema and really lacks its sibling', () => {
+    // The premise of the fixture, not of the seam. Whether the loader actually
+    // READS it is what the next test shows — against the real `schemas/v2/`, the
+    // schema compiles and both packs load, so `schema_unavailable` cannot appear.
     expect(seam.schemasDir).not.toBe('');
     expect(existsSync(join(seam.schemasDir, CHAIN_SCHEMA))).toBe(true);
-    expect(existsSync(join(seam.schemasDir, 'v2', CHAIN_SCHEMA))).toBe(true);
-    expect(existsSync(join(seam.schemasDir, 'v2', 'ids.schema.json'))).toBe(false);
+    expect(existsSync(join(seam.schemasDir, 'ids.schema.json'))).toBe(false);
   });
 
-  it('refuses the v2-signed pack BY NAME with a schema-unavailable code — it does not throw, and does not fall back to v1', () => {
+  it('refuses EVERY pack by name with a schema-unavailable code — it does not throw, and loads nothing', () => {
     const { errors } = loadWorkflowChainPacks({ roots: [root] });
-    const refused = errors.find((e) => e.pack === 'v2-signed');
-    expect(refused?.code, JSON.stringify(errors)).toBe('workflow_chain_pack_schema_unavailable');
-    expect(refused?.message).toContain('v2');
-    expect(getChain('whd15.v2-signed'), 'a v2-signed pack loaded with no v2 schema to judge it — something fell back to v1').toBeNull();
-  });
-
-  it('still loads the unsigned pack — the v1 route does not depend on schemas/v2/', () => {
-    const { errors } = loadWorkflowChainPacks({ roots: [root] });
-    expect(errors.find((e) => e.pack === 'unsigned'), JSON.stringify(errors)).toBeUndefined();
-    expect(getChain('whd15.unsigned')?.packName).toBe('core.openwop.workflows.whd15-unsigned');
+    for (const pack of ['v2-signed', 'unsigned']) {
+      const refused = errors.find((e) => e.pack === pack);
+      expect(refused?.code, JSON.stringify(errors)).toBe('workflow_chain_pack_schema_unavailable');
+      expect(refused?.message).toContain('v2');
+    }
+    expect(getChain('whd15.v2-signed'), 'a pack loaded with no schema to judge it').toBeNull();
+    expect(getChain('whd15.unsigned'), 'a pack loaded with no schema to judge it — something fell back to v1').toBeNull();
   });
 });

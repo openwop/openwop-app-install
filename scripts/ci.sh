@@ -491,6 +491,12 @@ step "gate tooling: the gate's own port/process helpers (GATE-5)"
 bash "$ROOT/scripts/test-gate-tooling.sh"
 node --test "$ROOT/scripts/test-ci-e2e-evidence.mjs"
 
+step "heavy slot: one heavy step at a time machine-wide (ADR 1166 D2)"
+# The slot is what keeps per-PR checks from swapping the machine into false
+# reds. A slot that does not serialise, or that silently runs after giving up,
+# is worse than none — so the arbitration itself is asserted, not trusted.
+bash "$ROOT/scripts/test-heavy.sh"
+
 step "custom-domain edge script: plan/apply/verify against a stub gcloud (ADR 0906 P3)"
 # Pure shell, no network: the real gcloud is never reached. `apply` creates billable
 # resources, so its confirmation guard and idempotence are asserted here, not trusted.
@@ -535,6 +541,8 @@ run_selftests() {
   node "$ROOT/scripts/test-tracegate.mjs"
   node --test --test-concurrency=1 "$ROOT/scripts/test-tracegate-report.mjs"
   bash "$ROOT/scripts/test-tracegate-package-shadow.sh"
+  bash "$ROOT/scripts/test-tracegate-daemon-portability.sh"
+  bash "$ROOT/scripts/test-check-inert-mocks.sh"
   echo
   echo "▶ payload ratchet: a subset run never judges an admission stale (ADR 0702 × ADR 0880)"
   node --test "$ROOT/scripts/test-audit-event-payloads.mjs"
@@ -676,6 +684,11 @@ step "distributions: catalog + manifest validity, and composition"
 # adopter's terminal after they built a distribution that "excluded" a feature
 # whose public page still shipped in their entry chunk (#3627).
 ( cd "$ROOT" && node scripts/check-feature-import-boundary.mjs )
+# A vi.mock override the target module does not export is DEAD: the component
+# uses the real module and a "mocked" read can hit the network. The zero gate
+# lived only in `build:steward`, so main went red on it silently (f3bb33c4a5,
+# found by an adopter's sync). Pure node, ~1s; walks src/ when there is no .git.
+( cd "$ROOT/frontend/react" && node scripts/check-inert-mocks.mjs )
 
 step "backend: build (esbuild bundle)"
 ( cd "$ROOT/backend/typescript" && npm run build )

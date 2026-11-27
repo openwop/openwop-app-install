@@ -3,10 +3,17 @@
  * page was given, says when the change was updated (stale) or the link is dead,
  * and never offers a decision on a stale package.
  *
- * Runs through the real `portalClient`: the page is public and the token is the
- * only authority, so the exact request (`credentials: 'omit'`, no session) and the
- * 404/409/429 mapping are part of the claim. Sabotage: `credentials: 'include'`,
- * a wrong hash, an empty diff, or 404 mapped to `failed` each red a case.
+ * Runs through the real `portalClient`, so the exact request and the
+ * 401/404/409/429 mapping are part of the claim.
+ *
+ * CORRECTED (ADR 0924 P2c): this used to pin `credentials: 'omit'` ("no
+ * session"). A recipient-bound approval link now decides only for the browser
+ * session that verified its one-time code (ADR 1141 D2), so the decision MUST
+ * carry the session cookie: in cookie mode (production) it sends
+ * `credentials: 'include'`, through the same `fetchOpts` as the shared viewer.
+ * A 401 is "verify again". Sabotage: `credentials: 'omit'`, a wrong hash, an
+ * empty diff, 404 mapped to `failed`, 401 not mapped to `verify`, or 423 told to
+ * reload (a locked link does not unlock on reload) each red a case.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, screen, fireEvent, waitFor } from '@testing-library/react';
@@ -24,8 +31,9 @@ const pkg = {
 const fetchMock = vi.fn<typeof fetch>();
 const answer = (status: number, body: unknown = {}): void => { fetchMock.mockResolvedValue(new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })); };
 
-beforeEach(() => { fetchMock.mockReset(); vi.stubGlobal('fetch', fetchMock); });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+const priorAuthMode = config.authMode;
+beforeEach(() => { fetchMock.mockReset(); vi.stubGlobal('fetch', fetchMock); (config as { authMode: string }).authMode = 'cookie'; });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); (config as { authMode: string }).authMode = priorAuthMode; });
 
 describe('PublicApprovalView', () => {
   it('shows the request and the change, and approves the hash it was shown, with the comment', async () => {
@@ -39,7 +47,7 @@ describe('PublicApprovalView', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Approve this change' }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     expect(fetchMock).toHaveBeenCalledWith(`${config.baseUrl}/host/openwop-app/public-campaign-approval/tok/decision`, {
-      method: 'POST', credentials: 'omit', headers: { 'content-type': 'application/json' },
+      method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ action: 'approve', expectedChangeSetHash: 'h-abc', comment: 'Looks right' }),
     });
     expect(await screen.findByText('Approved. Thank you.')).toBeTruthy();
@@ -74,5 +82,19 @@ describe('PublicApprovalView', () => {
     expect((await screen.findAllByText(t('campaign-ops:portalRateLimited'))).length).toBeGreaterThan(0);
     expect(screen.getByRole('button', { name: 'Approve this change' })).toBeTruthy();
     expect(screen.getByText('Move the webinar to Thursday')).toBeTruthy();
+  });
+  it('a decision whose verification lapsed asks for a new code and keeps the page', async () => {
+    answer(401, { error: 'share_verification_required' });
+    render(<PublicApprovalView token="tok" resource={pkg} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Approve this change' }));
+    expect(await screen.findByText(t('campaign-ops:portalVerifyExpired'))).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Approve this change' })).toBeTruthy();
+  });
+  it('a locked link says to ask for a new link, not to reload', async () => {
+    answer(423, { error: 'share_verification_locked' });
+    render(<PublicApprovalView token="tok" resource={pkg} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Approve this change' }));
+    expect((await screen.findAllByText(t('campaign-ops:portalLocked'))).length).toBeGreaterThan(0);
+    expect(screen.queryByText(t('campaign-ops:portalVerifyExpired'))).toBeNull();
   });
 });

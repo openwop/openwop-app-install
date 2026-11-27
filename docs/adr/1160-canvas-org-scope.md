@@ -1,7 +1,8 @@
 # ADR 1160 — A canvas belongs to one workspace (org), and every lane checks it
 
-Status: Accepted (2026-11-25, the user: "ADR, then build"). P0 (#6260) and P1
-(#6262) implemented; P2 in progress; see the phased plan.
+Status: Accepted (2026-11-25, the user: "ADR, then build"). P0 (#6260), P1
+(#6262), P2 (#6265) and the P3 primitives (#6266) implemented; the P3 backfill
+route is in progress, and the production backfill has not run.
 
 A canvas gets an `orgId`, stamped when it is created. The shared read and write
 predicates in `host/canvasSurface.ts` check the caller's access in THAT org, and
@@ -193,6 +194,15 @@ first, and the write needs the user's own go in the session that runs it.
   membership is NOT used to guess: a person in two orgs would place the canvas
   arbitrarily.
 
+> **Decision (the user, 2026-11-25): the backfill runs through a superadmin
+> route.** `GET /host/openwop-app/operations/canvas-org-backfill` is the dry
+> run. It returns counts and a digest of exactly what would be placed, and no
+> canvas or tenant ids. `POST` with that digest applies it. A canvas created or
+> placed since changes the digest, and the apply is refused with
+> `409 plan_changed`. So no agent opens a production database session or holds
+> a production token, and the write is exactly the plan that was reviewed. The
+> production apply is still the user's own go.
+
 ### D5 — the editor layout slots are a separate ADR
 
 CasaVoga also asked for a left-rail slot for a canvas type's own section, and a
@@ -255,8 +265,8 @@ capability or endpoint contract changes.
 |---|---|---|
 | P0 | #6260 (`8961fb54e`) | `src/host/__tests__/canvasOrgStamp.test.ts`, `test/adr1160-canvas-create-org-ratchet.test.ts` |
 | P1 | #6262 (`d77aed292`) | `test/adr1160-p1-canvas-org-enforced.test.ts`; the five render-tool tests assert the `?org=` link |
-| P2 | (this PR) | `test/adr1160-p2-lane-fixes.test.ts`, `test/adr1160-canvas-raw-read-ratchet.test.ts` |
-| P3 | | |
+| P2 | #6265 | `test/adr1160-p2-lane-fixes.test.ts`, `test/adr1160-canvas-raw-read-ratchet.test.ts` |
+| P3 | #6266 (primitives); this PR (the superadmin route) | `src/host/__tests__/canvasOrgClaim.test.ts`, `test/adr1160-backfill-route.test.ts`. The production dry run and apply have not run (the user's go) |
 
 ## Open questions
 

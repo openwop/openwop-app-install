@@ -73,3 +73,21 @@ export async function revokeProjectGrant(orgId: string, collaboratorId: string, 
 export function projectInviteUrl(token: string): string {
   return `${window.location.origin}/collab/accept/${encodeURIComponent(token)}`;
 }
+
+/** ADR 1099 D7 — one outside collaborator's thread with the firm on this project. */
+export interface ClientThread {
+  collaboratorId: string;
+  label: string;
+  entries: Array<{ entryId: string; author: { kind: 'collaborator'; label: string } | { kind: 'member'; userId: string }; text: string; createdAt: string }>;
+}
+const threadsUrl = (projectId: string): string => `${config.baseUrl}/host/openwop-app/projects/${encodeURIComponent(projectId)}/client-threads`;
+
+/** Every collaborator thread of the project (a 404 means the switch is off or no access). */
+export async function listClientThreads(projectId: string): Promise<ClientThread[]> {
+  return (await asJson<{ threads: ClientThread[] }>(await fetch(threadsUrl(projectId), fetchOpts({ headers: authedHeaders() })))).threads;
+}
+
+/** A member's reply to one collaborator; it joins at once. */
+export async function replyToClient(projectId: string, collaboratorId: string, text: string): Promise<void> {
+  await asJson<unknown>(await fetch(`${threadsUrl(projectId)}/${encodeURIComponent(collaboratorId)}`, json('POST', { text })));
+}

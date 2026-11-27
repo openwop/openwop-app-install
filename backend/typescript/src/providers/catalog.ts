@@ -169,6 +169,21 @@ export function isAdaptiveThinkingOnly(providerId: string, modelId: string): boo
   return p?.models.some((m) => m.id === modelId && m.adaptiveThinkingOnly === true) ?? false;
 }
 
+/**
+ * #6242 — the model the host transcribes audio with when the caller names none.
+ * It is the provider's catalog `quick` class default, so it moves when the catalog
+ * does and can never name a model the catalog dropped. It used to be the literal
+ * `gemini-2.5-flash`, which Google deprecated (re-routed from 2026-12-01) and the
+ * catalog removed, so a preflight that checks the model against the catalog
+ * refused the default. Google's `quick` default (`gemini-3.5-flash-lite`) is also
+ * Google's own re-route target for 2.5 Flash. Falls back to the provider's default
+ * model when it declares no `quick` class. Adopters that pin a transcription model
+ * should call this instead of a literal.
+ */
+export function defaultTranscriptionModel(providerId: string): string {
+  return getClassDefault(providerId, 'quick') ?? getDefaultModel(providerId);
+}
+
 export function getDefaultModel(providerId: string): string {
   const p = getProviderConfig(providerId);
   if (!p) {

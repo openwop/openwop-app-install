@@ -298,6 +298,38 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
     expect(result.current.isSending).toBe(false);
   });
 
+  it('ISS-066 (casavoga #887): a stream that ends on its idle timer still settles the turn, with the typed error', async () => {
+    // MEASURED casavoga prod 148d022cf1, run ca0ae3e3: Google took ~54 s to answer 503,
+    // so 58 s passed between two run events. The stream's 30 s idle timer ended it
+    // with no error, nothing polled, and "Thinking..." ran the 180 s settle wait into
+    // "The reply timed out", although the server had logged the typed error at once.
+    // Red without the onTimeout fallback: this send waits the full 180 s.
+    sendConversationTurnMock.mockResolvedValueOnce({
+      turns: [{ messageId: 'c:1:user', role: 'user', turnIndex: 1, from: 'user', content: 'hi', ts: 0 }],
+      lastSeq: 1,
+    });
+    vi.mocked(pollEvents).mockResolvedValue({
+      events: [{
+        eventId: 'e-poll-6', runId: 'conv-run-1', type: 'openwop-app.ai.message-error',
+        payload: { conversationId: 'c', turnIndex: 1, code: 'internal_error', message: 'Agent tool turn failed: Provider 5xx. (google/gemini-3.8-flash)' },
+        timestamp: '2026-01-01T00:00:00Z', sequence: 6, schemaVersion: 3,
+      }],
+      runId: 'conv-run-1', lastSequence: 6, status: 'waiting-input', isTerminal: false,
+    });
+    const { result } = renderHook(() => useChatSession());
+    await act(async () => {
+      const sending = result.current.send('hi', CONFIG);
+      await vi.waitFor(() => expect(captured?.runId).toBe('conv-run-1'));
+      captured!.onTimeout?.('idle');
+      await sending;
+    });
+    expect(vi.mocked(pollEvents)).toHaveBeenCalledWith('conv-run-1', 0);
+    const err = result.current.session.messages.find((m) => m.meta?.error);
+    expect(err?.meta?.error?.code).toBe('internal_error');
+    expect(err?.meta?.error?.message).toContain('Provider 5xx');
+    expect(result.current.isSending).toBe(false);
+  });
+
   it('persists conversation turns to the durable store so a later open restores them (blank-history regression)', async () => {
     // Without this the conversation primitive lived only in the run event log +
     // localStorage; reopening a past chat from the rail (loadSessionFromBackend,

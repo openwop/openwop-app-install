@@ -18,7 +18,7 @@
  */
 
 import { archiveOutgoingAgentPack, notifyAgentPackInstalled, pruneAgentPackArchive } from './agentPackArchive.js';
-import { resolveRegistry, templateFor, expandEndpoint, legacyPathsEnabled, type EndpointKey } from './registryEndpoints.js';
+import { resolveRegistry, templateFor, expandEndpoint, type EndpointKey } from './registryEndpoints.js';
 import { PROTOCOL_VERSION_V2 } from '../middleware/protocolVersion.js';
 import { createHash, createPublicKey, verify as verifySig } from 'node:crypto';
 import {
@@ -109,7 +109,8 @@ export const V2_SIGNING_SCHEME = 'ed25519-canonical-json';
  *   signed bytes are the canonical-JSON `pack.json` inside the tarball — what
  *   `extractPackJsonFromTarball` already returns, and what the registry's own
  *   `verify-signatures.mjs` verifies for v2.
- * - v1 / flat / legacy paths: `publicKeyRef`, unchanged.
+ * - any other tree: refused. RFC 0266 — this host reads only the v2 tree, and a v1
+ *   signature is re-signed into it by the registry, never relabelled.
  */
 export function manifestSigningKeyId(signing: ManifestSigning | undefined, tree: string): string {
   if (tree === 'v2') {
@@ -124,10 +125,7 @@ export function manifestSigningKeyId(signing: ManifestSigning | undefined, tree:
     }
     return signing.keyId;
   }
-  if (!signing || typeof signing.publicKeyRef !== 'string' || signing.publicKeyRef.length === 0) {
-    throw new Error('pack_signature_unverifiable: no signing.publicKeyRef in manifest');
-  }
-  return signing.publicKeyRef;
+  throw new Error(`pack_signature_unverifiable: a ${tree} signing block is not verified by this host; install the v2-signed copy from the registry's v2 tree`);
 }
 
 interface InstallMarker {
@@ -192,30 +190,26 @@ export async function installPackFromRegistry(
         `registry_endpoint_missing: ${key} is not named by ${registry}/.well-known/openwop-registry.json`,
       );
     }
-    if (!legacyPathsEnabled()) {
-      // An unreachable registry keeps the vocabulary the rest of the install
-      // path already uses for exactly that cause (ADR 0660); only a registry
-      // that ANSWERED without `endpoints` gets the new code.
-      if (resolution.reason === 'unreachable') {
-        throw new Error(
-          `pack_registry_unreachable: ${registry}/.well-known/openwop-registry.json did not answer`,
-        );
-      }
+    // RFC 0266 — no constructed paths and no v1 tree. An unreachable registry keeps
+    // the vocabulary the rest of the install path uses for that cause (ADR 0660);
+    // a registry that answered without `endpoints`, or without a v2 tree, is the
+    // registry's gap, named as such.
+    if (resolution.reason === 'unreachable') {
       throw new Error(
-        `registry_endpoints_unresolvable: ${registry}/.well-known/openwop-registry.json publishes no `
-        + '`endpoints` map. packs.md §"The registry tree" requires paths to be resolved through it; this host '
-        + 'will not construct one. Set OPENWOP_REGISTRY_LEGACY_V1_PATHS=true only for a registry that predates it.',
+        `pack_registry_unreachable: ${registry}/.well-known/openwop-registry.json did not answer`,
       );
     }
-    const legacy: Record<EndpointKey, string> = {
-      registryIndex: '/v1/index.json',
-      packMetadata: `/v1/packs/${vars.name}/index.json`,
-      versionManifest: `/v1/packs/${vars.name}/-/${vars.version}.json`,
-      versionTarball: `/v1/packs/${vars.name}/-/${vars.version}.tgz`,
-      versionSignature: `/v1/packs/${vars.name}/-/${vars.version}.sig`,
-      publicKey: `/keys/${vars.keyId}.pub`,
-    };
-    return `${registry.replace(/\/+$/, '')}${legacy[key]}`;
+    if (resolution.reason === 'no_v2_tree') {
+      throw new Error(
+        `registry_v2_tree_missing: ${registry}/.well-known/openwop-registry.json names no \`endpoints.v2\`. `
+        + 'This host installs only v2-signed packs from the v2 tree (packs.md §"The registry tree", RFC 0266).',
+      );
+    }
+    throw new Error(
+      `registry_endpoints_unresolvable: ${registry}/.well-known/openwop-registry.json publishes no `
+      + '`endpoints` map. packs.md §"The registry tree" requires paths to be resolved through it; this host '
+      + 'will not construct one.',
+    );
   };
 
   const manifestUrl = urlFor('versionManifest', { name: target.name, version: target.version });
@@ -251,9 +245,8 @@ export async function installPackFromRegistry(
   // 4. Resolve public key. Try the on-disk registry/keys/ first
   // (faster + works offline), then fall back to the registry's
   // /keys/<keyId>.pub endpoint.
-  // ADR 0713 — the tree the manifest was fetched from decides the signing shape.
-  // The legacy constructed paths are `/v1/…`, so they read as v1.
-  const keyRef = manifestSigningKeyId(manifest.signing, resolution.ok ? resolution.resolved.tree : 'v1');
+  // ADR 0713 — the tree decides the signing shape; RFC 0266 leaves only v2.
+  const keyRef = manifestSigningKeyId(manifest.signing, 'v2');
   if (!KEY_ID_RE.test(keyRef) || keyRef === '.' || keyRef === '..') {
     throw new Error('pack_signature_unverifiable: the manifest names a malformed signing key id');
   }

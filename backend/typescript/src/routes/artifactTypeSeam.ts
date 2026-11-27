@@ -42,9 +42,10 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
 import type { Express, Request, Response, NextFunction } from 'express';
-import { readFileSync, existsSync } from 'node:fs';
-import { Ajv2020 } from 'ajv/dist/2020.js';
-import { locateRepoSchemasDir } from '../host/_repoPath.js';
+import { existsSync } from 'node:fs';
+import type { Ajv2020 } from 'ajv/dist/2020.js';
+import { locateRepoSchemasV2Dir } from '../host/_repoPath.js';
+import { compileV2Schema } from '../host/v2SchemaCompile.js';
 import { loadArtifactTypePacks } from '../host/artifactTypePackLoader.js';
 import { validateArtifact, getArtifactType, isRegisteredArtifactType } from '../host/artifactTypes.js';
 import type { Storage } from '../storage/storage.js';
@@ -103,11 +104,12 @@ function canonicalManifestValidator(): ReturnType<Ajv2020['compile']> | null {
   if (manifestValidator !== undefined) return manifestValidator;
   try {
     const file = 'artifact-type-pack-manifest.schema.json';
-    const dir = locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), file);
+    // RFC 0266 — the v2 schema (`$ref`s `ids.schema.json`). MEASURED: the suite's
+    // seam manifests (sample, inert + hostile extension, the leg-5 typo) get the
+    // same verdict under v2 as under the frozen flat v1 copy, which is gone.
+    const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
     const path = join(dir, file);
-    manifestValidator = existsSync(path)
-      ? new Ajv2020({ strict: false, allErrors: true }).compile(JSON.parse(readFileSync(path, 'utf8')) as object)
-      : null;
+    manifestValidator = existsSync(path) ? compileV2Schema(dir, file, { formats: false }) : null;
   } catch { manifestValidator = null; }
   return manifestValidator;
 }

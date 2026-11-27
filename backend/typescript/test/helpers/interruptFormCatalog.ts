@@ -10,7 +10,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { locateRepoSchemasDir } from '../../src/host/_repoPath.js';
+import { locateRepoSchemasV2Dir } from '../../src/host/_repoPath.js';
 
 type Rec = Record<string, unknown>;
 const isRec = (v: unknown): v is Rec => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -22,7 +22,7 @@ function single(v: unknown, what: string): string {
 }
 
 function load(): { version: string; components: ReadonlySet<string> } {
-  const dir = join(locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json'), 'v2');
+  const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
   const schema: unknown = JSON.parse(readFileSync(join(dir, 'interrupt-form.schema.json'), 'utf8'));
   const defs = isRec(schema) && isRec(schema.$defs) ? schema.$defs : {};
   const form = defs.formV1;

@@ -17,12 +17,12 @@ import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import { createApp } from '../src/index.js';
-import { locateRepoSchemasDir } from '../src/host/_repoPath.js';
+import { locateRepoSchemasV2Dir } from '../src/host/_repoPath.js';
 import { projectCompensation } from '../src/host/compensationProjection.js';
 import { recordObligation, resolveObligation, type CompensationObligation } from '../src/host/compensationLedger.js';
 
-const schemasDir = locateRepoSchemasDir(process.cwd(), 'ai-envelope.schema.json');
-const v2 = (name: string): object => JSON.parse(readFileSync(join(schemasDir, 'v2', name), 'utf8')) as object;
+const schemasDir = locateRepoSchemasV2Dir(process.cwd());
+const v2 = (name: string): object => JSON.parse(readFileSync(join(schemasDir, name), 'utf8')) as object;
 const ajv = new Ajv2020({ strict: false, allErrors: true });
 ajv.addSchema(v2('ids.schema.json'));
 ajv.addSchema(v2('compensation-policy.schema.json'));

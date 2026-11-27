@@ -18,7 +18,7 @@ import { appendAudit, AUDIT_KIND_GOVERNANCE_DECISION } from './auditChainService
 import { resolveSubjectOrg } from './subjectOrgScope.js';
 import { hasWorkflowScope } from './workflowWriteAuthority.js';
 import { canvasTypeValidator, isPrivilegedCanvasType, resolveCanvasTypeAccess } from './canvasTypeOwnership.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { chargedAdmission, insertRunWithStartContext } from './runInsert.js';
 import { createLogger } from '../observability/logger.js';
 import { DurableCollection } from './hostExtPersistence.js';
@@ -869,6 +869,20 @@ export async function planCanvasOrgBackfill(tenantId: string): Promise<CanvasOrg
   }
   return plan;
 }
+/** ADR 1160 D4 — the backfill plan for every tenant that holds an unstamped
+ *  canvas, with a digest of exactly what would be placed. The operator route
+ *  shows the counts and the digest; an apply must send the digest back, so it
+ *  writes only the plan that was reviewed (a canvas created or placed since
+ *  changes the digest). */
+export async function planCanvasOrgBackfillAll(): Promise<{ plans: CanvasOrgPlan[]; digest: string }> {
+  const tenants = new Set<string>();
+  for (const c of await canvases.list()) if (!c.orgId) tenants.add(c.tenantId);
+  const plans: CanvasOrgPlan[] = [];
+  for (const t of [...tenants].sort()) plans.push(await planCanvasOrgBackfill(t));
+  const lines = plans.flatMap((p) => p.place.map((x) => `${p.tenantId}\u0000${x.canvasId}\u0000${x.orgId}`)).sort();
+  return { plans, digest: createHash('sha256').update(lines.join('\n')).digest('hex') };
+}
+
 export async function applyCanvasOrgPlan(plan: CanvasOrgPlan, by: `system:${string}`): Promise<Record<CanvasOrgClaim, number>> {
   const out: Record<CanvasOrgClaim, number> = { claimed: 0, already: 0, conflict: 0, not_found: 0, wrong_org: 0 };
   for (const p of plan.place) out[await claimCanvasOrg(plan.tenantId, p.canvasId, p.orgId, by)]++;

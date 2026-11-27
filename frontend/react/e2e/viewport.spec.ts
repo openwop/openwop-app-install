@@ -532,6 +532,8 @@ test.describe('mobile admin — compact disclosure, not a link cloud', () => {
  * chat boundary replacement is a GET config response: no stored key/default,
  * provider call or artificial textarea/navigation geometry. */
 test('pocket composer and non-modal navigation remain reachable above the mobile bar', async ({ page }) => {
+  // Seven real App boots plus a toggle pin and restore: 28.8–34.2 s alone on an idle Cloud Build box, over the 30 s default.
+  test.setTimeout(90_000);
   const tenantId = await loginPersonal(page.request, 'pocket-clearance@e2e.test');
   const restoreToggle = await pinTenantToggle(page.request, 'funnels', tenantId);
   const orgResponse = await page.request.post(`${API}/orgs`, { data: { name: 'Pocket clearance private fixture' } });
@@ -644,6 +646,8 @@ test('pocket composer and non-modal navigation remain reachable above the mobile
 /** Independent71 control: keep the real guidance offered, rather than dismissing
  * it to make a pocket hit target pass. Source70's mobile-bar case is separate. */
 test('tutorial offer and pocket composer retain their own real hit targets at 861px', async ({ page }) => {
+  // A real App boot plus a toggle pin and restore: 20.8–24.5 s alone on an idle Cloud Build box, too near the 30 s default.
+  test.setTimeout(90_000);
   const tenantId = await loginPersonal(page.request, 'tutorial-pocket-clearance@e2e.test');
   const restoreToggle = await pinTenantToggle(page.request, 'funnels', tenantId);
   const org = await page.request.post(`${API}/orgs`, { data: { name: 'Tutorial pocket private fixture' } });

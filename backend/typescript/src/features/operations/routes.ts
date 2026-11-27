@@ -34,6 +34,7 @@ import type { Storage } from '../../storage/storage.js';
 import type { WebhookDeliveryRecord } from '../../types.js';
 import type { SignedAttestation } from '../../host/deploymentAttestation.js'; // type-only — the module is imported lazily below
 import { OpenwopError } from '../../types.js';
+import { applyCanvasOrgPlan, planCanvasOrgBackfillAll, type CanvasOrgClaim, type CanvasOrgPlan } from '../../host/canvasSurface.js';
 import { createLogger } from '../../observability/logger.js';
 import { recordAttestationAge } from '../../observability/metricSeams.js';
 import { collectLocalScrape, lastEmissionMap, localScrapeStartedAt, localScrapeCardinalityLimit } from '../../observability/metrics.js';
@@ -179,6 +180,50 @@ export function registerOperationsRoutes(deps: RouteDeps): void {
     try {
       requireSuperadmin(req);
       res.json(profileCensusReport({ membershipEnforced: isAuthorizationEnforced(), superadminMfaRequired: superadminMfaRequired() }));
+    } catch (err) { next(err); }
+  });
+
+  // ── ADR 1160 D4 — place existing tenant-shared canvases in an org
+  //    (superadmin). GET is the dry run: counts and a digest of exactly what
+  //    would be placed, nothing written, no canvas or tenant ids. POST applies
+  //    ONLY the plan whose digest it is sent; a canvas created or placed since
+  //    changes the digest and the apply is refused (409). Every placement is a
+  //    CAS that only sets an unset org, audited per tenant (`claimCanvasOrg`).
+  //    Running the apply in production is a data write: the user's own go. ──
+  const backfillSummary = (plans: CanvasOrgPlan[]) => ({
+    tenants: plans.length,
+    unstamped: plans.reduce((n, p) => n + p.unstamped, 0),
+    place: {
+      oneOrgTenant: plans.reduce((n, p) => n + p.place.filter((x) => x.why === 'one-org-tenant').length, 0),
+      projectOwned: plans.reduce((n, p) => n + p.place.filter((x) => x.why === 'project-owned').length, 0),
+    },
+    leftShared: plans.reduce((n, p) => n + p.leftShared, 0),
+  });
+  app.get(`${BASE}/canvas-org-backfill`, async (req, res, next) => {
+    try {
+      requireSuperadmin(req);
+      const { plans, digest } = await planCanvasOrgBackfillAll();
+      res.json({ dryRun: true, ...backfillSummary(plans), digest });
+    } catch (err) { next(err); }
+  });
+  app.post(`${BASE}/canvas-org-backfill`, async (req, res, next) => {
+    try {
+      requireSuperadmin(req);
+      const sent = (req.body ?? {}) as { digest?: unknown };
+      if (typeof sent.digest !== 'string' || !/^[0-9a-f]{64}$/.test(sent.digest)) {
+        throw new OpenwopError('validation_error', 'Send the `digest` from GET …/canvas-org-backfill: the apply writes only a reviewed plan.', 400, { field: 'digest' });
+      }
+      const { plans, digest } = await planCanvasOrgBackfillAll();
+      if (digest !== sent.digest) {
+        throw new OpenwopError('conflict', 'The plan changed since the dry run. Run GET …/canvas-org-backfill again and review it.', 409, { reason: 'plan_changed' });
+      }
+      const outcome: Record<CanvasOrgClaim, number> = { claimed: 0, already: 0, conflict: 0, not_found: 0, wrong_org: 0 };
+      for (const p of plans) {
+        const r = await applyCanvasOrgPlan(p, 'system:adr1160-backfill');
+        for (const k of Object.keys(r) as CanvasOrgClaim[]) outcome[k] += r[k];
+      }
+      log.info('canvas_org_backfill_applied', { ...outcome, digest });
+      res.json({ dryRun: false, ...backfillSummary(plans), digest, outcome });
     } catch (err) { next(err); }
   });
 

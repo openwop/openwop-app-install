@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Sync JSON Schemas from the canonical openwop spec corpus into this repo's
-# vendored `schemas/` dir. The backend bundles them into the Docker image
+# vendored `schemas/v2/` dir.
+#
+# RFC 0266 (v2 is self-contained, 2026-11-25): ONLY `schemas/v2/` is vendored. The
+# corpus's flat `schemas/*.schema.json` (+ `schemas/envelopes/`) is the frozen v1
+# tree; this host reads none of it, and `scripts/check-v1-reliance.mjs`
+# `flatSchemaReads` must stay 0. `schemas/README.md` is this repo's own file (it
+# is NOT the corpus README, which indexes the v1 tree) and `schemas/CORPUS_TAG`
+# is written below; nothing else lives directly in `schemas/`. The backend bundles them into the Docker image
 # (Dockerfile COPY) so the deployed Cloud Run revision loads them at boot
 # (host/*.ts resolve `schemas/` from /app/lib). Vendoring is required because
 # `gcloud run deploy --source .` uploads only this repo; the corpus is elsewhere.
@@ -70,28 +77,33 @@ fi
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 git -C "$CORPUS" archive "$TAG" \
-  schemas \
+  schemas/v2 \
   spec/v2/event-codemap.json \
   spec/v2/path-manifest.json \
   spec/v2/declaration.json | tar -x -C "$WORK"
-CANONICAL="$WORK/schemas"
+CANONICAL="$WORK/schemas/v2"
 if [ ! -d "$CANONICAL" ]; then
-  echo "error: $TAG in $CORPUS carries no schemas/ tree." >&2
+  echo "error: $TAG in $CORPUS carries no schemas/v2/ tree." >&2
   exit 1
 fi
 
-rm -rf "$VENDORED"; mkdir -p "$VENDORED"
-cp -r "$CANONICAL/." "$VENDORED/"
-diff -rq "$CANONICAL" "$VENDORED" >/dev/null
+# Replace ONLY `schemas/v2/`. The flat v1 files are never copied (RFC 0266); a
+# stray one left by an older sync is removed so the tree cannot drift back.
+mkdir -p "$VENDORED"
+rm -rf "$VENDORED/v2" "$VENDORED/envelopes"
+find "$VENDORED" -maxdepth 1 -name '*.schema.json' -delete
+mkdir -p "$VENDORED/v2"
+cp -r "$CANONICAL/." "$VENDORED/v2/"
+diff -rq "$CANONICAL" "$VENDORED/v2" >/dev/null
 
 # `spec/v2/event-codemap.json` is the ONLY authority for the v1->v2 event-type
 # map (spec/v2/core/persistence.md "The codemap is data": "A host MUST NOT carry
 # a private mapping"). It lives under the corpus `spec/` tree, not `schemas/`,
 # and it is shipped in `@openwop/spec-artifacts` — which this repo carries as a
 # devDependency, so it is NOT in the runtime image. The storage-boundary era
-# adapter reads it at boot from the vendored `schemas/` dir the Dockerfile
+# adapter reads it at boot from the vendored `schemas/v2/` dir the Dockerfile
 # COPYs, so it is copied here, AFTER the `diff -rq` above (which requires the
-# vendored tree to equal the corpus `schemas/` exactly).
+# vendored tree to equal the corpus `schemas/v2/` exactly).
 cp "$WORK/spec/v2/event-codemap.json" "$VENDORED/v2/event-codemap.json"
 
 # `spec/v2/path-manifest.json` is the ONLY authority for which path keys the v2
@@ -117,4 +129,4 @@ cp "$WORK/spec/v2/declaration.json" "$VENDORED/v2/declaration.json"
 printf '%s\n' "$TAG" > "$VENDORED/CORPUS_TAG"
 # The SPA ships only the codemap's renamed pairs (bundle budget); regenerate them from the new vendor.
 ( cd "$REPO_ROOT/frontend/react" && node scripts/gen-event-codemap.mjs )
-echo "ok — vendored $(find "$VENDORED" -name '*.json' | wc -l | tr -d ' ') schemas into schemas/ from $CORPUS at $TAG ($TAG_COMMIT); recorded in schemas/CORPUS_TAG"
+echo "ok — vendored $(find "$VENDORED/v2" -name '*.json' | wc -l | tr -d ' ') files into schemas/v2/ from $CORPUS at $TAG ($TAG_COMMIT); recorded in schemas/CORPUS_TAG"

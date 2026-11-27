@@ -238,12 +238,14 @@ fi
 # Guard: the runtime-vendored corpora the backend loads at boot MUST be in the zip.
 # `providers.json` (model catalog the AI-chat/model-picker read), `packs/` (node /
 # agent / artifact-type / connection packs every feature surface rides on — campaign
-# studio, workflow-chain loader, etc.), `schemas/` + `conformance-fixtures/` (wire +
-# conformance). These are tracked at the repo root and the Dockerfile COPYs them, so
+# studio, workflow-chain loader, etc.), `schemas/v2/` + `conformance-fixtures/` (wire +
+# conformance). RFC 0266: only `schemas/v2/` is vendored — the flat v1 tree is gone, so
+# the guard names the tree the backend actually boots from (a bare `schemas/` would
+# pass on `schemas/README.md` alone). These are tracked at the repo root and the Dockerfile COPYs them, so
 # git archive includes them — but a stray gitignore/move would silently ship a bundle
 # whose backend can't boot, so assert each is present.
 echo "[whitelabel-zip] verifying runtime-vendored corpora are present"
-for path in 'providers\.json' 'packs/' 'schemas/' 'conformance-fixtures/'; do
+for path in 'providers\.json' 'packs/' 'schemas/v2/ids\.schema\.json' 'conformance-fixtures/'; do
   if ! grep -qE "^${PREFIX}${path}" <<<"$ZIP_LISTING"; then
     echo "[whitelabel-zip] FATAL: ${path//\\/} missing from the zip (backend would not boot)." >&2
     exit 1

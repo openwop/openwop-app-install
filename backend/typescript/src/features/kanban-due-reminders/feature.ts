@@ -1,6 +1,6 @@
 /**
  * ADR 1138 D4 — kanban due reminders. A tenant-bucket toggle (default OFF) and a
- * small daemon: every {@link TICK_MS} it sweeps a slice of the tenants that have
+ * small daemon: every {@link DUE_SWEEP_TICK_MS} it sweeps a slice of the tenants that have
  * the toggle on (see `dueSweep.ts`). No routes, no packs: reminders are ordinary
  * addressed notifications, so they arrive wherever the host already delivers
  * them (inbox, push, the recipient's email/Teams preferences).
@@ -9,10 +9,9 @@
 import type { BackendFeature } from '../types.js';
 import { runUnderWorkerContract } from '../../storage/eventEraAdapter.js';
 import { createLogger } from '../../observability/logger.js';
-import { KANBAN_DUE_REMINDERS_TOGGLE, dueSweepTenantSource, sweepDueTick } from './dueSweep.js';
+import { DUE_SWEEP_TICK_MS, KANBAN_DUE_REMINDERS_TOGGLE, dueSweepTenantSource, dueSweepTickAt, sweepDueTick } from './dueSweep.js';
 
 const log = createLogger('feature.kanban-due-reminders');
-const TICK_MS = 5 * 60 * 1000;
 
 export const kanbanDueRemindersFeature: BackendFeature = {
   id: KANBAN_DUE_REMINDERS_TOGGLE,
@@ -32,7 +31,6 @@ export const kanbanDueRemindersFeature: BackendFeature = {
     salt: KANBAN_DUE_REMINDERS_TOGGLE,
   },
   onStart: (ctx) => {
-    let tick = 0;
     let running = false;
     // Roster tenants plus every tenant with a board: an adopter with boards and no
     // roster agents would otherwise never be swept.
@@ -40,13 +38,12 @@ export const kanbanDueRemindersFeature: BackendFeature = {
     const run = (): void => {
       if (running) return;
       running = true;
-      const n = tick;
-      tick += 1;
-      void sweepDueTick(tenants, n)
+      const now = Date.now();
+      void sweepDueTick(tenants, dueSweepTickAt(now), now)
         .catch((err) => log.warn('due_sweep_failed', { error: err instanceof Error ? err.message : String(err) }))
         .finally(() => { running = false; });
     };
-    const timer = setInterval(() => runUnderWorkerContract(run), TICK_MS);
+    const timer = setInterval(() => runUnderWorkerContract(run), DUE_SWEEP_TICK_MS);
     timer.unref?.();
     return { stop: () => clearInterval(timer) };
   },

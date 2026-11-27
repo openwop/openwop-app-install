@@ -42,7 +42,7 @@ import { validateEvalSuite, type AgentEvalSuite } from '../src/host/evals/suiteS
 import { effectiveToolAllowlist } from '../src/host/agentToolAllowlistService.js';
 
 const PACKS = join(dirname(fileURLToPath(import.meta.url)), '../../../packs');
-const MODEL_CLASS_ENUM = (JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../../../schemas/agent-manifest.schema.json'), 'utf8')) as { properties: { modelClass: { enum: string[] } } }).properties.modelClass.enum;
+const MODEL_CLASS_ENUM = (JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../../../schemas/v2/agent-manifest.schema.json'), 'utf8')) as { properties: { modelClass: { enum: string[] } } }).properties.modelClass.enum;
 const V2 = { Authorization: 'Bearer dev-token', 'Content-Type': 'application/json', 'OpenWOP-Version': '2' };
 const T = (s: string): string => `openwop:${s}`;
 let server: Server;

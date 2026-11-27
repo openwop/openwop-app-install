@@ -38,6 +38,17 @@ installed pack with no reachable replacement.
 Found while answering the corpus steward's question about pack drift
 (crosstalk `5983` → `cbff`).
 
+> **CORRECTED 2026-11-25 (RFC 0266; maintainer decision: v1-signed packs are not accepted):**
+> the v1 overlap this ADR kept is gone. `preferredTree`, the v1 and flat fallbacks,
+> `OPENWOP_REGISTRY_TREE` and `OPENWOP_REGISTRY_LEGACY_V1_PATHS` are removed. The host
+> reads only `endpoints.v2`; a registry without it is refused (`no_v2_tree` →
+> `registry_v2_tree_missing`), and only `publicKey` may come from the flat map. The
+> default install pins moved to versions present in the v2 tree (`core.openwop.ai@1.5.2`,
+> `core.openwop.http@2.1.3`; the 1.0.0 pins existed only in v1). Measured before the
+> change: none of openwop-dev, casavoga-prod, kicktodo-prod or myndhyve-prod sets either
+> flag, and all 57 + 17 + 17 pinned packs resolve in the v2 tree (myndhyve-prod installs
+> none). The decision text below is kept as history.
+
 ## Decision
 
 1. **One fetch of the discovery document, one owner.** `packs/registryEndpoints.ts`

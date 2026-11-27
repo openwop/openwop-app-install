@@ -8,8 +8,22 @@
  * (erasure, bounces, complaints and manual holds block it). Not
  * `features/email` `activeProvider()`: that is the console stub on this host, so
  * a send there reports success and delivers nothing.
+ *
+ * ADR 1141 follow-up (after #6248): the code goes out from the firm's own sender,
+ * the link org's `senderAddress` (the one every other transactional email uses,
+ * `features/email/brokeredProvider.ts`), with the org's name as the From name. The
+ * env `OPENWOP_NOTIFY_EMAIL_FROM` is the fallback for an org that has none.
+ *
+ * The TRANSPORT stays the workspace Connection, resolved with the tenant only. A
+ * code send has no acting human: it runs for an anonymous visitor. The broker
+ * withholds an org Connection from a send with no acting user and then returns
+ * nothing (ADR 0024 D2, `authorizedCandidates`). So passing `orgId` there would
+ * leave an org that has its own Connection with no transport at all, where today
+ * it uses the workspace's.
  */
 import { makeEmailAdapter, resolveEmailProvider } from '../../host/emailAdapter.js';
+import { emailHeaderFieldProblem, FROM_NAME_MAX } from '../../host/emailHeaderFields.js';
+import { getEmailSettings } from '../email/emailService.js';
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { registerTransactionalTemplate, renderTransactional, type TransactionalTemplate } from '../../host/transactionalEmail.js';
 
@@ -55,36 +69,76 @@ export function registerShareCodeTemplate(): void {
   registerTransactionalTemplate(shareCodeTemplate);
 }
 
-interface ShareCodeMailForTest { ready: boolean; sent: Array<{ tenantId: string; to: string; code: string }> }
+interface ShareCodeMailForTest {
+  /** Is an email transport connected? The sender is still resolved for real. */
+  ready: boolean;
+  /** The transport refuses each send with this error (a provider that rejects the From). */
+  refuse?: string;
+  sent: Array<{ tenantId: string; orgId: string; to: string; code: string; from: string; fromName?: string }>;
+}
 let testMail: ShareCodeMailForTest | undefined;
-/** Test seam: replace the mail lane with an in-memory outbox (undefined restores it). */
+/** Test seam: replace the transport with an in-memory outbox (undefined restores it). */
 export function __setShareCodeMailForTest(m: ShareCodeMailForTest | undefined): void { testMail = m; }
 
-function fromAddress(): string | null {
-  return process.env.OPENWOP_NOTIFY_EMAIL_FROM?.trim() || null;
+/** The org's own sender, else the host's. Null when neither is set. */
+async function fromAddress(tenantId: string, orgId: string): Promise<string | null> {
+  const own = (await getEmailSettings(tenantId, orgId))?.senderAddress.trim();
+  return own || process.env.OPENWOP_NOTIFY_EMAIL_FROM?.trim() || null;
 }
 
-/** Can this workspace send a code at all? Asked at MINT, so the owner learns it then. */
-export async function shareCodeMailReady(tenantId: string): Promise<boolean> {
+/** The org's name as a From name: control characters become spaces, runs collapse,
+ *  it is capped at the header limit. Omitted when nothing usable is left. */
+function fromNameOf(orgName: string): string | undefined {
+  // eslint-disable-next-line no-control-regex
+  const name = orgName.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, FROM_NAME_MAX).trim();
+  return name && !emailHeaderFieldProblem({ fromName: name }) ? name : undefined;
+}
+
+async function transportReady(tenantId: string): Promise<boolean> {
   if (testMail) return testMail.ready;
-  if (!fromAddress()) return false;
   return (await resolveEmailProvider({ tenantId, purpose: 'transactional' })) !== null;
 }
 
-/** Send one code. Never throws: the visitor's answer is the same 202 either way. */
-export async function sendShareCode(input: { tenantId: string; to: string; orgName: string; code: string; idempotencyKey: string }): Promise<boolean> {
-  if (testMail) {
-    renderTransactional<ShareCodeData>(SHARE_CODE_KIND, { orgName: input.orgName || '—', code: input.code }); // the kind must render
-    testMail.sent.push({ tenantId: input.tenantId, to: input.to, code: input.code });
-    return true;
-  }
-  const from = fromAddress();
-  if (!from) return false;
+/** Can this org send a code at all? Asked at MINT, so the owner learns it then. */
+export async function shareCodeMailReady(tenantId: string, orgId: string): Promise<boolean> {
+  if (!(await fromAddress(tenantId, orgId))) return false;
+  return transportReady(tenantId);
+}
+
+/** Why a code did not go out. `email_*` is the adapter's own code; anything else the
+ *  provider said (an unverified From domain, for one) reads `provider_refused`. */
+export type ShareCodeSendFailure = 'no_sender' | 'provider_refused' | `email_${string}`;
+export type ShareCodeSendResult = { sent: true } | { sent: false; reason: ShareCodeSendFailure };
+
+function failureOf(error: string | undefined): ShareCodeSendFailure {
+  const code = error?.split(':')[0]?.trim() ?? '';
+  return /^email_[a-z_]+$/.test(code) ? (code as `email_${string}`) : 'provider_refused';
+}
+
+/**
+ * Send one code. Never throws: the visitor's answer is the same 202 either way.
+ *
+ * Limitation: the From is the org's address but the transport is the workspace's
+ * Connection. A provider that has not verified the org's domain can refuse the send
+ * (SendGrid and Postmark do) or a receiver can flag it. A refusal comes back as a
+ * typed failure, never as a sent code.
+ */
+export async function sendShareCode(input: { tenantId: string; orgId: string; to: string; orgName: string; code: string; idempotencyKey: string }): Promise<ShareCodeSendResult> {
+  const from = await fromAddress(input.tenantId, input.orgId);
+  if (!from) return { sent: false, reason: 'no_sender' };
+  const fromName = fromNameOf(input.orgName);
   const m = renderTransactional<ShareCodeData>(SHARE_CODE_KIND, { orgName: input.orgName || '—', code: input.code });
+  if (testMail) {
+    if (!testMail.ready) return { sent: false, reason: 'email_not_connected' };
+    if (testMail.refuse !== undefined) return { sent: false, reason: failureOf(testMail.refuse) };
+    testMail.sent.push({ tenantId: input.tenantId, orgId: input.orgId, to: input.to, code: input.code, from, ...(fromName ? { fromName } : {}) });
+    return { sent: true };
+  }
   const provider = (await resolveEmailProvider({ tenantId: input.tenantId, purpose: 'transactional' })) ?? 'smtp';
   const result = await makeEmailAdapter({ storage: hostExtStorage(), tenantId: input.tenantId, runId: `share-verify:${input.idempotencyKey}` }).send({
     from, to: input.to, subject: m.subject, text: m.text,
+    ...(fromName ? { fromName } : {}),
     provider, purpose: 'transactional', idempotencyKey: input.idempotencyKey,
   });
-  return result.sent;
+  return result.sent ? { sent: true } : { sent: false, reason: failureOf(result.error) };
 }

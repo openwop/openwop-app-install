@@ -39,6 +39,9 @@ import { readSessionSecret } from '../../middleware/cookieSession.js';
 import { scrubSecretShaped } from '../../host/redactSecrets.js';
 import { ERASED, subjectKeyForms } from '../../host/subjectErasureRedaction.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
+import { registerDefaultWindowSweep, type PurgeOutcome } from '../../host/retentionPurger.js';
+import { getRetentionHold } from '../../host/retentionHold.js';
+import { isKmsConfigured, kmsDecrypt, kmsEncrypt, type KmsAadContext, type KmsEncryptedRecord } from '../../byok/kmsEncryption.js';
 import type { ApprovalOrigin } from '../capability-firewall/types.js';
 
 export type ToolApprovalStatus = 'pending' | 'approved' | 'denied';
@@ -81,6 +84,12 @@ export interface ToolApprovalRecord {
   /** ADR 1156 D3 — the tool's own plain description of the held call (`describeApproval`),
    *  scrubbed and capped. Lives exactly as long as `requestedInput`: cleared on decision. */
   requestedLines?: ApprovalLine[];
+  /** ADR 1156 P2 (D10) — the held call's FULL input, sealed (the KMS envelope, AAD bound to
+   *  this row and its `inputDigest`), so the continue turn can run exactly the call that was
+   *  approved. In-app asks only. Kept while pending and on a `call`-grain approval; dropped on
+   *  every other decision, and gone with the row when the call is run or the conversation is
+   *  deleted. Never returned by the routes. */
+  sealedInput?: string;
 }
 
 /** ADR 1156 D3 — one line of a tool's description of a held call. `group` lets a tool
@@ -159,8 +168,53 @@ const withoutInput = (r: ToolApprovalRecord): ToolApprovalRecord => {
   const out = { ...r };
   delete out.requestedInput;
   delete out.requestedLines;
+  delete out.sealedInput;
   return out;
 };
+
+/** ADR 1156 P2 (D10) — the largest held input kept for running. A bigger one is not sealed,
+ *  and its approval works as in P1 (the model repeats the call). */
+export const SEALED_INPUT_MAX_CHARS = 128 * 1024;
+const SEALED_KMS = 'toolapproval:kms:v1:';
+const SEALED_PLAIN = 'toolapproval:plain:v1:';
+
+/** The AAD the input is sealed under: the row, and the digest the approval is checked
+ *  against, so a sealed input copied onto another row or another ask does not open. */
+function sealedInputAad(tenantId: string, conversationId: string, toolName: string, digest: string): KmsAadContext {
+  return { tenantId, credentialRef: `toolapproval:${conversationId}:${toolName}:${digest}` };
+}
+
+/** Seal a held call's input for the row. Without KMS (local dev, the anonymous demo) it is
+ *  stored with a plaintext marker, the `webhookSecretCodec.ts` posture. */
+async function sealInput(tenantId: string, conversationId: string, toolName: string, digest: string, input: Record<string, unknown>): Promise<string | undefined> {
+  let text: string;
+  try { text = canonicalize(input); } catch { return undefined; }
+  if (text.length > SEALED_INPUT_MAX_CHARS) return undefined;
+  if (!isKmsConfigured()) return `${SEALED_PLAIN}${text}`;
+  return `${SEALED_KMS}${JSON.stringify(await kmsEncrypt(text, sealedInputAad(tenantId, conversationId, toolName, digest)))}`;
+}
+
+/** Open a row's sealed input, and check it is the input the approval was given for (its
+ *  digest is the row's `inputDigest`). Anything else, tamper or a wrong AAD included, is
+ *  undefined: the call is then not run. */
+export async function openSealedInput(r: ToolApprovalRecord): Promise<Record<string, unknown> | undefined> {
+  if (!r.sealedInput || !r.inputDigest) return undefined;
+  try {
+    let text: string;
+    if (r.sealedInput.startsWith(SEALED_KMS)) {
+      text = await kmsDecrypt(JSON.parse(r.sealedInput.slice(SEALED_KMS.length)) as KmsEncryptedRecord, sealedInputAad(r.tenantId, r.conversationId, r.toolName, r.inputDigest));
+    } else if (r.sealedInput.startsWith(SEALED_PLAIN) && !isKmsConfigured()) {
+      // Under KMS every input is sealed with it, so a plaintext marker there was not
+      // written by `sealInput`.
+      text = r.sealedInput.slice(SEALED_PLAIN.length);
+    } else return undefined;
+    const input = JSON.parse(text) as unknown;
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+    return toolInputDigest(input as Record<string, unknown>) === r.inputDigest ? (input as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** Bound on compare-and-swap retries for a re-ask (contention is two writers on one row). */
 const CAS_ATTEMPTS = 5;
@@ -222,8 +276,14 @@ export async function recordToolApprovalRequested(
   const origin: ApprovalOrigin = ask.origin ?? 'baseline';
   const display = displayInput(ask.input);
   const lines = boundApprovalLines(ask.lines);
+  const inputDigest = toolInputDigest(ask.input);
+  // ADR 1156 P2 (D10) — in-app asks keep the full input, sealed, for running on approval.
+  const sealedInput = (ask.lane ?? 'app') === 'app' && ask.input && Object.keys(ask.input).length > 0
+    ? await sealInput(tenantId, conversationId, toolName, inputDigest, ask.input)
+    : undefined;
   const shown = {
-    inputDigest: toolInputDigest(ask.input),
+    inputDigest,
+    ...(sealedInput ? { sealedInput } : {}),
     ...(display.text ? { requestedInput: display.text } : {}),
     ...(display.complete ? {} : { inputTruncated: true }),
     lane: ask.lane ?? 'app',
@@ -296,8 +356,12 @@ export async function resolveToolApproval(
   if (decision === 'approved' && grain === 'conversation' && existing.lane === 'channel') return { ok: false, reason: 'grain_not_allowed' };
   // ADR 1156 D6 — a denial has a grain too: `call` covers the arguments shown (the row
   // keeps their digest), `conversation` blocks the tool (the composer dialog's Deny).
+  // ADR 1156 P2 (D10) — only a one-call approval keeps the sealed input: it is the call
+  // that will run. Every other decision drops it with the display copy.
+  const keepSealed = decision === 'approved' && grain === 'call' && existing.sealedInput !== undefined;
   const updated: ToolApprovalRecord = {
     ...withoutInput(existing), status: decision, resolvedAt: now(), resolvedBy, grain,
+    ...(keepSealed ? { sealedInput: existing.sealedInput } : {}),
   };
   if (!(await ledger.compareAndSwap(existing, updated))) return { ok: false, reason: 'approval_changed' };
   return { ok: true, record: updated };
@@ -349,6 +413,107 @@ export async function claimApprovedToolApprovals(rows: readonly ToolApprovalReco
   }
   return won;
 }
+
+/** ADR 1156 P2 (D12) — how long after its approval a one-call approval is still run by the
+ *  next turn. Later, the next turn does not run it on its own (the person may have moved
+ *  on); it still covers the call if the model makes it (P1). `OPENWOP_APPROVED_CALL_RUN_WINDOW_MIN`
+ *  overrides; default 60 minutes. */
+export const APPROVED_CALL_RUN_WINDOW_DEFAULT_MIN = 60;
+function approvedCallRunWindowMs(): number {
+  const raw = Number(process.env.OPENWOP_APPROVED_CALL_RUN_WINDOW_MIN);
+  return (Number.isFinite(raw) && raw > 0 ? raw : APPROVED_CALL_RUN_WINDOW_DEFAULT_MIN) * 60_000;
+}
+
+/** ADR 1156 P2 (D11) — an approved call the next turn runs itself, before the model. */
+export interface ApprovedCallToRun { row: ToolApprovalRecord; input: Record<string, unknown> }
+
+/** ADR 1156 P2 (D11, D13) — the in-app one-call approvals this turn should run itself, each
+ *  CLAIMED (compare-and-delete) before it is returned, so two turns cannot both run one
+ *  approval and a turn re-dispatched after a crash does not run it again (at most once).
+ *  Also returns the rows another turn claimed first: the caller drops them from its grant,
+ *  so a model re-attempt in that turn cannot spend an approval already being run. A row
+ *  whose input does not open, or whose digest no longer matches, is left in place (it still
+ *  covers a re-attempt, as in P1). `OPENWOP_APPROVED_CALL_RUN=off` turns this off. */
+export async function claimApprovedCallsToRun(rows: readonly ToolApprovalRecord[], nowMs: number = Date.now()): Promise<{ toRun: ApprovedCallToRun[]; lost: ToolApprovalRecord[] }> {
+  const toRun: ApprovedCallToRun[] = [];
+  const lost: ToolApprovalRecord[] = [];
+  if (process.env.OPENWOP_APPROVED_CALL_RUN === 'off') return { toRun, lost };
+  const windowMs = approvedCallRunWindowMs();
+  for (const r of rows) {
+    if (r.status !== 'approved' || r.grain !== 'call' || r.lane === 'channel' || !r.askId || !r.sealedInput) continue;
+    const at = Date.parse(r.resolvedAt ?? '');
+    if (!Number.isFinite(at) || nowMs - at > windowMs) continue;
+    const input = await openSealedInput(r);
+    if (!input) continue;
+    if (await ledger.compareAndDelete(r)) toRun.push({ row: r, input });
+    else lost.push(r);
+  }
+  return { toRun, lost };
+}
+
+/** ADR 1156 P2 (D10) — how long a still-PENDING ask keeps its sealed input, from its
+ *  latest ask. User decision 2026-11-26: 24 hours. In-app asks have no other expiry and
+ *  conversations no retention window, so without this an undecided ask kept the full
+ *  input for as long as the conversation existed. Past it, an approval still works as in
+ *  P1 (the model repeats the call). `OPENWOP_PENDING_SEALED_INPUT_TTL_MIN` overrides. */
+export const PENDING_SEALED_INPUT_TTL_DEFAULT_MIN = 24 * 60;
+function pendingSealedInputTtlMs(): number {
+  const raw = Number(process.env.OPENWOP_PENDING_SEALED_INPUT_TTL_MIN);
+  return (Number.isFinite(raw) && raw > 0 ? raw : PENDING_SEALED_INPUT_TTL_DEFAULT_MIN) * 60_000;
+}
+
+/** ADR 1156 P2 (D10) — a sealed input that can no longer run is not kept: its approval is
+ *  not a one-call approval any more, or its run window has passed (an unreadable decision
+ *  time reads as passed).
+ *
+ *  A PENDING ask keeps its input for `pendingSealedInputTtlMs` after its latest ask (an
+ *  unreadable ask time reads as passed): it is what a one-call approval will run. This
+ *  used to read every non-approved status as lapsed, so any turn (or the retention sweep)
+ *  that ran while an ask was pending stripped its input, and the approval that followed
+ *  had nothing to run. */
+function sealedInputLapsed(r: ToolApprovalRecord, nowMs: number): boolean {
+  if (r.sealedInput === undefined) return false;
+  if (r.status === 'pending') {
+    const asked = Date.parse(r.requestedAt);
+    return !Number.isFinite(asked) || nowMs - asked > pendingSealedInputTtlMs();
+  }
+  if (r.status !== 'approved' || r.grain !== 'call') return true;
+  const at = Date.parse(r.resolvedAt ?? '');
+  return !Number.isFinite(at) || nowMs - at > approvedCallRunWindowMs();
+}
+
+/** ADR 1156 P2 (D10) — drop the sealed inputs that lapsed from a conversation's rows, and
+ *  return the rows as stored. Every turn calls it, whoever acts (a fork, a participant or
+ *  a channel turn never runs one, so its window would otherwise never end). A row written
+ *  meanwhile wins the compare-and-swap and is returned as read; the next turn retries. */
+export async function dropLapsedSealedInputs(rows: readonly ToolApprovalRecord[], nowMs: number = Date.now()): Promise<ToolApprovalRecord[]> {
+  const out: ToolApprovalRecord[] = [];
+  for (const r of rows) {
+    if (!sealedInputLapsed(r, nowMs)) { out.push(r); continue; }
+    const next: ToolApprovalRecord = { ...r };
+    delete next.sealedInput;
+    out.push(await ledger.compareAndSwap(r, next).catch(() => false) ? next : r);
+  }
+  return out;
+}
+
+/** ADR 1156 P2 (D10) — the same drop on the retention daemon's default-on tick, so a
+ *  conversation that never has another turn does not keep a sealed input past its window.
+ *  Skips tenants under legal hold (ADR 0951 D3). The count is of inputs dropped. */
+export async function sweepLapsedSealedInputs(nowMs: number = Date.now()): Promise<PurgeOutcome> {
+  let deleted = 0; let failed = 0;
+  const held = new Map<string, boolean>();
+  for (const r of await ledger.list()) {
+    if (!sealedInputLapsed(r, nowMs)) continue;
+    if (!held.has(r.tenantId)) held.set(r.tenantId, (await getRetentionHold(r.tenantId)) !== null);
+    if (held.get(r.tenantId)) continue;
+    const next: ToolApprovalRecord = { ...r };
+    delete next.sealedInput;
+    try { if (await ledger.compareAndSwap(r, next)) deleted += 1; } catch { failed += 1; }
+  }
+  return { deleted, failed };
+}
+registerDefaultWindowSweep({ feature: 'conversation-tools-sealed-input', sweep: sweepLapsedSealedInputs });
 
 /** CHAN-F3 — hand back the claimed approvals the turn did NOT spend. `putIfAbsent`,
  *  never `put`: a row written meanwhile (a fresh ask, a denial, a re-approval) wins. */
@@ -472,7 +637,11 @@ export async function eraseConversationToolApprovalsSubject(tenantId: string, su
     if (r.tenantId !== tenantId) continue;
     if (r.resolvedBy === undefined || !forms.has(r.resolvedBy)) continue;
     // CAS: a concurrent decision on this row wins; the eraser re-runs on the next DSAR.
-    await ledger.compareAndSwap(r, { ...r, resolvedBy: ERASED });
+    // ADR 1156 P2 (D10): the sealed input of a call the subject approved goes too; the
+    // approval then works as in P1 (the model repeats the call).
+    const erased: ToolApprovalRecord = { ...r, resolvedBy: ERASED };
+    delete erased.sealedInput;
+    await ledger.compareAndSwap(r, erased);
   }
 }
 

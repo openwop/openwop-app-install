@@ -934,6 +934,8 @@ export const messages = {
   readableJsonAllFields: 'Tous les champs enregistrés',
   assetPreviewMediaAlt: 'Média généré en cours de révision',
   reviewRequestedBy: 'Demandé par',
+  reviewDecidedBy: 'Décidé par',
+  reviewPartOf: 'Fait partie de',
   reviewRequested: 'Demandé',
   reviewDue: 'Échéance',
   reviewNoteLabel: 'Note du relecteur',

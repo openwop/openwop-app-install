@@ -41,7 +41,7 @@ import { setSuspendBackend } from '../src/executor/suspendManager.js';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { projectV2Payload } from '../src/storage/v2PayloadProjection.js';
 import { VENDOR_CARRY_KEY } from '../src/storage/vendorKeyCarry.js';
-import { locateRepoSchemasDir } from '../src/host/_repoPath.js';
+import { locateRepoSchemasV2Dir } from '../src/host/_repoPath.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { EventRecord, RunRecord } from '../src/types.js';
@@ -144,7 +144,7 @@ describe('RFC 0257 §A — every terminal skipped, no node failed', () => {
 
 describe('RFC 0257 — the marker on the major-2 wire', () => {
   const here = dirname(fileURLToPath(import.meta.url));
-  const v2Dir = join(locateRepoSchemasDir(here, 'run-event.schema.json'), 'v2');
+  const v2Dir = locateRepoSchemasV2Dir(here);
   const payloads = JSON.parse(readFileSync(join(v2Dir, 'run-event-payloads.schema.json'), 'utf8')) as {
     $defs: Record<string, { properties?: Record<string, unknown> }>;
   };

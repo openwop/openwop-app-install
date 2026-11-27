@@ -121,10 +121,10 @@ export function subscribeToRun(runId: string, opts: SubscribeOptions): Subscript
   // Last-Event-ID) driven through a fetch that carries this app's auth. The
   // hand-rolled credentialed generator this replaces existed only because the
   // 1.x SDK had no fetch hook; 2.0's `EventsStreamContext.fetch` is that hook.
-  const makeGenerator = (lastEventId: string | undefined, signal: AbortSignal) =>
+  const makeGenerator = (lastEventId: string | undefined, signal: AbortSignal, onBytes: () => void) =>
     unbindEvents(
       boundStream(runId, (wireRunId) => streamEvents(
-        { baseUrl: config.sseBaseUrl, apiKey: config.apiKey, protocolVersion: V2_PROTOCOL_VERSION, fetch: credentialedFetch(runId, signal) },
+        { baseUrl: config.sseBaseUrl, apiKey: config.apiKey, protocolVersion: V2_PROTOCOL_VERSION, fetch: credentialedFetch(runId, signal, onBytes) },
         wireRunId,
         {
           ...(modeOpt !== undefined ? { streamMode: modeOpt } : {}),
@@ -159,6 +159,8 @@ function subscribeViaGenerator(
   makeGenerator: (
     lastEventId: string | undefined,
     signal: AbortSignal,
+    /** ISS-066 — called on every chunk the connection receives, comments included. */
+    onBytes: () => void,
   ) => AsyncGenerator<RunEventDoc, void, void>,
   opts: SubscribeOptions,
   hooks: Pick<TimerHooks, 'onTimedOut' | 'onManuallyClosed' | 'setManuallyClosed' | 'clearTimers' | 'resetIdle' | 'armAbsolute'>,
@@ -177,7 +179,12 @@ function subscribeViaGenerator(
       let terminal = false;
       let yielded = false;
       try {
-        const generator = makeGenerator(lastEventId, abort.signal);
+        // ISS-066 (casavoga #887) — liveness is BYTES, not yielded events. The host's
+        // 15 s heartbeat is an SSE comment the reader never yields, so counting only
+        // events let a quiet but healthy stream (a provider taking ~54 s to answer)
+        // hit the 30 s idle timer and end silently; any consumer that falls back only
+        // on onError then waited forever. A dead connection still sends nothing.
+        const generator = makeGenerator(lastEventId, abort.signal, () => hooks.resetIdle(onAbort));
         for await (const ev of generator) {
           if (hooks.onTimedOut() || hooks.onManuallyClosed()) return;
           yielded = true;
@@ -320,7 +327,7 @@ function streamLeavesApiOrigin(streamUrl: string): boolean {
  * so it is scoped to the right tenant. Each (re)connect mints afresh, so a
  * reconnect after a 403 is not the identical request again.
  */
-function credentialedFetch(runId: string, signal: AbortSignal): typeof fetch {
+function credentialedFetch(runId: string, signal: AbortSignal, onBytes?: () => void): typeof fetch {
   return async (input, init) => {
     const headers = new Headers(init?.headers);
     headers.delete('authorization');
@@ -342,8 +349,20 @@ function credentialedFetch(runId: string, signal: AbortSignal): typeof fetch {
         url = u.toString();
       }
     }
-    return fetch(url, { ...init, headers, credentials: 'include' });
+    const res = await fetch(url, { ...init, headers, credentials: 'include' });
+    return onBytes ? withByteLiveness(res, onBytes) : res;
   };
+}
+
+/** ISS-066 — the same response, with `onBytes` called for each chunk of its body
+ *  (heartbeat comments included) before the SDK's parser reads it. Bytes pass through
+ *  untouched; a response without a body is returned as is. */
+export function withByteLiveness(res: Response, onBytes: () => void): Response {
+  if (!res.body) return res;
+  const body = res.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) { onBytes(); controller.enqueue(chunk); },
+  }));
+  return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
 }
 
 /** The `{runId}` the SDK puts in the path MUST be tenant-bound (identity.md

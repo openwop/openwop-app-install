@@ -408,6 +408,55 @@ describe('SSE — one transport, major 2, this app\'s auth', () => {
     expect(new URL(streams[1]!.url).searchParams.get('resumable')).toBe('true');
   });
 
+  // ISS-066 (casavoga #887) — liveness is bytes. The host's 15 s heartbeat is an SSE
+  // comment the reader never yields, so a quiet but healthy stream (Google took ~54 s
+  // to answer 503) used to hit the idle timer and end silently. Red without
+  // withByteLiveness: onTimeout('idle') fires after 120 ms and the terminal is lost.
+  it('heartbeat comments keep a quiet stream alive past its idle timeout', async () => {
+    const enc = new TextEncoder();
+    stub(() => new Response(new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(enc.encode(FRAME));
+        let beats = 0;
+        const t = setInterval(() => {
+          beats += 1;
+          if (beats < 10) { c.enqueue(enc.encode(': heartbeat\n\n')); return; }
+          clearInterval(t);
+          c.enqueue(enc.encode(TERMINAL));
+          c.close();
+        }, 40);
+      },
+    }), { status: 200, headers: { 'content-type': 'text/event-stream' } }));
+    const { subscribeToRun } = await import('../streamsClient.js');
+    const seqs: number[] = [];
+    let timedOut: string | null = null;
+    let closed = false;
+    const sub = subscribeToRun(BARE, {
+      onEvent: (ev) => { seqs.push(ev.sequence); },
+      onTimeout: (kind) => { timedOut = kind; },
+      onClose: () => { closed = true; },
+      idleTimeoutMs: 120, absoluteTimeoutMs: 60_000,
+    });
+    await waitFor(() => closed || timedOut !== null);
+    sub.close();
+    expect(timedOut, 'a stream that only heartbeats for ~360 ms must not idle out at 120 ms').toBeNull();
+    expect(closed).toBe(true);
+    expect(seqs).toEqual([1, 9]);
+  });
+
+  it('withByteLiveness passes the body through unchanged and reports every chunk', async () => {
+    const { withByteLiveness } = await import('../streamsClient.js');
+    const enc = new TextEncoder();
+    const chunks = [': heartbeat\n\n', FRAME, ': heartbeat\n\n'];
+    const res = new Response(new ReadableStream<Uint8Array>({ start(c) { for (const k of chunks) c.enqueue(enc.encode(k)); c.close(); } }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    let n = 0;
+    const out = withByteLiveness(res, () => { n += 1; });
+    expect(out.status).toBe(200);
+    expect(out.headers.get('content-type')).toBe('text/event-stream');
+    expect(await out.text()).toBe(chunks.join(''));
+    expect(n).toBe(chunks.length);
+  });
+
   it('an endpoint that keeps closing at once with nothing gives up via onError instead of looping', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {

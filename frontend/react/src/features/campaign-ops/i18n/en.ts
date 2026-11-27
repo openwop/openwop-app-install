@@ -193,6 +193,12 @@ export const messages = {
   linkFor: 'Link for {{name}}',
   linkCopy: 'Copy link',
   linkCopied: 'Copied',
+  // ADR 0924 P2c — how each approver link was delivered.
+  sendToClientHelpEmailed: 'Each approver gets their private link by email. A link works for 7 days, only for this change, and stops once the change is decided. Sending again ends the old links.',
+  linkEmailed: 'Emailed to {{email}}',
+  linkNotDelivered: 'Not delivered. Send again, or copy the link and send it yourself.',
+  linkCopyOnly: 'Email isn’t set up for this workspace, so copy the link and send it yourself.',
+  linkVerifiedNote: 'Opening it asks for a one-time code sent to {{email}}, so the link works only for them.',
   portalTitle: 'A change for {{client}} needs your approval',
   portalIntro: 'Check what will change below, then approve or reject it.',
   portalIntroNamed: 'Hi {{name}}. Check what will change below, then approve or reject it.',
@@ -212,6 +218,8 @@ export const messages = {
   portalGoneTitle: 'This link no longer works',
   portalGoneBody: 'It may have expired, or this change was already decided. Ask the agency for a new link if you still need one.',
   portalRateLimited: 'Too many tries. Wait a few minutes and try again.',
+  portalVerifyExpired: 'Your verification has expired. Reload this page to get a new code.',
+  portalLocked: 'This link is locked after too many wrong codes. Ask the agency to send you a new link.',
   portalFailed: 'That did not go through. Check your connection and try again.',
   // ADR 0957 P0 — client reports (internal review view)
   reportsHeading: "Client reports",

@@ -37,6 +37,20 @@ export const OVERDUE_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 export const MAX_CARDS_PER_TENANT_TICK = 500;
 /** Tenants visited per tick; with a 5-minute tick, 12 ticks cover the list once an hour. */
 export const TICKS_PER_ROUND = 12;
+/** How often the daemon sweeps a slice. */
+export const DUE_SWEEP_TICK_MS = 5 * 60 * 1000;
+
+/**
+ * The slice a sweep at `now` visits, read from the clock. A per-boot counter
+ * restarted at slice 0 on every deploy, so with deploys closer than an hour apart
+ * the later slices waited (no notice was lost: the per-date id and the 7-day
+ * lookback hold it), and two overlapping instances swept slice 0 together. From
+ * the clock, a fresh boot picks up where the hour is, and overlapping instances
+ * sweep the same slice, where the per-date notification id sends once.
+ */
+export function dueSweepTickAt(now: number): number {
+  return Math.floor(now / DUE_SWEEP_TICK_MS) % TICKS_PER_ROUND;
+}
 
 export type DueState = 'soon' | 'overdue';
 

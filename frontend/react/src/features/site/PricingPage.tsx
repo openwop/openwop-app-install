@@ -11,7 +11,7 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { brand } from '../../brand/brand.js';
-import { Skeleton } from '../../ui/Skeleton.js';
+import { PublicPageLoading } from './PublicPageLoading.js';
 import { RenderSections } from '../cms/SectionRenderer.js';
 import { SYSTEM_SITE_ORG, type Section } from '../cms/cmsClient.js';
 import { fetchPublicPageResult, type PublicPage } from './siteClient.js';
@@ -87,7 +87,7 @@ export function PricingPage(): JSX.Element {
 
   // A11Y-1 — a labeled status region like the inner section's (discoverable;
   // role=status mounted with content is not reliably spoken on insertion).
-  if (!done) return <div className="cms-public-page"><div className="u-p-4" role="status" aria-label={t('common:loading')}><Skeleton /></div></div>;
+  if (!done) return <PublicPageLoading />;
 
   const sections = page && page.sections.length > 0
     ? page.sections

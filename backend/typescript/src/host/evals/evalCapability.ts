@@ -12,7 +12,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { locateRepoSchemasDir } from '../_repoPath.js';
+import { locateRepoSchemasV2Dir } from '../_repoPath.js';
 import { IMPLEMENTED_MODES, MAX_COST_USD_PER_SUITE, MAX_TASKS_PER_SUITE, MAX_TRIALS } from './suiteStore.js';
 
 let cached: boolean | undefined;
@@ -23,11 +23,11 @@ export function rfc0244WireAvailable(): boolean {
   try {
     // ESM: no `__dirname` (a ReferenceError here was swallowed by the catch and
     // read as "no wire" — caught by the conformance lane, now pinned by a test).
-    const dir = locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json');
-    const payloads = JSON.parse(readFileSync(join(dir, 'v2', 'run-event-payloads.schema.json'), 'utf8')) as {
+    const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
+    const payloads = JSON.parse(readFileSync(join(dir, 'run-event-payloads.schema.json'), 'utf8')) as {
       $defs?: Record<string, { properties?: Record<string, unknown> }>;
     };
-    const caps = readFileSync(join(dir, 'v2', 'capabilities.schema.json'), 'utf8');
+    const caps = readFileSync(join(dir, 'capabilities.schema.json'), 'utf8');
     cached = !!payloads.$defs?.evalScored?.properties?.trialIndex && /"regressionVerdict"/.test(caps);
   } catch {
     cached = false;
@@ -51,9 +51,9 @@ let cached0245: boolean | undefined;
 export function rfc0245WireAvailable(): boolean {
   if (cached0245 !== undefined) return cached0245;
   try {
-    const dir = locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json');
-    const suite = readFileSync(join(dir, 'v2', 'agent-eval-suite.schema.json'), 'utf8');
-    const caps = readFileSync(join(dir, 'v2', 'capabilities.schema.json'), 'utf8');
+    const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
+    const suite = readFileSync(join(dir, 'agent-eval-suite.schema.json'), 'utf8');
+    const caps = readFileSync(join(dir, 'capabilities.schema.json'), 'utf8');
     cached0245 = /"isError"/.test(suite) && /"fixtureErrors"/.test(caps);
   } catch {
     cached0245 = false;
@@ -76,8 +76,8 @@ let cached0251: boolean | undefined;
 export function rfc0251WireAvailable(): boolean {
   if (cached0251 !== undefined) return cached0251;
   try {
-    const dir = locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json');
-    cached0251 = /"baselineSelection"/.test(readFileSync(join(dir, 'v2', 'capabilities.schema.json'), 'utf8'));
+    const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
+    cached0251 = /"baselineSelection"/.test(readFileSync(join(dir, 'capabilities.schema.json'), 'utf8'));
   } catch {
     cached0251 = false;
   }
@@ -99,8 +99,8 @@ let cachedGated: boolean | undefined;
 export function rfc0246FieldsAvailable(): boolean {
   if (cachedGated !== undefined) return cachedGated;
   try {
-    const dir = locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json');
-    const summary = readFileSync(join(dir, 'v2', 'eval-summary.schema.json'), 'utf8');
+    const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
+    const summary = readFileSync(join(dir, 'eval-summary.schema.json'), 'utf8');
     cachedGated = /"gatedScore"/.test(summary) && /"gatedAggregateScore"/.test(summary);
   } catch {
     cachedGated = false;
@@ -124,11 +124,11 @@ let cached0252: boolean | undefined;
 export function rfc0252WireAvailable(): boolean {
   if (cached0252 !== undefined) return cached0252;
   try {
-    const dir = locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json');
-    const payloads = JSON.parse(readFileSync(join(dir, 'v2', 'run-event-payloads.schema.json'), 'utf8')) as {
+    const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
+    const payloads = JSON.parse(readFileSync(join(dir, 'run-event-payloads.schema.json'), 'utf8')) as {
       $defs?: Record<string, { properties?: Record<string, unknown> }>;
     };
-    const caps = readFileSync(join(dir, 'v2', 'capabilities.schema.json'), 'utf8');
+    const caps = readFileSync(join(dir, 'capabilities.schema.json'), 'utf8');
     cached0252 = !!payloads.$defs?.evalStarted?.properties?.fixtureRuns && /"recordedFixtures"/.test(caps);
   } catch {
     cached0252 = false;

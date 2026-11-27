@@ -54,6 +54,7 @@ import type {
   AiCallMessage,
   AiToolCallRequest,
   AiToolCallResult,
+  AiToolUseBlock,
   AiCitation,
 } from '../executor/types.js';
 import { resolveModelForClass, type ResolveModelOptions } from './modelClassResolver.js';
@@ -1075,6 +1076,14 @@ interface ToolLoopCtx {
 /** Inputs to the shared observe→act core (`runChatToolLoop`). */
 export interface ChatToolLoopOpts {
   /**
+   * ADR 1156 P2 (D11) — calls the person approved on a held-call card, run as this turn's
+   * first round BEFORE any model call. They are the model's own calls from the turn that
+   * held them, with the arguments the approval was given for, and they go through every
+   * gate below exactly as a model-requested call does (scope, the approval check, the
+   * guardrails, the firewall); the approval spends there. The model then reads the results.
+   */
+  approvedCalls?: ReadonlyArray<AiToolUseBlock>;
+  /**
    * CC-AGENT-3 — a tool's declared effect, for the repeat guard only. Defaults to
    * the registered `BuiltinTool.effect`; an unknown tool (MCP, unregistered) is
    * treated as a write, which keeps the ADR 0975 D6 behaviour for it.
@@ -1271,7 +1280,7 @@ export function repeatedCallNote(toolName: string): string {
 }
 
 /** CC-CHAN-1 — refusals the arguments cannot change: the plan or a toggle. */
-const TOOL_WIDE_REFUSALS = new Set(['not_entitled', 'feature_disabled', 'feature_unavailable', 'acting_user_required']);
+export const TOOL_WIDE_REFUSALS: ReadonlySet<string> = new Set(['not_entitled', 'feature_disabled', 'feature_unavailable', 'acting_user_required']);
 
 /** CC-CHAN-1 — the refusal a failed tool result carries, if it is one: the
  *  derived code, or the `reason` a `forbidden` result names (`launchRefusalResult`
@@ -1294,6 +1303,11 @@ export function repeatedRefusalNote(toolName: string, code: string): string {
   return `${toolName} was already refused this turn (${code}), and calling it again will be refused the same way, so it was not run. `
     + 'Do not call it again. Tell the user what was refused and why, and what would let it go ahead.';
 }
+
+/** ADR 1156 P2 (D11) — what the model is told after the host ran the approved calls. */
+export const APPROVED_CALLS_NOTE =
+  'The person approved the call(s) above on their approval card, and the host has just run them with exactly the approved arguments. '
+  + 'Their results are above. Tell the person what happened. Do not make the same call again.';
 
 /** ADR 0975 D6 — a turn that used every round and produced no text. */
 export const TOOL_ROUNDS_EXHAUSTED = 'tool_rounds_exhausted';
@@ -1395,10 +1409,18 @@ export async function runChatToolLoop(
   let roundBudget = maxRounds;
   let pendingContinuation: string | undefined;
   let continuations = 0;
+  // ADR 1156 P2 (D11) — the approved calls are a round the model did not spend.
+  const approvedCalls = opts.approvedCalls && opts.approvedCalls.length > 0 ? opts.approvedCalls : undefined;
+  if (approvedCalls) {
+    roundBudget += 1;
+    await emit({ type: 'agent.reasoned', agentId, reasoning: `${persona} ran ${approvedCalls.length} call(s) the person approved before replying.` });
+  }
   for (let round = 0; round < roundBudget; round += 1) {
     rounds = round + 1;
     let out: AiToolCallResult;
-    try {
+    if (round === 0 && approvedCalls) {
+      out = { toolCalls: approvedCalls, finishReason: 'tool-call' };
+    } else try {
       // ADR 1003 D3 — rounds after the first repeat this turn's tools + system
       // byte-for-byte, so they may carry a conversation cache breakpoint.
       out = await deps.callAIWithTools({ provider, model, systemPrompt, messages: [...messages], credentialRef, tools: toolDefs, ...(opts.webSearch ? { webSearch: true } : {}), ...(round > 0 ? { cacheConversation: true } : {}) });
@@ -1752,6 +1774,7 @@ export async function runChatToolLoop(
       turnWrites.push(...roundWrites);
       messages.push({ role: 'user', content: turnWritesNote(turnWrites) });
     }
+    if (round === 0 && approvedCalls) messages.push({ role: 'user', content: APPROVED_CALLS_NOTE });
     // ADR 1006 — a run-lane ask ends the loop and the node suspends on it. A tool
     // the firewall HELD this turn must still escalate (ADR 0150): the caller
     // checks these before the ask.

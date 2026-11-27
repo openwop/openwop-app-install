@@ -30,7 +30,7 @@
 // so they add no runtime firebase reference to the entry chunk.
 import type { FirebaseApp } from '@firebase/app';
 import type { AuthCredential, User, Auth, TotpSecret, MultiFactorResolver } from '@firebase/auth';
-import { setCurrentIdToken, registerIdTokenRefresher } from '../client/config.js';
+import { containAuthChangeDispatch, setCurrentIdToken, registerIdTokenRefresher } from '../client/config.js';
 import { noteOwnSignOut } from './shellIdentity.js';
 import i18n from '../i18n/index.js';
 import { brand } from '../brand/brand.js';
@@ -204,16 +204,16 @@ async function ensureInitAsync(): Promise<Auth | null> {
     // client/config cache so authedHeaders() reads it synchronously on fetch.
     am.onIdTokenChanged(auth, async (u) => {
       cachedUser = u;
+      // #6214 — the `try` covers ONLY `getIdToken()`. It used to wrap the
+      // dispatch too, so a throwing auth-change listener took the catch, replaced
+      // the valid token Firebase had just issued with null, and the tab acted
+      // signed out while its Firebase session stayed live. A listener failure is
+      // now contained and logged, and the token is kept.
+      let token: string | null = null;
       if (u) {
-        try {
-          const token = await u.getIdToken();
-          setCurrentIdToken(token);
-        } catch {
-          setCurrentIdToken(null);
-        }
-      } else {
-        setCurrentIdToken(null);
+        try { token = await u.getIdToken(); } catch { token = null; }
       }
+      containAuthChangeDispatch('onIdTokenChanged', () => setCurrentIdToken(token));
     });
     // The sync fetch path can SEE that the cached token expired but cannot await a
     // new one, so it calls this. The SDK's proactive refresh is a `setTimeout` and
@@ -225,7 +225,9 @@ async function ensureInitAsync(): Promise<Auth | null> {
       const u = auth?.currentUser ?? cachedUser;
       if (!u) return;
       void u.getIdToken(true).then(
-        (token) => setCurrentIdToken(token),
+        // #6214 — contained: a listener failure here used to escape as an
+        // unhandled rejection (the rejection handler below cannot catch it).
+        (token) => { containAuthChangeDispatch('idTokenRefresh', () => setCurrentIdToken(token)); },
         () => { /* offline / revoked — the cooldown throttles the retry */ },
       );
     });

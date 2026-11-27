@@ -26,7 +26,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { locateRepoSchemasDir } from './_repoPath.js';
+import { locateRepoSchemasV2Dir } from './_repoPath.js';
 import { projectV2ErrorObject } from '../middleware/protocolVersion.js';
 
 let cached: ReadonlySet<string> | undefined;
@@ -35,8 +35,8 @@ let cached: ReadonlySet<string> | undefined;
 function v2SnapshotFields(): ReadonlySet<string> | null {
   if (cached !== undefined) return cached.size > 0 ? cached : null;
   try {
-    const dir = locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json');
-    const doc = JSON.parse(readFileSync(join(dir, 'v2', 'run-snapshot.schema.json'), 'utf8')) as {
+    const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
+    const doc = JSON.parse(readFileSync(join(dir, 'run-snapshot.schema.json'), 'utf8')) as {
       properties?: Record<string, unknown>;
     };
     cached = new Set(Object.keys(doc.properties ?? {}));

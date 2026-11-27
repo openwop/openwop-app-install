@@ -2,7 +2,7 @@
  * ADR 0440 — tripwire for the DEFERRED `validateWorkflowDefinition` whitelist.
  *
  * `validateWorkflowDefinition` returns a node whitelist. The wire's `WorkflowNode`
- * (`schemas/workflow-definition.schema.json`) declares more — so
+ * (`schemas/v2/workflow-definition.schema.json`) declares more — so
  * `credentialsRef`, `outputSensitivity`, `envelopeContract`, `settings`,
  * `disabled`, `notes`, `groupId`, `artifactType`, and `cardType` are silently
  * dropped by the host's own POST route.
@@ -52,7 +52,7 @@ function dummyFor(prop: unknown): unknown {
 /** Node fields the wire models but `validateWorkflowDefinition` drops — DERIVED
  *  from the schema (SSoT) and the validator, never copied. */
 const DROPPED_BY_VALIDATOR: string[] = (() => {
-  const schema: unknown = JSON.parse(readFileSync(join(process.cwd(), '..', '..', 'schemas', 'workflow-definition.schema.json'), 'utf8'));
+  const schema: unknown = JSON.parse(readFileSync(join(process.cwd(), '..', '..', 'schemas', 'v2', 'workflow-definition.schema.json'), 'utf8'));
   const defs = typeof schema === 'object' && schema !== null ? (Reflect.get(schema, '$defs') ?? Reflect.get(schema, 'definitions')) : undefined;
   const node = typeof defs === 'object' && defs !== null ? Reflect.get(defs, 'WorkflowNode') : undefined;
   const props = typeof node === 'object' && node !== null ? Reflect.get(node, 'properties') : undefined;

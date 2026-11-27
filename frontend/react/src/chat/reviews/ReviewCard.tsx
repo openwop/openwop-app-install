@@ -324,6 +324,18 @@ export function ReviewCard({ review, onDecide, onOpenArtifact, compact }: Props)
             <dd title={review.requestedBy.id}>{review.requestedBy.label ?? shortRequester(review.requestedBy.id)}</dd>
           </div>
         ) : null}
+        {review.collabProposal?.deciderLabel ? (
+          <div className="review-card__meta-row">
+            <dt><ShieldIcon size={14} /> {t('reviewDecidedBy')}</dt>
+            <dd>{review.collabProposal.deciderLabel}</dd>
+          </div>
+        ) : null}
+        {review.collabProposal ? (
+          <div className="review-card__meta-row">
+            <dt><FileTextIcon size={14} /> {t('reviewPartOf')}</dt>
+            <dd title={review.collabProposal.groupKey}>{review.collabProposal.groupKey}</dd>
+          </div>
+        ) : null}
         <div className="review-card__meta-row">
           <dt><ClockIcon size={14} /> {t('reviewRequested')}</dt>
           <dd>{formatDate(review.requestedAt)}</dd>

@@ -34,6 +34,21 @@ if [ -n "$LEAKED" ]; then
 fi
 echo "[whitelabel-smoke] ✓ no steward-only paths in the bundle"
 
+# RFC 0266 — the backend boots from `schemas/v2/` and reads no flat v1 schema. A flat
+# `schemas/*.schema.json` (or `schemas/envelopes/`) in the bundle means a sync brought
+# the frozen v1 tree back, and an adopter would ship it as if it were current input.
+FLAT_V1="$(unzip -Z1 "$ZIP" | grep -E '^openwop-demo-app/schemas/([^/]+\.schema\.json|envelopes/)' || true)"
+if [ -n "$FLAT_V1" ]; then
+  echo "[whitelabel-smoke] ✗ the bundle ships the frozen flat v1 schema tree (RFC 0266):"
+  echo "$FLAT_V1" | head -10 | sed 's/^/    /'
+  exit 1
+fi
+# Not `unzip | grep -q`: grep -q exits on the first match, unzip dies of SIGPIPE (141)
+# and `set -o pipefail` turns a present file into a failure.
+unzip -Z1 "$ZIP" | grep -x 'openwop-demo-app/schemas/v2/ids.schema.json' >/dev/null \
+  || { echo "[whitelabel-smoke] ✗ the bundle has no schemas/v2/ — the backend cannot boot"; exit 1; }
+echo "[whitelabel-smoke] ✓ schemas/v2/ only (no flat v1 tree)"
+
 if [ "${OPENWOP_SKIP_WHITELABEL_SMOKE:-0}" = "1" ]; then
   echo "[whitelabel-smoke] build smoke skipped (OPENWOP_SKIP_WHITELABEL_SMOKE=1)"
   exit 0

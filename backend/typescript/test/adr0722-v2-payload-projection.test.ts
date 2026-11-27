@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 
-import { locateRepoSchemasDir } from '../src/host/_repoPath.js';
+import { locateRepoSchemasV2Dir } from '../src/host/_repoPath.js';
 import { applyPayloadKeyAliases, payloadKeyAliases, projectV2Payload } from '../src/storage/v2PayloadProjection.js';
 import { demoAutoIngestSubscriptionId } from '../src/host/triggerBridgeService.js';
 import { generateWorkforceHistory } from '../src/host/workforceHistory.js';
@@ -19,8 +19,8 @@ import { generateWorkforceHistory } from '../src/host/workforceHistory.js';
  * leaves the opaque grammar.
  */
 const here = dirname(fileURLToPath(import.meta.url));
-const schemasDir = locateRepoSchemasDir(here, 'run-event.schema.json');
-const payloads = JSON.parse(readFileSync(join(schemasDir, 'v2', 'run-event-payloads.schema.json'), 'utf8')) as {
+const schemasDir = locateRepoSchemasV2Dir(here);
+const payloads = JSON.parse(readFileSync(join(schemasDir, 'run-event-payloads.schema.json'), 'utf8')) as {
   $defs: Record<string, { properties?: Record<string, unknown>; $ref?: string }> & { _typeIndex: { properties: Record<string, { $ref: string }> } };
 };
 const defFor = (type: string) => {
@@ -46,7 +46,7 @@ function validatorFor(defName: string) {
         const file = v.split('#')[0]?.split('/').pop() ?? '';
         if (file.endsWith('.schema.json') && !registered.has(file)) {
           registered.add(file);
-          const doc = JSON.parse(readFileSync(join(schemasDir, 'v2', file), 'utf8')) as { $id?: string };
+          const doc = JSON.parse(readFileSync(join(schemasDir, file), 'utf8')) as { $id?: string };
           ajv.addSchema(doc, file);
           if (typeof doc.$id === 'string') { try { ajv.addSchema(doc, doc.$id); } catch { /* dup */ } }
           walk(doc);

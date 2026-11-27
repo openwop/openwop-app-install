@@ -30,7 +30,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Ajv2020, { type ValidateFunction } from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
-import { locateRepoSchemasDir } from '../../host/_repoPath.js';
+import { locateRepoSchemasV2Dir } from '../../host/_repoPath.js';
 import { semverCompare } from '../../host/promptStore.js';
 import { hostOwnsChainId, hostOwnsChainPackName, validateChainDocuments } from '../../host/workflowChainPackLoader.js';
 import {
@@ -56,7 +56,7 @@ const validators = new Map<InstalledPackKind, ValidateFunction>();
 function manifestValidator(kind: InstalledPackKind): ValidateFunction {
   const hit = validators.get(kind);
   if (hit) return hit;
-  const dir = join(locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json'), 'v2');
+  const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
   const ajv = new Ajv2020({ allErrors: true, strict: false });
   addFormats(ajv);
   let id: string | undefined;
@@ -77,7 +77,7 @@ let cachedWire: boolean | undefined;
 export function rfc0253WireAvailable(): boolean {
   if (cachedWire !== undefined) return cachedWire;
   try {
-    const dir = join(locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json'), 'v2');
+    const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
     cachedWire = readFileSync(join(dir, 'proposal.schema.json'), 'utf8').includes('getInstalledPack');
   } catch {
     cachedWire = false;

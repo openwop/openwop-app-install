@@ -29,20 +29,22 @@ const { MockForbiddenError } = vi.hoisted(() => {
 vi.mock('../connectionsClient.js', () => ({
   ForbiddenError: MockForbiddenError,
   listProviders: vi.fn(),
-  listOAuthClients: vi.fn(),
+  listOAuthClientsWithRedirects: vi.fn(),
   setOAuthClient: vi.fn(),
   deleteOAuthClient: vi.fn(),
 }));
 vi.mock('../../../ui/toast.js', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 import {
-  listProviders, listOAuthClients, setOAuthClient, deleteOAuthClient,
+  listProviders, listOAuthClientsWithRedirects, setOAuthClient, deleteOAuthClient,
   type Provider, type OAuthClientConfig,
 } from '../connectionsClient.js';
 import { OAuthClientAdminPanel } from '../OAuthClientAdminPanel.js';
 
 const mProviders = vi.mocked(listProviders);
-const mList = vi.mocked(listOAuthClients);
+const mList = vi.mocked(listOAuthClientsWithRedirects);
+/** The server's read: its clients plus its own redirect URI per provider. */
+const withUris = (clients: OAuthClientConfig[], redirectUris: Record<string, string> = {}) => ({ clients, redirectUris });
 const mSet = vi.mocked(setOAuthClient);
 const mDelete = vi.mocked(deleteOAuthClient);
 
@@ -84,7 +86,7 @@ describe('OAuthClientAdminPanel (FP-2)', () => {
     render(<OAuthClientAdminPanel />);
     expect(await screen.findByText('upstream 503')).toBeTruthy();
 
-    mList.mockResolvedValueOnce([cfg({ configured: false })]);
+    mList.mockResolvedValueOnce(withUris([cfg({ configured: false })]));
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     expect(await screen.findByText('Google')).toBeTruthy();
     expect(screen.queryByText('upstream 503')).toBeNull();
@@ -93,7 +95,7 @@ describe('OAuthClientAdminPanel (FP-2)', () => {
 
   it('renders for a superadmin with oauth providers (shows the not-configured state)', async () => {
     mProviders.mockResolvedValue([google()]);
-    mList.mockResolvedValue([cfg({ configured: false })]);
+    mList.mockResolvedValue(withUris([cfg({ configured: false })]));
     render(<OAuthClientAdminPanel />);
     await waitFor(() => expect(screen.getByText('Google')).toBeTruthy());
     expect(screen.getByText('Not configured')).toBeTruthy();
@@ -102,7 +104,7 @@ describe('OAuthClientAdminPanel (FP-2)', () => {
 
   it('hides when there are no oauth providers (even for a superadmin)', async () => {
     mProviders.mockResolvedValue([{ id: 'sn', label: 'SN', kind: 'api_key', reach: 'user', refreshable: false }]);
-    mList.mockResolvedValue([]);
+    mList.mockResolvedValue(withUris([]));
     const { container } = render(<OAuthClientAdminPanel />);
     await settle();
     expect(mList).toHaveBeenCalledTimes(1);
@@ -111,7 +113,7 @@ describe('OAuthClientAdminPanel (FP-2)', () => {
 
   it('saves a client id + secret for an unconfigured provider', async () => {
     mProviders.mockResolvedValue([google()]);
-    mList.mockResolvedValue([]); // no existing config → the button is "Save" (not "Replace")
+    mList.mockResolvedValue(withUris([])); // no existing config → the button is "Save" (not "Replace")
     mSet.mockResolvedValue(undefined);
     render(<OAuthClientAdminPanel />);
     await waitFor(() => expect(screen.getByText('Google')).toBeTruthy());
@@ -129,7 +131,7 @@ describe('OAuthClientAdminPanel (FP-2)', () => {
     // <ConfirmRoot> it falls back to window.confirm — accept it.
     vi.spyOn(window, 'confirm').mockReturnValue(true);
     mProviders.mockResolvedValue([google()]);
-    mList.mockResolvedValue([cfg({ configured: true })]);
+    mList.mockResolvedValue(withUris([cfg({ configured: true })]));
     mDelete.mockResolvedValue(undefined);
     render(<OAuthClientAdminPanel />);
     await waitFor(() => expect(screen.getByText('Google')).toBeTruthy());
@@ -140,7 +142,7 @@ describe('OAuthClientAdminPanel (FP-2)', () => {
   it('a declined confirm removes nothing (XC-1)', async () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
     mProviders.mockResolvedValue([google()]);
-    mList.mockResolvedValue([cfg({ configured: true })]);
+    mList.mockResolvedValue(withUris([cfg({ configured: true })]));
     mDelete.mockResolvedValue(undefined);
     render(<OAuthClientAdminPanel />);
     await waitFor(() => expect(screen.getByText('Google')).toBeTruthy());
@@ -148,5 +150,22 @@ describe('OAuthClientAdminPanel (FP-2)', () => {
     await settle();
     expect(confirmSpy).toHaveBeenCalledTimes(1);
     expect(mDelete).not.toHaveBeenCalled();
+  });
+
+  it('shows the redirect URI the server sends, exactly, and never a guess', async () => {
+    mProviders.mockResolvedValue([google()]);
+    const sent = 'https://casavoga.example/host/openwop-app/connections/google/callback';
+    mList.mockResolvedValue(withUris([cfg()], { google: sent }));
+    render(<OAuthClientAdminPanel />);
+    await waitFor(() => expect(screen.getByText('Google')).toBeTruthy());
+    const shown = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="text"]')).filter((i) => i.readOnly).map((i) => i.value);
+    expect(shown).toEqual([sent]);
+    cleanup();
+    // An older server without `redirectUris`: no URI is shown, rather than a guess.
+    mList.mockResolvedValue(withUris([cfg()]));
+    render(<OAuthClientAdminPanel />);
+    await waitFor(() => expect(screen.getByText('Google')).toBeTruthy());
+    expect(Array.from(document.querySelectorAll<HTMLInputElement>('input[type="text"]')).filter((i) => i.readOnly)).toEqual([]);
+    expect(document.body.textContent ?? '').not.toContain('/api/host/openwop-app/connections/google/callback');
   });
 });

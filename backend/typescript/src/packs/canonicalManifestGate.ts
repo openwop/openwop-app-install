@@ -28,11 +28,12 @@
  * `docs/steward/PACK-MANIFEST-CANONICAL-GAP.md`.
  */
 
-import { readFileSync, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Ajv2020, type ValidateFunction } from 'ajv/dist/2020.js';
-import { locateRepoSchemasDir } from '../host/_repoPath.js';
+import type { ValidateFunction } from 'ajv/dist/2020.js';
+import { locateRepoSchemasV2Dir } from '../host/_repoPath.js';
+import { compileV2Schema } from '../host/v2SchemaCompile.js';
 import { createLogger } from '../observability/logger.js';
 
 const log = createLogger('packs.canonicalManifestGate');
@@ -50,11 +51,13 @@ function validatorFor(kind: string): ValidateFunction | null {
   let compiled: ValidateFunction | null = null;
   if (file) {
     try {
-      const dir = locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), file);
+      // RFC 0266 — the v2 schema the host LOADS the kind under (#5993: form-content
+      // `FormField.when` exists only in v2). It `$ref`s `ids.schema.json`, so the
+      // closure is registered; the frozen flat v1 copy is no longer vendored.
+      const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
       const path = join(dir, file);
       if (existsSync(path)) {
-        compiled = new Ajv2020({ strict: false, allErrors: true })
-          .compile(JSON.parse(readFileSync(path, 'utf8')) as object);
+        compiled = compileV2Schema(dir, file, { formats: false });
       } else {
         // Fail OPEN here, loudly. A missing vendored schema is a packaging bug in
         // THIS host; refusing every install because we mislaid a file would turn a

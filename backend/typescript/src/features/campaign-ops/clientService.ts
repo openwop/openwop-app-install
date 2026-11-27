@@ -149,6 +149,20 @@ export async function updateClient(
   return next;
 }
 
+/**
+ * ADR 0924 P2c (user decision 2026-11-26) — record, once, that this client has had
+ * recipient-bound approval links. Idempotent and race-safe: a CAS retry, and an
+ * already-set mark is kept as it is (the first time stays the first time).
+ */
+export async function markVerifiedApprovalLinks(tenantId: string, orgId: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const cur = await getClient(tenantId, orgId);
+    if (!cur || cur.verifiedLinksSince) return;
+    if (await clients.compareAndSwap(cur, { ...cur, verifiedLinksSince: nowIso(), updatedAt: nowIso() })) return;
+  }
+  throw new OpenwopError('conflict', 'The client changed while the links were being sent. Try again.', 409, { reason: 'client_changed' });
+}
+
 /** ADR 0464 — re-attribute `createdBy` for an erased subject. The account is
  *  the client's configuration, so the row is kept; only the person goes. */
 export async function eraseClientCreators(tenantId: string, forms: ReadonlySet<string>, tombstone: string): Promise<number> {

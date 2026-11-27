@@ -13,13 +13,18 @@
  * the v2 block against the prose, strip it, validate the rest against v1). Corpus
  * tag v2.32.0 fixed the v2 schema, and the loader now routes a v2-shaped manifest
  * to it WHOLE; the workaround is deleted. The switch was decided by
- * `scripts/adr0713-whd15-chain-schema-routing.ts` (zero verdicts differ across the
+ * `scripts/adr0713-whd15-chain-schema-routing.ts` (since deleted, RFC 0266; zero verdicts differ across the
  * in-tree + published-registry population), and the tests below pin what that
  * script cannot: that the v2 route is really the v2 SCHEMA, and that the schema
  * really does subsume the prose check the loader stopped running.
  *
- * Tracker TST-BGF-19. Red when `chainManifestSchemaTree` stops routing a v2
- * signing block to v2, or the loader judges every pack by the v2 schema. Every
+ * RFC 0266 — CORRECTED: the loader now judges EVERY manifest by the v2 schema
+ * (the frozen flat v1 tree is no longer vendored). The v1 route this file used to
+ * pin for unsigned and v1-signed packs is gone; the witnesses below now assert
+ * that an unsigned pack gets the v2 verdict too, and that a v1 block is refused.
+ *
+ * Tracker TST-BGF-19. Red when the loader stops judging a manifest by the v2
+ * schema. Every
  * refusal asserts `/signing` in its message, because any schema violation shares
  * the `workflow_chain_pack_manifest_invalid` code.
  */
@@ -32,11 +37,10 @@ import addFormats from 'ajv-formats';
 import {
   loadWorkflowChainPacks,
   getChain,
-  chainManifestSchemaTree,
   _resetChainRegistryForTest,
 } from '../src/host/workflowChainPackLoader.js';
 import { manifestSigningKeyId } from '../src/packs/registryInstaller.js';
-import { locateRepoSchemasDir } from '../src/host/_repoPath.js';
+import { locateRepoSchemasV2Dir } from '../src/host/_repoPath.js';
 import { __setUnpinnedChainPackWaiversForTests } from '../src/host/unpinnedChainPackAllowlist.js';
 
 const V2_SIGNING = { keyId: 'openwop-team-1', scheme: 'ed25519-canonical-json' };
@@ -72,9 +76,8 @@ function chainPack(name: string, chainId: string, signing: unknown, extra: Recor
 let root: string;
 beforeAll(() => {
   root = mkdtempSync(join(tmpdir(), 'adr0713-chains-'));
-  // ADR 0766 — this file's subject is schema ROUTING, not pins. Since a pin
-  // claims the v2 tree, the v1 route is reachable only by an UNPINNED manifest,
-  // which registers only when waived; the fixtures are waived for that reason.
+  // ADR 0766 — this file's subject is the schema, not pins; the unpinned
+  // fixtures are waived so only the schema can refuse them.
   const waived: string[] = [];
   const write = (dir: string, manifest: Record<string, unknown>) => {
     waived.push(manifest['name'] as string);
@@ -118,26 +121,27 @@ describe('ADR 0713 Phase 1b — chain-pack loader and the v2 signing block', () 
     const byPack = Object.fromEntries(errors.map((e) => [e.pack, e]));
     expect(byPack['v2-bad-scheme']?.code).toBe('workflow_chain_pack_manifest_invalid');
     expect(byPack['v2-bad-scheme']?.message).toContain('/signing');
-    expect(byPack['v2-mixed']?.code).toBe('workflow_chain_pack_manifest_invalid');
-    expect(byPack['v2-mixed']?.message).toContain('/signing');
+    // A block carrying a v1 field is refused BY NAME (RFC 0266), with its remedy.
+    expect(byPack['v2-mixed']?.code).toBe('workflow_chain_pack_signing_v1');
+    expect(byPack['v2-mixed']?.message).toContain('chains:migrate-v2');
     expect(getChain('adr0713.bad-scheme')).toBeNull();
   });
 
   it('still refuses a v1 block riding on a v2-shaped pack', () => {
     const { errors } = loadWorkflowChainPacks({ roots: [root] });
     const byPack = Object.fromEntries(errors.map((e) => [e.pack, e]));
-    expect(byPack['v2-with-v1-block']?.code).toBe('workflow_chain_pack_manifest_invalid');
-    expect(byPack['v2-with-v1-block']?.message).toContain('/signing');
+    expect(byPack['v2-with-v1-block']?.code).toBe('workflow_chain_pack_signing_v1');
+    expect(byPack['v2-with-v1-block']?.message).toContain("registry's v2 tree");
     expect(getChain('adr0713.v2-with-v1-block')).toBeNull();
   });
 
-  it('a v1 block, or none, still goes to the v1 schema — unchanged', () => {
-    expect(chainManifestSchemaTree(chainPack('x', 'y', V1_SIGNING))).toBe('v1');
-    expect(chainManifestSchemaTree(chainPack('x', 'y', undefined))).toBe('v1');
-    expect(chainManifestSchemaTree(chainPack('x', 'y', V2_SIGNING))).toBe('v2');
+  it('RFC 0266 — an unsigned pack loads, and a v1 signing block is refused over /signing (no v1 route)', () => {
     const { errors } = loadWorkflowChainPacks({ roots: [root] });
-    expect(errors.find((e) => e.pack === 'v1-signed'), JSON.stringify(errors)).toBeUndefined();
-    expect(getChain('adr0713.v1-signed')?.packName).toBe('core.openwop.workflows.adr0713-v1');
+    const byPack = Object.fromEntries(errors.map((e) => [e.pack, e]));
+    expect(byPack['unsigned'], JSON.stringify(errors)).toBeUndefined();
+    expect(byPack['v1-signed']?.code, 'a v1 signing block loaded — something still judges by the v1 schema').toBe('workflow_chain_pack_signing_v1');
+    expect(byPack['v1-signed']?.message).toMatch(/method|publicKeyRef|signatureRef/);
+    expect(getChain('adr0713.v1-signed')).toBeNull();
   });
 
   // ── WHD-15 — the loader accepts a v2-signed pack THROUGH the v2 schema ────────
@@ -146,8 +150,8 @@ describe('ADR 0713 Phase 1b — chain-pack loader and the v2 signing block', () 
   // `v2-signed` fixture, by stripping the block and asking v1. What names the
   // schema is a manifest the two schemas DISAGREE on. Each witness below has one
   // verdict under v2 and the opposite under strip-and-v1, in BOTH directions, and
-  // the unsigned twins pin that the v1 route did not move.
-  it('WHD-15 — a v2-signed pack is judged by the v2 schema, an unsigned one still by v1', () => {
+  // the unsigned twins pin that they get the SAME v2 verdicts (RFC 0266: no v1 route).
+  it('WHD-15 / RFC 0266 — signed or unsigned, a pack is judged by the v2 schema', () => {
     const { errors } = loadWorkflowChainPacks({ roots: [root] });
     const byPack = Object.fromEntries(errors.map((e) => [e.pack, e]));
 
@@ -159,11 +163,12 @@ describe('ADR 0713 Phase 1b — chain-pack loader and the v2 signing block', () 
     expect(byPack['v2-openwop-ext'], `a v2-signed pack with an openwop- extension key was refused — it was NOT judged by the v2 schema: ${byPack['v2-openwop-ext']?.message}`).toBeUndefined();
     expect(getChain('adr0713.v2-openwop-ext')?.packName).toBe('core.openwop.workflows.adr0713-w2');
 
-    // …and the SAME two bodies, unsigned, get v1's opposite verdicts.
-    expect(byPack['unsigned-open-engines'], 'an unsigned pack was routed away from the v1 schema').toBeUndefined();
-    expect(getChain('adr0713.unsigned-open-engines')?.packName).toBe('core.openwop.workflows.adr0713-w3');
-    expect(byPack['unsigned-openwop-ext']?.code, 'an unsigned pack was routed away from the v1 schema').toBe('workflow_chain_pack_manifest_invalid');
-    expect(getChain('adr0713.unsigned-openwop-ext')).toBeNull();
+    // …and the SAME two bodies, unsigned, get the SAME v2 verdicts.
+    expect(byPack['unsigned-open-engines']?.code, 'an unsigned pack with an extra `engines` key loaded — it was judged by the v1 schema').toBe('workflow_chain_pack_manifest_invalid');
+    expect(byPack['unsigned-open-engines']?.message).toContain('/engines');
+    expect(getChain('adr0713.unsigned-open-engines')).toBeNull();
+    expect(byPack['unsigned-openwop-ext'], `an unsigned pack with an openwop- extension key was refused — it was judged by the v1 schema: ${byPack['unsigned-openwop-ext']?.message}`).toBeUndefined();
+    expect(getChain('adr0713.unsigned-openwop-ext')?.packName).toBe('core.openwop.workflows.adr0713-w4');
   });
 
   it('WHD-15 — every block the prose check refused, the v2 schema refuses too (why the loader no longer runs it)', () => {
@@ -176,9 +181,11 @@ describe('ADR 0713 Phase 1b — chain-pack loader and the v2 signing block', () 
     expect(PROSE_REFUSED).toHaveLength(7);
     const { errors } = loadWorkflowChainPacks({ roots: [root] });
     const byPack = Object.fromEntries(errors.map((e) => [e.pack, e]));
-    for (const { label } of PROSE_REFUSED) {
-      expect(byPack[`prose-${label}`]?.code, `prose-${label} loaded`).toBe('workflow_chain_pack_manifest_invalid');
-      expect(byPack[`prose-${label}`]?.message, `prose-${label} was refused, but not over its signing block`).toContain('/signing');
+    for (const { label, signing } of PROSE_REFUSED) {
+      // A block with a v1 field is refused by name (RFC 0266); every other bad block by the v2 schema.
+      const v1 = ['method', 'publicKeyRef', 'signatureRef'].some((k) => k in signing);
+      expect(byPack[`prose-${label}`]?.code, `prose-${label} loaded`).toBe(v1 ? 'workflow_chain_pack_signing_v1' : 'workflow_chain_pack_manifest_invalid');
+      if (!v1) expect(byPack[`prose-${label}`]?.message, `prose-${label} was refused, but not over its signing block`).toContain('/signing');
       expect(getChain(`adr0713.prose-${label}`)).toBeNull();
     }
   });
@@ -212,11 +219,11 @@ describe('ADR 0713 Phase 1b — chain-pack loader and the v2 signing block', () 
     }
     return ajv.compile(target);
   }
-  const rootSchemasDir = (): string =>
-    locateRepoSchemasDir(join(import.meta.dirname, '..', 'src', 'host'), 'workflow-chain-pack-manifest.schema.json');
+  const v2SchemasDir = (): string =>
+    locateRepoSchemasV2Dir(join(import.meta.dirname, '..', 'src', 'host'), 'workflow-chain-pack-manifest.schema.json');
 
   it('FACT 1 — the corpus v2 schema NOW admits { keyId, scheme } (openwop#1367, vendored at v2.32.0)', () => {
-    const validate = compileChainSchema(join(rootSchemasDir(), 'v2'));
+    const validate = compileChainSchema(v2SchemasDir());
     const ok = validate(chainPack('core.openwop.workflows.adr0713-v2', 'adr0713.v2-signed', V2_SIGNING));
     expect(ok, `the vendored v2 chain-pack schema rejects the v2 signing block again: ${JSON.stringify(validate.errors?.slice(0, 2))}`).toBe(true);
     // …and it is closed the right way round: the v1 block is what it refuses.

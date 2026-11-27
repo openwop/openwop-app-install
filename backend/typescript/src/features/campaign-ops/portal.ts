@@ -35,7 +35,7 @@ import { cleanString } from '../../host/boundedStrings.js';
 import { resolveToggle } from '../../host/featureToggles/service.js';
 import { takeShared } from '../../host/sharedRateLimit.js';
 import { getChangeSet, diffOf } from './changeSetService.js';
-import { getClient } from './clientService.js';
+import { getClient, markVerifiedApprovalLinks } from './clientService.js';
 import { getRequest } from './requestService.js';
 import { agencyStandInRefusal, auditOps, changeSetApprovalIdOf, clientApproverSubject } from './approval.js';
 import { getApproval } from '../../host/approvalService.js';
@@ -44,6 +44,11 @@ import {
   checkGrantLink, createLinkOnlyCollaborator, getCollaborator, grantAccess, grantLinkResourceId, listCollaborators,
   purgeCollaboratorsForOrg, revokeGrant, setCollaboratorStatus, type ExternalCollaborator,
 } from '../../host/externalCollaborators.js';
+import { listTenantMembers } from '../../host/accessControlService.js';
+import { sendTransactional } from '../../host/transactionalEmail.js';
+import { shareCodeMailReady } from '../sharing/shareCodeMail.js';
+import type { ShareViewer } from '../sharing/sharingService.js';
+import { APPROVAL_LINK_KIND, type ApprovalLinkMailData } from './approvalLinkMail.js';
 import type { ApprovalLinkRecord, ClientAccount, ClientApprover } from './types.js';
 
 export const CLIENT_PORTAL_TOGGLE = 'campaign-ops-client-portal';
@@ -57,6 +62,8 @@ export const CHANGE_SET_GRANT_KIND = 'change-set';
 const LINK_DAYS = 7;
 const MAX_COMMENT = 2000;
 const MAX_APPROVERS_PER_CLIENT = 20;
+/** ADR 0924 P2c — how long a verified browser session may decide (ADR 1141 D2). */
+const VERIFY_SESSION_HOURS = 24;
 const EMAIL_RE = /^[^\s@]{1,64}@[^\s@]{1,255}\.[^\s@]{1,63}$/;
 
 /** Pre-0958-P1 approver rows. Read only to adopt them (`adoptLegacyApprovers`). */
@@ -149,6 +156,30 @@ export async function countActiveApprovers(tenantId: string, orgId: string): Pro
   return (await listApprovers(tenantId, orgId)).filter((a) => a.status === 'active').length;
 }
 
+/**
+ * ADR 0924 P2c (review C3.2) — is this address a member of the workspace? A
+ * client approver must be someone at the CLIENT: an agency member who names
+ * their own address as the approver could vote as both parties. Asked when the
+ * approver is added AND when the client votes, because members can be added
+ * later. Compares the normalized address against each member's email, and
+ * against a subject that is itself an address. Any read failure answers `true`
+ * (refuse): the vote fails closed.
+ * Residual, stated in the ADR: a member who adds a private mailbox they control
+ * is not caught here; the audit, the visible approver email and ADR 0958
+ * signed-in stakeholders are the defence.
+ */
+export async function isWorkspaceMemberEmail(tenantId: string, email: string): Promise<boolean> {
+  const want = email.trim().toLowerCase();
+  if (!want) return false;
+  try {
+    return (await listTenantMembers(tenantId)).some((m) =>
+      (typeof m.email === 'string' && m.email.trim().toLowerCase() === want)
+      || (typeof m.subject === 'string' && m.subject.includes('@') && m.subject.trim().toLowerCase().replace(/^user:/, '') === want));
+  } catch {
+    return true;
+  }
+}
+
 export async function addApprover(input: { tenantId: string; orgId: string; email: unknown; displayName: unknown; createdBy: string }): Promise<ClientApprover> {
   const email = cleanString(input.email, 320, '').trim().toLowerCase();
   if (!EMAIL_RE.test(email)) throw new OpenwopError('validation_error', 'Enter the approver’s email address.', 400, { field: 'email' });
@@ -157,6 +188,9 @@ export async function addApprover(input: { tenantId: string; orgId: string; emai
   const existing = await listApprovers(input.tenantId, input.orgId);
   if (existing.some((a) => a.status !== 'revoked' && a.email === email)) {
     throw new OpenwopError('conflict', 'This person is already an approver for this client.', 409, { reason: 'approver_exists' });
+  }
+  if (await isWorkspaceMemberEmail(input.tenantId, email)) {
+    throw new OpenwopError('validation_error', 'This address belongs to a member of your workspace. A client approver must be someone at the client.', 409, { reason: 'approver_is_member', field: 'email' });
   }
   if (existing.filter((a) => a.status === 'active').length >= MAX_APPROVERS_PER_CLIENT) {
     throw new OpenwopError('validation_error', `A client can have at most ${MAX_APPROVERS_PER_CLIENT} approvers.`, 409, { reason: 'too_many_approvers' });
@@ -238,6 +272,8 @@ export async function revokeLinksForChangeSet(tenantId: string, orgId: string, c
 export async function clientVoteStillLive(tenantId: string, orgId: string, changeSetId: string, approverId: string): Promise<boolean> {
   const approver = await getApproverRow(tenantId, orgId, approverId);
   if (!approver || approver.status !== 'active') return false;
+  // ADR 0924 P2c (C3.2) — an approver who has since become a member no longer counts.
+  if (await isWorkspaceMemberEmail(tenantId, approver.email)) return false;
   const record = await approvalLinks.get(`${tenantId}::${orgId}::${changeSetId}::${approverId}`);
   if (!record || record.tenantId !== tenantId || record.orgId !== orgId || !record.grantId) return false;
   try {
@@ -279,12 +315,29 @@ export async function eraseApproverCreators(tenantId: string, forms: ReadonlySet
 
 // ── Sending links (agency side) ──
 
-export interface SentLink { approverId: string; displayName: string; email: string; url: string; expiresAt?: string }
+export interface SentLink {
+  approverId: string; displayName: string; email: string; url: string; expiresAt?: string;
+  /** ADR 0924 P2c — how the link reached the approver (see `ApprovalLinkRecord.delivery`). */
+  delivery: NonNullable<ApprovalLinkRecord['delivery']>;
+  /** ADR 0924 P2c — recipient-bound with a one-time code: the URL alone opens nothing. */
+  verified: boolean;
+}
 
 /**
  * Mint a fresh link per active approver for an in-review change set, replacing
  * any earlier link of that pair (so a lost link is re-sent, never duplicated).
- * The raw URL is returned once; the operator sends it (no email in v1).
+ *
+ * ADR 0924 P2c — when the workspace can send a one-time code (the ADR 1141
+ * transactional lane), each link is RECIPIENT-BOUND to the approver's address
+ * with verification: opening or deciding needs a code mailed to that address at
+ * click time, so the sender holding the URL (review C3.1) or a forwardee is not
+ * enough. The link is then emailed through the transactional seam, keyed
+ * `cops-link:<grantId>` so a retry never sends a second distinct link, and the
+ * delivery is recorded honestly. With no transport, the `client` policy keeps
+ * the v1 copy-link fallback (`delivery.channel:'copy'`), but only for a client
+ * that has never had verified links: once it has (`verifiedLinksSince`), a missing
+ * code lane is a 409 `verification_unavailable` (user decision 2026-11-26). The raw
+ * URL is still returned once, for the agency's own record.
  */
 export async function sendApprovalLinks(input: { tenantId: string; client: ClientAccount; changeSetId: string; sentBy: string; baseUrl: string }): Promise<SentLink[]> {
   const { tenantId, client, changeSetId, sentBy } = input;
@@ -317,6 +370,15 @@ export async function sendApprovalLinks(input: { tenantId: string; client: Clien
   const active = (await listApprovers(tenantId, orgId)).filter((a) => a.status === 'active');
   if (active.length === 0) throw new OpenwopError('validation_error', 'Add a client approver first.', 409, { reason: 'no_client_approver' });
   const { createLink } = await import('../sharing/sharingService.js');
+  const verified = await shareCodeMailReady(tenantId, orgId);
+  // User decision 2026-11-26 (security read residual): binding must not depend on
+  // the sending side keeping its email lane. Once a client has had verified links,
+  // a missing code lane is a refusal here, before anything is minted, never a quiet
+  // fallback to an unbound link.
+  if (!verified && client.verifiedLinksSince) {
+    throw new OpenwopError('validation_error', 'This client’s approval links need a one-time code, and this workspace can’t send email right now. Fix the email connection, then send again.', 409, { reason: 'verification_unavailable' });
+  }
+  if (verified) await markVerifiedApprovalLinks(tenantId, orgId);
   const out: SentLink[] = [];
   for (const a of active) {
     // A re-send replaces the earlier link of this pair: its sharing row and grant go.
@@ -327,15 +389,38 @@ export async function sendApprovalLinks(input: { tenantId: string; client: Clien
       actions: ['view', 'decide'], expiresInDays: LINK_DAYS, createdBy: LINK_ACTOR,
     });
     const resourceId = approvalResourceIdOf(changeSetId, grant.grantId);
-    await approvalLinks.put({ tenantId, orgId, changeSetId, approverId: a.approverId, grantId: grant.grantId, sentBy, sentAt: nowIso() });
-    const link = await createLink(tenantId, orgId, LINK_ACTOR, { resourceType: APPROVAL_RESOURCE_TYPE, resourceId, expiresInDays: LINK_DAYS }, { lane: 'visitor', why: 'the client approver link for one change set (ADR 0924 D5)' });
+    const sentAt = nowIso();
+    await approvalLinks.put({ tenantId, orgId, changeSetId, approverId: a.approverId, grantId: grant.grantId, sentBy, sentAt, verified });
+    const link = await createLink(tenantId, orgId, LINK_ACTOR, {
+      resourceType: APPROVAL_RESOURCE_TYPE, resourceId, expiresInDays: LINK_DAYS,
+      ...(verified ? { recipient: { email: a.email }, verify: { sessionHours: VERIFY_SESSION_HOURS } } : {}),
+    }, { lane: 'visitor', why: 'the client approver link for one change set (ADR 0924 D5)' });
+    const url = `${input.baseUrl.replace(/\/$/, '')}/shared/${encodeURIComponent(link.token)}`;
+    const mail = await sendTransactional<ApprovalLinkMailData>(APPROVAL_LINK_KIND, {
+      to: a.email,
+      data: { clientName: client.displayName, url, verified },
+      context: { tenantId, orgId, actingUserId: sentBy, idempotencyKey: `cops-link:${grant.grantId}` },
+    });
+    // Never reported as sent unless it was. No transport at all, on an unbound
+    // link, is the v1 copy fallback: the operator sends the URL.
+    const delivery: NonNullable<ApprovalLinkRecord['delivery']> = mail.sent
+      ? { channel: 'email', status: 'sent', at: nowIso() }
+      : !verified && mail.reason === 'no_transport'
+        ? { channel: 'copy', status: 'sent', at: nowIso() }
+        : { channel: 'email', status: 'failed', at: nowIso() };
+    const key = `${tenantId}::${orgId}::${changeSetId}::${a.approverId}`;
+    const cur = await approvalLinks.get(key);
+    if (cur && cur.grantId === grant.grantId) await approvalLinks.compareAndSwap(cur, { ...cur, delivery });
     out.push({
-      approverId: a.approverId, displayName: a.displayName, email: a.email,
-      url: `${input.baseUrl.replace(/\/$/, '')}/shared/${encodeURIComponent(link.token)}`,
-      ...(link.expiresAt ? { expiresAt: link.expiresAt } : {}),
+      approverId: a.approverId, displayName: a.displayName, email: a.email, url,
+      ...(link.expiresAt ? { expiresAt: link.expiresAt } : {}), delivery, verified,
     });
   }
-  auditOps(tenantId, 'approval.links-sent', { orgId, changeSetId, changeSetHash: cs.hash, approverIds: active.map((a) => a.approverId), by: sentBy });
+  auditOps(tenantId, 'approval.links-sent', {
+    orgId, changeSetId, changeSetHash: cs.hash, approverIds: active.map((a) => a.approverId), by: sentBy,
+    verified, emailed: out.filter((l) => l.delivery.channel === 'email' && l.delivery.status === 'sent').length,
+    notDelivered: out.filter((l) => l.delivery.status === 'failed').length,
+  });
   return out;
 }
 
@@ -425,7 +510,7 @@ const ipKey = (ip: string): string => createHash('sha256').update(ip).digest('he
  * superseded, wrong hash) is the same 404; a stale package is 409 `package_stale`.
  * Limits are the shared counters, failing CLOSED (ADR 0934 D2: this decides).
  */
-export async function decideFromPortal(input: { token: string; ip: string; body: unknown; deps: ApprovalDecisionDeps }): Promise<{ status: 'approved' | 'rejected' | 'pending' }> {
+export async function decideFromPortal(input: { token: string; ip: string; body: unknown; deps: ApprovalDecisionDeps; viewer?: ShareViewer }): Promise<{ status: 'approved' | 'rejected' | 'pending' }> {
   const body = (input.body ?? {}) as { action?: unknown; expectedChangeSetHash?: unknown; comment?: unknown };
   const ipTake = await takeShared({ scope: 'campaign-ops.portal.ip', key: ipKey(input.ip || 'unknown'), limit: 60, windowS: 600, failure: 'closed' });
   const tokenTake = ipTake.allowed
@@ -446,10 +531,15 @@ export async function decideFromPortal(input: { token: string; ip: string; body:
   const comment = typeof body.comment === 'string' ? cleanString(body.comment, MAX_COMMENT, '').trim() : '';
 
   const { resolveActiveResource } = await import('../sharing/sharingService.js');
-  const { tenantId, orgId, resourceId } = await resolveActiveResource(input.token, APPROVAL_RESOURCE_TYPE);
+  // ADR 0924 P2c — the browser session rides, so a recipient-bound link decides
+  // only for a session that verified it (otherwise 401 `share_verification_required`,
+  // which the page answers by asking for a code again).
+  const { tenantId, orgId, resourceId } = await resolveActiveResource(input.token, APPROVAL_RESOURCE_TYPE, input.viewer ? { viewer: input.viewer } : {});
   const ctx = await liveContext(tenantId, orgId, resourceId, 'decide');
   if (!ctx) throw notFound();
   if (ctx.state === 'stale') throw stalePackage();
+  // ADR 0924 P2c (C3.2) — re-checked at the vote: a member's address never votes as the client.
+  if (await isWorkspaceMemberEmail(tenantId, ctx.approver.email)) throw notFound();
   const cs = await getChangeSet(tenantId, orgId, ctx.changeSetId);
   if (!cs || typeof body.expectedChangeSetHash !== 'string' || body.expectedChangeSetHash !== cs.hash) throw notFound();
 

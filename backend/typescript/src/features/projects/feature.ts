@@ -25,6 +25,8 @@ import { registerProjectsRoutes } from './routes.js';
 import { ADDRESSABLE_PROJECT_ROLES, getProject, listProjects, projectRoleOf, resolveProjectAccess, registerProjectsErasure } from './projectsService.js';
 import { registerPrivateProjectProbe } from '../../host/runProjectAccess.js';
 import { PROJECTS_CLIENT_PORTAL_TOGGLE, registerProjectClientPortal } from './clientPortal.js';
+import { registerProjectClientThread } from './clientThread.js';
+import { registerProjectClientThreadRoutes } from './clientThreadRoutes.js';
 
 export const projectsFeature: BackendFeature = {
   id: 'projects',
@@ -34,6 +36,8 @@ export const projectsFeature: BackendFeature = {
     registerMemoryProposalLifecycle(); // ADR 1092 D2 — proposals' eraser and project-delete cascade
     registerProjectsErasure(); // D2 (chat-first port) — DSAR anonymizes a member's ref in place
     registerProjectClientPortal(); // ADR 1099 D3 — the `project` grant kind behind `projects.client-portal`
+    registerProjectClientThread(); // ADR 1099 D7 — client threads: the message tool, erasure, project-delete cascade
+    registerProjectClientThreadRoutes(deps); // ADR 1099 D7 — members' threads and replies, the collaborator's own thread
 
     // ADR 0054 § Correction (2026-06-16) — the `project-collab` toggle is RETIRED;
     // the collaborative surfaces (members / visibility / chat) are now always-on.

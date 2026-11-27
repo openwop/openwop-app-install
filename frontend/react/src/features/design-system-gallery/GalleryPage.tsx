@@ -35,6 +35,7 @@ import { InfoTip } from '../../ui/InfoTip.js';
 import { Tooltip } from '../../ui/Tooltip.js';
 import { ToastCard } from '../../ui/ToasterView.js';
 import { CreateDialog } from '../../ui/CreateDialog.js';
+import { StepRail, type StepRailState } from '../../ui/StepRail.js';
 import { AlertIcon, CheckIcon, ChevronDownIcon, SearchIcon, SettingsIcon, ShieldIcon, UserIcon, WorkflowIcon } from '../../ui/icons/index.js';
 import { NavRailItemContent, NavRailSection } from '../../chrome/NavRailPrimitives.js';
 import { EnvelopeEventsTimeline } from '../../chat/EnvelopeEventsTimeline.js';
@@ -90,6 +91,15 @@ const RUN_FIXTURES: { id: string; run: RunState; waiting: boolean }[] = [
  *  Video section renders (`video<K>` + `video<K>Body` catalog keys). */
 const VIDEO_SWATCHES = ['stage', 'stage-text', 'stage-muted', 'stage-rule', 'card', 'card-text', 'card-muted', 'card-faint', 'accent', 'accent-on-stage', 'accent-on-card'] as const;
 const VIDEO_RULES = ['Audience', 'Story', 'Voice', 'Type', 'Motion', 'Sound', 'Honesty', 'Access'] as const;
+
+/** One step per state, so the rail specimen shows every chip tone and glyph. */
+const STEP_RAIL_STEPS: ReadonlyArray<{ id: string; state: StepRailState; stateKey: string }> = [
+  { id: 'brief', state: 'done', stateKey: 'stepRailDone' },
+  { id: 'plan', state: 'needs-you', stateKey: 'stepRailNeedsYou' },
+  { id: 'create', state: 'in-progress', stateKey: 'stepRailInProgress' },
+  { id: 'review', state: 'not-started', stateKey: 'stepRailNotStarted' },
+  { id: 'measure', state: 'unknown', stateKey: 'stepRailUnknown' },
+];
 
 function Section({ id, title, children }: { id: string; title: string; children: React.ReactNode }): JSX.Element {
   return (
@@ -434,6 +444,16 @@ export function GalleryPage(): JSX.Element {
       <Section id="dialogs" title={t('dialogs')}>
         <Specimen label="CreateDialog: closed / open from its button (submit fails, to show the error)">
           <CreateDialogSpecimen />
+        </Specimen>
+      </Section>
+
+      <Section id="step-rail" title={t('stepRail')}>
+        <Specimen label='StepRail: one step per state; the second is aria-current="step"'>
+          <StepRail
+            label={t('stepRailLabel')}
+            currentId="plan"
+            items={STEP_RAIL_STEPS.map((s) => ({ id: s.id, label: t(`stepRailStep_${s.id}`), to: `?step=${s.id}`, state: s.state, stateLabel: t(s.stateKey) }))}
+          />
         </Specimen>
       </Section>
     </div>

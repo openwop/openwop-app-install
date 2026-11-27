@@ -12,7 +12,15 @@
  * `checkCode` stops consuming a code (single-use); `issueCode` stops replacing the
  * pending code (resend); the lock stops at five (lock); the send cap is removed;
  * an unknown or unbound token answers the code routes differently (uniform);
- * revocation stops clearing verified sessions (revoke).
+ * revocation stops clearing verified sessions (revoke); the code stops going out
+ * from the link org's own sender, or another org's sender leaks onto it (sender).
+ *
+ * Sender witnesses, run 2026-11-25 on `shareCodeMail.ts` `fromAddress`:
+ * - env-only (`own = undefined`): red "an org with a sender address sends from it"
+ *   (from was notify@host.test) and "with neither, mint refuses" (the org's sender
+ *   alone could not mint);
+ * - orgId ignored (`own = listVerifiedSenders(tenantId).all[0]`): red "org A's
+ *   sender is never used for org B's link" (from was a@firm-a.test).
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -25,16 +33,20 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createOrg } from '../src/host/accessControlService.js';
 import { createPage } from '../src/features/cms/cmsService.js';
 import { createContact } from '../src/features/crm/contactsService.js';
+import { setSenderAddress } from '../src/features/email/emailService.js';
 import { createLink, eraseSharingRecipient, listLinks, revokeLink, unlockLinkVerification } from '../src/features/sharing/sharingService.js';
 import { __setShareCodeMailForTest } from '../src/features/sharing/shareCodeMail.js';
 import { __lastShareCodeDeliveryForTest } from '../src/features/sharing/recipientVerification.js';
 import { __resetVerificationStoreForTest } from '../src/features/sharing/verificationStore.js';
+import { listChain } from '../src/host/auditChainService.js';
 
 let BASE = '';
 let server: http.Server;
 let storage: Storage;
 let n = 0;
-const outbox: Array<{ tenantId: string; to: string; code: string }> = [];
+const outbox: Array<{ tenantId: string; orgId: string; to: string; code: string; from: string; fromName?: string }> = [];
+const HOST_FROM = 'notify@host.test';
+const priorFrom = process.env.OPENWOP_NOTIFY_EMAIL_FROM;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -45,8 +57,11 @@ beforeAll(async () => {
   await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['crm', 'cms']) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
 });
-beforeEach(async () => { outbox.length = 0; __setShareCodeMailForTest({ ready: true, sent: outbox }); await __resetVerificationStoreForTest(); });
-afterEach(() => { vi.useRealTimers(); __setShareCodeMailForTest(undefined); });
+beforeEach(async () => { outbox.length = 0; process.env.OPENWOP_NOTIFY_EMAIL_FROM = HOST_FROM; __setShareCodeMailForTest({ ready: true, sent: outbox }); await __resetVerificationStoreForTest(); });
+afterEach(() => {
+  vi.useRealTimers(); __setShareCodeMailForTest(undefined);
+  if (priorFrom === undefined) delete process.env.OPENWOP_NOTIFY_EMAIL_FROM; else process.env.OPENWOP_NOTIFY_EMAIL_FROM = priorFrom;
+});
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 /** A browser: keeps its own `__session` cookie and its own client IP. */
@@ -72,12 +87,13 @@ function browser(ip = `10.0.${n % 250}.${(n++ % 250) + 1}`) {
 }
 
 /** A tenant with a page, a contact, and a link of that page bound to the contact. */
-async function fixture(opts: { verify?: boolean } = { verify: true }) {
-  const T = `org:adr1141-${Date.now()}-${n++}`;
-  const org = await createOrg({ tenantId: T, createdBy: 'owner-1', name: 'Casa Studio' });
+async function fixture(opts: { verify?: boolean; T?: string; orgName?: string; sender?: string; email?: string } = { verify: true }) {
+  const T = opts.T ?? `org:adr1141-${Date.now()}-${n++}`;
+  const org = await createOrg({ tenantId: T, createdBy: 'owner-1', name: opts.orgName ?? 'Casa Studio' });
+  if (opts.sender) await setSenderAddress(T, org.orgId, opts.sender, 'owner-1');
   const MINTER = 'system:casavoga-portal'; // a visitor-lane mint is the host's own
   const page = await createPage({ tenantId: T, orgId: org.orgId, title: 'Your project portal', createdBy: 'owner-1', sections: [{ type: 'richText', data: { text: 'Budget: 42,000' } }] });
-  const contact = await createContact({ tenantId: T, name: 'Ana Client', email: 'ana@client.test' });
+  const contact = await createContact({ tenantId: T, name: 'Ana Client', email: opts.email ?? 'ana@client.test' });
   const link = await createLink(T, org.orgId, MINTER, {
     resourceType: 'cms_page', resourceId: page.pageId, label: 'Ana portal',
     ...(opts.verify ? { recipient: { contactId: contact.contactId }, verify: {} } : {}),
@@ -281,5 +297,53 @@ describe('ADR 1141 — a recipient-bound link opens only after the emailed code'
     const after = await get();
     expect(after.status).toBe(200);
     expect(after.headers.get('cache-control'), 'a verified view must never be cached for the next visitor').toBe('private, no-store');
+  });
+});
+
+describe('ADR 1141 follow-up — the code goes out from the firm\'s own sender', () => {
+  it('an org with a sender address sends from it, with its name as the From name', async () => {
+    const f = await fixture({ verify: true, orgName: 'Casa Studio', sender: 'studio@casa.test' });
+    expect((await browser().request(f.token)).status).toBe(202);
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]).toMatchObject({ orgId: f.orgId, from: 'studio@casa.test', fromName: 'Casa Studio' });
+  });
+
+  it('an org without one falls back to the host sender', async () => {
+    const f = await fixture({ verify: true });
+    await browser().request(f.token);
+    expect(outbox[0]).toMatchObject({ orgId: f.orgId, from: HOST_FROM, fromName: 'Casa Studio' });
+  });
+
+  it('with neither, mint refuses: share_verification_unavailable', async () => {
+    delete process.env.OPENWOP_NOTIFY_EMAIL_FROM;
+    await expect(fixture({ verify: true })).rejects.toMatchObject({ code: 'share_verification_unavailable', httpStatus: 422 });
+    // The org's own sender alone is enough.
+    const f = await fixture({ verify: true, sender: 'studio@casa.test' });
+    await browser().request(f.token);
+    expect(outbox[0]).toMatchObject({ from: 'studio@casa.test' });
+  });
+
+  it("org A's sender is never used for org B's link, in the same workspace", async () => {
+    const T = `org:adr1141-iso-${Date.now()}-${n++}`;
+    await fixture({ verify: true, T, orgName: 'Firm A', sender: 'a@firm-a.test', email: 'ana@a.test' });
+    const b = await fixture({ verify: true, T, orgName: 'Firm B', email: 'bea@b.test' });
+    await browser().request(b.token);
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0]).toMatchObject({ orgId: b.orgId, from: HOST_FROM, fromName: 'Firm B' });
+    // And with no host sender, B cannot mint on the strength of A's.
+    delete process.env.OPENWOP_NOTIFY_EMAIL_FROM;
+    await expect(fixture({ verify: true, T, orgName: 'Firm B2', email: 'cy@b2.test' })).rejects.toMatchObject({ code: 'share_verification_unavailable' });
+  });
+
+  it('a provider that refuses the From (an unverified domain) is a typed failure, never a sent code', async () => {
+    const f = await fixture({ verify: true, sender: 'studio@casa.test' });
+    __setShareCodeMailForTest({ ready: true, refuse: 'The from address does not match a verified Sender Identity', sent: outbox });
+    expect((await browser().request(f.token)).status, 'the visitor answer stays uniform').toBe(202);
+    expect(outbox).toHaveLength(0);
+    const kinds = (await listChain(f.T)).map((e) => ({ kind: e.kind, reason: (e.payload as { reason?: string }).reason }));
+    expect(kinds).toContainEqual({ kind: 'share.verification.send_failed', reason: 'provider_refused' });
+    expect(kinds.some((k) => k.kind === 'share.verification.sent')).toBe(false);
+    const [row] = (await listLinks(f.T, f.orgId, 'system:casavoga-portal')).filter((l) => l.tokenHash === f.tokenHash);
+    expect(row?.verification?.sentCount ?? 0).toBe(0);
   });
 });

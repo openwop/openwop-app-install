@@ -24,6 +24,7 @@ import type { InterruptRecord, RunRecord } from '../types.js';
 import { timeoutApprovalGateIfDue } from '../executor/approvalGateTimeout.js';
 import { mayViewApproval } from './approvalAudience.js';
 import { featureApprovalKind } from './approvalKindRegistry.js';
+import { clientProjectTool } from './clientProjectTools.js';
 import { gateAclOf, gateApproverRefs, isEligibleApprover, policyApproverRefs, type ApproverRefs } from './approverResolution.js';
 import type { EffectiveAccess } from './accessControlService.js';
 import { isTerminalRunStatus } from '@openwop/openwop';
@@ -96,6 +97,18 @@ export interface ReviewAsset {
  */
 export interface FeatureReviewFields {}
 
+/** ADR 1099 P3b — what a `collab-proposal` card shows beyond its summary. Ids and
+ *  the firm's own labels only. */
+export interface CollabProposalReview {
+  /** The adopter's grouping key (a submission or session id), for grouping cards. */
+  groupKey: string;
+  resourceKind: string;
+  resourceId: string;
+  toolId: string;
+  /** Who may decide, when the tool names one ("the project's lead designer"). */
+  deciderLabel?: string;
+}
+
 export interface ReviewRequest extends FeatureReviewFields {
   reviewId: `interrupt:${string}` | `approval:${string}`;
   source: ReviewSource;
@@ -123,6 +136,8 @@ export interface ReviewRequest extends FeatureReviewFields {
   artifactId?: string;
   revisionId?: string;
   requestedBy?: { kind: 'user' | 'agent' | 'system'; id: string; label?: string };
+  /** ADR 1099 P3b — present on a `collab-proposal` card. */
+  collabProposal?: CollabProposalReview;
   requestedAt: string;
   dueAt?: string;
   risk?: { level: 'low' | 'medium' | 'high' | 'critical'; reasons: string[] };
@@ -724,8 +739,16 @@ export function approvalToReview(a: PendingApproval): ReviewRequest {
   // workflow: attribute it to the composing agent and chip it as elevated
   // review (the definition is not from the catalog; approval executes it).
   const composed = a.kind === 'composed-workflow' ? a.composedWorkflow : undefined;
+  // ADR 1099 P3b — a collaborator's proposal: someone OUTSIDE the workspace (a
+  // firm's client or builder) asked for it. Attribute it to them by the firm's own
+  // name for them, chip it as outside input, and name who may decide.
+  const collab = a.kind === 'collab-proposal' ? a.collabProposal : undefined;
+  const collabDecider = collab ? clientProjectTool(collab.toolId) : undefined;
+  const deciderLabel = collabDecider?.effect === 'propose' ? collabDecider.deciderLabel : undefined;
   const requestedBy: ReviewRequest['requestedBy'] = anonWrite
     ? { kind: 'system', id: anonWrite.principal, label: 'Anonymous visitor' }
+    : collab
+      ? { kind: 'user', id: `collab:${collab.collaboratorId}`, label: collab.collaboratorLabel ?? 'Outside collaborator' }
     : composed?.agentProfileId
       ? { kind: 'agent', id: composed.agentProfileId }
       : a.rosterId
@@ -735,7 +758,9 @@ export function approvalToReview(a: PendingApproval): ReviewRequest {
     ? { level: 'medium', reasons: ['Anonymous website visitor', `Held write: ${anonWrite.tool.name}`] }
     : composed
       ? { level: 'medium', reasons: ['Agent-composed workflow (not from the catalog)', 'Approval starts the run'] }
-      : undefined;
+      : collab
+        ? { level: 'medium', reasons: ['Proposed by someone outside your workspace', 'Approving records it in the project', ...(deciderLabel ? [`Only ${deciderLabel} can decide`] : [])] }
+        : undefined;
   // ADR 0470 — when the held write captured a LEAD (email/name/note on the flat
   // `captured*` fields), surface it as the card summary so the operator can decide
   // WITHOUT opening the payload. These are OD4-redactor-covered, so an erased row
@@ -771,6 +796,17 @@ export function approvalToReview(a: PendingApproval): ReviewRequest {
     // ADR 1031 P3 — fields the owning feature projects for its own kind (ids only,
     // by the same rule as everything above: no free text on a second exposure path).
     ...(featureApprovalKind(kind)?.reviewFields?.(a) ?? {}),
+    ...(collab
+      ? {
+          collabProposal: {
+            groupKey: collab.groupKey,
+            resourceKind: collab.resource.kind,
+            resourceId: collab.resource.id,
+            toolId: collab.toolId,
+            ...(deciderLabel ? { deciderLabel } : {}),
+          },
+        }
+      : {}),
     ...(composed
       ? {
           composedWorkflow: {

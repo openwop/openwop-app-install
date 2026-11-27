@@ -26,7 +26,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { scanMatches, stripeChokeViolations, keptLines, ownV1Pattern, KEEP_MARKER, V1_PATH } from '../../../scripts/v1RelianceScan.mjs';
+import { scanMatches, stripeChokeViolations, keptLines, ownV1Pattern, KEEP_MARKER, V1_PATH, THIRD_PARTY_V1_HOSTS, isThirdPartyHostMatch } from '../../../scripts/v1RelianceScan.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const SRC = 'backend/typescript/src';
@@ -141,5 +141,64 @@ describe('v1-reliance — own-path gate and KEEP marker (ADR 0812 P4 slice 2b)',
     catch (e) { code = (e as { status: number }).status; err = String((e as { stderr: string }).stderr); }
     expect(code).toBe(1);
     expect(err).toContain(`${SRC}/x.ts:1`);
+  });
+  it('leg 11 (RFC 0266): a flat v1 schema read in shipped code FAILS flatSchemaReads, naming file:line; a v2 read does not', () => {
+    const root = tree({
+      [`${SRC}/features/billing/stripeApi.ts`]: CHOKE_OK,
+      [`${SRC}/ok.ts`]: "const a = join(dir, 'schemas', 'v2', 'ids.schema.json');\nconst b = locateRepoSchemasV2Dir(here);\n// schemas/run-event.schema.json in a comment is prose\n",
+      [`${SRC}/flat.ts`]: "const a = join(root, 'schemas', 'run-event.schema.json');\nconst b = locateRepoSchemasDir(here, 'ai-envelope.schema.json');\n",
+      'schemas/v2/path-manifest.json': JSON.stringify({ operations: [{ path: '/runs' }] }),
+      [`${SRC}/middleware/protocolVersion.ts`]: 'export function preferredVersion(): string {\n  return PROTOCOL_VERSION_V2;\n}\n',
+      'scripts/v1-reliance-baseline.json': '{}',
+    });
+    for (const f of ['check-v1-reliance.mjs', 'v1RelianceScan.mjs']) writeFileSync(join(root, 'scripts', f), readFileSync(join(ROOT, 'scripts', f)));
+    let code = 0; let err = '';
+    try { execFileSync('node', [join(root, 'scripts', 'check-v1-reliance.mjs')], { cwd: root, encoding: 'utf8', stdio: 'pipe' }); }
+    catch (e) { code = (e as { status: number }).status; err = String((e as { stderr: string }).stderr); }
+    expect(code).toBe(1);
+    expect(err).toContain(`${SRC}/flat.ts:1`);
+    expect(err).toContain(`${SRC}/flat.ts:2`);
+    expect(err).not.toContain(`${SRC}/ok.ts`);
+  });
+});
+
+describe('v1-reliance — the reviewed third-party host allowlist', () => {
+  /** Built, not written, so this file adds nothing to testCorpusV1Refs either way. */
+  const TOKENS = ['', 'oauth2', 'v1', 'tokens', 'bearer'].join('/');
+  const url = (host: string) => `https://${host}${TOKENS}`;
+  const TEST = 'backend/typescript/test';
+  const V1_SEG = ['', 'v1', ''].join('/');
+  const corpus = (root: string) => scanMatches(root, TEST, V1_PATH, ['*.ts']);
+
+  it('leg 11: every entry is an exact host with a stated reason', () => {
+    expect(THIRD_PARTY_V1_HOSTS.length).toBeGreaterThan(0);
+    for (const { host, reason } of THIRD_PARTY_V1_HOSTS) {
+      expect(host).toMatch(/^[a-z0-9-]+(\.[a-z0-9-]+)+$/);
+      expect(reason.trim().length).toBeGreaterThan(20);
+    }
+  });
+
+  it("leg 12: an allowlisted host's literal URL does NOT count, quoted any way", () => {
+    const host = 'oauth.platform.intuit.com';
+    const root = tree({ [`${TEST}/qb.test.ts`]: `expect(u).toBe('${url(host)}');\nconst a = \"${url(host)}\";\nconst b = \`${url(host)}?x=1\`;\n` });
+    expect(corpus(root)).toEqual([]);
+  });
+
+  it('leg 13: a non-allowlisted v1 path still counts: another host, a lookalike, a built host, a bare path, and a second match on the same line', () => {
+    const ok = 'oauth.platform.intuit.com';
+    const root = tree({ [`${TEST}/other.test.ts`]: [
+      `f('${url('api.example.test')}');`,
+      `f('${url(`${ok}.evil.test`)}');`,
+      `f(\`https://\${host}${TOKENS}\`);`,
+      `f('${['', 'v1', 'runs'].join('/')}');`,
+      `f('${url(ok)}', '${['', 'v1', 'runs'].join('/')}');`,
+    ].join('\n') + '\n' });
+    expect(corpus(root)).toHaveLength(5);
+  });
+
+  it('isThirdPartyHostMatch keys on the URL the match sits in, not the line', () => {
+    const line = `f('${url('oauth.platform.intuit.com')}', '${['', 'v1', 'runs'].join('/')}')`;
+    expect(isThirdPartyHostMatch(line, line.indexOf(V1_SEG))).toBe(true);
+    expect(isThirdPartyHostMatch(line, line.lastIndexOf(V1_SEG))).toBe(false);
   });
 });

@@ -8,7 +8,7 @@
  *
  * Install-time validation per RFC 0028 §B §"Install-time validation":
  *   1. Parse `pack.json`.
- *   2. Validate against `schemas/prompt-pack-manifest.schema.json`.
+ *   2. Validate against `schemas/v2/prompt-pack-manifest.schema.json` (RFC 0266).
  *   3. Verify Ed25519 signature when `pack.json` carries a `signing`
  *      block. In-tree dev packs without a `signing` block install
  *      with a warning log line (matches the lighter posture the
@@ -30,45 +30,30 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { verifySelfAttested } from './packSignature.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import Ajv2020, { type ValidateFunction } from 'ajv/dist/2020.js';
-import addFormats from 'ajv-formats';
+import type { ValidateFunction } from 'ajv/dist/2020.js';
+import { compileV2Schema } from './v2SchemaCompile.js';
 import { installPackTemplates, type PromptTemplate } from './promptStore.js';
 import { createLogger } from '../observability/logger.js';
-import { locateRepoSchemasDir } from './_repoPath.js';
+import { locateRepoSchemasV2Dir } from './_repoPath.js';
 import { isParkedPackDirName } from '../bootstrap/mountLocalPacks.js';
 
 const log = createLogger('prompt-pack-loader');
 
 // __dirname-equivalent for ESM. Used to anchor schema lookups.
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// Locate the repo `schemas/` directory under both source-tree and
-// esbuild-bundled layouts. See `_repoPath.ts` for the implementation;
-// the sentinel here is the schema this loader validates pack manifests
-// against. Per commit `d09d99c`, the prior `..` × 6 from `__dirname`
-// pattern crashed when bundled (overshot the repo root by 2 levels).
-const SCHEMAS_DIR = locateRepoSchemasDir(__dirname, 'prompt-pack-manifest.schema.json');
+// Locate the vendored `schemas/v2/` tree under both source-tree and
+// esbuild-bundled layouts (`_repoPath.ts`). RFC 0266: the manifest is judged
+// by the v2 schema; the frozen flat v1 copy is no longer vendored.
+const SCHEMAS_V2_DIR = locateRepoSchemasV2Dir(__dirname, 'prompt-pack-manifest.schema.json');
 
-// Lazily compiled. Cross-refs to `prompt-kind.schema.json` +
-// `prompt-template.schema.json` are pre-loaded so the manifest
-// schema's $refs resolve without per-pack disk hits.
+// Lazily compiled. The v2 manifest `$ref`s `./prompt-template.schema.json`
+// (→ `prompt-kind`) and `ids.schema.json`; `compileV2Schema` registers that
+// closure so the refs resolve without per-pack disk hits.
 let _manifestValidator: ValidateFunction | null = null;
 
 function loadManifestValidator(): ValidateFunction {
   if (_manifestValidator) return _manifestValidator;
-  const ajv = new Ajv2020({ allErrors: true, strict: false });
-  addFormats(ajv);
-  // Pre-load every prompt-* schema so the manifest schema's relative
-  // $refs (`./prompt-kind.schema.json`, `./prompt-template.schema.json`)
-  // resolve. Order doesn't matter — Ajv resolves at compile time.
-  for (const name of ['prompt-kind.schema.json', 'prompt-template.schema.json', 'prompt-ref.schema.json']) {
-    const schema = JSON.parse(readFileSync(join(SCHEMAS_DIR, name), 'utf8')) as Record<string, unknown>;
-    ajv.addSchema(schema, name);
-    ajv.addSchema(schema, `./${name}`);
-  }
-  const manifestSchema = JSON.parse(
-    readFileSync(join(SCHEMAS_DIR, 'prompt-pack-manifest.schema.json'), 'utf8'),
-  ) as Record<string, unknown>;
-  _manifestValidator = ajv.compile(manifestSchema);
+  _manifestValidator = compileV2Schema(SCHEMAS_V2_DIR, 'prompt-pack-manifest.schema.json');
   return _manifestValidator;
 }
 
@@ -148,7 +133,7 @@ export function loadPromptPacks(opts: {
       if (manifest.kind !== 'prompt') continue; // skip node + workflow-chain packs
 
       // Install-time validation step 2 per RFC 0028 §B: validate the
-      // manifest against `prompt-pack-manifest.schema.json` before
+      // manifest against v2 `prompt-pack-manifest.schema.json` before
       // calling installPackTemplates(). A malformed pack that slips
       // through here would otherwise surface garbage through
       // `GET /v1/prompts`, breaking the RFC 0028 §A response contract.

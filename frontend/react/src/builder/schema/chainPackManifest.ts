@@ -3,7 +3,7 @@
  *
  * Produces a `WorkflowChainPackManifest` (kind: "workflow-chain") with a
  * single chain whose `dag` is the built graph, conforming to
- * `schemas/workflow-chain-pack-manifest.schema.json`. This is the
+ * `schemas/v2/workflow-chain-pack-manifest.schema.json`. This is the
  * *authoring* half of "publish as a chain pack" — the user downloads the
  * manifest and submits it via the PR-based registry flow (PUBLISHING.md);
  * the app never signs or pushes to the registry.

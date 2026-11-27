@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Ajv2020 from 'ajv/dist/2020.js';
 import type { ValidateFunction } from 'ajv';
-import { locateRepoSchemasDir } from './_repoPath.js';
+import { locateRepoSchemasV2Dir } from './_repoPath.js';
 import { OpenwopError } from '../types.js';
 
 const V2_INPUTS = new Set(['TextField', 'CheckBox', 'ChoicePicker', 'DateTimeInput']);
@@ -23,7 +23,7 @@ const isRec = (v: unknown): v is Rec => typeof v === 'object' && v !== null && !
 let validator: ValidateFunction | undefined;
 function formValidator(): ValidateFunction {
   if (validator) return validator;
-  const dir = join(locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json'), 'v2');
+  const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
   const schema = JSON.parse(readFileSync(join(dir, 'interrupt-form.schema.json'), 'utf8')) as Rec;
   validator = new Ajv2020({ allErrors: true, strict: false }).compile(schema);
   return validator;

@@ -62,6 +62,7 @@ import {
   callbackRefusalPage,
   writeScopesOf,
   inboundIngestUrl,
+  redirectUri,
 } from './oauthFlow.js';
 import {
   setInboundConfig,
@@ -302,7 +303,20 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
   app.get('/host/openwop-app/connections-oauth-clients', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'OAuth client configuration');
-      res.json({ clients: await listHostOAuthClients() });
+      // The redirect URI each provider must register, from the SAME builder the
+      // authorize request sends (`redirectUri`: the callback base URL, and `/v1`
+      // unless OPENWOP_OAUTH_REDIRECT_UNVERSIONED). The admin panel shows this,
+      // never a client-side guess: a guessed URI the operator copied into a
+      // provider console failed at that provider (casavoga-prod).
+      const origin = reqOriginOf(req);
+      // A provider whose URI cannot be built (production with no callback base
+      // configured refuses by design) is left out, not guessed; the panel then
+      // shows no URI for it.
+      const redirectUris: Record<string, string> = {};
+      for (const p of listProviders()) {
+        try { redirectUris[p.id] = redirectUri(p.id, origin); } catch { /* not buildable here: omitted */ }
+      }
+      res.json({ clients: await listHostOAuthClients(), redirectUris });
     } catch (err) {
       next(err);
     }

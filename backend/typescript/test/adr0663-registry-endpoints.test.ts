@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  expandEndpoint, preferredTree, resetRegistryEndpointCache, resolveRegistry, templateFor,
+  expandEndpoint, resetRegistryEndpointCache, resolveRegistry, templateFor,
 } from '../src/packs/registryEndpoints.js';
+import { installPackFromRegistry } from '../src/packs/registryInstaller.js';
 
 /**
  * ADR 0663 / `packs.md` §"The registry tree" — a client MUST resolve every
@@ -9,9 +10,10 @@ import {
  * rather than constructing one, and a major-2 host must read the `v2` tree,
  * where the admissible versions live.
  *
- * Tracker TST-BG3-24. Red when: a major-2 host stops preferring the v2 tree, the
- * v1 fallback breaks, OPENWOP_REGISTRY_TREE is ignored, the flat alias is not used for
- * an unversioned key, a non-OK status or a missing `endpoints` is not reported as its
+ * Tracker TST-BG3-24. Red when: the host reads any tree but v2 (RFC 0266: no v1 or
+ * flat fallback, no OPENWOP_REGISTRY_TREE pin back to v1), a registry with no v2 tree
+ * is not refused (`no_v2_tree`, and the installer's typed `registry_v2_tree_missing`),
+ * the flat alias is used for a versioned key or not used for an unversioned one, a non-OK status or a missing `endpoints` is not reported as its
  * own reason, or `expandEndpoint` stops percent-encoding. DOUBLE GUARD on "fetched
  * once": both `resolveRegistry`'s cache and `fetchRegistryDocument`'s docCache hold the
  * fetch count at 1, so removing either alone stays green (probe `0663-cache`).
@@ -45,30 +47,35 @@ function serve(doc: unknown, status = 200): void {
 const fetchedUrls = (): string[] => fetchMock.mock.calls.map((c) => String(c[0]));
 
 describe('ADR 0663 — registry paths are resolved, never constructed', () => {
-  it('a major-2 host resolves the v2 tree; a major-1 host resolves v1; the same registry serves both', async () => {
+  it('resolves the v2 tree, through the discovery document (RFC 0266: v2 only)', async () => {
     serve(DOC);
     const asV2 = await resolveRegistry(REG, 2);
     expect(fetchedUrls()).toEqual([WK]);
     expect(asV2.ok && asV2.resolved.tree).toBe('v2');
     expect(asV2.ok && templateFor(asV2.resolved, 'versionManifest')).toBe('/v2/packs/{name}/-/{version}.json');
-    resetRegistryEndpointCache();
-    serve(DOC);
-    const asV1 = await resolveRegistry(REG, 1);
-    expect(asV1.ok && asV1.resolved.tree).toBe('v1');
-    expect(asV1.ok && templateFor(asV1.resolved, 'versionManifest')).toBe('/v1/packs/{name}/-/{version}.json');
   });
 
-  it('falls back to v1 when the registry advertises no v2 tree — the overlap tree, not a guess', async () => {
+  it('a registry that advertises no v2 tree is refused (no_v2_tree), never read through v1', async () => {
     serve({ endpoints: { v1: DOC.endpoints.v1, publicKey: '/keys/{keyId}.pub' } });
     const r = await resolveRegistry(REG, 2);
-    expect(r.ok && r.resolved.tree).toBe('v1');
+    expect(r).toEqual({ ok: false, reason: 'no_v2_tree' });
   });
 
-  it('OPENWOP_REGISTRY_TREE pins the tree explicitly, over the host major', () => {
+  it('OPENWOP_REGISTRY_TREE=v1 does not pin the host back to the v1 tree', async () => {
     process.env.OPENWOP_REGISTRY_TREE = 'v1';
-    expect(preferredTree(DOC.endpoints, 2)).toBe('v1');
-    process.env.OPENWOP_REGISTRY_TREE = 'v2';
-    expect(preferredTree(DOC.endpoints, 1)).toBe('v2');
+    try {
+      serve(DOC);
+      const r = await resolveRegistry(REG, 2);
+      expect(r.ok && r.resolved.tree).toBe('v2');
+    } finally {
+      delete process.env.OPENWOP_REGISTRY_TREE;
+    }
+  });
+
+  it('a flat v1-era alias key is not used for a versioned endpoint the v2 tree omits', async () => {
+    serve({ endpoints: { ...DOC.endpoints, v2: { registryIndex: '/v2/index.json' } } });
+    const r = await resolveRegistry(REG, 2);
+    expect(r.ok && templateFor(r.resolved, 'versionManifest')).toBeNull();
   });
 
   it('an unversioned endpoint (publicKey) comes from the flat alias, because keys are not protocol-versioned', async () => {
@@ -101,6 +108,16 @@ describe('ADR 0663 — registry paths are resolved, never constructed', () => {
     serve(DOC);
     await resolveRegistry(REG, 2);
     await resolveRegistry(REG, 2);
+    expect(fetchedUrls()).toEqual([WK]);
+  });
+});
+
+describe('RFC 0266 — a boot install against a registry with no v2 tree', () => {
+  it('is refused, typed, and fetches nothing but the discovery document', async () => {
+    serve({ endpoints: { v1: DOC.endpoints.v1, publicKey: '/keys/{keyId}.pub' } });
+    await expect(
+      installPackFromRegistry({ name: 'core.openwop.ai', version: '1.5.2' }, { packDir: '/nonexistent-rfc0266', registry: REG }),
+    ).rejects.toThrow(/^registry_v2_tree_missing: /);
     expect(fetchedUrls()).toEqual([WK]);
   });
 });

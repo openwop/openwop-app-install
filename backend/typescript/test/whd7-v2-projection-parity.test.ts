@@ -70,6 +70,7 @@ import {
 import { buildV2Advertisement, stripSupported as hostStripSupported } from '../src/routes/discovery.js';
 import { MAX_SUB_CHAIN_DEPTH } from '../src/host/workflowChainPackLoader.js';
 import { loadConfigFromEnv } from '../src/index.js';
+import { corpusSchema } from './support/corpusSchema.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
@@ -82,6 +83,15 @@ const RECORD_ENVELOPE = new Set(['status', 'since', 'until', 'witness']);
 function readSchema(...segments: string[]): Rec {
   const parsed: unknown = JSON.parse(readFileSync(join(ROOT, 'schemas', ...segments), 'utf8'));
   if (!isRec(parsed)) throw new Error(`${segments.join('/')} is not a JSON object`);
+  return parsed;
+}
+
+/** The FROZEN v1 capabilities schema — the comparison baseline this file is about
+ *  (what a v1 family carried). RFC 0266: the app no longer vendors the flat v1
+ *  tree, so it is read from the corpus package, which still ships it as history. */
+function frozenV1Capabilities(): Rec {
+  const parsed: unknown = corpusSchema('capabilities.schema.json');
+  if (!isRec(parsed)) throw new Error('v1 capabilities.schema.json is not a JSON object');
   return parsed;
 }
 
@@ -231,8 +241,8 @@ describe('WHD-7 — workflowChainPacks.subChains, the fifth hand-written project
 });
 
 describe('WHD-7 — carriesUnspliceablePayload(): no advertised family is a bare record over a lost payload (RFC 0193)', () => {
-  it('the probe reproduces known figures from the vendored v1 schema before it is trusted with unknown ones', () => {
-    const v1Schema = schemaProperties(readSchema('capabilities.schema.json'));
+  it('the probe reproduces known figures from the frozen v1 schema before it is trusted with unknown ones', () => {
+    const v1Schema = schemaProperties(frozenV1Capabilities());
     // `supportedEnvelopes` is the corpus docblock's own example: an ARRAY at v1,
     // published by a production host as `{status:"stable"}` — a catalog with no
     // catalog. `limits` is an object with properties, so it splices.
@@ -242,7 +252,7 @@ describe('WHD-7 — carriesUnspliceablePayload(): no advertised family is a bare
 
   it('every family advertised at major 2 either splices, or names a seat for what it carried', () => {
     const v2 = buildV2();
-    const v1Schema = schemaProperties(readSchema('capabilities.schema.json'));
+    const v1Schema = schemaProperties(frozenV1Capabilities());
     const bare: string[] = [];
     let judged = 0;
     for (const [family, record] of v2Families(v2)) {

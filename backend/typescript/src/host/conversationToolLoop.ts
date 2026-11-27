@@ -58,7 +58,7 @@ import type { RoutingTarget } from '../features/model-router/routeTurn.js';
 import { resolveUserNamedSecret } from '../byok/userNamedSecret.js';
 import { createLogger } from '../observability/logger.js';
 import { scrubSecretShaped } from './redactSecrets.js';
-import { listToolApprovals, recordToolApprovalRequested, claimApprovedToolApprovals, returnUnspentToolApprovals, makeApprovalGrant, deleteSpentCallApprovals, scopeFoldRows, type ApprovalGrant, type ApprovalLine, type ToolApprovalRecord } from '../features/conversation-tools/approvalLedger.js';
+import { listToolApprovals, recordToolApprovalRequested, claimApprovedToolApprovals, claimApprovedCallsToRun, dropLapsedSealedInputs, returnUnspentToolApprovals, makeApprovalGrant, deleteSpentCallApprovals, scopeFoldRows, type ApprovalGrant, type ApprovalLine, type ToolApprovalRecord } from '../features/conversation-tools/approvalLedger.js';
 import { computeFirewallStamp } from '../features/capability-firewall/firewallHook.js';
 import { buildLaneFirewall, safeModeBaseline } from './laneFirewall.js';
 import { resolveConversationToolGate } from './conversationToolScope.js';
@@ -503,6 +503,21 @@ export function settledFromSpent(spent: ReadonlyArray<{ row: ToolApprovalRecord;
   return out;
 }
 
+/** ADR 1156 P2 — the call id an approved call runs under: stable per card and tool. */
+export function approvedCallId(row: Pick<ToolApprovalRecord, 'askId' | 'toolName'>): string {
+  return `approved:${row.askId ?? ''}:${row.toolName}`;
+}
+
+/** ADR 1156 P2 — the outcome of an approved call whose approval was not spent: a gate
+ *  before the approval check refused it (no longer in scope, invalid arguments, ...). */
+export function settledUnspent(row: ToolApprovalRecord, events: readonly AgentEvent[]): SettledApproval {
+  const ret = events.find((e) => e.type === 'agent.toolReturned' && e.callId === approvedCallId(row));
+  const err = ret?.error && typeof ret.error === 'object' ? (ret.error as { message?: unknown }).message : undefined;
+  const said = typeof err === 'string' ? plainToolMessage(err) : undefined;
+  const reason = said ? scrubSecretShaped(said).slice(0, SETTLED_REASON_MAX_CHARS) : undefined;
+  return { askId: row.askId ?? '', toolName: row.toolName, outcome: ret?.status === 'ok' ? 'ran' : 'refused', ...(reason ? { reason } : {}) };
+}
+
 /**
  * ADR 1042 CHAN-F3 (security review H2) + ADR 0834 FW2-D1 (CHAN-F2) — the approvals a
  * turn may use, as ONE per-call grant every gate of the turn asks (the ADR 0132 scope
@@ -749,7 +764,8 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   // and its held calls must not land in the owner's ledger as asks the owner never saw
   // coming. Folded only when the acting principal IS the owner.
   const actingPrincipal = typeof actingUserId === 'string' ? actingUserId : undefined;
-  const approvals = await listToolApprovals(run.tenantId, conversationStateKey);
+  // ADR 1156 P2 (D10) — a sealed input whose run window passed is dropped on any turn.
+  const approvals = await dropLapsedSealedInputs(await listToolApprovals(run.tenantId, conversationStateKey));
   const channelTurn = Boolean((run.metadata as Record<string, unknown> | undefined)?.['channelIngress']);
   const gate = await resolveConversationToolGate({
     tenantId: run.tenantId, conversationKey: conversationStateKey,
@@ -768,7 +784,18 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   // here, before the loop, and only the rows this turn won are folded, so two instances
   // running turns on one conversation cannot both spend one approval. Unspent claims
   // go back after the loop (`returnUnspentToolApprovals`).
-  const turnApprovals = await approvalsForTurn({ channelTurn, actsAsOwner, approvals });
+  // ADR 1156 P2 (D11, D13) — the one-call approvals given on a card since the last turn are
+  // run by this turn, before the model: claimed first (at most once), and only for the
+  // owner's own in-app turn (a fork acts as someone else, FW2-CD-1; a channel turn is an
+  // outside sender's). A row another turn claimed first is dropped from this turn's grant.
+  // A forked run (`forkMode` set) never runs one, even the owner's own fork: the approval
+  // was given for the timeline it was asked on (ADR 0834 D3 / FW2-CD-1).
+  const approvedRun = actsAsOwner && !channelTurn && run.forkMode === undefined
+    ? await claimApprovedCallsToRun(approvals)
+    : { toRun: [], lost: [] };
+  const lostClaims = new Set(approvedRun.lost);
+  const approvedCalls = approvedRun.toRun.map(({ row, input }) => ({ id: approvedCallId(row), name: row.toolName, input }));
+  const turnApprovals = await approvalsForTurn({ channelTurn, actsAsOwner, approvals: lostClaims.size ? approvals.filter((r) => !lostClaims.has(r)) : approvals });
 
   // ADR 0150 / ADR 0834 D3 — `bypass` is honoured only for the principal the tools ACT
   // AS (`run.metadata.actingUserId`). A participant can read and post in a shared
@@ -842,6 +869,7 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
       ...(capabilityScope ? { capabilityScope } : {}),
       firewall, // decisions are logged by the hook itself (ADR 0834 D1)
       approvalGrant: turnApprovals.grant, // FW2-D1 — the same grant answers the ADR 0132 scope gate
+      ...(approvedCalls.length ? { approvedCalls } : {}),
       ...(onEvent ? { onEvent } : {}),
     },
     { callAIWithTools, executeTool: chatExecuteTool },
@@ -865,6 +893,12 @@ export async function runConversationAgentToolTurn(params: AgentToolTurnParams):
   // of earlier cards' approvals (ran, refused, or overtaken by a different ask).
   const heldCalls: HeldCallAsk[] = [];
   const settledApprovals: SettledApproval[] = actsAsOwner ? settledFromSpent(turnApprovals.grant.spentCalls?.() ?? [], loop.events) : [];
+  // ADR 1156 P2 — an approved call a gate refused before it could spend its approval still
+  // settles its card: it did not run, and the card says why.
+  for (const { row } of approvedRun.toRun) {
+    if (!row.askId || settledApprovals.some((a) => a.askId === row.askId && a.toolName === row.toolName)) continue;
+    settledApprovals.push(settledUnspent(row, loop.events));
+  }
   for (const p of actsAsOwner ? pendingApprovals : []) {
     try {
       const lines = await describeHeldCall(p.toolName, p.input, { tenantId: run.tenantId, conversationId: conversationStateKey });

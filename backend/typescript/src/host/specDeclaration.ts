@@ -22,7 +22,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { locateRepoSchemasDir } from './_repoPath.js';
+import { locateRepoSchemasV2Dir } from './_repoPath.js';
 
 interface DeclarationDoc {
   extensions?: Record<string, unknown>;
@@ -36,8 +36,8 @@ let cached: DeclarationDoc | null = null;
 /** The raw document, read once. */
 export function declaration(): DeclarationDoc {
   if (cached !== null) return cached;
-  const dir = locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'run-event.schema.json');
-  cached = JSON.parse(readFileSync(join(dir, 'v2', 'declaration.json'), 'utf8')) as DeclarationDoc;
+  const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
+  cached = JSON.parse(readFileSync(join(dir, 'declaration.json'), 'utf8')) as DeclarationDoc;
   return cached;
 }
 

@@ -66,10 +66,13 @@ beforeAll(async () => {
 },120_000);
 afterAll(async()=>{if(server)await new Promise<void>(resolve=>server.close(()=>resolve()));for(const k of envKeys){if(saved[k]===undefined)delete process.env[k];else process.env[k]=saved[k];}reloadWorkflowChainPacks();if(root)rmSync(root,{recursive:true,force:true});});
 it('projects exact booleans only from actual manifests, retaining false and ignoring opaque fields',()=>{
-  const schema = readJsonObject(join(repo, 'schemas/node-pack-manifest.schema.json'));
+  // RFC 0266 — the v2 schema (the flat v1 tree is no longer vendored). Its PackNode
+  // `$ref`s `ids.schema.json`, registered under that key for the $id-less wrapper.
+  const schema = readJsonObject(join(repo, 'schemas/v2/node-pack-manifest.schema.json'));
   if (!isObject(schema.$defs)) throw new Error('node-pack manifest schema has no $defs');
   const ajv = new Ajv2020({ strict: false });
   addFormats(ajv);
+  ajv.addSchema(readJsonObject(join(repo, 'schemas/v2/ids.schema.json')), 'ids.schema.json');
   const validate = ajv.compile({ $ref: '#/$defs/PackNode', $defs: schema.$defs });
   const manifest = readJsonObject(join(root, 'nodes/vendor.test.guidance/pack.json'));
   const rawNodes: unknown = manifest.nodes;

@@ -231,27 +231,29 @@ describe('RFC 0087 §D — normative GET /agents/org-chart', () => {
   // every assertion above still passed, because each one reads a field the two
   // shapes share. Validating the whole body is the only check that sees the
   // envelope.
+  // RFC 0266 — both rows validate against v2: the header-less request is served
+  // major 2 (`preferredVersion()`), and the flat v1 tree is no longer vendored.
   it.each([
-    ['v1', '/agents/org-chart', {}],
-    ['v2', '/agents/org-chart', { 'OpenWOP-Version': '2' }],
-  ] as const)('the %s chart response satisfies agent-org-chart.schema.json', async (major, path, headers) => {
+    ['header-less', '/agents/org-chart', {}],
+    ['OpenWOP-Version: 2', '/agents/org-chart', { 'OpenWOP-Version': '2' }],
+  ] as const)('the %s chart response satisfies agent-org-chart.schema.json', async (_label, path, headers) => {
     await seedChart(TENANT_A, ['wf-a']);
     const res = await fetch(`${BASE}${path}`, { headers: { authorization: `Bearer ${KEY_A}`, ...headers } });
     expect(res.status).toBe(200);
     const body = await res.json();
-    const validate = schema(major, 'agent-org-chart.schema.json');
+    const validate = schema('agent-org-chart.schema.json');
     expect(validate(body), JSON.stringify(validate.errors)).toBe(true);
     expect((body as { owner?: { tenantId?: string } }).owner?.tenantId).toBe(TENANT_A);
   });
 
   it.each([
-    ['v1', '/agents/org-chart/dept-marketing', {}],
-    ['v2', '/agents/org-chart/dept-marketing', { 'OpenWOP-Version': '2' }],
-  ] as const)('the %s department roll-up satisfies org-chart-responsibility-view.schema.json', async (major, path, headers) => {
+    ['header-less', '/agents/org-chart/dept-marketing', {}],
+    ['OpenWOP-Version: 2', '/agents/org-chart/dept-marketing', { 'OpenWOP-Version': '2' }],
+  ] as const)('the %s department roll-up satisfies org-chart-responsibility-view.schema.json', async (_label, path, headers) => {
     await seedChart(TENANT_A, ['wf-a']);
     const res = await fetch(`${BASE}${path}`, { headers: { authorization: `Bearer ${KEY_A}`, ...headers } });
     expect(res.status).toBe(200);
-    const validate = schema(major, 'org-chart-responsibility-view.schema.json');
+    const validate = schema('org-chart-responsibility-view.schema.json');
     const body = await res.json();
     expect(validate(body), JSON.stringify(validate.errors)).toBe(true);
   });
@@ -259,7 +261,7 @@ describe('RFC 0087 §D — normative GET /agents/org-chart', () => {
   it('an EMPTY chart satisfies the schema too — it is the common case for a new tenant', async () => {
     const { status, body } = await get<unknown>('/agents/org-chart', KEY_B);
     expect(status).toBe(200);
-    const validate = schema('v1', 'agent-org-chart.schema.json');
+    const validate = schema('agent-org-chart.schema.json');
     expect(validate(body), JSON.stringify(validate.errors)).toBe(true);
   });
 
@@ -276,11 +278,11 @@ describe('RFC 0087 §D — normative GET /agents/org-chart', () => {
   });
 });
 
-const SCHEMA_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'schemas');
+const SCHEMA_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'schemas', 'v2');
 
-/** Compile one corpus schema with every sibling registered, so `$ref`s resolve. */
-function schema(major: 'v1' | 'v2', file: string) {
-  const dir = major === 'v2' ? join(SCHEMA_ROOT, 'v2') : SCHEMA_ROOT;
+/** Compile one v2 corpus schema with every sibling registered, so `$ref`s resolve. */
+function schema(file: string) {
+  const dir = SCHEMA_ROOT;
   const ajv = new Ajv2020({ strict: false, allErrors: true });
   (addFormats as unknown as (a: unknown) => void)(ajv);
   for (const f of readdirSync(dir)) {
@@ -289,7 +291,7 @@ function schema(major: 'v1' | 'v2', file: string) {
   }
   const target = JSON.parse(readFileSync(join(dir, file), 'utf8')) as { $id?: string };
   const fn = (target.$id ? ajv.getSchema(target.$id) : undefined) ?? ajv.getSchema(file);
-  if (!fn) throw new Error(`${major}/${file} did not register — the validator would be vacuous`);
+  if (!fn) throw new Error(`v2/${file} did not register — the validator would be vacuous`);
   return fn;
 }
 

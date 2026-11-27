@@ -327,9 +327,9 @@
       "digest": "3f3dcee36f596797314bf9a514d1663016d992051e7d38d3f7893bb795fc9410"
     },
     "feature.campaign-brief.nodes": {
-      "version": "1.7.1",
+      "version": "1.7.2",
       "files": 2,
-      "digest": "2bb2c0379f8f187fb7e9eeb93e971404dc0aa8ddd3c77e2824859513fa9d9ed8"
+      "digest": "71afa972e9c8e58543c7ebf785420d180965272397a74904dbc9385e606c8ea4"
     },
     "feature.campaign-channels.nodes": {
       "version": "1.20.0",

@@ -23,7 +23,13 @@ export interface ClientApprover {
   status: 'active' | 'suspended' | 'revoked'; createdAt: string;
 }
 /** One approver's link to one change set. The URL is shown once. */
-export interface SentApprovalLink { approverId: string; displayName: string; email: string; url: string; expiresAt?: string }
+export interface SentApprovalLink {
+  approverId: string; displayName: string; email: string; url: string; expiresAt?: string;
+  /** ADR 0924 P2c — how the link reached the approver; `failed` is never shown as sent. */
+  delivery?: { channel: 'email' | 'copy'; status: 'sent' | 'failed'; at: string };
+  /** ADR 0924 P2c — recipient-bound with a one-time code: the URL alone opens nothing. */
+  verified?: boolean;
+}
 
 /** ADR 0962 D7. */
 export type ExternalAgentsAccess = 'off' | 'read' | 'request';

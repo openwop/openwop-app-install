@@ -12,7 +12,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { locateRepoSchemasDir } from './_repoPath.js';
+import { locateRepoRootFromSchemas } from './_repoPath.js';
 
 /** `group` (ADR 0820 §7 UI) — the store goal-group this bundle is shown under;
  *  one of the catalog's `groups`. Optional; validated by `gen-distribution --check`. */
@@ -36,8 +36,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  *  (sibling of the located schemas dir; `/app/distributions` in the image, the
  *  repo root in dev). */
 function bundlesJsonPath(): string {
-  const schemasDir = locateRepoSchemasDir(__dirname, 'frontend-plugin-manifest.schema.json');
-  return join(dirname(schemasDir), 'distributions', 'bundles.json');
+  return join(locateRepoRootFromSchemas(__dirname), 'distributions', 'bundles.json');
 }
 
 function stringArray(v: unknown): string[] {

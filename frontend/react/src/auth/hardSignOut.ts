@@ -25,7 +25,7 @@
  * registration is live wherever a sign-in modal can open.
  */
 import { useSyncExternalStore } from 'react';
-import { fireAuthChanged, setCurrentIdToken } from '../client/config.js';
+import { containAuthChangeDispatch, fireAuthChanged, setCurrentIdToken } from '../client/config.js';
 import { registerSessionRefusalHandler, type SessionRefusalCode } from '../client/sessionRefusal.js';
 import { setBackendSessionUser } from './backendSession.js';
 import { signOut } from './firebase.js';
@@ -46,16 +46,21 @@ function publish(next: HardSignOutReason | null): void {
   for (const fn of listeners) fn();
 }
 
-/** Run the hard sign-out. Never throws; concurrent calls share one run. */
+/** Run the hard sign-out. Never throws, and the promise never rejects;
+ *  concurrent calls share one run. */
 export function hardSignOut(why: HardSignOutReason): Promise<void> {
   if (inflight) return inflight;
   // Publish FIRST so the UI reacts even if the IdP sign-out is slow/offline.
   publish(why);
-  setCurrentIdToken(null);
+  // #6214 — both dispatches are contained. A throwing auth-change listener used
+  // to throw out of here before the backend session and the IdP were signed out,
+  // or to reject `inflight`, which callers are told cannot fail. The sign-out now
+  // always runs to the end; a listener failure is logged.
+  containAuthChangeDispatch('hardSignOut.token', () => setCurrentIdToken(null));
   setBackendSessionUser(null);
   inflight = signOut()
     .catch(() => { /* IdP unreachable — the token is already dropped */ })
-    .then(() => { fireAuthChanged(); })
+    .then(() => { containAuthChangeDispatch('hardSignOut.changed', () => { fireAuthChanged(); }); })
     .finally(() => { inflight = null; });
   return inflight;
 }

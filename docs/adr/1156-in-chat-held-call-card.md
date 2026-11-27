@@ -1,7 +1,7 @@
 # ADR 1156 — A held tool call is approved on a card in the chat, in one press
 
-Status: Accepted (2026-11-23). P1 is implemented in the PR that carries this
-ADR. P2 is Proposed and is not built until the user decides it.
+Status: Accepted (2026-11-23). P1 implemented (#6210). P2 accepted by the user
+on 2026-11-24 and implemented in the PR that carries D10–D15.
 
 A chat agent's held tool call (ADR 0132, ADR 0834) gets a card in the message
 list, at the turn that raised it, in the full chat and the embedded one. One
@@ -57,7 +57,11 @@ person still gets the platform dialog.
 | D8 | **Both chats.** `MessageFeed` renders the card, so the full chat, the tab deck and the embedded chat all get it. A surface passes the conversation's session id and its submit; without them (an ephemeral embed with no persisted conversation) no card is shown, as before. The card is lazy-loaded with its client. It is keyboard-reachable, and a status change is announced in a polite live region. |
 | D9 | **A feature may draw its own card.** If a card is registered for `tool-approval.<toolName>` in the chat `CardRegistry`, it renders instead of the default, receiving the row, the lines and the outcome as its payload, and `approve` / `decline` as actions that go through D4. This is the seam the adopter asked for; it adds no store and no route. |
 
-### P2 — Proposed, not built
+### P2 — Accepted (2026-11-24), implemented
+
+> **The user's decision, 2026-11-24:** build P2. The three questions below are
+> answered by D10–D15 after the original text, which is kept as the reasoning trail.
+
 
 **Run the approved call itself.** On the continue turn, before the first model
 call, the host executes the call the model already authored in the previous
@@ -81,6 +85,61 @@ built:
   re-execute, and a fork must not re-run an approval the forker never gave
   (ADR 0834 D3 / FW2-CD-1).
 
+#### P2 decisions
+
+| # | Decision |
+|---|---|
+| D10 | **Arguments at rest.** An in-app ask stores the held call's full canonical input on its ledger row as `sealedInput`: the BYOK KMS envelope, with the AAD bound to (tenant, conversation, tool, `inputDigest`), so a sealed value copied onto another row or another ask does not open. Without KMS (local dev, the anonymous demo) it is stored with a plaintext marker, the `webhookSecretCodec.ts` posture. Inputs over 128 KB are not sealed (their approval works as P1). The routes never return it (`approvalView` drops it). It is kept while the ask is pending and on a `call`-grain approval, dropped on a denial and on a tool-wide approval, and gone with the row when the call runs or the conversation is deleted. A channel ask is never sealed. |
+| D11 | **The approved call is the turn's first round.** On the next turn, before the first model call, the loop runs the approved calls as a round the model did not spend (it does not count against the round budget), then gives the model the results and a note that they ran with exactly the approved arguments. The calls go through the same per-call path as a model-requested call, every gate included: scope, argument validation, the approval check (where the approval spends), the guardrails and the firewall. Nothing is skipped because a person approved it. |
+| D12 | **A run window.** A one-call approval is run by the next turn only within 60 minutes of being given (`OPENWOP_APPROVED_CALL_RUN_WINDOW_MIN`). Later, the person may have moved on, so the turn does not run it unasked; it still covers the call if the model makes it (P1). `OPENWOP_APPROVED_CALL_RUN=off` turns P2 off. |
+| D13 | **At most once.** The turn claims each row (compare-and-delete) before it runs it. Two turns started together run it once; a turn re-dispatched after a crash does not run it again. A turn that lost the claim drops the row from its own grant, so its model cannot spend an approval another turn is running. The cost of a crash between claim and run is a lost approval (the person approves again), never a second run. |
+| D14 | **Replay and fork.** The call runs only on the owner's own in-app turn (`actsAsOwner`, not a channel turn) and never on a forked run (`forkMode` set), even the owner's own fork: the approval was given for the timeline it was asked on (ADR 0834 D3 / FW2-CD-1). The run is recorded as an ordinary `agent.toolCalled` / `agent.toolReturned` pair, so a replay reads the recorded result. The approval itself is live ledger state, not run input, and it is gone after the run, so no later execution can repeat it. |
+| D15 | **The wire.** RFC 0064 does not forbid a tool call before a turn's first model call. Its one rule about calls before a model call (§C forbidden-at-load: synthesize the `callId`, do not invent an `agent.toolCalled`) is about refusals with no call. This call is real, the model's own, and is executed, so it gets the ordinary pair, under the stable call id `approved:<askId>:<tool>`. No RFC revision. |
+
+> **Correction to D10 (security review, 2026-11-24, before merge).** As first
+> written, a one-call approval that was not run kept its sealed input
+> indefinitely: when the window lapsed, or when a fork, a participant or a
+> channel turn skipped it. The DSAR eraser also kept it while redacting the
+> approver. Four fixes:
+>
+> - Every turn, whoever acts, drops the sealed inputs that can no longer run
+>   (`dropLapsedSealedInputs`). These are inputs past the D12 window, or on rows
+>   that are no longer a one-call approval. The approval stays and works as in P1.
+> - `eraseConversationToolApprovalsSubject` drops the sealed input of a call the
+>   erased subject approved.
+> - Under KMS, `openSealedInput` refuses the plaintext marker.
+>
+> - The retention daemon's default-on tick drops lapsed sealed inputs with no
+>   later turn needed (`sweepLapsedSealedInputs`, a `registerDefaultWindowSweep`
+>   entry, ADR 0951 D3). It skips a tenant under legal hold.
+>
+> No field-level data-classification census covers this collection. Its
+> coverage is the subject-eraser manifest entry above.
+
+> **Correction to the correction (2026-11-26, adopted by openwop-app-95 with the
+> user's agreement).** "Rows that are no longer a one-call approval" was coded as
+> every status except `approved`, and that includes `pending`. So any turn, or the
+> retention sweep, that ran while an ask was still pending stripped its input, and
+> the one-call approval that followed had nothing to run. A pending row now keeps
+> its sealed input for **24 hours after its latest ask** (user decision
+> 2026-11-26; `OPENWOP_PENDING_SEALED_INPUT_TTL_MIN` overrides; an unreadable ask
+> time reads as passed), and then drops it on the next turn or retention tick. An
+> approval after that still works as in P1: the model repeats the call. A bound was
+> needed because in-app pending asks have no other expiry and conversations have
+> no retention window, so "as long as its display copy" would have meant as long
+> as the conversation exists. The display copy (`requestedInput`) itself is
+> unchanged here and keeps that open residual. Witnesses: cases 11 and 12 of
+> `adr1156-p2-approved-call-runs.test.ts`.
+
+> **Note on D13 (release-manager diff read, 2026-11-27).** The claim deletes the
+> row before the call runs (`claimApprovedCallsToRun`), and the claimed call then
+> goes through every gate in the synthetic round 0. So the approval is spent
+> whether or not the call succeeds: a gate refusal in that round loses it the
+> same way a crash does. Nothing hands it back, unlike a channel turn's unspent
+> claims (`returnUnspentToolApprovals`). This fails closed by design. An approval
+> is never retried on its own, and the person approves again if they still want
+> the call.
+
 ### Not in this ADR
 
 A tool-id class on `CapabilityRule` ("always ask for this tool, for every
@@ -96,7 +155,7 @@ are host-extension (`/host/openwop-app/*`, `openwop-app.*` event types; the
 clarification-card events are the precedent). What the wire carries is
 unchanged: RFC 0064 `agent.toolReturned` with `status:'forbidden'` and a
 host-chosen `error.code`, of which `approval_declined` is one more. No RFC.
-P2 may need one (above).
+P2 needed none (D15).
 
 ## Alternatives weighed
 
@@ -129,17 +188,18 @@ P2 may need one (above).
 | Phase | What | Status |
 |---|---|---|
 | P1 | D1–D9: the card, the two events, `describeApproval`, call-grain denial, the person-session check, the feature card seam | implemented in this PR |
-| P2 | Run the approved call on the continue turn (above) | Proposed; needs the user's decision and the RFC 0064 reading |
+| P2 | D10–D15: run the approved call on the next turn | implemented (user decision 2026-11-24) |
 
 ## Implementation record
 
 | Phase | Commit | Tests |
 |---|---|---|
-| P1 | (this PR) | `backend/typescript/test/adr1156-held-call-card.test.ts`, `frontend/react/src/conversationTools/__tests__/HeldCallCard.test.tsx` |
+| P1 | #6210 | `backend/typescript/test/adr1156-held-call-card.test.ts`, `frontend/react/src/conversationTools/__tests__/HeldCallCard.test.tsx` |
+| P2 | (this PR) | `backend/typescript/test/adr1156-p2-approved-call-runs.test.ts`; the P1 file now runs with P2 off, since it pins the model-repeats path |
 
 ## Open questions
 
-1. P2: build it? (The user's call; see above.)
+1. ~~P2: build it?~~ Yes (the user, 2026-11-24): D10–D15.
 2. Should the composer dialog's Deny also become call-grain by default, with
    "block this tool" as a second choice? Left as is in P1, so its meaning does
    not change under anyone.

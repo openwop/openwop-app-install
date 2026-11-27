@@ -20,7 +20,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Ajv2020, { type ValidateFunction } from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
-import { locateRepoSchemasDir } from '../../host/_repoPath.js';
+import { locateRepoSchemasV2Dir } from '../../host/_repoPath.js';
 import { semverCompare, type PromptTemplate } from '../../host/promptStore.js';
 import { installTenantVersion, latestTenantVersion, tenantTemplateReservedReason } from '../../host/tenantPromptTemplates.js';
 import { OpenwopError } from '../../types.js';
@@ -38,7 +38,7 @@ let validator: ValidateFunction | null = null;
 
 function templateValidator(): ValidateFunction {
   if (validator) return validator;
-  const dir = join(locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json'), 'v2');
+  const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
   const ajv = new Ajv2020({ allErrors: true, strict: false });
   addFormats(ajv);
   // Every v2 schema by its `$id`, so `prompt-template`'s cross-file refs

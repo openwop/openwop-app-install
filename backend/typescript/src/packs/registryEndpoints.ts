@@ -35,14 +35,14 @@ export type EndpointKey =
   | 'versionSignature'
   | 'publicKey';
 
-export type RegistryTree = 'v1' | 'v2';
+export type RegistryTree = 'v2';
 
 interface EndpointMap {
   readonly [k: string]: string | { readonly [k: string]: string } | undefined;
 }
 
 export interface ResolvedRegistry {
-  readonly tree: RegistryTree | 'flat';
+  readonly tree: RegistryTree;
   readonly endpoints: EndpointMap;
 }
 
@@ -57,7 +57,7 @@ export interface ResolvedRegistry {
  */
 export type RegistryResolution =
   | { readonly ok: true; readonly resolved: ResolvedRegistry }
-  | { readonly ok: false; readonly reason: 'unreachable' | 'no_endpoints' };
+  | { readonly ok: false; readonly reason: 'unreachable' | 'no_endpoints' | 'no_v2_tree' };
 
 const cache = new Map<string, Promise<RegistryResolution>>();
 
@@ -107,17 +107,14 @@ export async function fetchRegistryDocument(registry: string): Promise<RegistryD
 }
 
 /**
- * The tree a host of this protocol major must read. `OPENWOP_REGISTRY_TREE`
- * pins it explicitly (an operator running a registry mid-migration); otherwise
- * a major-2 host takes `v2` when the registry advertises it and `v1` only when
- * it does not, which is the read-only overlap tree.
+ * RFC 0266 — this host reads the registry's v2 tree only. The v1 tree is frozen
+ * v1-signed history (packs.md §"The registry tree"; §Signing: a v1 signature is
+ * re-signed into the v2 tree, never relabelled), so there is no v1 or flat
+ * fallback and no operator pin back to v1. A registry that publishes no
+ * `endpoints.v2` is refused (`no_v2_tree`): every v2-signed pack lives there.
  */
-export function preferredTree(endpoints: EndpointMap, hostMajor: number): RegistryTree | 'flat' {
-  const pinned = (process.env.OPENWOP_REGISTRY_TREE ?? '').trim();
-  if (pinned === 'v1' || pinned === 'v2') return pinned;
-  if (hostMajor >= 2 && typeof endpoints['v2'] === 'object') return 'v2';
-  if (typeof endpoints['v1'] === 'object') return 'v1';
-  return 'flat';
+export function hasV2Tree(endpoints: EndpointMap): boolean {
+  return typeof endpoints['v2'] === 'object' && endpoints['v2'] !== null;
 }
 
 /**
@@ -126,7 +123,7 @@ export function preferredTree(endpoints: EndpointMap, hostMajor: number): Regist
  * (it is, unless the operator opted into legacy constructed paths).
  */
 export async function resolveRegistry(registry: string, hostMajor: number): Promise<RegistryResolution> {
-  const key = `${registry}|${hostMajor}|${process.env.OPENWOP_REGISTRY_TREE ?? ''}`;
+  const key = `${registry}|${hostMajor}`;
   const hit = cache.get(key);
   if (hit) return hit;
   const p = (async (): Promise<RegistryResolution> => {
@@ -137,21 +134,27 @@ export async function resolveRegistry(registry: string, hostMajor: number): Prom
       log.warn('registry_wellknown_no_endpoints', { registry });
       return { ok: false, reason: 'no_endpoints' };
     }
-    const tree = preferredTree(endpoints, hostMajor);
-    log.info('registry_endpoints_resolved', { registry, tree });
-    return { ok: true, resolved: { tree, endpoints } };
+    if (!hasV2Tree(endpoints)) {
+      log.warn('registry_wellknown_no_v2_tree', { registry });
+      return { ok: false, reason: 'no_v2_tree' };
+    }
+    log.info('registry_endpoints_resolved', { registry, tree: 'v2' });
+    return { ok: true, resolved: { tree: 'v2', endpoints } };
   })();
   cache.set(key, p);
   return p;
 }
 
-/** The template for one endpoint, from the chosen tree, falling back to the flat (unversioned) alias. */
+/** The template for one endpoint from the v2 tree. Only `publicKey` may come from
+ *  the flat map: keys are unversioned by design (packs.md §"The registry tree");
+ *  every other flat key is a deprecated v1-era alias of the v1 tree. */
 export function templateFor(resolved: ResolvedRegistry, key: EndpointKey): string | null {
-  const treeMap = resolved.tree === 'flat' ? undefined : resolved.endpoints[resolved.tree];
+  const treeMap = resolved.endpoints[resolved.tree];
   if (treeMap && typeof treeMap === 'object') {
     const t = (treeMap as Record<string, string>)[key];
     if (typeof t === 'string' && t.length > 0) return t;
   }
+  if (key !== 'publicKey') return null;
   const flat = resolved.endpoints[key];
   return typeof flat === 'string' && flat.length > 0 ? flat : null;
 }
@@ -170,7 +173,3 @@ export function expandEndpoint(template: string, vars: Readonly<Record<string, s
   });
 }
 
-/** `true` when the operator has opted into the pre-v2 constructed `/v1/…` paths. */
-export function legacyPathsEnabled(): boolean {
-  return (process.env.OPENWOP_REGISTRY_LEGACY_V1_PATHS ?? '').trim().toLowerCase() === 'true';
-}

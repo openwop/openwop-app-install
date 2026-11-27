@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import type { ValidateFunction } from 'ajv';
-import { locateRepoSchemasDir } from './_repoPath.js';
+import { locateRepoSchemasV2Dir } from './_repoPath.js';
 
 let compiled: ValidateFunction | null | undefined;
 
@@ -36,10 +36,7 @@ let compiled: ValidateFunction | null | undefined;
 function validator(): ValidateFunction | null {
   if (compiled !== undefined) return compiled;
   try {
-    const dir = join(
-      locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json'),
-      'v2',
-    );
+    const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
     const ajv = new Ajv2020({ allErrors: true, strict: false });
     addFormats(ajv);
     // `configurable.schema.json` $refs `budget-policy.schema.json` by relative

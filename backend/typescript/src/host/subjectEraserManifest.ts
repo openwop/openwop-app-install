@@ -430,6 +430,7 @@ export const EXPECTED_SUBJECT_ERASERS: ReadonlySet<string> = new Set([
   'eraseSalesCommissionsSubject',
   'eraseTopicOptOuts', // ADR 0905 D7 — consent topic opt-outs
   'eraseClientChannelGrants', // ADR 0955 Q7 — per-client SMS consent grants
+  'eraseClientThreadSubject', // ADR 1099 D7 — a member's replies in project client threads
   'eraseScheduledChatsSubject',
   'eraseRouterConfigSubject', // ADR 1016 (MR66CD-8)
   'eraseSharingSubject',

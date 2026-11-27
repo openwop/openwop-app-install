@@ -35,10 +35,11 @@ const { parse } = require('yaml');
 const ARTIFACTS = dirname(require.resolve('@openwop/spec-artifacts/package.json'));
 // TODO(2.45.0 pin): switch the source to `spec/v2/path-manifest.json`'s per-operation
 // `requestHeaders`; at 2.44.5 the manifest does not carry them, so openapi.yaml is it.
-// v1 is retired (2026-10-04, RFC 0234) and `/v1/*` answers 410, so the v1 spec
-// below is now dead input: dropping it is v2 migration plan phase 3 (it needs the
-// generated header list re-derived and diffed, not just this line removed).
-const SPECS = ['api/openapi.yaml', 'api/v2/openapi.yaml'];
+// v2 only (RFC 0266 §D: no v1 corpus input). v1 is retired and `/v1/*` answers 410.
+// Dropping the v1 spec removed four v1-only headers from the generated half
+// (X-Dedup, X-Force-Engine-Version, X-Pack-Sha256, X-Pack-Signing-Method); none is
+// sent by a browser, and If-Match stays allowed through HOST_REQUEST_HEADERS.
+const SPECS = ['api/v2/openapi.yaml'];
 const METHODS = ['get', 'put', 'post', 'delete', 'patch', 'head', 'options', 'trace'];
 
 /** Every header parameter an OpenAPI document declares on any operation. */

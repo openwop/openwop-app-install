@@ -410,6 +410,35 @@ data is" move phases 2 and 3 both made, and it is the only piece of decision 12
 that can currently ship a control that reports success and has no effect — which
 is the exact failure decision 12 exists to prevent.
 
+> **EXTENDED 2026-11-24 (decktalk-4a; openwop-app-76 approved the option shape):
+> the site shell can carry the public site's grouped menu, opt-in.** A white-label
+> whose signed-in desk is a `site` route (DeckTalk's `/app/*`) had no way to show
+> the public site's grouped menu there. `PublicMenu` and `usePublicNav` were
+> private to `chrome/PublicShell.tsx`, so DeckTalk carried a local edit (its PR
+> #107). The menu is now `PublicSiteMenu`, exported from `PublicShell.tsx`.
+> - **When it renders:** `SiteShell` renders it first in `.public-shell-actions`,
+>   but only when the build sets `VITE_BRAND_SITE_PUBLIC_MENU=true` (or `1`;
+>   `brand.sitePublicMenu`, default off).
+> - **What it shows:** grouped mode only (ADR 1049; an ungrouped site renders
+>   nothing), with Legal kept out as in the public header, and with no utilities
+>   row: `PublicMenu`'s new optional `utilities` prop, default on, is off here,
+>   because the site header already renders theme, language and sign-in.
+> - **What it reads:** the same three public, session-free reads the public
+>   header makes (published pages, the blog probe, the docs probe). So it works
+>   for a signed-out visitor on an `auth: 'optional'` route.
+> - **Weight:** it is loaded with `lazy()`, because `SiteShell` is in the entry
+>   chunk and a static import added ~3 kB gzip there. With the key off, the chunk
+>   is never requested and no public-nav read is made.
+>
+> **Alternatives weighed:**
+> - A per-route option on `FeatureRoute`: it would make the shell look up the
+>   active route, and it adds a manifest field for what is a per-brand choice.
+> - A runtime tenant setting: that moves a build-time design choice into storage.
+>
+> The key follows `VITE_BRAND_APP_HOME_PATH`: build-time, validated in
+> `brand/defaults.ts`, listed in `BRAND_ENV_KEYS` and forwarded by the compose
+> pack. Tests: `SiteShell.publicMenu.test.tsx`.
+
 ## Alternatives weighed
 
 - **`FeatureChrome` variant + an auth flag.** Rejected on finding 1: chrome is a

@@ -533,9 +533,37 @@ if [ "$BACKEND_ONLY" -eq 1 ]; then
   note "SKIP" "firebase identity — backend-only deploy has no Firebase half"
 elif command -v firebase >/dev/null 2>&1 && [ -n "${OPENWOP_DEPLOY_FIREBASE_PROJECT:-}" ]; then
   FB_ARGS=()
-  [ -n "${OPENWOP_DEPLOY_ACCOUNT:-}" ] && FB_ARGS=(--account "$OPENWOP_DEPLOY_ACCOUNT")
   FB_WHO="${OPENWOP_DEPLOY_ACCOUNT:-<ambient CLI state>}"
-  if fb_out=$(firebase projects:list ${FB_ARGS[@]+"${FB_ARGS[@]}"} 2>&1); then
+  adc_error=0
+  if [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
+    # A service-account key IS the identity: firebase-tools reads it through ADC.
+    # Handing it --account as well made the CLI look for a USER token for that
+    # address and refuse — "Account deployer@… not found" — even though the key
+    # could deploy (measured 2026-11-27, the first service-account deploy of this
+    # app). So check the key names the account we mean to deploy as, then let ADC
+    # speak for itself.
+    adc_email=""
+    if [ -r "$GOOGLE_APPLICATION_CREDENTIALS" ]; then
+      adc_email=$(sed -n 's/.*"client_email"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$GOOGLE_APPLICATION_CREDENTIALS" | head -1)
+    fi
+    if [ -z "$adc_email" ]; then
+      note "REFUSED" "GOOGLE_APPLICATION_CREDENTIALS names no readable client_email"
+      echo "             $GOOGLE_APPLICATION_CREDENTIALS"
+      echo "             An unreadable key is not an identity: fix the path, or unset it and log in."
+      adc_error=1
+    elif [ -n "${OPENWOP_DEPLOY_ACCOUNT:-}" ] && [ "$adc_email" != "$OPENWOP_DEPLOY_ACCOUNT" ]; then
+      note "REFUSED" "ADC key is $adc_email but OPENWOP_DEPLOY_ACCOUNT is $OPENWOP_DEPLOY_ACCOUNT"
+      echo "             One deploy, one identity: point both at the same service account."
+      adc_error=1
+    else
+      FB_WHO="$adc_email (ADC key)"
+    fi
+  elif [ -n "${OPENWOP_DEPLOY_ACCOUNT:-}" ]; then
+    FB_ARGS=(--account "$OPENWOP_DEPLOY_ACCOUNT")
+  fi
+  if [ "$adc_error" -eq 1 ]; then
+    fail=1
+  elif fb_out=$(firebase projects:list ${FB_ARGS[@]+"${FB_ARGS[@]}"} 2>&1); then
     # Match the project id as a whole token, so a longer id that merely CONTAINS
     # it does not read as a hit.
     if grep -qE "(^|[^A-Za-z0-9_.-])$(printf '%s' "$OPENWOP_DEPLOY_FIREBASE_PROJECT" | sed 's/[][\.^$*+?(){}|/-]/\\&/g')([^A-Za-z0-9_.-]|\$)" <<<"$fb_out"; then

@@ -21,6 +21,8 @@
 import { lazy } from 'react';
 import { Navigate, matchRoutes, useLocation } from 'react-router-dom';
 import { featureNavGroups, featureRoutes } from '../features/registry.js';
+import { ADOPTER_FRONTEND_FEATURES } from '../features/adopterFeatures.js';
+import { checkPathCollisions, collectAdopterKnownPathCollisions } from './pathCollisions.js';
 import type {
   IconCmp,
   FeatureTier,
@@ -409,19 +411,25 @@ assertSiteRouteContracts(
 // pair means two features claim one path, and one of them should move.
 const KNOWN_PATH_COLLISIONS: ReadonlySet<string> = new Set<string>([]);
 
+// ADR 1031 — an adopter records a deliberate claim on a host path in ITS OWN file,
+// `src/adopter/chrome/knownPathCollisions.ts` (optional; openwop-app has none), with
+// a reason. The guard stays on in every tree; see `pathCollisions.ts` for the rules
+// (exact owner set, an adopter owner required, stale entries fail).
 {
-  const byPath = new Map<string, string[]>();
-  for (const f of FEATURES) {
-    byPath.set(f.path, [...(byPath.get(f.path) ?? []), f.ownerFeatureId ?? '(core)']);
+  const { unexpected, invalidAdopterEntries } = checkPathCollisions(
+    FEATURES,
+    KNOWN_PATH_COLLISIONS,
+    collectAdopterKnownPathCollisions(import.meta.glob('/src/adopter/chrome/knownPathCollisions.ts', { eager: true })),
+    new Set(ADOPTER_FRONTEND_FEATURES.map((f) => f.id)),
+  );
+  if (invalidAdopterEntries.length > 0) {
+    throw new Error(`ADR 0718 × ADR 1031: invalid adopter KNOWN_PATH_COLLISIONS entries: ${invalidAdopterEntries.join(' ; ')}`);
   }
-  const unexpected = [...byPath.entries()]
-    .filter(([path, owners]) => owners.length > 1 && !KNOWN_PATH_COLLISIONS.has(path))
-    .map(([path, owners]) => `${path} <- ${owners.join(', ')}`);
   if (unexpected.length > 0) {
     throw new Error(
       `ADR 0718: two features declare the same route path, so one surface is silently unreachable. `
       + `Note the winner is the SITE-tier claimant (App.tsx pre-empts the router), not the first registrant. `
-      + `Give one a distinct path, or record it in KNOWN_PATH_COLLISIONS with the reason: ${unexpected.join(' ; ')}`,
+      + `Give one a distinct path, or record it with the reason in KNOWN_PATH_COLLISIONS (host) or src/adopter/chrome/knownPathCollisions.ts (an adopter's own claim): ${unexpected.join(' ; ')}`,
     );
   }
 }

@@ -424,6 +424,26 @@ export function useTurnTransport(
       const degraded = { value: null as string[] | null };
       // ADR 1003 D5 — the window's omitted-turn count for this exchange.
       const budgeted = { value: null as number | null };
+      // The poll fallback for a stream that can no longer deliver the settle signal
+      // (it errored, or it ended on its idle/absolute timer). Idempotent.
+      const startPollFallback = (): void => {
+        if (stopped || pollTimer !== undefined) return;
+        let cursor = startSeq;
+        const tick = async () => {
+          if (stopped) return;
+          try {
+            const page = await pollEvents(runId, cursor);
+            for (const ev of page.events) {
+              if (typeof ev.sequence === 'number' && ev.sequence > cursor) cursor = ev.sequence;
+              const signal = exchangeSettleSignal(ev, startSeq);
+              if (signal === 'error') { asyncErr.value = exchangeErrorPayload(ev); resolveSettle?.('error'); }
+              else if (signal === 'agent') resolveSettle?.('agent');
+            }
+          } catch { /* transient — the next tick retries; the settle timeout still bounds the wait */ }
+          if (!stopped) pollTimer = setTimeout(() => { void tick(); }, STREAM_FALLBACK_POLL_MS);
+        };
+        pollTimer = setTimeout(() => { void tick(); }, 0);
+      };
       streamSub = subscribeToRun(runId, {
         modes: ['updates'],
         onEvent: (ev) => {
@@ -454,24 +474,14 @@ export function useTurnTransport(
         // full ASYNC_SETTLE_TIMEOUT_MS on "Thinking…" though the reply had landed
         // (MEASURED prod 2026-10-09: every stream 429'd and the bubble hung).
         // So poll the run's events and read them with the same settle rule.
-        onError: () => {
-          if (stopped || pollTimer !== undefined) return;
-          let cursor = startSeq;
-          const tick = async () => {
-            if (stopped) return;
-            try {
-              const page = await pollEvents(runId, cursor);
-              for (const ev of page.events) {
-                if (typeof ev.sequence === 'number' && ev.sequence > cursor) cursor = ev.sequence;
-                const signal = exchangeSettleSignal(ev, startSeq);
-                if (signal === 'error') { asyncErr.value = exchangeErrorPayload(ev); resolveSettle?.('error'); }
-                else if (signal === 'agent') resolveSettle?.('agent');
-              }
-            } catch { /* transient — the next tick retries; the settle timeout still bounds the wait */ }
-            if (!stopped) pollTimer = setTimeout(() => { void tick(); }, STREAM_FALLBACK_POLL_MS);
-          };
-          pollTimer = setTimeout(() => { void tick(); }, 0);
-        },
+        onError: () => { startPollFallback(); },
+        // ISS-066 (casavoga #887) — the stream also ENDS without an error: its idle
+        // timer (30 s, reset only by a yielded event; the 15 s heartbeat is an SSE
+        // comment and yields nothing) aborts it and the reader returns. A turn whose
+        // next event is > 30 s away — a provider that took ~54 s to answer 503 — then
+        // lost its settle signal: the typed error landed on the log and "Thinking…"
+        // ran the full 180 s into "The reply timed out". Same fallback.
+        onTimeout: () => { startPollFallback(); },
       });
       // Tail from the cursor: fetch only events past what we've folded, then merge.
       const { turns, lastSeq, notice, clarification } = await sendConversationTurn(

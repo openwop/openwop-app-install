@@ -18,6 +18,72 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+## [0.23.0] — 2026-11-27
+
+A MINOR release under ADR 0052. It brings the **client portal page** (ADR 1099 P4) and the read-only **portal section seam** adopters build on (D10), plus fixes. There is **no migration** (sqlite 54 / postgres 52, app-migration 27), and **no route, env var or config key is removed or renamed**. Behaviour changes:
+
+- a run's AI key can no longer be chosen by the caller through `metadata.aiDefault` (#6309);
+- the backend no longer reads any v1 corpus file (RFC 0266, #6256).
+
+### Security
+
+- **Client approval links are bound to the approver (ADR 0924 P2c).** When the
+  workspace can send email, each client approver link now asks for a one-time
+  code sent to the approver's address before it shows the change or takes a
+  decision, so the agency member who sent it, or anyone it is forwarded to,
+  cannot use it. Links are emailed, and the agency sees whether each one was
+  delivered. A workspace member's address can no longer be added as a client
+  approver, and an expired approval link answers the same 404 as an unknown one.
+  A workspace with no email transport keeps the copy-the-link fallback.
+- **A caller cannot choose a run's AI key through `metadata.aiDefault` (#6309).** The run's key is resolved by the host's own rules only.
+- **Stored customer quotes are fenced in the campaign brief's angle and targeting prompts (CB-UNTRUSTED-1, #6142, #6244).**
+
+### Added
+
+- **The client portal page (ADR 1099 P4, #6294).** A collaborator with a project grant gets a chat with the firm's project agent. It is the shared `ConversationView` in a new outsider mode: no voice, no `/` or `@` pickers, no attachments, and nothing read from the visitor's own workspace. It runs on the collaborator-turn lane. Shown only where the kind names an agent and `projects.client-portal` is on.
+- **Portal sections (ADR 1099 D10, #6294).** A feature adds read-only sections to the portal page:
+  - server: `registerGrantViewSection` (`host/grantViewSections.ts`);
+  - frontend: `lazyExtensions.portalSections`.
+
+  The scope comes from the grant only. The list and every read pass the per-use check and the switch. Bounds: a closed least view, 64 KB, and 120 reads/min per grant. An optional `enabledFor(tenantId)` hides a section for a firm. `PortalSectionFrame` lets adopters test a section with fixture data.
+- **The host keeps a collaborator's conversation with the agent (ADR 1099 P3d, #6283);** client threads, messages a member approves before they count (P3c, #6281); a collaborator's proposal on the review card (P3b, #6280).
+- **One erasure witness across every client-portal store, and `docs/client-portal-adopter-guide.md` (ADR 1099 P5, #6317).**
+- **An approved held call runs on the next turn (ADR 1156 P2, #6233).**
+- **Verified emailed approval links (ADR 0924 P2c, #6286).**
+- **A guided step rail on the campaign page (ADR 1154 P3, #6182).**
+- **An opt-in public grouped menu in the site shell (`VITE_BRAND_SITE_PUBLIC_MENU`, #6246).**
+- **Adopter-declared known path collisions (ADR 0718 × ADR 1031, #6274).**
+- **The superadmin canvas backfill route: dry run, then a reviewed apply (ADR 1160 D4, #6275).**
+- **The machine-wide heavy-step slot as a tracked script (ADR 1166 D2, #6316).**
+
+### Changed
+
+- **Share-link verification codes go out from the firm's own sender (ADR 1141 follow-up).** The code email used `OPENWOP_NOTIFY_EMAIL_FROM` for every org. It now sends from the link org's configured sender address (the one its other transactional email uses), with the org's name as the From name, and falls back to `OPENWOP_NOTIFY_EMAIL_FROM` only for an org that has none. Minting a verified link is refused (`422 share_verification_unavailable`) only when neither is set. The transport is unchanged: the workspace's email Connection.
+
+### Fixed
+
+- A chat stream that ends on its idle timer still settles the turn (ISS-066, #6290).
+- A throwing auth-change listener no longer signs a tab out or breaks `hardSignOut` (#6291).
+- Public pages load inside their own full-height box, so the layout no longer shifts (#6311).
+- The transcriber's default model comes from the catalog (#6247).
+- The OAuth admin panel shows the redirect URI the server sends (#6282).
+- A kanban batch assignment notice is withdrawn with its last card (#6284). The due-reminder sweep slice comes from the clock (#6279).
+- Deploys: a service-account key is the firebase identity, so `--account` is not passed (ADR 1166 D11, #6319).
+- Desktop: electron 45.3.0 → 45.3.4 (#6168).
+
+#### Upgrading from 0.22.0
+
+- **Required stop:** no. **Rolling-safe:** yes. One step, no stop:
+  1. back up the database (and object store);
+  2. 0.22.0 instances may keep running alongside 0.23.0;
+  3. start 0.23.0 (sqlite 54 → 54, postgres 52 → 52, app 27 → 27);
+  4. check that `/readiness` reports version 0.23.0.
+- **Migrations:** none.
+- **Client portal (ADR 1099 P4).** Nothing changes while `projects.client-portal` is off, which is the default. Turn it on per tenant, starting with a test tenant. An invite creates real outside access to one project. Adopters: see `docs/client-portal-adopter-guide.md`.
+- **`metadata.aiDefault` (#6309).** A client that set a run's AI key through run metadata now gets the host's resolution instead. Configure keys through BYOK or the provider settings.
+- **Config:** nothing required. `VITE_BRAND_SITE_PUBLIC_MENU` is optional.
+- **Steps:** back up the database, deploy the new backend image and then the frontend, and check that `/readiness` reports `"version": "0.23.0"`.
+
 ## [0.22.0] — 2026-11-25
 
 A MINOR release under ADR 0052, for new features (ADR 1099 P3a, ADR 1161, ADR 1160 P3's primitives). There is **no migration** (sqlite 54 / postgres 52, app-migration 27), and **no route, env var or config key is removed or renamed**. The urgent part is #6269: every OpenAI image generation or edit without an explicit model has failed since OpenAI shut down `gpt-image-1` on 2026-10-23. Read "Upgrading from 0.21.0" for two behaviour changes:
@@ -74,14 +140,14 @@ There is no schema migration (sqlite 54 / postgres 52).
 
 ### Added
 
-- **A workflow's work-item proposal can carry card facets (ADR 1155 P2b).** `core.openwop.kanban-work-items` 1.3.0 accepts `facets` on each proposal item (at most 8 lower-case keys, values of 1–64 characters with no control characters), written at create and rewritten by `refresh`. `vendor.openwop.app-builder.workflows` 1.4.4 re-pins the node. Both are image-vendored packs; no production pin names them.
+- **A workflow's work-item proposal can carry card facets (ADR 1155 P2b, #6252).** `core.openwop.kanban-work-items` 1.3.0 accepts `facets` on each proposal item (at most 8 lower-case keys, values of 1–64 characters with no control characters), written at create and rewritten by `refresh`. `vendor.openwop.app-builder.workflows` 1.4.4 re-pins the node. Both are image-vendored packs; no production pin names them.
 - **Transactional email carries a sender name, a Reply-To and the feature's own opt-out link (#6135).** `sendTransactional` / `sendTransactionalEmail` accept optional `fromName`, `replyTo` and `listUnsubscribe: { url }`, and the brokered transport passes them to the email adapter, which writes the name in each provider's shape (SendGrid `from.name`, Postmark `"Name" <addr>`, SMTP an address object). A `fromName` or `replyTo` with a control character (CR/LF), a display name or a list is refused: `invalid_header` at the seam, `email_header_invalid` at the adapter, with no provider request. `listUnsubscribe` is now also accepted for any `https:` path on the deployment's own `OPENWOP_PUBLIC_BASE_URL` origin; any other origin is still dropped. Existing callers are unchanged.
 - **A client can talk to the project's agent (ADR 1099 P2, #6261).** `POST /host/openwop-app/collab/grants/:grantId/turn` runs one turn as an outside collaborator on a `project` grant. It answers only while the grant is usable (`checkGrantUse`, re-checked before every tool call) and the `projects.client-portal` switch is on (default off). It uses the firm's model credential, and a refused credential answers 503. Turns are capped per day at 50 per grant and 500 per tenant (`OPENWOP_COLLAB_TURNS_PER_GRANT_DAY` / `OPENWOP_COLLAB_TURNS_PER_TENANT_DAY`, 429 above). The run is owned by `collab:<collaboratorId>`, the message is fenced, and only tools from the new client registry (`registerClientProjectTool`, read-only `openwop:client.<kind>.*`) resolve; scope keys are dropped from model input at every depth. Each tool decision is audited (`collab-turn.tool`). The agent is the Project Guide (`vendor.openwop-app.projects.agents`) with one tool, `openwop:client.project.overview`. A grant can carry an `audience` label (registered by features), set on the Client access tab, and the projection and every client tool receive it; a grant without one gets the most limited view. A member cannot fork a collaborator's run: `409 collab_run_not_forkable`. The default-deny turn (`host/scopedToolTurn.ts`) and the outsider credential rule (`host/outsiderTurnCredential.ts`) are now shared with the anonymous chat-widget lane, which is unchanged. There is no thread yet: one turn, no history (P3).
 
 ### Changed
 
-- **Agents propose, humans dispose, by default (ADR 1159).** A roster agent with no autonomy level used to run heartbeat picks with no human gate, because `autonomyOf()` read absent as `auto`. Absent now reads as `review`, new agents (API, hire screen, create wizard, agent author, portability import) store an explicit level defaulting to `review`, and existing agents keep their current behaviour through app-migration 27.
-- **An unpaged kanban read above 2,000 cards is refused (ADR 1155 OQ-2, P5b). This is a contract change for API callers.** `GET /host/openwop-app/kanban/boards/:boardId` with no `limit` counts the board first, and `GET …/kanban/assigned` with no `limit` counts the caller's matching cards. Above 2,000 either answers `400 validation_error` with `details: { reason: "kanban_board_page_required", total, cap: 2000 }` and no cards. It never answers a truncated `200`, which an old client would render as the whole board. At or below 2,000 the response is unchanged, and a paged read (`?limit=`) is never capped. The SPA's agent board, agent view, "Assigned to me" list and dashboard tiles now read a page at a time, and `@openwop/cli` 2.2.0 `kanban board` and `kanban assigned` follow `nextCursor`. The personal board route (`/boards/personal`) is not capped.
+- **Agents propose, humans dispose, by default (ADR 1159, #6251).** A roster agent with no autonomy level used to run heartbeat picks with no human gate, because `autonomyOf()` read absent as `auto`. Absent now reads as `review`, new agents (API, hire screen, create wizard, agent author, portability import) store an explicit level defaulting to `review`, and existing agents keep their current behaviour through app-migration 27.
+- **An unpaged kanban read above 2,000 cards is refused (ADR 1155 OQ-2, P5b, #6224). This is a contract change for API callers.** `GET /host/openwop-app/kanban/boards/:boardId` with no `limit` counts the board first, and `GET …/kanban/assigned` with no `limit` counts the caller's matching cards. Above 2,000 either answers `400 validation_error` with `details: { reason: "kanban_board_page_required", total, cap: 2000 }` and no cards. It never answers a truncated `200`, which an old client would render as the whole board. At or below 2,000 the response is unchanged, and a paged read (`?limit=`) is never capped. The SPA's agent board, agent view, "Assigned to me" list and dashboard tiles now read a page at a time, and `@openwop/cli` 2.2.0 `kanban board` and `kanban assigned` follow `nextCursor`. The personal board route (`/boards/personal`) is not capped.
 - **The workspace switcher and client left the entry bundle (#6250).** `Sidebar` lazy-loads `WorkspaceSwitcher` behind its own static `/orgs` link, and `runsClient` / `exampleDataClient` load `workspaceClient` on first use. The host entry goes from 129.4 kB to 126.7 kB gzip, against its 130.0 kB budget.
 - **Example data starts with nothing selected (#6231).** The page adds Select all and Select none. Load selected and Clear stay disabled until something is chosen, with a visible hint. The Clear dialog names the chosen types and the workspace.
 - **The Project Guide (the agent an outside collaborator talks to) is no longer listed to a firm's members or on the A2A card; it still serves the collaborator turn (ADR 1099 P2, #6268).** The member agent list leaves out any agent whose every tool is a client tool (`openwop:client.*`), because in a member's chat it would have none. `vendor.openwop-app.projects.agents` 1.0.1 sets `a2aExposed: false`. The agent stays installed and resolvable by id.

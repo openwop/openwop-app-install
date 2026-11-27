@@ -46,8 +46,8 @@ let hostSecret: string;
 
 const packJson = (): string => JSON.stringify({
   name: NAME, version: '1.0.0', description: 'fixture', author: 'test', license: 'Apache-2.0',
-  engines: { openwop: '>=1.0.0 <3.0.0' },
-  signing: { method: 'ed25519', publicKeyRef: 'acme-key' },
+  engines: { openwop: '>=2.0.0 <3.0.0' },
+  signing: { keyId: 'acme-key', scheme: 'ed25519-canonical-json' },
   agents: [{ agentId: `${NAME}.a`, persona: 'Fixture', modelClass: 'general', systemPromptRef: 'prompts/sys.md' }],
 }, null, 2);
 
@@ -69,13 +69,13 @@ function serveBytes(tgz: Buffer, signed: Buffer, keyId: string): void {
   const stub: typeof globalThis.fetch = async (input) => {
     const u = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     const ok = (b: string | Uint8Array, t = 'application/json') => new Response(typeof b === 'string' ? b : new Blob([new Uint8Array(b)]), { status: 200, headers: { 'content-type': t } });
-    if (u.endsWith('.json') && u.includes('/t1/packs/')) return ok(JSON.stringify({ name: NAME, version: '1.0.0', integrity, signing: { method: 'ed25519', publicKeyRef: keyId } }));
+    if (u.endsWith('.json') && u.includes('/t1/packs/')) return ok(JSON.stringify({ name: NAME, version: '1.0.0', integrity, signing: { keyId, scheme: 'ed25519-canonical-json' } }));
     if (u.endsWith('.tgz')) return ok(new Uint8Array(tgz), 'application/gzip');
     if (u.endsWith('.sig')) return ok(new Uint8Array(sig), 'application/octet-stream');
     if (u.includes('/keys/')) return ok(PUB_PEM, 'text/plain');
     if (u.endsWith('/.well-known/openwop-registry.json')) return ok(JSON.stringify({
       signingKeys: [{ keyId, permittedNamespaces: ['acme.*'] }],
-      endpoints: { publicKey: '/keys/{keyId}.pub', v1: { versionManifest: '/t1/packs/{name}/-/{version}.json', versionTarball: '/t1/packs/{name}/-/{version}.tgz', versionSignature: '/t1/packs/{name}/-/{version}.sig' } },
+      endpoints: { publicKey: '/keys/{keyId}.pub', v2: { versionManifest: '/t1/packs/{name}/-/{version}.json', versionTarball: '/t1/packs/{name}/-/{version}.tgz', versionSignature: '/t1/packs/{name}/-/{version}.sig' } },
     }));
     throw new Error(`unstubbed fetch: ${u}`);
   };

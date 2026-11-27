@@ -32,7 +32,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join as joinPath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { locateRepoSchemasDir } from './_repoPath.js';
+import { locateRepoSchemasV2Dir } from './_repoPath.js';
 import { looksProjected, unprojectBoundId } from './boundIdProjection.js';
 
 /** `ids.schema.json#/$defs/opaque` — a host-minted segment: no `@`, no `/`, no whitespace. */
@@ -259,8 +259,8 @@ export function fromWireRunId(
 function deriveKeysBoundTo(refRe: RegExp, floor: readonly string[]): ReadonlySet<string> {
   const keys = new Set<string>();
   try {
-    const dir = locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json');
-    const root = joinPath(dir, 'v2');
+    const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
+    const root = dir;
     const walk = (node: unknown, parentKey: string | undefined): void => {
       if (Array.isArray(node)) { for (const n of node) walk(n, parentKey); return; }
       if (node === null || typeof node !== 'object') return;

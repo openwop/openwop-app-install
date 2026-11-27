@@ -12,12 +12,25 @@
 // data against at runtime (so a stale copy would mean the app mis-accepts or
 // mis-rejects live data — a real bug, not cosmetic):
 //
-//   - schemas/prompt-pack-manifest.schema.json   (host/promptPackLoader.ts)
-//   - schemas/prompt-kind.schema.json            (   "  — manifest $ref)
-//   - schemas/prompt-template.schema.json        (   "  — manifest $ref)
-//   - schemas/prompt-ref.schema.json             (   "  — manifest $ref)
-//   - schemas/connection-pack-manifest.schema.json (features/connections/connectionPackLoader.ts)
-//   - schemas/workflow-chain-pack-manifest.schema.json (host/workflowChainPackLoader.ts —
+// RFC 0266 (2026-11-25): every path below is under `schemas/v2/`. The flat v1
+// tree is no longer vendored and nothing reads it; the v1 entries this list used
+// to carry (`ai-envelope` + `envelopes/`, deleted from v2 by RFC 0255, and
+// `certification-bundle-v2`, which has no v2 copy and whose only reader — the
+// retired `conformance/certify.ts` emitter — is gone) were dropped with it.
+// `ids.schema.json` is new here: every v2 manifest schema below `$ref`s it, so a
+// stale copy mis-judges every id the loaders validate.
+//
+//   - schemas/v2/prompt-pack-manifest.schema.json   (host/promptPackLoader.ts)
+//   - schemas/v2/prompt-kind.schema.json            (   "  — manifest $ref)
+//   - schemas/v2/prompt-template.schema.json        (   "  — manifest $ref)
+//   - schemas/v2/prompt-ref.schema.json             (agent-manifest $ref)
+//   - schemas/v2/ids.schema.json                    (every manifest's $ref)
+//   - schemas/v2/connection-pack-manifest.schema.json (features/connections/connectionPackLoader.ts)
+//   - schemas/v2/frontend-plugin-manifest.schema.json (features/ui-plugins/frontendPluginPacks.ts)
+//   - schemas/v2/agent-manifest.schema.json         (features/marketplace/skillImport/convert.ts)
+//   - schemas/v2/form-content-pack-manifest.schema.json (packs/canonicalManifestGate.ts)
+//   - schemas/v2/artifact-type-pack-manifest.schema.json (routes/artifactTypeSeam.ts)
+//   - schemas/v2/workflow-chain-pack-manifest.schema.json (host/workflowChainPackLoader.ts —
 //     compiled with ajv at boot; `additionalProperties:false` on FragmentNode, so a
 //     stale copy REJECTS every pack carrying a newer field. H34, 2026-08-16: it
 //     had drifted silently — RFC 0157's `compensation`/`irreversibleEffect` made
@@ -40,15 +53,19 @@ import { classifyDrift, suiteCertifiesCorpusTag, AHEAD, UNKNOWN } from './schema
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const VENDORED = join(ROOT, 'schemas');
 
-// The fixed load-bearing set + the per-kind envelopes/ directory (globbed so a
+// The fixed load-bearing set (all under schemas/v2/; RFC 0266). Was: + the per-kind envelopes/ directory (globbed so a
 // newly-added envelope kind is covered automatically).
 const FIXED = [
-  'ai-envelope.schema.json',
   'prompt-pack-manifest.schema.json',
   'prompt-kind.schema.json',
   'prompt-template.schema.json',
   'prompt-ref.schema.json',
+  'ids.schema.json',
   'connection-pack-manifest.schema.json',
+  'frontend-plugin-manifest.schema.json',
+  'agent-manifest.schema.json',
+  'form-content-pack-manifest.schema.json',
+  'artifact-type-pack-manifest.schema.json',
   'workflow-chain-pack-manifest.schema.json',
   // ── a THIRD harm class: the reference copy for a HAND-WRITTEN mirror ──────
   //
@@ -91,16 +108,6 @@ const FIXED = [
   // harm: a conforming peer's identity object rejected by a host reading a stale
   // reference. Guarding the copy is what makes that findable.
   'workload-identity.schema.json',
-  // ADR 0550 P4 / RFC 0148 §C. `conformance/certify.ts` COMPILED this copy with
-  // ajv and refused to write a bundle that failed it (that emitter is retired,
-  // ADR 0812 P4 slice 3; the copy stays guarded while it stays vendored). A
-  // stale copy let that emitter accept a bundle no consumer's verifier would —
-  // the drift class this file's header describes, applied to evidence.
-  //
-  // Guarded even though it is not compiled by a RUNTIME loader (the route serves
-  // the already-validated stamp): the harm is the same shape, and it lands on
-  // the one artifact whose whole purpose is to be checked by someone else.
-  'certification-bundle-v2.schema.json',
   // ── the second harm class, and why it is no longer guarded here ────────
   // On 2026-08-10 `run-event-payloads` and `capabilities` were added to this set
   // because the TEST SUITE compiled the vendored copies with ajv — so a stale
@@ -118,18 +125,24 @@ const FIXED = [
   // If a RUNTIME loader ever reads either vendored copy, add it back — the
   // original harm class (the app mis-handling live data) would then apply.
 ];
-const paths = FIXED.map((f) => `schemas/${f}`);
-const envelopesDir = join(VENDORED, 'envelopes');
-if (existsSync(envelopesDir)) {
-  for (const f of readdirSync(envelopesDir)) {
-    if (f.endsWith('.schema.json')) paths.push(`schemas/envelopes/${f}`);
-  }
+const paths = FIXED.map((f) => `schemas/v2/${f}`);
+
+// RFC 0266 — the flat v1 tree must stay gone. A sync from an older script, or a
+// hand copy, that brings back `schemas/*.schema.json` or `schemas/envelopes/` is
+// refused here, before any drift comparison.
+const flatV1 = existsSync(VENDORED)
+  ? readdirSync(VENDORED).filter((f) => f.endsWith('.schema.json') || f === 'envelopes')
+  : [];
+if (flatV1.length > 0) {
+  console.error(`check-vendored-schemas: the frozen flat v1 tree is vendored again (RFC 0266): ${flatV1.map((f) => `schemas/${f}`).join(', ')}`);
+  console.error('  Only schemas/v2/ is vendored. Delete these and re-sync with scripts/sync-schemas.sh.');
+  process.exit(1);
 }
 
 // Resolve the canonical source: local corpus dir wins (offline-friendly, same as
 // sync-schemas.sh), else GitHub raw.
 const corpusDir = process.env.OPENWOP_CORPUS_DIR ?? join(ROOT, '..', 'openwop');
-const useLocal = existsSync(join(corpusDir, 'schemas'));
+const useLocal = existsSync(join(corpusDir, 'schemas', 'v2'));
 const rawBase = process.env.OPENWOP_SPEC_RAW_BASE ?? 'https://raw.githubusercontent.com/openwop/openwop/main';
 let _pinned;
 const sourceLabel = useLocal ? `local corpus ${corpusDir}${pinnedTag() === null ? ' (working tree — CORPUS_TAG not in this clone)' : ` at ${pinnedTag()}`}` : rawBase;

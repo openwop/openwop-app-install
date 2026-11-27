@@ -361,6 +361,12 @@ describe('CALL-SITE RATCHET — every handler of fenced text is classified', () 
       kind: 'PRODUCES',
       why: 'RFC 0124 per-variable wrap — applies the angle fence to each substituted value. Never truncates.',
     },
+    // ADR 1099 P3d — the host-kept conversation: it cuts the RAW text before storing it
+    // and fences each collaborator message (and defangs each agent reply) on replay.
+    'host/collaboratorTurnMemory.ts': {
+      kind: 'PRODUCES',
+      why: 'Stores a collaborator conversation cut to 2000 chars BEFORE any fence exists, then fences every collaborator message and defangs every agent reply when it replays them. Never shortens fenced text.',
+    },
     // ADR 1099 D5 — the collaborator turn fences the outsider's message.
     'host/collaboratorTurn.ts': {
       kind: 'PRODUCES',

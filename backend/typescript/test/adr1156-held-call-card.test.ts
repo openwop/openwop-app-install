@@ -64,6 +64,10 @@ let refuse = false;
 let reset: () => void = () => {};
 beforeAll(async () => {
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
+  // These cases pin P1: the continue turn relies on the model repeating the call. That is
+  // still the path when P2 is off or outside its run window; P2 has its own file
+  // (adr1156-p2-approved-call-runs.test.ts).
+  process.env.OPENWOP_APPROVED_CALL_RUN = 'off';
   const { initHostExtPersistence, __resetHostExtPersistence } = await import('../src/host/hostExtPersistence.js');
   const { openStorage } = await import('../src/storage/index.js');
   initHostExtPersistence(await openStorage('memory://'));
@@ -85,7 +89,7 @@ beforeAll(async () => {
     run: async () => ({ content: 'ran' }),
   });
 });
-afterAll(() => reset());
+afterAll(() => { reset(); delete process.env.OPENWOP_APPROVED_CALL_RUN; });
 
 const agent = (allow: string[]): ResolvedAgentManifest => ({
   agentId: 'adr1156-agent', persona: 'P', modelClass: 'chat', systemPrompt: 'sp', toolAllowlist: allow,
@@ -268,7 +272,11 @@ describe('ADR 1156 D7 — only a signed-in person decides', () => {
     expect((read.body.viewer as { mayApprove: boolean }).mayApprove).toBe(true);
     const row = (read.body.approvals as Array<{ askId?: string; requestedAt: string }>)[0]!;
     expect(row.askId).toBe('ask-1');
+    // ADR 1156 P2 (D10) — the sealed full input never leaves the server.
+    expect(JSON.stringify(read.body)).not.toContain('sealedInput');
     const ok = await call('POST', `${base}/approvals/${encodeURIComponent(PROBE)}`, { decision: 'approved', requestedAt: row.requestedAt, grain: 'call' }, asPerson);
     expect(ok.status).toBe(200);
+    expect(JSON.stringify(ok.body)).not.toContain('sealedInput');
+    expect((await listToolApprovals('t-1156-route', session))[0]?.sealedInput, 'fixture: the approved row does hold one').toBeTruthy();
   });
 });

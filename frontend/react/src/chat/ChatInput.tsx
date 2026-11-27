@@ -155,6 +155,10 @@ interface Props {
    *  composer. A draft is never chat history — it's cleared the moment the
    *  message is sent. */
   draftKey?: string;
+  /** ADR 1099 P4 — plain text only (the collaborator portal): no `/` and `@`
+   *  pickers, no sigil chips, no attachments, no hand-off hint. Those reach the
+   *  viewer's OWN workspace, which an outsider lane must never offer. */
+  plainText?: boolean;
 }
 
 export function ChatInput({
@@ -174,6 +178,7 @@ export function ChatInput({
   liveVoice,
   draftKey,
   seed,
+  plainText = false,
 }: Props): JSX.Element {
   const { t } = useTranslation('chat');
   // CHAT-7/A11Y-8 — surface the live-voice PHASE. The visible word rides the
@@ -314,9 +319,12 @@ export function ChatInput({
   // mount (ADR 0163 follow-on) so the caller's REAL owned workflows are
   // available to the `/` picker AND the LLM tool list before the first send.
   // Best-effort: failure leaves the demo + localStorage sources untouched.
+  // ADR 1099 P4 — never in a plain-text composer: it has no `/` picker, and the
+  // list is the viewer's OWN workspace, which an outsider lane must not read.
   useEffect(() => {
+    if (plainText) return;
     void refreshWorkflowMentionCache();
-  }, []);
+  }, [plainText]);
 
   // Auto-resize: clamp scrollHeight to the textarea's own CSS max-height
   // (`--chat-input-height-max`, min(40vh, 320px)) — read, not hard-coded, so a
@@ -465,6 +473,9 @@ export function ChatInput({
           registered workflows in one menu, grouped under subheads.
           Replaces the prior CommandAutocomplete after the 2026-05-28
           mention-symbol swap (`@` is now agents, `/` is unified). */}
+      {/* ADR 1099 P4 — the container stays (aria-controls names it); a plain-text
+          composer mounts no picker into it. */}
+      {plainText ? <div id={pickersId} /> : (<>
       <div id={pickersId}>
         <SlashAutocomplete
           text={text}
@@ -534,6 +545,7 @@ export function ChatInput({
         </Suspense>
       )}
       <AgentHandoffHint text={text} hasAttachments={pendingFiles.length > 0 || pendingAudio !== null} inChannel={mentionEntries !== undefined} entries={agentEntries} />
+      </>)}
       {pendingAudio && (
         <div className="u-flex u-items-center u-gap-2 u-pad-6x10 u-mb-1-5 u-bg-surface-2 u-border u-radius u-fs-12">
           <MicIcon size={14} />
@@ -658,7 +670,7 @@ export function ChatInput({
           spellCheck={false}
           className="chatinput-textarea"
         />
-        {narrowComposer ? (
+        {plainText ? null : narrowComposer ? (
           // ADR 0768 P6 — on a narrow composer the chips would squeeze the text
           // area to nothing; the same four actions live behind the `+` menu.
           <Menu

@@ -16,7 +16,7 @@
  * app brand via `hydrateBrandSingleton`, and `useBrand()` re-renders consumers when
  * an override loads. Read `useBrand()` (not the raw import) where live updates matter.
  */
-import { BRAND_DEFAULTS, appHomePath, coalesce, optional, type BrandConfig } from './defaults.js';
+import { BRAND_DEFAULTS, appHomePath, coalesce, optional, sitePublicMenu, type BrandConfig } from './defaults.js';
 
 const env = import.meta.env;
 const markSrc =
@@ -112,4 +112,5 @@ export const brand: BrandConfig = {
     ),
   },
   appHomePath: appHomePath(env.VITE_BRAND_APP_HOME_PATH as string | undefined),
+  sitePublicMenu: sitePublicMenu(env.VITE_BRAND_SITE_PUBLIC_MENU as string | undefined),
 };

@@ -189,6 +189,12 @@ export const messages = {
   linkFor: 'Enlace para {{name}}',
   linkCopy: 'Copiar enlace',
   linkCopied: 'Copiado',
+  // ADR 0924 P2c — cómo se entregó cada enlace de aprobación.
+  sendToClientHelpEmailed: 'Cada aprobador recibe su enlace privado por correo. Un enlace funciona durante 7 días, solo para este cambio, y deja de funcionar cuando se decide. Enviar de nuevo anula los enlaces anteriores.',
+  linkEmailed: 'Enviado por correo a {{email}}',
+  linkNotDelivered: 'No se entregó. Envíalo de nuevo, o copia el enlace y envíalo tú.',
+  linkCopyOnly: 'El correo no está configurado en este espacio de trabajo, así que copia el enlace y envíalo tú.',
+  linkVerifiedNote: 'Al abrirlo se pide un código de un solo uso enviado a {{email}}, así que el enlace solo funciona para esa persona.',
   portalTitle: 'Un cambio para {{client}} necesita tu aprobación',
   portalIntro: 'Revisa abajo lo que cambiará y luego apruébalo o recházalo.',
   portalIntroNamed: 'Hola, {{name}}. Revisa abajo lo que cambiará y luego apruébalo o recházalo.',
@@ -208,6 +214,8 @@ export const messages = {
   portalGoneTitle: 'Este enlace ya no funciona',
   portalGoneBody: 'Puede que haya caducado o que este cambio ya se haya decidido. Pide a la agencia un enlace nuevo si todavía lo necesitas.',
   portalRateLimited: 'Demasiados intentos. Espera unos minutos y vuelve a intentarlo.',
+  portalVerifyExpired: 'Tu verificación caducó. Vuelve a cargar esta página para recibir un código nuevo.',
+  portalLocked: 'Este enlace se bloqueó tras demasiados códigos incorrectos. Pide a la agencia que te envíe un enlace nuevo.',
   portalFailed: 'No se pudo enviar. Revisa tu conexión y vuelve a intentarlo.',
   // ADR 0957 P0 — client reports (internal review view)
   reportsHeading: "Informes para clientes",

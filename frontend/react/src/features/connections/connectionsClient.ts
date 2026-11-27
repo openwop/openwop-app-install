@@ -143,9 +143,18 @@ export class ForbiddenError extends Error {}
 /** List host-configured OAuth clients (superadmin only). Throws `ForbiddenError`
  *  on 403 so the caller can hide the panel for non-superadmins. */
 export async function listOAuthClients(): Promise<OAuthClientConfig[]> {
+  return (await listOAuthClientsWithRedirects()).clients;
+}
+
+/** The configured clients plus the redirect URI the SERVER sends for each
+ *  provider (its own `redirectUri()`), which is what an operator must register.
+ *  An older server without `redirectUris` yields `{}`: the panel then shows no
+ *  URI rather than a guess. */
+export async function listOAuthClientsWithRedirects(): Promise<{ clients: OAuthClientConfig[]; redirectUris: Record<string, string> }> {
   const res = await fetch(`${base}/connections-oauth-clients`, fetchOpts({ headers: authedHeaders() }));
   if (res.status === 403) throw new ForbiddenError('not a superadmin');
-  return (await asJson<{ clients: OAuthClientConfig[] }>(res, 'listOAuthClients')).clients;
+  const body = await asJson<{ clients: OAuthClientConfig[]; redirectUris?: Record<string, string> }>(res, 'listOAuthClients');
+  return { clients: body.clients, redirectUris: body.redirectUris ?? {} };
 }
 
 /** Configure a provider's OAuth client (superadmin). The secret is write-only —

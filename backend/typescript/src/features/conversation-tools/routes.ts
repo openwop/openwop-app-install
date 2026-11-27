@@ -27,8 +27,9 @@ const MAX_TOOLS = 200; // cap each scope list to bound payload (abuse guard)
 
 /** What a client sees of a ledger row: never the digest (FW2-D1); a channel row that can
  *  expire (a pending ask, an unused one-call approval) carries when it does (CHAN-F17). */
-function approvalView(r: ToolApprovalRecord): Omit<ToolApprovalRecord, 'inputDigest'> & { expiresAt?: string } {
-  const { inputDigest: _d, ...view } = r;
+function approvalView(r: ToolApprovalRecord): Omit<ToolApprovalRecord, 'inputDigest' | 'sealedInput'> & { expiresAt?: string } {
+  // ADR 1156 P2 (D10) — the sealed full input never leaves the server.
+  const { inputDigest: _d, sealedInput: _s, ...view } = r;
   const expiresAt = approvalExpiresAt(r);
   return expiresAt ? { ...view, expiresAt } : view;
 }

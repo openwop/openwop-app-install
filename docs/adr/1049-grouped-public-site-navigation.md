@@ -206,3 +206,10 @@ page keeps Blog in Company as before. Additive: no stored value changes, and a
 Tests: `adr1049-site-nav.test.ts` accepts the group, and
 `PublicShell.groupedNav.test.tsx` pins the column order (menu and footer) and
 Blog's move.
+
+## Addendum (2026-11-24): the grouped menu in the site shell
+
+The grouped menu can also render in the site-tier product header, behind
+`VITE_BRAND_SITE_PUBLIC_MENU` (default off). It shows in grouped mode only, without
+its utilities row. Decision and reasoning: ADR 0641, the extension note of
+2026-11-24.

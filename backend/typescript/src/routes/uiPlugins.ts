@@ -38,7 +38,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Ajv2020, { type ValidateFunction } from 'ajv/dist/2020.js';
-import { locateRepoSchemasDir } from '../host/_repoPath.js';
+import { locateRepoSchemasV2Dir } from '../host/_repoPath.js';
 
 /** ADR 0835 D7 — the request facts the write-authority check needs (the same
  *  two `requireTenantScope` threads through): the wildcard operator principal
@@ -176,9 +176,9 @@ export function dispatcherForTenant(tenantId: string, caller: SubjectCaller = {}
 let v2MessageValidator: ValidateFunction | undefined;
 function validateV2Message(message: unknown): boolean {
   if (!v2MessageValidator) {
-    const dir = locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json');
+    const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
     const ajv = new Ajv2020({ allErrors: false, strict: false });
-    v2MessageValidator = ajv.compile(JSON.parse(readFileSync(join(dir, 'v2', 'ui-plugin-message.schema.json'), 'utf8')));
+    v2MessageValidator = ajv.compile(JSON.parse(readFileSync(join(dir, 'ui-plugin-message.schema.json'), 'utf8')));
   }
   return v2MessageValidator(message) === true;
 }

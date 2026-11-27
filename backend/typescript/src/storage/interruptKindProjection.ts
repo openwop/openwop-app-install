@@ -23,7 +23,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { locateRepoSchemasDir } from '../host/_repoPath.js';
+import { locateRepoSchemasV2Dir } from '../host/_repoPath.js';
 import { VENDOR_CARRY_KEY } from './vendorKeyCarry.js';
 
 const KIND_ALIASES: Readonly<Record<string, string>> = { conversation: 'conversation.start' };
@@ -32,8 +32,8 @@ let corpusKinds: ReadonlySet<string> | null = null;
 /** The corpus interrupt-kind enum, from `suspend-request.schema.json`. Fails LOUD on an empty read: a mapping over an empty enum would send every kind to `custom`. */
 export function corpusInterruptKinds(): ReadonlySet<string> {
   if (corpusKinds !== null) return corpusKinds;
-  const dir = locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'run-event.schema.json');
-  const doc = JSON.parse(readFileSync(join(dir, 'v2', 'suspend-request.schema.json'), 'utf8')) as { properties?: { kind?: { enum?: unknown } } };
+  const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
+  const doc = JSON.parse(readFileSync(join(dir, 'suspend-request.schema.json'), 'utf8')) as { properties?: { kind?: { enum?: unknown } } };
   const e = doc.properties?.kind?.enum;
   if (!Array.isArray(e) || e.length === 0 || !e.every((k) => typeof k === 'string')) {
     throw new Error('suspend-request.schema.json carries no `kind` enum — the interrupt-kind projection has nothing to map onto');
@@ -52,8 +52,8 @@ export function corpusInterruptKinds(): ReadonlySet<string> {
 let kindTypes: ReadonlySet<string> | null = null;
 function kindCarryingTypes(): ReadonlySet<string> {
   if (kindTypes !== null) return kindTypes;
-  const dir = locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'run-event.schema.json');
-  const doc = JSON.parse(readFileSync(join(dir, 'v2', 'run-event-payloads.schema.json'), 'utf8')) as { $defs?: Record<string, Record<string, unknown>> };
+  const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
+  const doc = JSON.parse(readFileSync(join(dir, 'run-event-payloads.schema.json'), 'utf8')) as { $defs?: Record<string, Record<string, unknown>> };
   const defs = doc.$defs ?? {};
   const index = (defs['_typeIndex'] as { properties?: Record<string, { $ref?: string }> } | undefined)?.properties ?? {};
   const want = [...corpusInterruptKinds()].sort().join('|');

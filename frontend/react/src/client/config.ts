@@ -221,6 +221,30 @@ function emitAuthChange(
   return event;
 }
 
+/**
+ * #6214 — run an auth-change dispatch whose caller must carry on whatever a
+ * listener does. `setCurrentIdToken` and `fireAuthChanged` update their state
+ * first and then rethrow a listener failure as `AuthChangeDispatchError`. A caller
+ * that wraps them in a broad `try` (the Firebase token callback) then took the
+ * failure for a failed sign-in and dropped a valid token, and `hardSignOut` threw
+ * out of a function documented never to throw. This contains ONLY that error type:
+ * it logs the sanitized counts (never the causes) and returns false. Any other
+ * error still throws.
+ */
+export function containAuthChangeDispatch(site: string, dispatch: () => void): boolean {
+  try {
+    dispatch();
+    return true;
+  } catch (error) {
+    if (!(error instanceof AuthChangeDispatchError)) throw error;
+    console.warn(`openwop.auth: an auth-change listener failed (${site}); continuing`, {
+      listenerFailureCount: error.listenerFailureCount,
+      preparationFailed: error.preparationFailed,
+    });
+    return false;
+  }
+}
+
 /** Broadcast tenant invalidation without changing the token. The optional
  *  synchronous hook binds a private completion's expected event, not authority.
  *  Delivery invokes synchronous listeners; their async work is not settled. */

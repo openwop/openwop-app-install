@@ -369,6 +369,14 @@ export function auditCollaboratorToolCall(tenantId: string, d: {
   return audit(tenantId, { action: 'collab-turn.tool', ...d });
 }
 
+/** ADR 1099 D10 — a portal section read (or the list of sections), in the same
+ *  audit domain as the grant. Ids only; never the section's content. */
+export function auditCollaboratorSectionRead(tenantId: string, d: {
+  grantId: string; collaboratorId: string; orgId: string; section: string; outcome: string;
+}): Promise<void> {
+  return audit(tenantId, { action: 'collab-section.read', ...d });
+}
+
 // ── collaborators ──
 
 export function normalizeEmail(raw: unknown): string {

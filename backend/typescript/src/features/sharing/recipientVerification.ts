@@ -67,9 +67,11 @@ async function deliver(link: ShareLink): Promise<void> {
   const now = Date.now();
   const code = await issueCode(link.tokenHash, link.tenantId, now); // a new code voids the previous one
   const org = await getOrg(link.orgId);
-  const sent = await sendShareCode({ tenantId: link.tenantId, to: email, orgName: org?.name ?? '', code, idempotencyKey: `share-code:${link.tokenHash}:${now}` });
-  if (!sent) {
-    log.warn('share_code_not_sent', { tokenPrefix: prefixOf(link.tokenHash) });
+  const result = await sendShareCode({ tenantId: link.tenantId, orgId: link.orgId, to: email, orgName: org?.name ?? '', code, idempotencyKey: `share-code:${link.tokenHash}:${now}` });
+  if (!result.sent) {
+    // The visitor's 202 is already out and stays uniform (D3). The owner sees why.
+    log.warn('share_code_not_sent', { tokenPrefix: prefixOf(link.tokenHash), reason: result.reason });
+    await audit(link.tenantId, 'share.verification.send_failed', { tokenPrefix: prefixOf(link.tokenHash), reason: result.reason });
     return;
   }
   const at = new Date(now).toISOString();

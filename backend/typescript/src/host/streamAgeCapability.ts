@@ -13,7 +13,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { locateRepoSchemasDir } from './_repoPath.js';
+import { locateRepoSchemasV2Dir } from './_repoPath.js';
 
 /** RFC 0247 — a host MAY end an opted-in stream only once it has been open this long. */
 export const RFC0247_MIN_AGE_MS = 15_000;
@@ -25,8 +25,8 @@ let floorMs = RFC0247_MIN_AGE_MS;
 export function rfc0247WireAvailable(): boolean {
   if (cached !== undefined) return cached;
   try {
-    const dir = locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json');
-    const caps = JSON.parse(readFileSync(join(dir, 'v2', 'capabilities.schema.json'), 'utf8')) as {
+    const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
+    const caps = JSON.parse(readFileSync(join(dir, 'capabilities.schema.json'), 'utf8')) as {
       properties?: { limits?: { properties?: Record<string, unknown> } };
     };
     cached = caps.properties?.limits?.properties?.maxStreamAgeSec !== undefined;

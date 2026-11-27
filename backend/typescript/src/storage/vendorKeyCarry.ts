@@ -23,7 +23,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { locateRepoSchemasDir } from '../host/_repoPath.js';
+import { locateRepoSchemasV2Dir } from '../host/_repoPath.js';
 
 /** This host's boxed-carry property. Matches the corpus hatch `^(openwop-|x-|vendor\.)`. */
 export const VENDOR_CARRY_KEY = 'vendor.openwop-app';
@@ -36,8 +36,8 @@ let defsDoc: Record<string, Schema> | null = null;
 
 function loadDefs(): Record<string, Schema> {
   if (defsDoc !== null) return defsDoc;
-  const dir = locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'run-event.schema.json');
-  const doc = JSON.parse(readFileSync(join(dir, 'v2', 'run-event-payloads.schema.json'), 'utf8')) as { $defs?: Record<string, Schema> };
+  const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
+  const doc = JSON.parse(readFileSync(join(dir, 'run-event-payloads.schema.json'), 'utf8')) as { $defs?: Record<string, Schema> };
   defsDoc = doc.$defs ?? {};
   return defsDoc;
 }

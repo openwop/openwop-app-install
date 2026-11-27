@@ -31,8 +31,10 @@ import {
 const log = createLogger('bootstrap.installRegistryPacks');
 
 const DEFAULT_PACKS: InstallTarget[] = [
-  { name: 'core.openwop.ai', version: '1.0.0' },
-  { name: 'core.openwop.http', version: '1.0.0' },
+  // RFC 0266 — pins that exist in the registry's v2 tree (the 1.0.0 pins were
+  // published only in the frozen v1 tree). Match openwop-dev's OPENWOP_INSTALL_PACKS.
+  { name: 'core.openwop.ai', version: '1.5.2' },
+  { name: 'core.openwop.http', version: '2.1.3' },
 ];
 
 /**

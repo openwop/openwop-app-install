@@ -1,6 +1,6 @@
 # ADR 0924 — Campaign ops: version-bound approval and the client approver portal
 
-Status: Accepted — P0 implemented (change-set PR); P1 client portal implemented (client-portal PR); P2a quorum groundwork built, pending gate (`feat/adr0924-p2a-quorum`); P2b (`client_and_agency`) and P2c (verified emailed links) pending
+Status: Accepted — P0 implemented (change-set PR); P1 client portal implemented (client-portal PR); P2a quorum groundwork implemented (#6177); P2c verified emailed links implemented (`feat/adr0924-p2c-verified-links`); P2b (`client_and_agency`) pending
 
 Program: agency campaign operations (ADRs 0921–0928). PRD features **F6**
 (version-bound approval) and **F2** (client approver role and portal). Depends on
@@ -425,7 +425,8 @@ expressible scope today; that is a follow-up `comments:write` scope in
 | P0 | campaign-ops change-set PR (follows #5015) | `test/campaign-ops-approval-execution.test.ts` |
 | P1 | campaign-ops client-portal PR (follows #5022 and #5026) | `test/campaign-ops-client-portal.test.ts` (10, sabotage ×9); frontend `operationsPage.test.tsx`, `publicApprovalView.test.tsx` |
 | P1 on ADR 0958 | `feat/0958-p1` (ADR 0958 P1) | the approver and link moved onto ADR 0958 grants; `test/adr0958-p1-link-only.test.ts` (8) |
-| P2a (= ADR 0942 P3b core) | `feat/adr0924-p2a-quorum`, **pending gate** | `test/adr0924-p2a-compile-per-party.test.ts`, `test/adr0924-p2a-vote-ledger.test.ts`, `test/adr0924-p2a-change-set-votes.test.ts`; regression: `campaign-ops-approval-execution`, `campaign-ops-client-portal`, `adr0958-p1-link-only`, `approval-quorum`, `quorum-review`, `approval-sla-hitl`, `adr0942-p4-sla-notify`, `adr0942-p2-autonomy-gate` |
+| P2a (= ADR 0942 P3b core) | #6177 (`9f55407501`) | `test/adr0924-p2a-compile-per-party.test.ts`, `test/adr0924-p2a-vote-ledger.test.ts`, `test/adr0924-p2a-change-set-votes.test.ts`; regression: `campaign-ops-approval-execution`, `campaign-ops-client-portal`, `adr0958-p1-link-only`, `approval-quorum`, `quorum-review`, `approval-sla-hitl`, `adr0942-p4-sla-notify`, `adr0942-p2-autonomy-gate` |
+| P2c | #6286 (`feat/adr0924-p2c-verified-links`) | `test/adr0924-p2c-verified-links.test.ts` (10); regression: `campaign-ops-client-portal`, `adr0958-p1-link-only`, `adr1141-share-link-recipient-verification`, `adr0957-p2-report-links`; frontend `publicApprovalView.test.tsx` |
 
 ### As built — P2a (2026-11-20, pending gate)
 
@@ -475,3 +476,76 @@ Corrections found while building:
 - The change set has no rejection-reason field, so `sla_expired` lives on the
   approval row's note and in the audit, not on the change set.
 - Review M2 (a reopened row with a met quorum) is not in this step.
+
+### As built — P2c (2026-11-24)
+
+Review § 8 row 3. What landed:
+- **Recipient-bound links (C3.1).** When the workspace can send a one-time code
+  (the ADR 1141 lane, `shareCodeMailReady`), `sendApprovalLinks` mints each link
+  with `recipient: {email}` and `verify: {sessionHours: 24}`. Opening the link, or
+  deciding on it, needs a code mailed to the approver's address at click time.
+  The member who sent the link, or anyone it is forwarded to, can ask for a code,
+  but it goes only to the approver.
+- **The session reaches the decision.** `resolveActiveResource` takes an optional
+  `viewer`, and the decision route passes the request's `__session` sid
+  (`liveSessionSidOf`, the one the sharing viewer reads). Without a verified
+  session a bound link answers 401 `share_verification_required`; the page then
+  asks the approver to reload for a new code. The SPA's decision call now sends
+  credentials (`fetchOpts`), as the shared viewer already did.
+- **Emailed delivery.** Each link is sent through the transactional seam as the
+  registered kind `campaign-ops.approval-link` (four locales), keyed
+  `cops-link:<grantId>`, the ADR 0957 report-link precedent. The email carries
+  the client's name and the URL only. `ApprovalLinkRecord.delivery` records
+  `email`/`sent`, `email`/`failed` (shown as "not delivered", never as sent) or
+  `copy`/`sent` (no transport and no code lane: the v1 copy fallback under
+  `client`). The URL is still returned once, for the agency's record. It is safe
+  to hold, because it opens nothing without the code.
+- **Member-email guard (C3.2).** `addApprover` refuses an address that belongs to
+  a workspace member (409 `approver_is_member`). The decision re-checks, as the
+  uniform 404, and `clientVoteStillLive` drops such a vote, because members can be
+  added after the approver was. The check reads the tenant's members and compares
+  each member's email, and a subject that is itself an address. A read failure
+  refuses.
+- **L1.** A sharing resolver can declare `expiredAsNotFound`; `campaign_approval`
+  does. Its expired links answer the uniform 404, byte-identical to an unknown
+  token, instead of the 410.
+
+Added after the release manager's security read (2026-11-26):
+- **CSRF on the session-acting public routes.** The global origin guard
+  (`middleware/csrf.ts`) skips public paths, and the decision now acts on the
+  ambient `__session` cookie (`SameSite=None` in production).
+  `requireSameSiteForSession()` applies the guard's one rule, on the same
+  allowlist through one shared `cookieOriginRefusal`, to the decision route and
+  the ADR 1141 code verify. A cookie-carrying request from a foreign Origin or
+  Referer is 403 `csrf_origin_rejected`, a form-style `text/plain` POST included.
+- **Binding never depends on the sender keeping email (user decision,
+  2026-11-26).** The first verified send stamps `ClientAccount.verifiedLinksSince`,
+  which is never cleared. After that, a send with no code lane is 409
+  `verification_unavailable` before anything is minted, so an agency cannot turn
+  C3.1 off by removing its mail transport. A client that has never had verified
+  links keeps the v1 copy fallback. The user chose this over accepting the
+  downgrade for `client`.
+- **Idempotency** is pinned: a second approve, or a later reject, of a decided
+  change is the uniform 404 and leaves `resolvedAt` and `decidedBy` unchanged.
+- **A locked link** (423, too many wrong codes) tells the approver to ask for a new
+  link, not to reload.
+
+Not in this step, and why:
+- **M3 (`note` redaction)** stays in P2b. The redactor wipes `textFields` only
+  when the row matches one of its `idFields`. For this kind that is only
+  `changeSetProposedBy`, so adding `note` would wipe the client's comment when
+  the PROPOSER is erased, and keep it when the client approver is. Doing it right
+  needs the decider as a match key, which P2b's frozen row policy changes anyway.
+- **C3.3 (audit and admin notice on approver changes)** is P2b's, with the mode it
+  protects.
+- **Residual, stated:** an agency member who adds a private mailbox they control
+  as the approver is not caught by any link scheme. The defences are the audit
+  (`approver.added`), the visible approver email, and later ADR 0958 signed-in
+  stakeholders (0958 Q3). A mailbox-API email connection that keeps a Sent copy
+  readable by members is a second residual. A member could request a code and
+  read it there, but the request is audited and the approver receives a code they
+  did not ask for. Operators should prefer an SMTP or provider transport.
+- **Residual closed by the user's decision:** binding used to depend on the
+  agency keeping a code lane, so removing it would quietly bring back unbound
+  links. `verifiedLinksSince` makes that a refusal instead (see above).
+

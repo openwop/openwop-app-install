@@ -41,11 +41,10 @@ function plantPack(root: string, suffix: string): string[] {
     chains: Array<{ chainId: string; dag: { nodes: Array<{ typeId: string }> } }>;
   };
   manifest.name = `private.sigtest.${suffix}`;
-  // ADR 0766 D5 — this file exercises the V1 signing block (`publicKeyRef` /
-  // `signatureRef`). A v1 block can only ride a v1-shaped manifest: a node pin
-  // routes the manifest to the v2 schema, which refuses a v1 block, and the v1
-  // schema refuses a pin. So the copy is made v1-shaped (pins stripped) and, being
-  // unpinned, registers only when waived — which is exactly a legacy v1 pack.
+  // ADR 0766 D5 — the copy is made v1-shaped (pins stripped) and, being unpinned,
+  // registers only when waived — which is exactly a legacy v1 pack. RFC 0266: it
+  // is judged by the v2 schema like every other manifest (an unpinned typeId is
+  // legal there; the pin rule, waived here, is what would refuse it).
   for (const c of manifest.chains) for (const n of c.dag.nodes) n.typeId = n.typeId.replace(/@[0-9.]+$/, '');
   waivedSigtestPacks.push(manifest.name);
   __setUnpinnedChainPackWaiversForTests(waivedSigtestPacks);
@@ -119,26 +118,28 @@ describe('chain-pack signature posture (ADR 0427)', () => {
     expect(getChain(chainIds[0])).toBeNull(); // nothing partial
   });
 
-  it('a properly signed pack under a pinned key loads with the flag SET (trusted)', () => {
-    process.env.OPENWOP_REQUIRE_CHAINPACK_SIGNATURES = 'true';
-    const chainIds = plantPack(installRoot, 'signed');
-    signPack(installRoot, 'signed', 'pub-1');
-    const outcome = loadWorkflowChainPacks({ roots: [installRoot] });
-    expect(outcome.errors).toHaveLength(0);
-    expect(getChain(chainIds[0])).not.toBeNull();
-  });
-
-  it('a REVOKED version is rejected even when correctly signed (revocation wins)', () => {
-    process.env.OPENWOP_REQUIRE_CHAINPACK_SIGNATURES = 'true';
-    const chainIds = plantPack(installRoot, 'revoked');
-    signPack(installRoot, 'revoked', 'pub-2');
-    const manifest = JSON.parse(readFileSync(join(installRoot, 'sigtest-revoked', 'pack.json'), 'utf8')) as { name: string; version: string };
-    const revPath = join(keysDir, 'revocations.json');
-    writeFileSync(revPath, JSON.stringify([`${manifest.name}@${manifest.version}`]));
-    process.env.OPENWOP_TRUSTED_PACK_REVOCATIONS = revPath;
-    const outcome = loadWorkflowChainPacks({ roots: [installRoot] });
-    expect(outcome.errors.map((e) => e.code)).toContain('workflow_chain_pack_signature_revoked');
-    expect(getChain(chainIds[0])).toBeNull();
+  // RFC 0266 — CORRECTED. These two cases used to pin that a v1 detached-signature
+  // block (`publicKeyRef` + `signatureRef`) verified against the pinned keyring
+  // loaded, and that a revoked one did not. The loader now judges every manifest
+  // by the v2 schema, whose `Signing` def is closed to `{ keyId, scheme }`, so a v1
+  // block is refused before any signature check — correctly signed or not. That
+  // path could not register in production before either: a v1 block rides only an
+  // UNPINNED manifest, and the unpinned allowlist is empty. Revocation stays
+  // covered for the v2 shape below ("a keyring-REVOKED v2 version is refused").
+  it('RFC 0266: a correctly signed pack carrying a v1 signing block is refused over /signing, flag set or not', () => {
+    for (const flag of ['true', undefined]) {
+      _resetChainRegistryForTest();
+      if (flag) process.env.OPENWOP_REQUIRE_CHAINPACK_SIGNATURES = flag;
+      else delete process.env.OPENWOP_REQUIRE_CHAINPACK_SIGNATURES;
+      const suffix = `v1signed-${flag ?? 'unset'}`;
+      const chainIds = plantPack(installRoot, suffix);
+      signPack(installRoot, suffix, `pub-${flag ?? 'unset'}`);
+      const outcome = loadWorkflowChainPacks({ roots: [installRoot] });
+      const refusal = outcome.errors.find((e) => e.pack === `sigtest-${suffix}`);
+      expect(refusal?.code, JSON.stringify(outcome.errors)).toBe('workflow_chain_pack_signing_v1');
+      expect(refusal?.message).toContain('chains:migrate-v2');
+      expect(getChain(chainIds[0])).toBeNull();
+    }
   });
 
   it('exemption boundary: a non-registry root loads unsigned even under the flag (R7 posture)', () => {

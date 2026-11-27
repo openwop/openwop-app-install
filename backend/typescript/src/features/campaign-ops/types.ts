@@ -36,6 +36,11 @@ export interface ClientAccount {
   house?: true;
   /** ADR 0962 D7 — what outside agents (MCP) may do for this client. Absent ⇒ `off`. */
   externalAgents?: ExternalAgentsAccess;
+  /** ADR 0924 P2c (user decision 2026-11-26) — when this client first got
+   *  recipient-bound approval links. Once set, it is never cleared, and no
+   *  unbound link is ever sent to this client again: an agency whose email lane
+   *  goes away gets a refusal, not a quiet downgrade (security read residual). */
+  verifiedLinksSince?: string;
   createdAt: string;
   createdBy: string;
   updatedAt: string;
@@ -82,6 +87,14 @@ export interface ApprovalLinkRecord {
   grantId?: string;
   sentBy: string;
   sentAt: string;
+  /** ADR 0924 P2c — how the link reached the approver. `email` + `failed` is
+   *  shown as "not delivered" and is never reported as sent; `copy` means no
+   *  email transport exists and the operator sends the URL themselves. Absent on
+   *  a record written before P2c. */
+  delivery?: { channel: 'email' | 'copy'; status: 'sent' | 'failed'; at: string };
+  /** ADR 0924 P2c — the link is recipient-bound with a one-time code (ADR 1141):
+   *  holding the URL is not enough to read or decide. */
+  verified?: boolean;
 }
 
 export type DestinationKind = 'openwop.cms.page' | 'openwop.email.template';

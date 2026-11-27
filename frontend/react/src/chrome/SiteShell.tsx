@@ -25,7 +25,7 @@
  * `check-orphan-classes` / `check-css-tokens` would be carrying two owners of
  * one visual contract. The only addition is the nav strip.
  */
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { ConfirmRoot } from '../ui/confirm.js';
@@ -34,6 +34,7 @@ import { Toaster } from '../ui/toast.js';
 import { GlobalLiveRegion } from '../ui/announce.js';
 import { ErrorBoundary } from '../ui/ErrorBoundary.js';
 import { useBrand } from '../brand/BrandProvider.js';
+import { brand as buildBrand } from '../brand/brand.js';
 import { BrandLockup } from '../brand/BrandLockup.js';
 import { SignInButton } from '../auth/SignInButton.js';
 import { ThemeToggle } from '../ui/ThemeToggle.js';
@@ -215,7 +216,18 @@ function SiteNav(): JSX.Element | null {
   );
 }
 
-export function SiteShell({ children }: { children: ReactNode }): JSX.Element {
+// VITE_BRAND_SITE_PUBLIC_MENU (ADR 0641 note, 2026-11-24): the public site's
+// grouped menu in this header. LAZY, because SiteShell is in the entry chunk and
+// a static import of PublicShell's menu added ~3 kB gzip there (DeckTalk's trial
+// went 646 B over check-bundle-budget). With the key off, the chunk is never
+// requested and no public-nav read is made.
+const PublicSiteMenu = lazy(() => import('./PublicShell.js').then((m) => ({ default: m.PublicSiteMenu })));
+
+export function SiteShell({ children, publicMenu = buildBrand.sitePublicMenu }: {
+  children: ReactNode;
+  /** Defaults to the build's `VITE_BRAND_SITE_PUBLIC_MENU`; tests pass it. */
+  publicMenu?: boolean;
+}): JSX.Element {
   const { t } = useTranslation('chrome');
   const brand = useBrand();
   const location = useLocation();
@@ -233,6 +245,7 @@ export function SiteShell({ children }: { children: ReactNode }): JSX.Element {
         </Link>
         <SiteNav />
         <div className="public-shell-actions">
+          {publicMenu ? <Suspense fallback={null}><PublicSiteMenu /></Suspense> : null}
           <ThemeToggle />
           <div className="site-header-language"><LanguageSwitcher /></div>
           {/* Session-bearing under BOTH postures. On `auth: 'optional'` an

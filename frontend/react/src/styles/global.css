@@ -4758,6 +4758,38 @@ button.handoff-chip--button[aria-expanded="true"] { background: var(--paper-2); 
   font-weight: var(--weight-emphasis);
 }
 
+/* StepRail (ui/StepRail.tsx, ADR 1154 D9) — an ordered path of step LINKS.
+ * Wraps on narrow viewports; the current step is marked by aria-current. */
+.step-rail { margin: 0 0 var(--space-4); }
+.step-rail__list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--space-2);
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.step-rail__link {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1-5);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  color: var(--ink-2);
+  text-decoration: none;
+  height: 100%;
+}
+.step-rail__link:hover { background: var(--paper-2); }
+.step-rail__link[aria-current="step"] {
+  border-color: var(--clay);
+  color: var(--ink);
+  font-weight: var(--weight-emphasis);
+}
+.step-rail__name { display: inline-flex; align-items: center; gap: var(--space-1-5); font-size: var(--text-body); }
+.step-rail__index { font-family: var(--mono); font-size: var(--text-sm); color: var(--ink-3); }
+
 /* BYOK provider grid — 3 tiles wide on desktop, stacks on narrow viewports
  * so each tile keeps a comfortable click target on phones. */
 @media (max-width: 720px) {
@@ -5550,6 +5582,7 @@ a.btn-link:focus-visible, /* text links styled as buttons — a <Link className=
 a.btn-accent:focus-visible, /* accent CTAs rendered as anchors — .btn-accent is standalone (not .btn), so a <Link className="btn-accent"> (ADR 0419 locked-state CTA) matched no ring entry (grade-ux gate-hardening pass) */
 a.btn-accent-solid:focus-visible, /* same for the solid variant — used as a <Link> across the kicktodo empty-states */
 a.secondary:focus-visible, /* secondary-styled anchors — a <Link className="secondary btn-sm"> (the ADR 0473 review-card "Open in builder" deep link) matched no ring entry; button.secondary already had one */
+a.step-rail__link:focus-visible, /* StepRail step links (ADR 1154 D9) */
 a.chip:focus-visible, /* chip-styled anchors — a <Link className="chip chip--muted"> (the ADR 0475 run-detail "Redriven" provenance link) matched no ring entry (ux-review C2) */
 a.account-menu-item:focus-visible, /* account-menu <Link role=menuitem> rows (My profile / Team) — the <button role=menuitem> siblings inherit the ring via button:focus-visible; the anchors got the UA default (USERS-UX-17) */
 select:focus-visible,
@@ -9144,6 +9177,9 @@ button.teampage-skill-chip:not(:disabled):hover { background: var(--clay-soft); 
    ════════════════════════════════════════════════════════════════════════════ */
 
 .cms-public-page { background: var(--paper); color: var(--ink); }
+/* Loading: hold a full viewport so the footer never sits in view and then jumps
+   off-screen when the page arrives (PublicPageLoading.tsx). */
+.cms-public-page--loading { min-height: 100svh; }
 /* The CMS "Public" preview iframe (PublicPreviewFrame) — a real published-page
  * render, isolated from the admin shell. Tall, scrolls internally. */
 .cms-public-frame { width: 100%; height: min(72vh, 900px); border: 1px solid var(--rule); border-radius: var(--radius); background: var(--paper); display: block; }

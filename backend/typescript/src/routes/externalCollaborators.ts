@@ -18,13 +18,17 @@ import { tenantOf } from '../features/featureRoute.js';
 import { createLink, purgeLinksForResource, resolveActiveResource } from '../features/sharing/sharingService.js';
 import { getOrg, type Scope } from '../host/accessControlService.js';
 import {
-  anySurfaceAdmits, assertGrantAuthority, bindCollaborator, checkGrantUse, createCollaborator, extendGrant, getCollaborator, grantAccess, grantResourceKind,
+  anySurfaceAdmits, assertGrantAuthority, auditCollaboratorSectionRead, bindCollaborator, checkGrantUse, createCollaborator, extendGrant, getCollaborator, grantAccess, grantResourceKind,
   grantScopeOf, kindAdmits, projectForGrant, kindCollaborationOn, listCollaborationAudit, listCollaborators, listGrantableResources, listGrants, revokeGrant,
   usableGrantsForUser, type ExternalCollaborator, type GrantUse,
 } from '../host/externalCollaborators.js';
 import { startCollaboratorExpiryNotices } from '../host/externalCollaboratorExpiry.js';
 import { runCollaboratorTurn } from '../host/collaboratorTurn.js';
+import { clearTurnMemory, readTurnMemory, registerCollaboratorTurnMemory } from '../host/collaboratorTurnMemory.js';
 import { registerCollabProposalGate } from '../host/collabProposals.js';
+import { clientScopeOf } from '../host/grantScope.js';
+import { grantViewSection, grantViewSectionsFor, readGrantViewSection } from '../host/grantViewSections.js';
+import { takeShared } from '../host/sharedRateLimit.js';
 import type { Storage } from '../storage/storage.js';
 
 /** What a collaborator sees of a usable grant: the grant kind's surface switch on
@@ -67,9 +71,13 @@ async function requireAnySurface(tenantId: string, orgId: string): Promise<void>
   if (!(await anySurfaceAdmits(tenantId, orgId))) throw new OpenwopError('not_found', 'Not found.', 404, {});
 }
 
+/** ADR 1099 D10 — section reads (and lists) per grant per minute. */
+const SECTION_READS_PER_GRANT_MIN = 120;
+
 export function registerExternalCollaboratorRoutes(app: Express, storage: Storage): void {
   startCollaboratorExpiryNotices();
   registerCollabProposalGate(); // ADR 1099 D6 — a member decides each collaborator proposal
+  registerCollaboratorTurnMemory(); // ADR 1099 P3d — the conversation's erase hook
 
   // ── The collaborator's side (ADR 0958 P2). A signed-in person in THEIR OWN home
   // tenant; every answer is derived from a grant they are bound to, so nothing here
@@ -103,9 +111,12 @@ export function registerExternalCollaboratorRoutes(app: Express, storage: Storag
       }
       const shown = await present(use);
       if (!shown) throw new OpenwopError('not_found', 'Not found.', 404, {});
+      // ADR 1099 P4 — the portal shows the chat only where the turn route would
+      // answer: the kind names an agent AND its switch is on.
+      const chat = !!grantResourceKind(use.grant.resource.kind)?.turnAgentId && (await kindCollaborationOn(use.grant.resource.kind, use.tenantId));
       res.json({
         grant: { grantId: use.grant.grantId, resourceKind: use.grant.resource.kind, actions: use.grant.actions, expiresAt: use.grant.expiresAt },
-        title: shown.title, clientName: shown.clientName, resource: shown.body,
+        title: shown.title, clientName: shown.clientName, resource: shown.body, chat,
       });
     } catch (err) { next(err); }
   });
@@ -120,6 +131,77 @@ export function registerExternalCollaboratorRoutes(app: Express, storage: Storag
       if (turn.failed) throw new OpenwopError('service_unavailable', 'The project assistant could not answer. Try again.', 503, {});
       // The run is the firm's: its id is never handed to the outsider.
       res.json({ reply: turn.reply });
+    } catch (err) { next(err); }
+  });
+
+  /** ADR 1099 P3d — the collaborator's conversation with the agent, read back (the
+   *  portal shows it) or cleared to start over. Their own grant only; uniform 404. */
+  const conversationUse = async (req: Request): Promise<GrantUse> => {
+    const user = await resolveCallerUser(req);
+    let use: GrantUse;
+    try {
+      use = await checkGrantUse({ grantId: req.params.grantId, via: { userId: user.userId }, action: 'view' });
+    } catch {
+      throw new OpenwopError('not_found', 'Not found.', 404, {});
+    }
+    if (!(await kindCollaborationOn(use.grant.resource.kind, use.tenantId))) throw new OpenwopError('not_found', 'Not found.', 404, {});
+    return use;
+  };
+  app.get('/host/openwop-app/collab/grants/:grantId/turns', async (req, res, next) => {
+    try {
+      res.set('Cache-Control', 'no-store'); // ADR 0887 S4
+      const use = await conversationUse(req);
+      res.json({ messages: (await readTurnMemory(use.grant.grantId)).map(({ role, text, at }) => ({ role, text, at })) });
+    } catch (err) { next(err); }
+  });
+  app.delete('/host/openwop-app/collab/grants/:grantId/turns', async (req, res, next) => {
+    try {
+      const use = await conversationUse(req);
+      await clearTurnMemory(use.grant.grantId);
+      res.status(204).end();
+    } catch (err) { next(err); }
+  });
+
+  /** ADR 1099 D10 (P4) — the sections a feature added to this grant's view.
+   *  The budget fails OPEN on purpose: a limiter outage lets reads through, and
+   *  each read is still grant-checked, switch-checked and audited. Do not make it
+   *  `closed`: that would turn a KV blip into a blank portal.
+   *  The list and every read pass the same check as the grant itself (the one
+   *  per-use check, then the kind's switch; uniform 404), so a section id never
+   *  reaches someone without a usable grant. Both share one read budget per grant
+   *  (the page re-reads on focus, which can loop). */
+  const sectionBudget = async (use: GrantUse): Promise<void> => {
+    const limit = await takeShared({ scope: 'collab.section.read', key: use.grant.grantId, limit: SECTION_READS_PER_GRANT_MIN, windowS: 60, failure: 'open' });
+    if (!limit.allowed) throw new OpenwopError('rate_limited', 'Too many requests. Try again in a minute.', 429, { retryAfterS: limit.retryAfterS });
+  };
+  app.get('/host/openwop-app/collab/grants/:grantId/sections', async (req, res, next) => {
+    try {
+      res.set('Cache-Control', 'no-store'); // ADR 0887 S4
+      const use = await conversationUse(req);
+      await sectionBudget(use);
+      res.json({ sections: await grantViewSectionsFor(use.grant.resource.kind, use.tenantId) });
+    } catch (err) { next(err); }
+  });
+  app.get('/host/openwop-app/collab/grants/:grantId/sections/:sectionId', async (req, res, next) => {
+    try {
+      res.set('Cache-Control', 'no-store'); // ADR 0887 S4
+      const use = await conversationUse(req);
+      const section = await grantViewSection(use.grant.resource.kind, req.params.sectionId, use.tenantId);
+      if (!section) throw new OpenwopError('not_found', 'Not found.', 404, {});
+      await sectionBudget(use);
+      const audit = (outcome: string): Promise<void> => auditCollaboratorSectionRead(use.tenantId, {
+        grantId: use.grant.grantId, collaboratorId: use.collaborator.collaboratorId, orgId: use.orgId, section: section.id, outcome,
+      });
+      let data: Record<string, unknown>;
+      try {
+        // The scope comes from the grant only; no query or body field reaches read().
+        data = await readGrantViewSection(section, clientScopeOf(use));
+      } catch (err) {
+        await audit(err instanceof OpenwopError && typeof err.details?.reason === 'string' ? err.details.reason : 'failed');
+        throw err;
+      }
+      await audit(data.available === false ? 'least-view' : 'read');
+      res.json({ data });
     } catch (err) { next(err); }
   });
 

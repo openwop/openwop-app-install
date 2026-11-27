@@ -114,9 +114,9 @@ describe('ADR 0713 — manifestSigningKeyId reads the block its tree defines', (
     expect(() => manifestSigningKeyId({ method: 'manual', publicKeyRef: 'k' }, 'v2')).toThrow(/pack_signature_unverifiable/);
     expect(() => manifestSigningKeyId(undefined, 'v2')).toThrow(/pack_signature_unverifiable/);
   });
-  it('v1: publicKeyRef, unchanged — and a v2 block is not a v1 one', () => {
-    expect(manifestSigningKeyId({ method: 'manual', publicKeyRef: 'openwop-team-1' }, 'v1')).toBe('openwop-team-1');
-    expect(() => manifestSigningKeyId(LIVE_V2_SIGNING, 'v1')).toThrow(/no signing.publicKeyRef/);
+  it('RFC 0266: any non-v2 tree is refused — a v1 block is never read for a key id', () => {
+    expect(() => manifestSigningKeyId({ method: 'manual', publicKeyRef: 'openwop-team-1' }, 'v1')).toThrow(/pack_signature_unverifiable: a v1 signing block/);
+    expect(() => manifestSigningKeyId(LIVE_V2_SIGNING, 'v1')).toThrow(/pack_signature_unverifiable/);
   });
 });
 

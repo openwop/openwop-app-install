@@ -36,7 +36,7 @@ import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { gzipSync } from 'node:zlib';
 import { installPackFromRegistry } from '../src/packs/registryInstaller.js';
-import { __resetRegistryDiscoveryCache } from '../src/host/packSignature.js';
+import { __resetRegistryDiscoveryCache, assertKeyPermittedForPack } from '../src/host/packSignature.js';
 
 const REGISTRY = 'https://registry.test';
 const { publicKey, privateKey } = generateKeyPairSync('ed25519');
@@ -60,11 +60,10 @@ function tarball(files: Record<string, string>): Buffer {
 function packJson(name: string, version: string, keyId: string): string {
   return JSON.stringify({
     name, version, description: 'fixture', author: 'test', license: 'Apache-2.0',
-    // This suite isolates v1 registry signing/namespace behavior while the
-    // host serves major 2. Keep the fixture admissible on both majors so the
-    // shared production admission gate does not (correctly) fail first.
-    engines: { openwop: '>=1.0.0 <3.0.0' },
-    signing: { method: 'ed25519', publicKeyRef: keyId },
+    // RFC 0266 — the host reads only the registry's v2 tree, so the fixture is a
+    // v2-signed pack (packs.md §Signing) admissible on major 2.
+    engines: { openwop: '>=2.0.0 <3.0.0' },
+    signing: { keyId, scheme: 'ed25519-canonical-json' },
     runtime: { language: 'javascript', format: 'esm', entry: './index.mjs', minRuntimeVersion: 'node>=20' },
     nodes: [],
   }, null, 2);
@@ -81,8 +80,8 @@ function serve(opts: {
     const u = String(url);
     const ok = (body: string | ArrayBuffer, type = 'application/json'): Response =>
       new Response(body, { status: 200, headers: { 'content-type': type } });
-    if (u.endsWith('.json') && u.includes('/v1/packs/')) {
-      return ok(JSON.stringify({ name: opts.name, version: opts.version, integrity, signing: { method: 'ed25519', publicKeyRef: opts.keyId } }));
+    if (u.endsWith('.json') && u.includes('/v2/packs/')) {
+      return ok(JSON.stringify({ name: opts.name, version: opts.version, integrity, signing: { keyId: opts.keyId, scheme: 'ed25519-canonical-json' } }));
     }
     if (u.endsWith('.tgz')) return ok(new Uint8Array(opts.tgz).buffer, 'application/gzip');
     if (u.endsWith('.sig')) return ok(new Uint8Array(sig).buffer, 'application/octet-stream');
@@ -92,15 +91,15 @@ function serve(opts: {
       // ADR 0663: a conformant registry serves `endpoints` alongside
       // `signingKeys` — the installer resolves paths through it rather than
       // constructing them, and this fixture is the same ONE document both
-      // readers consume. The v1 templates keep this suite's URL shapes.
+      // readers consume. RFC 0266: the v2 tree only.
       return ok(JSON.stringify({
         signingKeys: opts.signingKeys ?? [{ keyId: opts.keyId, permittedNamespaces: ['acme.*'] }],
         endpoints: {
           publicKey: '/keys/{keyId}.pub',
-          v1: {
-            versionManifest: '/v1/packs/{name}/-/{version}.json',
-            versionTarball: '/v1/packs/{name}/-/{version}.tgz',
-            versionSignature: '/v1/packs/{name}/-/{version}.sig',
+          v2: {
+            versionManifest: '/v2/packs/{name}/-/{version}.json',
+            versionTarball: '/v2/packs/{name}/-/{version}.tgz',
+            versionSignature: '/v2/packs/{name}/-/{version}.sig',
           },
         },
       }));
@@ -163,24 +162,17 @@ describe('ADR 0660 D1 — the registry must AUTHORIZE the key for the pack names
     // The whole point: a check that degrades to "allow" when the network hiccups is
     // not a check — it is the original defect with a nondeterministic trigger.
     //
-    // Legacy constructed paths ON, deliberately: since ADR 0663 the installer
-    // resolves its endpoints through the SAME discovery document first, and with
-    // legacy paths off THAT upstream guard throws `pack_registry_unreachable` at
-    // the manifest step — the namespace check was never reached, so a fail-OPEN
-    // catch in it stayed green (wave-10 probe, measured vacuous). With legacy
-    // paths the manifest/tarball/sig/key fetches succeed against the stub, and the
-    // namespace check's own discovery read is the only thing left to refuse.
-    process.env.OPENWOP_REGISTRY_LEGACY_V1_PATHS = 'true';
-    try {
-      // Anchored: the namespace check's own refusal, not the upstream endpoint
-      // resolver's `… did not answer` (the same code, a different guard).
-      await expect(install('acme.widgets')).rejects.toThrow(
-        /^pack_registry_unreachable: https:\/\/registry\.test\/\.well-known\/openwop-registry\.json$/,
-      );
-      expect(existsSync(join(packDir, 'acme.widgets'))).toBe(false);
-    } finally {
-      delete process.env.OPENWOP_REGISTRY_LEGACY_V1_PATHS;
-    }
+    // Through the installer, the endpoint resolver reads the SAME discovery document
+    // first and refuses with its own `… did not answer`, so the namespace check is
+    // never reached (the old legacy-path bypass is gone with RFC 0266). Both halves
+    // are asserted: the install refuses typed, and the namespace check's OWN read
+    // fails closed when called directly (the wave-10 probe's vacuity, closed).
+    await expect(install('acme.widgets')).rejects.toThrow(/^pack_registry_unreachable: /);
+    expect(existsSync(join(packDir, 'acme.widgets'))).toBe(false);
+    __resetRegistryDiscoveryCache();
+    await expect(assertKeyPermittedForPack(REGISTRY, 'acme-key', 'acme.widgets')).rejects.toThrow(
+      /^pack_registry_unreachable: https:\/\/registry\.test\/\.well-known\/openwop-registry\.json$/,
+    );
   });
 
   it('a namespace prefix must respect the dot boundary (acme.* does not admit acmecorp.*)', async () => {

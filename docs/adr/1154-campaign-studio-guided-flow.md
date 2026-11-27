@@ -1,6 +1,6 @@
 # ADR 1154 — Campaign Studio guided flow
 
-Status: Accepted (P1 backend records and P2 progress reads built 2026-11-21, with one P1 part still owed, the D4 channel chain step; no screen yet)
+Status: Accepted (P1 backend records and P2 progress reads built 2026-11-21, with one P1 part still owed, the D4 channel chain step; P3, the step rail on the campaign page, built 2026-11-22 behind `campaigns.guided`, default OFF)
 
 Date: 2026-11-20. Extends `campaigns` (ADR 0200) and `campaign-orchestration`
 (ADRs 0158, 0941, 0960). Source: an in-conversation design, drawn at
@@ -267,6 +267,32 @@ Tests: `backend/typescript/test/adr1154-p2-campaign-progress.test.ts` (13 cases)
 Sabotage-witnessed red on four mechanisms: the other-client brief rule, the
 `unknown` state for a finalized campaign, the per-campaign waiting count on the
 route, and the same count in the status tool.
+
+**P3 (built 2026-11-22).** The sub-toggle `campaigns.guided` (default OFF, bucket
+`tenant`) is declared in the `campaigns` feature. The campaign page shows the
+guided flow only when both `campaigns` and `campaigns.guided` are on; with
+either off the page is unchanged and reads no progress.
+
+- **Step rail.** `ui/StepRail.tsx` is a named `nav` holding an ordered list of
+  links. It is not a tablist: each step has its own address, the current one
+  carries `aria-current="step"`, and each link says its state in words. The rule
+  is in `DESIGN.md`.
+- **Routes.** `/campaign-studio/campaigns/:campaignId/:step` beside the existing
+  campaign route. An unknown step segment shows the overview.
+- **Page.** `CampaignDetailPage` reads `GET …/campaigns/:id/progress` through
+  `progressClient.ts`. The overview shows the rail and a "Next" link to the
+  current step, or to Review when a decision is waiting. A step address shows
+  only that step's sections. The existing sections are re-homed, not rewritten.
+  A failed progress read is a failure with a retry, never an empty rail, and a
+  step the server calls `unknown` is drawn as unknown.
+
+Tests: `ui/__tests__/StepRail.test.tsx` (4 cases) and
+`features/campaign-orchestration/__tests__/campaignGuidedFlow.test.tsx` (6 cases).
+Sabotage-witnessed red on three mechanisms: the current-step mark, the
+two-toggle rule and the step-only sections.
+
+Not in P3: the home, the nav entry rule and the tour (P4); no browser pass yet
+(P6).
 
 ## Risks
 

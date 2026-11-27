@@ -144,6 +144,16 @@ No RFC is needed, and no capability is advertised.
   `makeEmailAdapter(...).send({ purpose: 'transactional' })` on the first
   workspace-scoped Connection, with `OPENWOP_NOTIFY_EMAIL_FROM` as the sender. The
   mint check is `shareCodeMailReady`: a sender address and a resolvable provider.
+
+  > **CORRECTED 2026-11-25 (after #6248):** the sender is now the link org's own
+  > `senderAddress` (`getEmailSettings(tenantId, orgId)`, as `features/email/brokeredProvider.ts`
+  > uses), with the org's name as `fromName` (control characters collapsed, capped at
+  > 100). `OPENWOP_NOTIFY_EMAIL_FROM` is only the fallback for an org without one. The
+  > mint check and the send both take `link.orgId`. The provider is still resolved with
+  > the tenant only, on purpose: a code send has no acting human, and the broker
+  > withholds an org Connection from such a send and then returns nothing
+  > (`authorizedCandidates`), so resolving with `orgId` would leave an org with its own
+  > Connection unable to send at all.
 - **The session read.** `/host/openwop-app/shared` is a public prefix the auth
   middleware does not session, so the route reads and verifies `__session` itself,
   and the verify route mints an anonymous session when the visitor has none.

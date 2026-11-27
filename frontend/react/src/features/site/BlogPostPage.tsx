@@ -23,7 +23,7 @@ import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { brand } from '../../brand/brand.js';
-import { Skeleton } from '../../ui/Skeleton.js';
+import { PublicPageLoading } from './PublicPageLoading.js';
 import { CheckIcon, LinkIcon, ListIcon, MailIcon, ExternalLinkIcon } from '../../ui/icons/index.js';
 import { RenderSections } from '../cms/SectionRenderer.js';
 import { deriveToc, type TocEntry } from '../docs/docsToc.js';
@@ -224,7 +224,7 @@ export function BlogPostPage({ orgId, slug }: { orgId: string; slug: string }): 
     return () => observer.disconnect();
   }, [page]);
 
-  if (!done) return <div className="cms-public-page"><div className="u-p-4" role="status" aria-label={t('common:loading')}><Skeleton /></div></div>;
+  if (!done) return <PublicPageLoading />;
 
   if (!page) {
     const notFound = failure !== 'error';

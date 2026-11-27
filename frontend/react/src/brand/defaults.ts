@@ -78,6 +78,11 @@ export interface BrandConfig {
    *  and the app shell's `/`. An in-app path; see `appHomePath()` for what is
    *  accepted. Build-time only. */
   appHomePath: string;
+  /** Show the public site's grouped menu in the site-tier product header
+   *  (`SiteShell`), for a white-label whose signed-in desk is a `site` route
+   *  (DeckTalk's `/app/*`). Off by default. Build-time only; see
+   *  `sitePublicMenu()`. */
+  sitePublicMenu: boolean;
 }
 
 /** The stock signed-in landing path (ADR 0487). */
@@ -100,6 +105,16 @@ export function appHomePath(raw: string | undefined): string {
   if (!v || v[0] !== '/' || v[1] === '/') return DEFAULT_APP_HOME_PATH;
   if (/[\\\s\u0000-\u001f\u007f?#]/.test(v)) return DEFAULT_APP_HOME_PATH;
   return v;
+}
+
+/**
+ * `VITE_BRAND_SITE_PUBLIC_MENU` as a boolean: on only for exactly `true` or `1`
+ * (surrounding whitespace ignored). Anything else, unset included, is off, so a
+ * stock build and every adopter that does not set it are unchanged.
+ */
+export function sitePublicMenu(raw: string | undefined): boolean {
+  const v = raw?.trim();
+  return v === 'true' || v === '1';
 }
 
 /**
@@ -162,6 +177,7 @@ export const BRAND_DEFAULTS: BrandConfig = {
   // is a shared-secret stopgap, not an identity posture). See WHITE-LABEL.md.
   appGate: { mode: 'none', password: '' },
   appHomePath: DEFAULT_APP_HOME_PATH,
+  sitePublicMenu: false,
 };
 
 /**
@@ -263,6 +279,7 @@ export const BRAND_ENV_KEYS = {
   consentClearance: 'VITE_BRAND_CONSENT_CLEARANCE',
   consentFooter: 'VITE_BRAND_CONSENT_FOOTER',
   appHomePath: 'VITE_BRAND_APP_HOME_PATH',
+  sitePublicMenu: 'VITE_BRAND_SITE_PUBLIC_MENU',
 } as const;
 
 /** Every `VITE_BRAND_*` build variable this app reads. The Vite config refuses any
@@ -372,6 +389,7 @@ export function resolveBrandFromEnv(
       password: coalesce(env[k.appGatePassword], BRAND_DEFAULTS.appGate.password),
     },
     appHomePath: appHomePath(env[k.appHomePath]),
+    sitePublicMenu: sitePublicMenu(env[k.sitePublicMenu]),
   };
 }
 

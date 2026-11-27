@@ -45,8 +45,10 @@ const REPO = join(import.meta.dirname, '..', '..', '..', '..', '..', '..');
 /** The constraints come from the SCHEMAS this export is judged by, read off disk
  *  (repo-root `schemas/`, resolved from this file) — never a hand copy. */
 interface StringRule { pattern?: string; maxLength?: number }
-const V1_MANIFEST = JSON.parse(
-  readFileSync(join(REPO, 'schemas', 'workflow-chain-pack-manifest.schema.json'), 'utf8'),
+// RFC 0266 — the v2 manifest schema (the host judges every chain pack by it; the
+// flat v1 copy is no longer vendored). Its `name`/`description` rules equal v1's.
+const MANIFEST = JSON.parse(
+  readFileSync(join(REPO, 'schemas', 'v2', 'workflow-chain-pack-manifest.schema.json'), 'utf8'),
 ) as { properties: { name: StringRule; description: StringRule } };
 const V2_IDS = JSON.parse(
   readFileSync(join(REPO, 'schemas', 'v2', 'ids.schema.json'), 'utf8'),
@@ -181,10 +183,10 @@ describe('every length-constrained field stays inside the schema', () => {
     // constraint in this file, and an invented constraint yields an invented
     // finding. Read the SSoT, not the intuition.
     const m = buildChainPackManifest(wf([node('a')], 'T'.repeat(2000)));
-    expect(rule(V1_MANIFEST.properties.name, 'maxLength')).toBe(256);
-    expect(rule(V1_MANIFEST.properties.description, 'maxLength')).toBe(1024);
-    expect(m.name.length, 'pack name exceeds the schema maxLength').toBeLessThanOrEqual(V1_MANIFEST.properties.name.maxLength ?? 0);
-    expect(m.description.length, 'pack description exceeds the schema maxLength').toBeLessThanOrEqual(V1_MANIFEST.properties.description.maxLength ?? 0);
+    expect(rule(MANIFEST.properties.name, 'maxLength')).toBe(256);
+    expect(rule(MANIFEST.properties.description, 'maxLength')).toBe(1024);
+    expect(m.name.length, 'pack name exceeds the schema maxLength').toBeLessThanOrEqual(MANIFEST.properties.name.maxLength ?? 0);
+    expect(m.description.length, 'pack description exceeds the schema maxLength').toBeLessThanOrEqual(MANIFEST.properties.description.maxLength ?? 0);
   });
 });
 
@@ -204,8 +206,8 @@ describe('the pack name survives hostile workflow names', () => {
     // draft asserted npm's 214 and a looser pattern — an invented constraint
     // produces an invented finding, so the assertion has to come from the SSoT.)
     expect(m.name, `slug escaped the manifest name pattern: ${m.name}`)
-      .toMatch(new RegExp(String(rule(V1_MANIFEST.properties.name, 'pattern'))));
-    expect(m.name.length, `slug exceeds maxLength: ${m.name.length}`).toBeLessThanOrEqual(Number(rule(V1_MANIFEST.properties.name, 'maxLength')));
+      .toMatch(new RegExp(String(rule(MANIFEST.properties.name, 'pattern'))));
+    expect(m.name.length, `slug exceeds maxLength: ${m.name.length}`).toBeLessThanOrEqual(Number(rule(MANIFEST.properties.name, 'maxLength')));
     // ADR 0766 — a pinned export is judged by the v2 schema, whose chainId is
     // `^[A-Za-z0-9._~:-]{1,128}$` (ids.schema.json). A 216-char chainId loaded on
     // v1 and is refused on v2.

@@ -396,8 +396,12 @@ function usePublicNav(): { groups: NavGroup[]; flat: NavLink[]; primary: NavLink
  * the VISIBLE "Menu" label (WCAG 2.5.3 label-in-name — SITE-R2-8); open/closed
  * state rides `aria-expanded`, not the name.
  */
-function PublicMenu({ groups, mega, featured, setPageActionsTarget }: {
+function PublicMenu({ groups, mega, featured, setPageActionsTarget, utilities = true }: {
   groups: NavGroup[];
+  /** The panel's closing row (theme, language, sign-in, page actions). Default
+   *  on. `PublicSiteMenu` turns it off: `SiteShell` already renders those in its
+   *  header, and has no page actions. */
+  utilities?: boolean;
   /** ADR 1062 D2 — the grouped panel's featured card (grouped mode only). */
   featured: FeaturedCard | null;
   /** ADR 1049 grouped mode: the panel becomes a multi-column mega menu and each
@@ -462,19 +466,38 @@ function PublicMenu({ groups, mega, featured, setPageActionsTarget }: {
         ) : null}
         {/* ADR 1062 D1 — the utilities close the panel: navigation first, then
             the theme, language and page actions ("Edit this page") as one row. */}
-        <div className="public-menu__footer">
-          <div className="public-menu__utilities">
-            <ThemeToggle />
-            <LanguageSwitcher />
+        {utilities ? (
+          <div className="public-menu__footer">
+            <div className="public-menu__utilities">
+              <ThemeToggle />
+              <LanguageSwitcher />
+            </div>
+            {/* On a phone the account button moves in here, so the header's
+                wordmark keeps its full width (CSS shows exactly one of the two). */}
+            <div className="public-menu__signin"><SignInButton /></div>
+            <div ref={setPageActionsTarget} className="public-menu__page-actions" />
           </div>
-          {/* On a phone the account button moves in here, so the header's
-              wordmark keeps its full width (CSS shows exactly one of the two). */}
-          <div className="public-menu__signin"><SignInButton /></div>
-          <div ref={setPageActionsTarget} className="public-menu__page-actions" />
-        </div>
+        ) : null}
       </nav>
     </div>
   );
+}
+
+const noPageActions = (): void => {};
+
+/**
+ * The public site's grouped menu, for the site-tier product header (`SiteShell`,
+ * behind `VITE_BRAND_SITE_PUBLIC_MENU`; ADR 0641 note of 2026-11-24). It is the
+ * same `usePublicNav` read the public header makes: published pages, the blog
+ * and the docs probe, all public reads that need no session. It renders in
+ * grouped mode only (ADR 1049), with Legal kept out as in `PublicShell`, and no
+ * utilities row. An ungrouped site renders nothing: the site nav strip already
+ * covers it.
+ */
+export function PublicSiteMenu(): JSX.Element | null {
+  const { groups, grouped, featured } = usePublicNav();
+  if (!grouped) return null;
+  return <PublicMenu groups={groups.filter((g) => g.id !== 'legal')} mega featured={featured} setPageActionsTarget={noPageActions} utilities={false} />;
 }
 
 export function PublicShell({ children }: { children: ReactNode }): JSX.Element {

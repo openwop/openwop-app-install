@@ -77,7 +77,6 @@ it('signed normal installer preserves imported bytes, allows unchanged no-op and
         signingKeys: [{ keyId, permittedNamespaces: ['vendor.*'] }],
         endpoints: { publicKey: '/keys/{keyId}.pub',
           versionManifest: '/v1/packs/{name}/-/{version}.json',
-          v1: { versionManifest: '/v1/packs/{name}/-/{version}.json', versionTarball: '/v1/packs/{name}/-/{version}.tgz', versionSignature: '/v1/packs/{name}/-/{version}.sig' },
           v2: { versionManifest: '/v2/packs/{name}/-/{version}.json', versionTarball: '/v2/packs/{name}/-/{version}.tgz', versionSignature: '/v2/packs/{name}/-/{version}.sig' } },
       }));
       if (url === registry + '/keys/' + keyId + '.pub') return ok(publicPem);

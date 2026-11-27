@@ -31,6 +31,7 @@ import { ProjectStrategyChips } from '../strategy/StrategyAlignment.js';
 import { ProjectMembersTab } from './ProjectMembersTab.js';
 import { ProjectChatTab } from './ProjectChatTab.js';
 import { ProjectClientAccessTab } from './ProjectClientAccessTab.js';
+import { ProjectClientMessages } from './ProjectClientMessages.js';
 // ADR 0084 correction — notebooks (Sources) + podcasts as project tabs, not standalone.
 import { useFeatureAccess, useFeatureVisible } from '../../featureToggles/FeatureAccessContext.js';
 import { featureProjectTabs } from '../registry.js';
@@ -327,7 +328,11 @@ export function ProjectDetailPage(): JSX.Element {
       ) : tab === 'members' ? (
         <ProjectMembersTab project={project} canWrite={canWrite} onSaved={setProject} />
       ) : tab === 'clients' ? (
-        <ProjectClientAccessTab project={project} />
+        <>
+          <ProjectClientAccessTab project={project} />
+          {/* ADR 1099 D7 — each outside collaborator's thread with the firm. */}
+          <ProjectClientMessages project={project} canWrite={canWrite} />
+        </>
       ) : tab === 'chat' ? (
         <ProjectChatTab project={project} canWrite={canWrite} onSaved={setProject} />
       ) : tab === 'board' ? (

@@ -18,7 +18,6 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 
 describe('LOCALE_RE is the vendored schema pattern (RFC 0206 §A)', () => {
   it.each([
-    'schemas/localized-content-section.schema.json',
     'schemas/v2/localized-content-section.schema.json',
   ])('byte-identical to the locale-key pattern in %s', (rel) => {
     const text = readFileSync(join(ROOT, rel), 'utf8');

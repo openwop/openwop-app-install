@@ -90,6 +90,12 @@ const PREFIX_RATE_TABLE: ReadonlyArray<readonly [string, { input: number; output
   ['o1-mini', { input: 3.0, output: 12.0 }],
   ['o1', { input: 15.0, output: 60.0 }],
   // Google Gemini 2.x / 1.5
+  // #6242 (2026-11-24) — KEPT on purpose although the catalog dropped both ids
+  // (deprecated 2026-11-02). A caller may still pin them, and Google bills them at
+  // these prices until it re-routes them on 2026-12-01: 2.5 Flash to 3.5 Flash-Lite
+  // ($0.30/$2.50, the same as this row) and 2.5 Pro to 3.8 Flash ($0.75/$3.75, below
+  // this row, so the estimate errs high). Deleting a row makes the estimate
+  // undefined, which reads as $0, and a cost ceiling then cannot fire (H2 above).
   ['gemini-2.5-pro', { input: 1.25, output: 10.0 }],
   ['gemini-2.5-flash', { input: 0.3, output: 2.5 }],
   ['gemini-2.0-flash', { input: 0.1, output: 0.4 }],

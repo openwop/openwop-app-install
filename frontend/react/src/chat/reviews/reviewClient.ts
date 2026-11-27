@@ -103,6 +103,14 @@ export interface ReviewRequest {
     current?: unknown;
     reason?: string;
   };
+  /** ADR 1099 P3b — a proposal from someone outside the workspace (a firm's client). */
+  collabProposal?: {
+    groupKey: string;
+    resourceKind: string;
+    resourceId: string;
+    toolId: string;
+    deciderLabel?: string;
+  };
   composedWorkflow?: {
     definitionHash: string;
     agentProfileId?: string;

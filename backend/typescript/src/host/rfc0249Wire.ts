@@ -11,14 +11,14 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { locateRepoSchemasDir } from './_repoPath.js';
+import { locateRepoSchemasV2Dir } from './_repoPath.js';
 
 let cachedWire: boolean | undefined;
 
 export function rfc0249WireAvailable(): boolean {
   if (cachedWire !== undefined) return cachedWire;
   try {
-    const dir = join(locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json'), 'v2');
+    const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
     cachedWire = existsSync(join(dir, 'proposal-submit.schema.json'))
       && /"installedArtifact"/.test(readFileSync(join(dir, 'proposal.schema.json'), 'utf8'));
   } catch {

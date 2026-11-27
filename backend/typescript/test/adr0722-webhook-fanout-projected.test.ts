@@ -2,7 +2,7 @@ import { createRequire } from 'node:module';
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { locateRepoSchemasDir } from '../src/host/_repoPath.js';
+import { locateRepoSchemasV2Dir } from '../src/host/_repoPath.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -106,7 +106,7 @@ describe('ADR 0722 — the webhook fan-out is a projected major-2 egress channel
     };
     const ajv = new Ajv({ strict: false, allErrors: true });
     (require_('ajv-formats').default ?? require_('ajv-formats'))(ajv);
-    const dir = join(locateRepoSchemasDir(here, 'run-event.schema.json'), 'v2');
+    const dir = locateRepoSchemasV2Dir(here);
     for (const f of readdirSync(dir)) {
       if (!f.endsWith('.schema.json')) continue;
       try { ajv.addSchema(JSON.parse(readFileSync(join(dir, f), 'utf8')) as unknown); } catch { /* duplicate $id */ }

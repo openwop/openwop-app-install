@@ -48,6 +48,16 @@ upgrade is neither: list it in `breakingConfig`.
 
 ## Version log
 
+### v0.23.0 — 2026-11-27
+
+- **Required stop:** no. **Rolling-safe:** yes.
+- **Schema:** sqlite 54 / postgres 52 (unchanged) · **App migrations:** 27 (unchanged).
+- **Added:** the client portal page and the portal section seam (ADR 1099 P4 + D10, #6294), behind `projects.client-portal` (default off); the adopter guide and erasure witness (P5, #6317); verified emailed approval links (ADR 0924 P2c); the approved held call runs on the next turn (ADR 1156 P2).
+- **Security:** a caller can no longer choose a run's AI key through `metadata.aiDefault` (#6309).
+- **Breaking:** none. No route, env var or config key is removed or renamed.
+- **Config:** none required. Optional `VITE_BRAND_SITE_PUBLIC_MENU`.
+- [CHANGELOG §0.23.0](./CHANGELOG.md#0230--2026-11-27)
+
 ### v0.22.0 — 2026-11-25
 
 - **Required stop:** no. **Rolling-safe:** yes.

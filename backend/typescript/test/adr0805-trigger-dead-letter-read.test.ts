@@ -28,7 +28,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Ajv2020 from 'ajv/dist/2020.js';
@@ -42,15 +42,18 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 let server: http.Server; let base = '';
 const saved: Record<string, string | undefined> = {};
 
-// The corpus page schema (vendored at the suite pin), with the payload defs it
-// `$ref`s — so a record that is not the RFC 0232 §C shape fails here first.
-const SCHEMAS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'schemas');
+// The corpus page schema (vendored at the suite pin), with the payload defs and
+// ids it `$ref`s — so a record that is not the RFC 0232 §C shape fails here first.
+// RFC 0266: the v2 copy (the host serves major 2; the flat v1 tree is gone).
+const SCHEMAS = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'schemas', 'v2');
 const ajv = new Ajv2020({ strict: false, allErrors: true });
 addFormats(ajv);
-for (const f of ['run-event-payloads.schema.json', 'trigger-dead-letter-page.schema.json']) {
+// Every v2 sibling, because v2 schemas `$ref` each other (`ids.schema.json`, and
+// the payload defs' own siblings) and an unregistered one fails the compile.
+for (const f of readdirSync(SCHEMAS).filter((x) => x.endsWith('.schema.json'))) {
   ajv.addSchema(JSON.parse(readFileSync(join(SCHEMAS, f), 'utf8')) as Record<string, unknown>);
 }
-const pageSchema = ajv.getSchema('https://openwop.dev/spec/v1/trigger-dead-letter-page.schema.json');
+const pageSchema = ajv.getSchema('https://openwop.dev/spec/v2/trigger-dead-letter-page.schema.json');
 function pageErrors(doc: unknown): string[] {
   if (!pageSchema) throw new Error('trigger-dead-letter-page did not register — validation would be vacuous');
   return pageSchema(doc) ? [] : (pageSchema.errors ?? []).map((e) => `${e.instancePath} ${e.message}`);

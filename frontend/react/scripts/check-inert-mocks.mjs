@@ -122,6 +122,40 @@ const exportsKey = (targetSrc, key) =>
   new RegExp(`export\\s+(type|interface|enum)\\s+${key}\\b`).test(targetSrc) ||
   (key === 'default' && /export\s+default\b/.test(targetSrc));
 
+/** Where the factory's returned object(s) start, as indexes into `call`.
+ *  An expression body (`() => ({ … })`) is one object. A BLOCK body
+ *  (`async (orig) => { const x: T = …; return { … }; }`) is not itself the
+ *  object: its own top level holds locals, whose `name: Type` annotations read
+ *  like keys, while the real overrides sit inside each top-level `return { … }`.
+ *  Reading the block as the object was a false positive on every annotated
+ *  local AND blind to every real key of a block-bodied factory (false reds on main f3bb33c4a5, 2026-11-27). */
+function overrideObjects(call) {
+  const comma = call.indexOf(',');
+  if (comma < 0) return [];
+  const arrow = call.indexOf('=>', comma);
+  let j = arrow >= 0 ? arrow + 2 : call.indexOf('{', comma);
+  if (j < 0) return [];
+  while (/\s/.test(call[j] ?? '')) j++;
+  if (call[j] === '(') { const k = call.indexOf('{', j); return k < 0 ? [] : [k]; }
+  if (call[j] !== '{') return [];
+  const starts = [];
+  let depth = 0, paren = 0, inStr = null;
+  for (let i = j; i < call.length; i++) {
+    const c = call[i], p = call[i - 1];
+    if (inStr) { if (c === inStr && p !== '\\') inStr = null; continue; }
+    if (c === '"' || c === "'" || c === '`') { inStr = c; continue; }
+    if (c === '(') paren++;
+    else if (c === ')') paren--;
+    else if (c === '{') depth++;
+    else if (c === '}') { depth--; if (depth === 0) break; }
+    else if (depth === 1 && paren === 0 && !/[\w$.]/.test(p ?? '')) {
+      const rm = /^return\s*\(?\s*\{/.exec(call.slice(i));
+      if (rm) { starts.push(i + rm[0].length - 1); }
+    }
+  }
+  return starts;
+}
+
 const findings = [];
 let mocksChecked = 0;
 
@@ -136,8 +170,7 @@ for (const rel of files) {
     if (!target) continue;
     mocksChecked++;
     const targetSrc = readFileSync(target, 'utf8');
-    const bodyStart = call.indexOf('{', call.indexOf(','));
-    if (bodyStart < 0) continue;
+    for (const bodyStart of overrideObjects(call)) {
     let depth = 0, paren = 0, inStr = null;
     for (let i = bodyStart; i < call.length; i++) {
       const c = call[i], p = call[i - 1];
@@ -146,7 +179,7 @@ for (const rel of files) {
       if (c === '(') { paren++; continue; }
       if (c === ')') { paren--; continue; }
       if (c === '{') depth++;
-      else if (c === '}') depth--;
+      else if (c === '}') { depth--; if (depth === 0) break; }
       else if (depth === 1 && paren === 0) {
         const km = /^([A-Za-z_$][\w$]*)\s*:/.exec(call.slice(i));
         if (km && /[{,\s]/.test(p ?? '')) {
@@ -156,6 +189,7 @@ for (const rel of files) {
           i += km[0].length - 1;
         }
       }
+    }
     }
   }
 }

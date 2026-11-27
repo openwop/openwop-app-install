@@ -32,6 +32,7 @@ import { getChain } from '../../host/workflowChainPackLoader.js';
 import { CLIENT_REPORT_CHAIN_ID } from './reports/types.js';
 import { CLIENT_REPORT_GRANT_KIND, publishedReportExists } from './reports/portalLinks.js';
 import { registerClientReportLinkTemplate } from './reports/reportLinkMail.js';
+import { registerApprovalLinkTemplate } from './approvalLinkMail.js';
 import { registerRunStartContributor } from '../../host/runStartContext.js';
 import { registerRunContextProvider } from '../../host/runContextProviders.js';
 import { registerRunClientKnowledge } from '../../host/runClientKnowledge.js';
@@ -124,6 +125,7 @@ export const campaignOpsFeature: BackendFeature = {
     });
     // ADR 0957 D7 — the report-link email kind (link only, no figures).
     registerClientReportLinkTemplate();
+    registerApprovalLinkTemplate(); // ADR 0924 P2c — the approver link email (4 locales)
     registerCollaborationRoutes(deps);
   },
   surface: { id: CAMPAIGN_OPS_TOGGLE, build: buildCampaignOpsSurface },

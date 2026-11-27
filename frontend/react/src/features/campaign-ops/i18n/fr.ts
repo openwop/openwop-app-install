@@ -189,6 +189,12 @@ export const messages = {
   linkFor: 'Lien pour {{name}}',
   linkCopy: 'Copier le lien',
   linkCopied: 'Copié',
+  // ADR 0924 P2c — comment chaque lien d’approbation a été remis.
+  sendToClientHelpEmailed: 'Chaque approbateur reçoit son lien privé par e-mail. Un lien fonctionne 7 jours, uniquement pour cette modification, et cesse de fonctionner une fois la décision prise. Renvoyer désactive les anciens liens.',
+  linkEmailed: 'Envoyé par e-mail à {{email}}',
+  linkNotDelivered: 'Non remis. Renvoyez-le, ou copiez le lien et envoyez-le vous-même.',
+  linkCopyOnly: 'L’e-mail n’est pas configuré pour cet espace de travail : copiez le lien et envoyez-le vous-même.',
+  linkVerifiedNote: 'À l’ouverture, un code à usage unique est envoyé à {{email}} : le lien ne fonctionne que pour cette personne.',
   portalTitle: 'Une modification pour {{client}} attend votre approbation',
   portalIntro: 'Vérifiez ci-dessous ce qui va changer, puis approuvez ou refusez.',
   portalIntroNamed: 'Bonjour {{name}}. Vérifiez ci-dessous ce qui va changer, puis approuvez ou refusez.',
@@ -208,6 +214,8 @@ export const messages = {
   portalGoneTitle: 'Ce lien ne fonctionne plus',
   portalGoneBody: 'Il a peut-être expiré, ou la décision a déjà été prise. Demandez un nouveau lien à l’agence si vous en avez encore besoin.',
   portalRateLimited: 'Trop de tentatives. Patientez quelques minutes et réessayez.',
+  portalVerifyExpired: 'Votre vérification a expiré. Rechargez cette page pour recevoir un nouveau code.',
+  portalLocked: 'Ce lien est bloqué après trop de codes erronés. Demandez à l’agence de vous envoyer un nouveau lien.',
   portalFailed: 'L’envoi a échoué. Vérifiez votre connexion et réessayez.',
   // ADR 0957 P0 — client reports (internal review view)
   reportsHeading: "Rapports clients",

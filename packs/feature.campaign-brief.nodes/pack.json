@@ -1,6 +1,6 @@
 {
   "name": "feature.campaign-brief.nodes",
-  "version": "1.7.1",
+  "version": "1.7.2",
   "kind": "node",
   "description": "Personas & Campaign Brief node pack \u2014 validate a brief (compute the enabled channel set) and generate the messaging kernel (the shared strategic foundation every channel echoes), grounding it in the knowledge base (kb.rag) + brand voice (ctx.features.brand) via the run-scoped provider. Drives the Campaign Studio orchestration.",
   "author": "OpenWOP App",
@@ -73,7 +73,7 @@
     },
     {
       "typeId": "feature.campaign-brief.nodes.generate-angles",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "label": "Brief: Generate Ad Angles",
       "description": "Generates positioning angles from the messaging kernel + the brief's stored VOC evidence \u2014 the model cites evidence by index, the node maps indexes to stored evidence ids, and the surface re-validates every proofRef closed-world; an angle with no resolvable proof is dropped with a finding and an all-dropped generation is a typed failure. Hook variants project into the ORG hook bank as candidate hooks (deterministic ids, idempotent, never demoting). Requires a kernel + stored evidence (ADR 0403 P2). Inputs: { briefId, personaId?, provider?, model? }. ADR 1020 D9: role side-effect, because it writes the brief's research. It is held on the AI invocation log, not served: a replay fork re-runs it with the model call answered from the log, so its write runs again. Evidence and angle ids are content-derived (put-if-absent), so the repeat adds no duplicate, but it can bring back an item deleted while curating; the targeting pack is an upsert per platform, so a fork re-writes it (CS70WF-37).",
       "category": "integration",
@@ -82,7 +82,7 @@
     },
     {
       "typeId": "feature.campaign-brief.nodes.build-targeting",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "label": "Brief: Build Targeting Pack",
       "description": "Builds THE platform targeting pack (meta|google|linkedin|tiktok) for a brief \u2014 audiences, interests, keywords with a rationale citing the VOC evidence they derive from (model cites indexes, node maps to ids, surface re-validates). Deterministic brief+platform upsert: a re-run replaces, never duplicates. Requires stored evidence (ADR 0403 P3). Inputs: { briefId, platform, provider?, model? }. ADR 1020 D9: role side-effect, because it writes the brief's research. It is held on the AI invocation log, not served: a replay fork re-runs it with the model call answered from the log, so its write runs again. Evidence and angle ids are content-derived (put-if-absent), so the repeat adds no duplicate, but it can bring back an item deleted while curating; the targeting pack is an upsert per platform, so a fork re-writes it (CS70WF-37).",
       "category": "integration",

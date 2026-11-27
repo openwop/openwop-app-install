@@ -20,6 +20,7 @@ import { StateCard } from '../../ui/StateCard.js';
 import { InlineState } from '../../ui/InlineState.js';
 import { Modal } from '../../ui/Modal.js';
 import { SelectField, TextField } from '../../ui/Field.js';
+import { StepRail, type StepRailState } from '../../ui/StepRail.js';
 import { useFeatureVisible } from '../../featureToggles/FeatureAccessContext.js';
 import { useOrgSelection } from '../../ui/useOrgSelection.js';
 import { formatCurrencyMinor, formatDateTime, formatNumber } from '../../i18n/format.js';
@@ -33,6 +34,7 @@ import {
   FeatureDisabledError, CAMPAIGN_STATUSES, CAMPAIGN_STRATEGIST_AGENT,
   type MarketingCampaign, type CampaignStatus, type AdDispatch, type CampaignLinks, type CampaignProductRef, type LinkSection,
 } from './campaignStudioClient.js';
+import { CAMPAIGN_STEPS, campaignStepPath, getCampaignProgress, isCampaignStep, type CampaignProgress, type CampaignStep } from './progressClient.js';
 
 const CommandSection = lazy(() => import('./CommandSection.js').then((m) => ({ default: m.CommandSection })));
 const CampaignVariantsSection = lazy(() => import('./CampaignVariantsSection.js').then((m) => ({ default: m.CampaignVariantsSection })));
@@ -43,13 +45,16 @@ const VetoWindowsSection = lazy(() => import('./autonomy/VetoWindowsSection.js')
 type TFn = ReturnType<typeof useTranslation>['t'];
 
 export function CampaignDetailPage(): JSX.Element {
-  const { campaignId = '' } = useParams();
-  return <CampaignDetail key={campaignId} campaignId={campaignId} />;
+  const { campaignId = '', step } = useParams();
+  return <CampaignDetail key={campaignId} campaignId={campaignId} step={isCampaignStep(step) ? step : undefined} />;
 }
+
+/** i18n key suffixes for the server's machine codes (keys cannot carry a hyphen cleanly). */
+const camel = (code: string): string => code.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
 
 // A new route gets a new state owner. Late responses from the previous
 // campaign can only settle its unmounted instance, never the current page.
-function CampaignDetail({ campaignId }: { campaignId: string }): JSX.Element {
+function CampaignDetail({ campaignId, step }: { campaignId: string; step?: CampaignStep | undefined }): JSX.Element {
   const { t } = useTranslation('campaign-orchestration');
   const { t: tc } = useTranslation('common');
   const navigate = useNavigate();
@@ -62,6 +67,18 @@ function CampaignDetail({ campaignId }: { campaignId: string }): JSX.Element {
   const [links, setLinks] = useState<CampaignLinks | null>(null);
   const [linksFailed, setLinksFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // ADR 1154 D9 — the guided flow rides the console toggle AND its own. Off, this
+  // page is exactly the detail it was: every section, in one column, no rail.
+  const guided = featureVisible('campaigns') && featureVisible('campaigns.guided');
+  const [progress, setProgress] = useState<CampaignProgress | null>(null);
+  const [progressFailed, setProgressFailed] = useState(false);
+  const loadProgress = useCallback(async () => {
+    setProgressFailed(false);
+    try { setProgress(await getCampaignProgress(campaignId)); } catch { setProgress(null); setProgressFailed(true); }
+  }, [campaignId]);
+  useEffect(() => { if (guided) void loadProgress(); }, [guided, loadProgress]);
+  /** Which sections show: all of them off the guided flow; one step's (or the overview's) on it. */
+  const on = (where: CampaignStep | 'overview'): boolean => !guided || (step ?? 'overview') === where;
 
   const loadLinks = useCallback(async (id: string) => {
     setLinksFailed(false);
@@ -114,6 +131,10 @@ function CampaignDetail({ campaignId }: { campaignId: string }): JSX.Element {
           CO-SP-7 — the planned budget, WITH its ISO currency when recorded
           (formatCurrencyMinor derives the currency's own decimals, so JPY-class
           amounts don't misrender 100×); labeled bare when currency is absent. */}
+      {guided ? (
+        <GuidedRail t={t} campaignId={campaign.id} step={step} progress={progress} failed={progressFailed} onRetry={() => void loadProgress()} retryLabel={tc('retry')} />
+      ) : null}
+      {on('overview') ? <>
       {campaign.objective ? <p className="muted u-mt-0">{campaign.objective}</p> : null}
       {orgsFailed ? <InlineState kind="failed" message={t('orgNameFailed')} announce={t('orgNameFailed')} announcePolite
         action={<Button variant="link" size="sm" onClick={retryOrgs}>{tc('retry')}</Button>} /> : null}
@@ -128,8 +149,9 @@ function CampaignDetail({ campaignId }: { campaignId: string }): JSX.Element {
             : t('plannedBudgetNoCurrency', { amount: formatNumber(campaign.budget.totalMinor) })}</span>
         ) : null}
       </p>
+      </> : null}
 
-      {campaign.kernel ? (
+      {!on('brief') ? null : campaign.kernel ? (
         <section className="surface-card u-mb-4">
           <div className="u-flex u-items-center u-gap-2 u-mb-2"><SparklesIcon size={16} aria-hidden /> <h2 className="u-m-0 u-fs-16">{t('kernelTitle')}</h2></div>
           <p className="u-fw-600 u-mb-1">{campaign.kernel.headline}</p>
@@ -141,33 +163,70 @@ function CampaignDetail({ campaignId }: { campaignId: string }): JSX.Element {
         <Notice variant="info">{t('noKernel')} <Button variant="link" onClick={run}>{t('runWithStrategist')}</Button></Notice>
       )}
 
+      {on('create') ? (
       <section className="surface-card u-mb-4">
         <h2 className="u-mt-0 u-fs-16">{t('channelsTitle')}</h2>
         {campaign.channels.length === 0 ? <p className="muted">{t('noChannels')}</p> : (
           <div className="list-row-name-line">{campaign.channels.map((c) => <span key={c} className="chip chip--muted">{t(`channel_${c}`, { defaultValue: c })}</span>)}</div>
         )}
       </section>
+      ) : null}
 
+      {on('overview') ? <AttentionNotice t={t} campaign={campaign} onChanged={(c) => setCampaign(c)} onError={setError} /> : null}
 
-      <AttentionNotice t={t} campaign={campaign} onChanged={(c) => setCampaign(c)} onError={setError} />
+      {on('plan') ? <ProductsSection t={t} campaign={campaign} links={links} linksFailed={linksFailed}
+        onSaved={(c) => { setCampaign(c); void loadLinks(c.id); }} onRetry={() => void loadLinks(campaign.id)} /> : null}
 
-      <ProductsSection t={t} campaign={campaign} links={links} linksFailed={linksFailed}
-        onSaved={(c) => { setCampaign(c); void loadLinks(c.id); }} onRetry={() => void loadLinks(campaign.id)} />
-
+      {on('review') ? (
       <Suspense fallback={<InlineState kind="loading" message={tc('loading')} />}>
         <VetoWindowsSection campaignId={campaign.id} />
         <AutonomyPolicyPanel scope={{ kind: 'campaign', campaignId: campaign.id }} />
       </Suspense>
+      ) : null}
 
-      {featureVisible('campaign-autopilot') ? <Suspense fallback={null}><AutopilotSection key={campaign.id} campaignId={campaign.id} /></Suspense> : null}
-      <Suspense fallback={null}><CommandSection key={campaign.id} campaignId={campaign.id} /></Suspense>
-      {featureVisible('campaign-orchestration.variant-factory') ? <Suspense fallback={null}><CampaignVariantsSection key={campaign.id} campaignId={campaign.id} /></Suspense> : null}
-      <CampaignLedgerSection campaignId={campaign.id} />
+      {on('launch') && featureVisible('campaign-autopilot') ? <Suspense fallback={null}><AutopilotSection key={campaign.id} campaignId={campaign.id} /></Suspense> : null}
+      {on('create') ? <Suspense fallback={null}><CommandSection key={campaign.id} campaignId={campaign.id} /></Suspense> : null}
+      {on('create') && featureVisible('campaign-orchestration.variant-factory') ? <Suspense fallback={null}><CampaignVariantsSection key={campaign.id} campaignId={campaign.id} /></Suspense> : null}
+      {on('measure') ? <CampaignLedgerSection campaignId={campaign.id} /> : null}
 
-      <LaunchState t={t} campaign={campaign} />
+      {on('launch') ? <LaunchState t={t} campaign={campaign} /> : null}
 
-      <LinkedWork t={t} links={links} linksFailed={linksFailed} onRetry={() => void loadLinks(campaign.id)} />
+      {on('plan') ? <LinkedWork t={t} links={links} linksFailed={linksFailed} onRetry={() => void loadLinks(campaign.id)} /> : null}
     </div>
+  );
+}
+
+/**
+ * ADR 1154 D9 — the step rail and the one "next" line, both from the server's
+ * progress read. A failed read is a failure with a retry; the rail is never
+ * drawn from a guess, and an `unknown` step says unknown.
+ */
+function GuidedRail({ t, campaignId, step, progress, failed, onRetry, retryLabel }: {
+  t: TFn; campaignId: string; step?: CampaignStep | undefined; progress: CampaignProgress | null; failed: boolean; onRetry: () => void; retryLabel: string;
+}): JSX.Element {
+  if (failed) {
+    return <InlineState kind="failed" message={t('progressFailed')} announce={t('progressFailed')}
+      action={<Button variant="link" size="sm" onClick={onRetry}>{retryLabel}</Button>} />;
+  }
+  if (!progress) return <InlineState kind="loading" message={t('progressLoading')} />;
+  const stateOf = new Map(progress.steps.map((s) => [s.step, s] as const));
+  const items = CAMPAIGN_STEPS.map((id) => {
+    const state: StepRailState = stateOf.get(id)?.state ?? 'unknown';
+    return { id, label: t(`step_${id}`), to: campaignStepPath(campaignId, id), state, stateLabel: t(`stepState_${camel(state)}`) };
+  });
+  // A waiting decision is cleared on Review, wherever the campaign otherwise stands.
+  const nextStep: CampaignStep = progress.next === 'review-waiting' ? 'review' : progress.current;
+  const waiting = stateOf.get('review')?.waiting ?? 0;
+  return (
+    <>
+      <StepRail label={t('stepsLabel')} items={items} {...(step ? { currentId: step } : {})} />
+      <p className="u-fs-13 u-mt-0">
+        <strong>{t('nextLabel')}</strong>{' '}
+        <Link to={campaignStepPath(campaignId, nextStep)}>{t(`next_${camel(progress.next)}`)}</Link>
+        {waiting > 0 ? <span className="muted"> · {t('reviewWaiting', { count: waiting })}</span> : null}
+        {step ? <span> · <Link to={campaignStepPath(campaignId)}>{t('overviewLink')}</Link></span> : null}
+      </p>
+    </>
   );
 }
 

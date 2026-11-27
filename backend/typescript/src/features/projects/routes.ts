@@ -96,7 +96,9 @@ async function requireOrgScope(req: Request, orgId: string, scope: Scope): Promi
  *  surface (the project, its memory, knowledge, schedules), so a private project
  *  can't leak through any of them. (The board is gated identically in kanban via
  *  the `subjectAccess` seam.) */
-async function requireProject(req: Request, scope: Scope): Promise<Project> {
+/** The project at `:id`, if the caller may act on it at `scope` (uniform 404, 403 for
+ *  read-only access). Shared with `clientThreadRoutes.ts`. */
+export async function requireProject(req: Request, scope: Scope): Promise<Project> {
   const project = await getProject(tenantOf(req), req.params.id);
   const level = project ? await resolveProjectAccess(tenantOf(req), project.id, actingUserOf(req)) : 'none';
   if (!project || level === 'none') {

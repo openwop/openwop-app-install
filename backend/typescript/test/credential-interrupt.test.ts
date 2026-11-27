@@ -37,7 +37,7 @@ vi.mock('../src/host/webhookEgressGuard.js', async (importOriginal) => {
 
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
-import { locateRepoSchemasDir } from '../src/host/_repoPath.js';
+import { locateRepoSchemasV2Dir } from '../src/host/_repoPath.js';
 import { __setConnectionStatusForTests, listConnections, revokeConnection, upsertOAuthConnection } from '../src/features/connections/connectionsService.js';
 import { projectRunStatusToTaskState } from '../src/host/a2aTaskStore.js';
 import { projectTaskRecordToA2aTask10 } from '../src/host/a2aCodec10.js';
@@ -112,7 +112,7 @@ async function resolve(runId: string, resumeValue: unknown): Promise<Response> {
 }
 
 function v2SuspendRequestValidator(): (x: unknown) => boolean {
-  const dir = join(locateRepoSchemasDir(__dirname, 'v2/suspend-request.schema.json'), 'v2');
+  const dir = locateRepoSchemasV2Dir(__dirname);
   const ajv = new Ajv2020({ strict: false, allErrors: true });
   addFormats(ajv);
   for (const f of readdirSync(dir).filter((n) => n.endsWith('.schema.json'))) {

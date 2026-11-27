@@ -48,7 +48,10 @@ import { getManagedProviderStatuses } from '../providers/managedProvider.js';
 import { isAnonTenantId } from './requestSubject.js';
 import { runAiCredentialRef, tenantRefStatus } from './runCredentials.js';
 
-export const RUN_AI_DEFAULT_KEY = 'aiDefault';
+import { RUN_AI_DEFAULT_KEY } from './runLinkage.js';
+
+// The key lives in the leaf module so every caller-metadata entry point can strip it.
+export { RUN_AI_DEFAULT_KEY };
 
 export interface RunAiDefault {
   provider: string;

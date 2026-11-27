@@ -1,5 +1,7 @@
 /**
- * Pinning test for the `locateRepoSchemasDir()` contract.
+ * Pinning test for the `locateRepoSchemasV2Dir()` contract (was
+ * `locateRepoSchemasDir()`; RFC 0266 moved the sentinel into `schemas/v2/` when the
+ * flat v1 tree stopped being vendored).
  *
  * Regression guard for commit `d09d99c` (2026-05-23). The workflow-engine
  * is built in two layouts — source-tree (`src/host/<file>.ts`, six levels
@@ -8,9 +10,9 @@
  * correctly under the source tree but overshot the repo root under the
  * bundled tree, crashing the host at first envelope-accept call.
  *
- * `host/_repoPath.ts:locateRepoSchemasDir(fromDir, sentinelFile)` solves
- * the bug by walking parents until a sibling `schemas/` containing the
- * sentinel is found. This test verifies the contract on the source-tree
+ * `host/_repoPath.ts:locateRepoSchemasV2Dir(fromDir, sentinelFile)` solves
+ * the bug by walking parents until a sibling `schemas/` whose `v2/` holds the
+ * sentinel is found, and returns that `schemas/v2/` directory. This test verifies the contract on the source-tree
  * layout (which is what we test under). A separate integration test
  * would be needed to verify the bundled-tree layout — out of scope for
  * a fast unit test.
@@ -23,7 +25,7 @@
  * `import` (this case until wave 114) could never see.
  *
  * Sabotages that red this file (8fw1g4 round 1 + 2, re-probed wave 114):
- * returning the walk's current dir instead of the `schemas/` candidate, never
+ * returning the walk's current dir instead of the `schemas/v2/` candidate, never
  * throwing at the filesystem root, ignoring the sentinel, and the loader going
  * back to a fixed `..`-count path instead of the helper.
  *
@@ -38,20 +40,22 @@ import { tmpdir } from 'node:os';
 import { dirname, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { locateRepoSchemasDir } from '../src/host/_repoPath.js';
+import { locateRepoSchemasV2Dir } from '../src/host/_repoPath.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-describe('host/_repoPath: locateRepoSchemasDir', () => {
-  it('locates the repo schemas/ directory under the source-tree layout', () => {
-    const dir = locateRepoSchemasDir(__dirname, 'ai-envelope.schema.json');
-    expect(basename(dir)).toBe('schemas');
-    expect(existsSync(join(dir, 'ai-envelope.schema.json'))).toBe(true);
+describe('host/_repoPath: locateRepoSchemasV2Dir', () => {
+  it('locates the repo schemas/v2/ directory under the source-tree layout', () => {
+    const dir = locateRepoSchemasV2Dir(__dirname, 'prompt-pack-manifest.schema.json');
+    expect(basename(dir)).toBe('v2');
+    expect(basename(dirname(dir))).toBe('schemas');
+    expect(existsSync(join(dir, 'prompt-pack-manifest.schema.json'))).toBe(true);
+    expect(locateRepoSchemasV2Dir(__dirname), 'the default sentinel finds the same tree').toBe(dir);
   });
 
   it('throws when the sentinel cannot be found anywhere in the parent chain', () => {
     expect(() =>
-      locateRepoSchemasDir(__dirname, 'this-schema-cannot-possibly-exist.schema.json'),
+      locateRepoSchemasV2Dir(__dirname, 'this-schema-cannot-possibly-exist.schema.json'),
     ).toThrow(/walked from .* to filesystem root/);
   });
 

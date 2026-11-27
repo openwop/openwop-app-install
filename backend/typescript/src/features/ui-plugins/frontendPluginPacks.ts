@@ -26,17 +26,17 @@
  * loaders treat their vendored packs.
  *
  * @see docs/adr/0300-frontend-plugin-loader-rfc-0117-0119.md
- * @see ../../../schemas/frontend-plugin-manifest.schema.json (RFC 0117)
+ * @see ../../../schemas/v2/frontend-plugin-manifest.schema.json (RFC 0117)
  * @see ../../host/uiPluginRpc.ts (the ui-plugin/1 host-RPC single source)
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import Ajv2020, { type ValidateFunction } from 'ajv/dist/2020.js';
-import addFormats from 'ajv-formats';
+import type { ValidateFunction } from 'ajv/dist/2020.js';
+import { compileV2Schema } from '../../host/v2SchemaCompile.js';
 import { createLogger } from '../../observability/logger.js';
-import { locateRepoSchemasDir } from '../../host/_repoPath.js';
+import { locateRepoSchemasV2Dir } from '../../host/_repoPath.js';
 import {
   UI_PLUGIN_ISOLATION,
   UI_PLUGIN_MAX_ENTRY_BYTES,
@@ -48,9 +48,11 @@ import { operatorTrustedPacks } from './operatorTrustedPacks.js';
 
 const log = createLogger('feature.ui-plugins.packs');
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SCHEMAS_DIR = locateRepoSchemasDir(__dirname, 'frontend-plugin-manifest.schema.json');
+// RFC 0266 — the v2 manifest schema (`$ref`s `ids.schema.json#/$defs/pluginId`);
+// the frozen flat v1 copy is no longer vendored.
+const SCHEMAS_V2_DIR = locateRepoSchemasV2Dir(__dirname, 'frontend-plugin-manifest.schema.json');
 /** `<repo>/packs` — the vendored source packs dir (image-vendored per DEPLOY.md). */
-const PACKS_DIR = process.env.OPENWOP_FRONTEND_PLUGIN_PACK_DIR ?? join(dirname(SCHEMAS_DIR), 'packs');
+const PACKS_DIR = process.env.OPENWOP_FRONTEND_PLUGIN_PACK_DIR ?? join(dirname(dirname(SCHEMAS_V2_DIR)), 'packs');
 
 // ── manifest shapes (the subset we consume; the schema is the authority) ──
 
@@ -107,10 +109,7 @@ export function uiPluginOperationPaths(packName: string, pluginId: string): { fr
 let _validator: ValidateFunction | undefined;
 function validator(): ValidateFunction {
   if (_validator) return _validator;
-  const ajv = new Ajv2020({ allErrors: true, strict: false });
-  addFormats(ajv);
-  const schema = JSON.parse(readFileSync(join(SCHEMAS_DIR, 'frontend-plugin-manifest.schema.json'), 'utf8'));
-  _validator = ajv.compile(schema);
+  _validator = compileV2Schema(SCHEMAS_V2_DIR, 'frontend-plugin-manifest.schema.json');
   return _validator;
 }
 

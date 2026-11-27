@@ -189,6 +189,12 @@ export const messages = {
   linkFor: 'Link para {{name}}',
   linkCopy: 'Copiar link',
   linkCopied: 'Copiado',
+  // ADR 0924 P2c — como cada link de aprovação foi entregue.
+  sendToClientHelpEmailed: 'Cada aprovador recebe o link privado por e-mail. O link funciona por 7 dias, só para esta alteração, e para de funcionar quando ela é decidida. Enviar de novo desativa os links anteriores.',
+  linkEmailed: 'Enviado por e-mail para {{email}}',
+  linkNotDelivered: 'Não foi entregue. Envie de novo, ou copie o link e envie você mesmo.',
+  linkCopyOnly: 'O e-mail não está configurado neste espaço de trabalho, então copie o link e envie você mesmo.',
+  linkVerifiedNote: 'Ao abrir, é pedido um código de uso único enviado para {{email}}, então o link só funciona para essa pessoa.',
   portalTitle: 'Uma alteração para {{client}} precisa da sua aprovação',
   portalIntro: 'Veja abaixo o que vai mudar e depois aprove ou rejeite.',
   portalIntroNamed: 'Olá, {{name}}. Veja abaixo o que vai mudar e depois aprove ou rejeite.',
@@ -208,6 +214,8 @@ export const messages = {
   portalGoneTitle: 'Este link não funciona mais',
   portalGoneBody: 'Ele pode ter expirado, ou esta alteração já foi decidida. Peça um novo link à agência se ainda precisar.',
   portalRateLimited: 'Tentativas demais. Aguarde alguns minutos e tente de novo.',
+  portalVerifyExpired: 'Sua verificação expirou. Recarregue esta página para receber um novo código.',
+  portalLocked: 'Este link foi bloqueado após muitos códigos errados. Peça à agência que envie um novo link.',
   portalFailed: 'Não foi possível enviar. Verifique sua conexão e tente de novo.',
   // ADR 0957 P0 — client reports (internal review view)
   reportsHeading: "Relatórios de clientes",

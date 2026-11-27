@@ -22,7 +22,7 @@ import { executeRun, emitTerminalFailure } from '../executor/executor.js';
 import { getEventLog } from '../executor/eventLog.js';
 import { createLogger } from '../observability/logger.js';
 import { ATTRIBUTION_KEYS } from './agentRunActivityIndex.js';
-import { CALLER_LINKAGE_KEYS } from './runLinkage.js';
+import { CALLER_AI_DEFAULT_KEYS, CALLER_LINKAGE_KEYS } from './runLinkage.js';
 import { RUN_START_GRANT_METADATA_KEY } from './runStartGrant.js';
 import { PROMOTION_READ_PREFIX } from './experiments/promotionReadKey.js';
 import { unwindOnDispatchTerminal } from './compensationRuntime.js';
@@ -149,6 +149,8 @@ export function stripCallerAttribution(metadata: Record<string, unknown>): Recor
   for (const k of CAMPAIGN_ATTRIBUTION_KEYS) delete out[k];
   for (const k of APPROVER_SCOPE_KEYS) delete out[k];
   for (const k of CALLER_LINKAGE_KEYS) delete out[k];
+  // A caller never chooses the run's AI key (runLinkage.ts, CALLER_AI_DEFAULT_KEYS).
+  for (const k of CALLER_AI_DEFAULT_KEYS) delete out[k];
   // ADR 0975 D8 — the start-grant stamp is what a feature's follow-up grant
   // trusts to say "this run was started under MY grant"; a caller who could
   // write it could continue a run the grant never admitted.

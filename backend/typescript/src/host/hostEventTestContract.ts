@@ -10,7 +10,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { locateRepoSchemasDir } from './_repoPath.js';
+import { locateRepoSchemasV2Dir } from './_repoPath.js';
 
 export const HOST_EVENT_TEST_TRIGGER_PATH = '/host/events/test';
 
@@ -19,7 +19,7 @@ let defined: boolean | undefined;
 export function hostEventTestTriggerDefined(): boolean {
   if (defined === undefined) {
     try {
-      const manifest = join(locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'ai-envelope.schema.json'), 'v2', 'path-manifest.json');
+      const manifest = join(locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url))), 'path-manifest.json');
       defined = readFileSync(manifest, 'utf8').includes(`"${HOST_EVENT_TEST_TRIGGER_PATH}"`);
     } catch {
       // No manifest is no contract: claim nothing rather than guess.

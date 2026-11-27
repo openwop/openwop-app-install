@@ -46,6 +46,35 @@ export function ownV1Pattern(segments) {
   return `/v1/(host/|(${esc.join('|')})([/?:'"\`]|$))`;
 }
 
+/**
+ * Third-party hosts whose `/v1/` paths are THEIR API version, not the OpenWOP
+ * wire. Reviewed: each entry is an EXACT host (no wildcard, no subdomain) plus
+ * the reason, and adding one is a stated change in this file. A `/v1/` match is
+ * exempt only when it sits inside a literal `https://<host>/…` URL on the same
+ * line (`isThirdPartyHostMatch`); a host built from parts (`${base}/v1/…`) is
+ * never exempt, so like the Stripe choke this can only ever under-reach.
+ *
+ * Why it exists: CasaVoga's QuickBooks test asserted Intuit's token endpoint and
+ * the test-corpus ratchet read it as OpenWOP v1 reliance (284 -> 285). The
+ * workaround (building the URL from parts) hid it from the scanner rather than
+ * explaining it; this names it instead.
+ */
+export const THIRD_PARTY_V1_HOSTS = Object.freeze([
+  Object.freeze({ host: 'oauth.platform.intuit.com', reason: "Intuit's OAuth 2.0 token endpoint (/oauth2/v1/tokens/bearer): QuickBooks' API version, not OpenWOP's" }),
+]);
+
+const THIRD_PARTY_HOST_SET = new Set(THIRD_PARTY_V1_HOSTS.map((h) => h.host.toLowerCase()));
+const LITERAL_URL = /https?:\/\/([A-Za-z0-9.-]+)(?::\d+)?[^\s'"`]*/g;
+
+/** Is the match at `index` in `text` inside a literal URL on an allowlisted third-party host? */
+export function isThirdPartyHostMatch(text, index) {
+  for (const u of text.matchAll(LITERAL_URL)) {
+    const start = u.index ?? 0;
+    if (index >= start && index < start + u[0].length) return THIRD_PARTY_HOST_SET.has(u[1].toLowerCase());
+  }
+  return false;
+}
+
 /** Is this code line an exempt Stripe call? `file` is the path as grep printed it. */
 export function isThirdPartyApiCall(file, line) {
   return file.replace(/\\/g, '/').endsWith(STRIPE_CHOKE_FILE) && /\bstripeRequest\(/.test(line);
@@ -101,7 +130,10 @@ export function scanSites(root, dir, pattern, includes, excludes = []) {
     if (t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')) continue;
     if (text.includes(KEEP_MARKER)) continue;
     if (isThirdPartyApiCall(file, text)) continue;
-    for (const m of text.match(re) ?? []) out.push({ file, line: Number(loc?.[2] ?? 0), match: m });
+    for (const m of text.matchAll(re)) {
+      if (isThirdPartyHostMatch(text, m.index ?? 0)) continue;
+      out.push({ file, line: Number(loc?.[2] ?? 0), match: m[0] });
+    }
   }
   return out;
 }

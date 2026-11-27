@@ -89,7 +89,9 @@ export interface ConversationViewProps {
   onAnswerClarification?: (askId: string, data: unknown, answers: unknown) => Promise<void>;
   /** ADR 1156 — see MessageFeed.heldCallHost. */
   heldCallHost?: { sessionId: string; onContinue: (text: string) => void };
-  onRegenerate: (messageId: string) => void;
+  /** Optional since ADR 1099 P4 — a lane with no regenerate (the collaborator
+   *  portal) omits it, and the feed shows no regenerate button. */
+  onRegenerate?: (messageId: string) => void;
   /** Optional since ADR 0195 D3b — multi-party surfaces suppress the private
    *  feedback thumbs (reactions are the public affordance there). */
   onFeedback?: (messageId: string, feedback: 'positive' | 'negative' | null) => void;
@@ -193,6 +195,13 @@ export interface ConversationViewProps {
   onOpenArtifact?: (a: { artifactId: string }) => void;
   /** ADR 0768 P6 — a narrow host (the Pocket): compact composer. */
   composerCompact?: boolean;
+  /** ADR 1099 P4 — the conversation belongs to an OUTSIDER lane (a collaborator
+   *  talking to a firm's project agent on their grant), not to the viewer's own
+   *  workspace. Everything that would reach the viewer's own workspace is off:
+   *  no voice, no `/` workflow or `@` agent pickers, no board sigil, no
+   *  attachments, no sign-in / own-key notice, no needs-you tray. Plain text in,
+   *  the lane's replies out. */
+  outsider?: boolean;
 }
 
 /** Does the newest failed turn already carry this exact error text? */
@@ -215,7 +224,7 @@ export function ConversationView(props: ConversationViewProps): JSX.Element {
     hasOlderMessages, isLoadingEarlier, onLoadEarlier, isHydrating = false, progress, footerSlot,
     renderEmptyState, composerModifiers, voiceAgentId, voiceConversationId, voiceBoardActive, onVoiceSpeakingAgent, draftKey, commentsContext, onLiveTranscript, onReloadConversation,
     composerPlaceholder, composerReadOnlyReason, mentionEntries, authorDirectory, viewerSubjectRef, messageActions,
-    unreadFromIndex, onSummarize, summarizeBusy, boardId, onOpenArtifact, composerCompact = false,
+    unreadFromIndex, onSummarize, summarizeBusy, boardId, onOpenArtifact, composerCompact = false, outsider = false,
   } = props;
   const [composerSeed, setComposerSeed] = useState<{ text: string; nonce: number } | undefined>(undefined);
   const fillComposer = useCallback((text: string) => {
@@ -230,7 +239,8 @@ export function ConversationView(props: ConversationViewProps): JSX.Element {
   // the chat generates the reply (no second chat). Mounted whenever voice is enabled (it must
   // persist THROUGH `isSending` so it can voice the reply). The reply text it speaks is the
   // most recent assistant message.
-  const voiceAccess = useFeatureAccess('voice');
+  const voiceFeature = useFeatureAccess('voice');
+  const voiceAccess = outsider ? { ...voiceFeature, enabled: false } : voiceFeature;
   // ADR 0768 P3 — the `@@` Board chip rides the Board of Advisors toggle.
   const boardsAccess = useFeatureAccess('advisory-board');
   // ADR 0147 — live voice is now the headless LiveVoiceController (no standalone
@@ -279,7 +289,7 @@ export function ConversationView(props: ConversationViewProps): JSX.Element {
           {...(heldCallHost ? { heldCallHost } : {})}
           onOpenWorkflowProgress={onOpenWorkflowProgress}
           focusedWorkflowMessageId={focusedWorkflowMessageId}
-          onRegenerate={onRegenerate}
+          {...(onRegenerate ? { onRegenerate } : {})}
           {...(onBranchFrom ? { onBranchFrom } : {})}
           {...(onFeedback ? { onFeedback } : {})}
           onReconfigureBYOK={onReconfigureBYOK}
@@ -308,7 +318,7 @@ export function ConversationView(props: ConversationViewProps): JSX.Element {
 
       {/* ADR 0768 P1 — open interrupts stay reachable above the composer, in
           every density (Studio + every EmbeddedChatPanel consumer). */}
-      {messages.length > 0 && !isHydrating ? <NeedsYouTray messages={messages} /> : null}
+      {messages.length > 0 && !isHydrating && !outsider ? <NeedsYouTray messages={messages} /> : null}
 
       {footerSlot ? <div className="cv-spine">{footerSlot}</div> : null}
 
@@ -330,7 +340,7 @@ export function ConversationView(props: ConversationViewProps): JSX.Element {
           (.cv-spine) so it lines up with the empty-state column above. */}
       <div className="u-p-3 u-border-t">
         <div className="cv-spine">
-        <SignInRequiredNotice onUseOwnKey={onReconfigureBYOK} />
+        {outsider ? null : <SignInRequiredNotice onUseOwnKey={onReconfigureBYOK} />}
         {/* CH2UX-1 (ADR 0879 D1/D8) — a viewer who may read but not post gets the
             REASON in place of the composer, not a disabled one: ChatInput keeps its
             textarea typeable (the in-flight design) and turns Send into a Stop
@@ -357,7 +367,8 @@ export function ConversationView(props: ConversationViewProps): JSX.Element {
           // Not offered when the plan does not include boards: a button that opens
           // a paywall is a worse invitation than no button (typing `@@` still
           // explains the lock and links to the bundles).
-          boardSigil={boardsAccess.enabled && !boardsAccess.locked}
+          boardSigil={!outsider && boardsAccess.enabled && !boardsAccess.locked}
+          plainText={outsider}
           compact={composerCompact}
           {...(leadingControls ? { leadingControls } : {})}
           {...(voiceAccess.enabled && liveVoice ? { liveVoice } : {})}

@@ -102,6 +102,8 @@ export function PublicApprovalView({ token, resource }: { token: string; resourc
         onChange={(e) => setComment(e.target.value)}
       />
       {failure === 'rate_limited' ? <Notice variant="error" announce={t('portalRateLimited')}>{t('portalRateLimited')}</Notice> : null}
+      {failure === 'verify' ? <Notice variant="error" announce={t('portalVerifyExpired')}>{t('portalVerifyExpired')}</Notice> : null}
+      {failure === 'locked' ? <Notice variant="error" announce={t('portalLocked')}>{t('portalLocked')}</Notice> : null}
       {failure === 'failed' ? <Notice variant="error" announce={t('portalFailed')}>{t('portalFailed')}</Notice> : null}
       <div className="u-flex u-gap-2 u-flex-wrap">
         <Button variant="primary" disabled={busy || !pkg.changeSetHash} onClick={() => void decide('approve')}>{t('portalApprove')}</Button>

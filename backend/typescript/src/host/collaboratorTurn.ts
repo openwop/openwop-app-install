@@ -18,9 +18,11 @@
  * storage (the grant, the collaborator, the kind's switch, the org rule, the
  * people check and `exists`).
  *
- * P2 is one turn with no history: the collaborator's thread (and the messages a
- * member reviews before they count) is P3, D7. A history supplied by the caller is
- * not accepted, because a client could then write the assistant's past turns.
+ * History (P3d): the conversation is kept by the HOST (`collaboratorTurnMemory.ts`),
+ * one per grant, written only after a turn is answered. A history supplied by the
+ * caller is never accepted, because a client could then write the assistant's past
+ * turns. The messages a member reviews before they count are a different thing: the
+ * project's client threads (P3c, D7).
  */
 import { DurableCollection } from './hostExtPersistence.js';
 import { registerKvAgeOut } from './kvAgeOut.js';
@@ -28,17 +30,20 @@ import type { Storage } from '../storage/storage.js';
 import type { AiToolCallRequest, AiToolCallResult } from '../executor/types.js';
 import type { ChatMessage } from '../providers/dispatch.js';
 import { OpenwopError } from '../types.js';
-import { auditCollaboratorToolCall, checkGrantUse, grantResourceKind, kindCollaborationOn, viewerOf, type GrantUse } from './externalCollaborators.js';
-import { clientToolDef, clientToolsFor, withoutScopeKeys, type ClientProjectTool, type ClientToolScope } from './clientProjectTools.js';
+import { auditCollaboratorToolCall, checkGrantUse, grantResourceKind, kindCollaborationOn, type GrantUse } from './externalCollaborators.js';
+import { clientScopeOf as scopeOf } from './grantScope.js';
+import { clientToolDef, clientToolsFor, withoutScopeKeys, type ClientProjectTool } from './clientProjectTools.js';
 import { resolveOutsiderCredential, outsiderToolsRound, type OutsiderSpend } from './outsiderTurnCredential.js';
 import { runScopedToolTurn } from './scopedToolTurn.js';
 import { collabOwnerStamp } from './runOwner.js';
 import { resolveServedAgent } from './agentServing.js';
 import { fenceUntrustedBlock } from './untrustedContent.js';
 import { toolRoundResult } from '../aiProviders/aiProvidersHost.js';
-import { toolError } from './agentToolKit.js';
+import { toolError, untrustedToolError } from './agentToolKit.js';
+import { TOOL_WIDE_REFUSALS } from './agentDispatch.js';
 import { sanitizeFreeText } from '../byok/textRedaction.js';
 import { holdProposals } from './collabProposals.js';
+import { appendTurnExchange, turnContext } from './collaboratorTurnMemory.js';
 import { createLogger } from '../observability/logger.js';
 
 const log = createLogger('host.collaboratorTurn');
@@ -88,6 +93,16 @@ async function claimTurn(cKey: string, tenantId: string, limit: number): Promise
   return 'contended'; // fail closed, but not as "the limit for today"
 }
 
+/** Give back one claimed unit (a propose call the tool itself refused held nothing).
+ *  Best-effort: losing a release only under-counts in the collaborator's favour once. */
+async function releaseTurn(cKey: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const cur = await turnDays.get(cKey);
+    if (!cur || cur.turns <= 0) return;
+    if (await turnDays.compareAndSwap(cur, { ...cur, turns: cur.turns - 1, updatedAt: new Date().toISOString() })) return;
+  }
+}
+
 /** The firm's cap is checked before the grant's, so a firm at its limit never spends
  *  a grant's turn. Only a contended or full GRANT row after a firm claim spends one. */
 async function claimTurnCaps(use: GrantUse, day: string): Promise<{ refused: 'grant' | 'tenant'; claim: Exclude<Claim, 'claimed'> } | null> {
@@ -113,17 +128,6 @@ export interface CollaboratorTurnInput {
 }
 
 export interface CollaboratorTurnResult { runId: string; reply: string; failed: boolean }
-
-/** The grant's scope, for a tool. Every field comes from the grant. */
-function scopeOf(use: GrantUse): ClientToolScope {
-  const viewer = viewerOf(use);
-  return {
-    tenantId: use.tenantId, orgId: use.orgId,
-    resourceKind: use.grant.resource.kind, resourceId: use.grant.resource.id,
-    grantId: use.grant.grantId, collaboratorId: use.collaborator.collaboratorId,
-    ...(viewer.audience ? { audience: viewer.audience } : {}),
-  };
-}
 
 /** Test seam: the model round a route-level test drives the turn with. Honoured only
  *  under vitest, so a production process can never skip the firm's-credential rule. */
@@ -203,7 +207,11 @@ export async function runCollaboratorTurn(rawInput: CollaboratorTurnInput): Prom
       // A host sentence only: the tool name is the model's text (TOC2CD-11).
       executeTool: async () => toolError('unknown_tool', 'This tool is not available here.'),
     }),
-    messages: [{ role: 'user', content: fenceUntrustedBlock(message, 'an outside collaborator on this project') }],
+    messages: [
+      // P3d — the host-kept history of THIS grant's conversation, fenced again.
+      ...(await turnContext(use.grant.grantId)),
+      { role: 'user', content: fenceUntrustedBlock(message, 'an outside collaborator on this project') },
+    ],
     callAIWithTools,
     maxRounds: MAX_ROUNDS,
     executeTool: async (call, { runId }) => {
@@ -228,17 +236,38 @@ export async function runCollaboratorTurn(rawInput: CollaboratorTurnInput): Prom
           // ADR 1099 D6 — nothing is written: each item is held for a member's review.
           const day = new Date().toISOString().slice(0, 10);
           const limit = capFromEnv('OPENWOP_COLLAB_PROPOSE_CALLS_PER_GRANT_DAY', DEFAULT_PROPOSE_CALLS_PER_GRANT_DAY);
-          if ((await claimTurn(`propose:${live.grant.grantId}:${day}`, live.tenantId, limit)) !== 'claimed') {
+          const proposeKey = `propose:${live.grant.grantId}:${day}`;
+          if ((await claimTurn(proposeKey, live.tenantId, limit)) !== 'claimed') {
             await audit(runId, tool.id, false, 'propose-capped');
             return toolError('proposals_capped', 'This person has sent as many proposals as they can today. Tell them the firm will review what they sent, and they can send more tomorrow.');
           }
-          const held = await holdProposals(live, tool, scopeOf(live), withoutScopeKeys(call.input ?? {}), runId);
+          let held;
+          try {
+            held = await holdProposals(live, tool, scopeOf(live), withoutScopeKeys(call.input ?? {}), runId);
+          } catch (err) {
+            // casavoga-c9 review — a call the tool refused (or that failed) held
+            // nothing, so it does not spend the day's allowance.
+            await releaseTurn(proposeKey);
+            throw err;
+          }
           return { content: JSON.stringify({ status: 'pending_review', held: held.held, alreadySent: held.duplicates, message: 'These were sent to the firm for review and are NOT recorded yet. Tell the person the firm will review them.' }) };
         }
         const result = await tool.run(scopeOf(live), withoutScopeKeys(call.input ?? {}));
         return { content: JSON.stringify(result ?? null) };
       } catch (err) {
         log.warn('collab_turn_tool_failed', { grantId: use.grant.grantId, tool: tool.id, error: err instanceof Error ? err.message : String(err) });
+        // A tool's OWN refusal (a typed 4xx OpenwopError, e.g. "That day has passed")
+        // tells the person why. Its text is the adopter's, not the host's, and can
+        // quote what the collaborator typed, so it reaches the model FENCED, as the
+        // detail of a host sentence (TOC2CD-11). A 5xx, a raw Error or anything else
+        // keeps the generic sentence: its text could carry internals.
+        if (err instanceof OpenwopError && err.httpStatus >= 400 && err.httpStatus < 500) {
+          const raw = typeof err.details?.code === 'string' ? err.details.code : err.code;
+          // A reserved host code (`not_entitled`, `feature_disabled`, …) would mark the
+          // tool refused for the whole turn (CC-CHAN-1), so an adopter cannot use one.
+          const code = /^[a-z0-9_.-]{1,64}$/.test(raw) && !TOOL_WIDE_REFUSALS.has(raw) ? raw : 'refused';
+          return untrustedToolError(code, 'The tool refused this request. Tell the person the reason given below, in your own words.', err.message.slice(0, 500));
+        }
         return toolError('tool_failed', 'This information could not be read right now.');
       }
     },
@@ -246,7 +275,12 @@ export async function runCollaboratorTurn(rawInput: CollaboratorTurnInput): Prom
     onFirewallDecision: async (d, run) => { await audit(run.runId, d.toolName, false, `firewall-${d.decision}`); },
   });
 
-  return { runId: turn.runId, reply: turn.failed ? '' : sanitizeFreeText(turn.finalText), failed: turn.failed };
+  const reply = turn.failed ? '' : sanitizeFreeText(turn.finalText);
+  // P3d — only an ANSWERED exchange is remembered; a failed turn leaves no trace.
+  if (!turn.failed && reply) {
+    await appendTurnExchange({ grantId: use.grant.grantId, tenantId: use.tenantId, orgId: use.orgId, collaboratorId: use.collaborator.collaboratorId, collaboratorText: message, agentText: reply });
+  }
+  return { runId: turn.runId, reply, failed: turn.failed };
 }
 
 /** Test seam: forget the day counters. */

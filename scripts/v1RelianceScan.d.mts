@@ -8,3 +8,5 @@ export declare const KEEP_MARKER: string;
 export declare function ownV1Pattern(segments: string[]): string;
 export declare function keptLines(root: string, dirs: string[], includes: string[]): string[];
 export declare function scanSites(root: string, dir: string, pattern: string, includes: string[], excludes?: string[]): { file: string; line: number; match: string }[];
+export declare const THIRD_PARTY_V1_HOSTS: readonly { readonly host: string; readonly reason: string }[];
+export declare function isThirdPartyHostMatch(text: string, index: number): boolean;

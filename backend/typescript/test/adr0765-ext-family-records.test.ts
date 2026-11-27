@@ -32,7 +32,7 @@ import { fileURLToPath } from 'node:url';
 import { gunzipSync, brotliDecompressSync } from 'node:zlib';
 import { createApp } from '../src/index.js';
 import { mintAnonSession, signSession } from '../src/middleware/cookieSession.js';
-import { locateRepoSchemasDir } from '../src/host/_repoPath.js';
+import { locateRepoSchemasV2Dir } from '../src/host/_repoPath.js';
 import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
 import { EXT_FAMILY_CLAIMS, extFamilyRecord, missingMethods } from '../src/host/extFamilyRecords.js';
 import { SUPPORTED_RUN_ENCODINGS, resolveRunEncodings } from '../src/host/restTransport.js';
@@ -41,7 +41,7 @@ import { projectBoundId } from '../src/host/boundIdProjection.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PACKS = join(HERE, '..', '..', '..', 'packs');
-const declaration = JSON.parse(readFileSync(join(locateRepoSchemasDir(HERE, 'run-event.schema.json'), 'v2', 'declaration.json'), 'utf8')) as {
+const declaration = JSON.parse(readFileSync(join(locateRepoSchemasV2Dir(HERE), 'declaration.json'), 'utf8')) as {
   extensionsKeyPattern: string; reservedOrgs: string[]; extensions: Record<string, unknown>;
   families?: { key: string; anchor?: string; extensionName?: string }[];
 };

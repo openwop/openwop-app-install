@@ -51,7 +51,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
-import { locateRepoSchemasDir } from '../host/_repoPath.js';
+import { locateRepoSchemasV2Dir } from '../host/_repoPath.js';
 import { registeredOrgs } from '../host/specDeclaration.js';
 import { OpenwopError } from '../types.js';
 import type { RunRecord } from '../types.js';
@@ -126,8 +126,8 @@ let cached: Codemap | null = null;
  */
 export function loadCodemap(): Codemap {
   if (cached !== null) return cached;
-  const dir = locateRepoSchemasDir(__dirname, 'run-event.schema.json');
-  const path = join(dir, 'v2', 'event-codemap.json');
+  const dir = locateRepoSchemasV2Dir(__dirname);
+  const path = join(dir, 'event-codemap.json');
   const doc = JSON.parse(readFileSync(path, 'utf8')) as CodemapDoc;
   const forward = new Map<string, string>();
   const inverse = new Map<string, string>();
@@ -347,8 +347,8 @@ const V2_ONLY_TYPES = {
 function loadV2OnlyTypes(): ReadonlySet<string> {
   const { inverse } = loadCodemap();
   try {
-    const dir = locateRepoSchemasDir(__dirname, 'run-event.schema.json');
-    const schema = JSON.parse(readFileSync(join(dir, 'v2', 'run-event.schema.json'), 'utf8')) as {
+    const dir = locateRepoSchemasV2Dir(__dirname);
+    const schema = JSON.parse(readFileSync(join(dir, 'run-event.schema.json'), 'utf8')) as {
       properties?: { type?: { oneOf?: ReadonlyArray<{ enum?: readonly string[] }> } };
     };
     const declared = (schema.properties?.type?.oneOf ?? []).flatMap((b) => b.enum ?? []);

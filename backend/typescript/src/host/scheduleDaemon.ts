@@ -50,7 +50,7 @@ import { resolveOne } from './featureToggles/service.js';
 import { getInstanceId } from './instanceId.js';
 import { DurableCollection } from './hostExtPersistence.js';
 import { createLogger } from '../observability/logger.js';
-import { CALLER_LINKAGE_KEYS } from './runLinkage.js';
+import { CALLER_AI_DEFAULT_KEYS, CALLER_LINKAGE_KEYS } from './runLinkage.js';
 
 const log = createLogger('scheduleDaemon');
 
@@ -230,7 +230,9 @@ export async function fireJob(
         ...Object.fromEntries(
           // ADR 0902 D2 — never the task-deck linkage either (a job written before
           // the scheduler route stripped it must not plant cards on each fire).
-          Object.entries(job.metadata ?? {}).filter(([k]) => k !== 'heartbeat' && k !== 'kanban' && k !== 'approval' && k !== 'schedule' && !(CALLER_LINKAGE_KEYS as readonly string[]).includes(k)),
+          // Nor the run's AI key: a job saved before the route refused it must not
+          // choose which stored secret pays for every run it fires (runLinkage.ts).
+          Object.entries(job.metadata ?? {}).filter(([k]) => k !== 'heartbeat' && k !== 'kanban' && k !== 'approval' && k !== 'schedule' && !(CALLER_LINKAGE_KEYS as readonly string[]).includes(k) && !(CALLER_AI_DEFAULT_KEYS as readonly string[]).includes(k)),
         ),
         schedule: {
           jobId: job.jobId,

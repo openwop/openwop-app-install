@@ -4,7 +4,7 @@
  */
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -92,6 +92,31 @@ export function readCapsule(path: string, expectedNonce: string): Capsule {
   return { root, nonce: expectedNonce, phase: 'old-exited', oldPid, oldExitCode: 0,
     oldDigest, oldControl: text(raw.oldControl) };
 }
+/**
+ * "Cold" here means a cold node-PACK import in a fresh process: the packs are
+ * plain `.mjs` written into this capsule, so every boot imports them for the
+ * first time whatever happens below. It does NOT mean a cold TypeScript compile
+ * of the host. tsx keeps its transform cache at `os.tmpdir()/tsx-<uid>`, and the
+ * child's TMPDIR is this capsule's private `tmp/`. So without this link, the first
+ * boot compiled the whole host from an EMPTY cache every run. On a heavier adopter
+ * tree under a full gate's load, that alone reached the 15 s startup budget
+ * (dev-c5, 2026-11-27: 2 of 5 DeckTalk gates red).
+ *
+ * The link points the child's tsx cache at the parent's own tsx cache, the one
+ * every other `node --import tsx` test child (support/appProcess.ts) already
+ * shares. Only compiled repo source lives there; no pack, key or capsule data
+ * does. The capsule's temp dir itself stays private, and removing the capsule
+ * removes the link, not the shared cache.
+ */
+function linkTsxCompileCache(childTemp: string): void {
+  // tsx names it by EFFECTIVE uid (dist/temporary-directory-*.mjs).
+  const geteuid = process.geteuid;
+  assert(typeof geteuid === 'function', 'Fixture requires POSIX owner checks');
+  const name = 'tsx-' + geteuid();
+  const shared = join(realpathSync(tmpdir()), name);
+  mkdirSync(shared, { recursive: true, mode: 0o700 });
+  symlinkSync(shared, join(childTemp, name), 'dir');
+}
 export function createFixture(): Capsule {
   assert.equal(process.env.NODE_ENV, 'test');
   const root = realpathSync(mkdtempSync(join(realpathSync(tmpdir()), 'node-import-cold-')));
@@ -99,6 +124,7 @@ export function createFixture(): Capsule {
   const p = layout(root), nonce = randomBytes(12).toString('hex');
   try {
     for (const path of [p.packDir, p.assets, p.home, p.temp, p.oldHost, p.freshHost]) mkdirSync(path, { mode: 0o700 });
+    linkTsxCompileCache(p.temp);
     const key = generateKeyPairSync('ed25519');
     writePrivate(root, join(p.assets, 'key.pub'), key.publicKey.export({ type: 'spki', format: 'pem' }).toString());
     for (const version of VERSIONS) {
@@ -161,7 +187,6 @@ export function closedRegistry(root: string) {
     if (url.pathname === '/.well-known/openwop-registry.json') return new Response(JSON.stringify({
       signingKeys: [{ keyId: 'node-import-cold-key', permittedNamespaces: ['vendor.*'] }],
       endpoints: { publicKey: '/keys/{keyId}.pub', versionManifest: '/v1/packs/{name}/-/{version}.json',
-        v1: { versionManifest: '/v1/packs/{name}/-/{version}.json', versionTarball: '/v1/packs/{name}/-/{version}.tgz', versionSignature: '/v1/packs/{name}/-/{version}.sig' },
         v2: { versionManifest: '/v2/packs/{name}/-/{version}.json', versionTarball: '/v2/packs/{name}/-/{version}.tgz', versionSignature: '/v2/packs/{name}/-/{version}.sig' } },
     }), { status: 200 });
     if (url.pathname === '/keys/node-import-cold-key.pub') return new Response(readFileSync(join(p.assets, 'key.pub'), 'utf8'));

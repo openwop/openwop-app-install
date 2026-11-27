@@ -12,6 +12,9 @@ export interface GrantView {
   title: string;
   clientName?: string;
   resource: Record<string, unknown>;
+  /** ADR 1099 P4 — the portal chat is available on this grant (the kind names an
+   *  agent and its switch is on). Absent on an older server ⇒ no chat. */
+  chat?: boolean;
 }
 export interface InviteView { collaboratorKind: string; displayName: string; clientName?: string }
 
@@ -101,4 +104,29 @@ export async function withdrawIntake(grantId: string, intakeId: string): Promise
   return (await asJson<{ intake: IntakeView }>(await fetch(`${base}/grants/${encodeURIComponent(grantId)}/intakes/${encodeURIComponent(intakeId)}/withdraw`, fetchOpts({
     method: 'POST', headers: authedHeaders(),
   })))).intake;
+}
+
+// ── ADR 1099 P4 — the portal: the conversation with the project agent, and sections ──
+
+/** One remembered exchange line (P3d). Only the host writes these. */
+export interface PortalTurn { role: 'collaborator' | 'agent'; text: string; at: string }
+
+export async function listPortalTurns(grantId: string): Promise<PortalTurn[]> {
+  return (await asJson<{ messages: PortalTurn[] }>(await fetch(`${base}/grants/${encodeURIComponent(grantId)}/turns`, fetchOpts({ headers: authedHeaders() })))).messages;
+}
+export async function sendPortalTurn(grantId: string, message: string): Promise<string> {
+  return (await asJson<{ reply: string }>(await fetch(`${base}/grants/${encodeURIComponent(grantId)}/turn`, fetchOpts({ method: 'POST', headers: authedHeaders({ 'content-type': 'application/json' }), body: JSON.stringify({ message }) })))).reply;
+}
+export async function clearPortalTurns(grantId: string): Promise<void> {
+  const res = await fetch(`${base}/grants/${encodeURIComponent(grantId)}/turns`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
+  if (!res.ok) await asJson<unknown>(res);
+}
+
+/** ADR 1099 D10 — the sections the server offers on this grant, in display order. */
+export async function listPortalSections(grantId: string): Promise<Array<{ id: string; order: number }>> {
+  return (await asJson<{ sections: Array<{ id: string; order: number }> }>(await fetch(`${base}/grants/${encodeURIComponent(grantId)}/sections`, fetchOpts({ headers: authedHeaders() })))).sections;
+}
+/** One section's data, as its server reader returned it (closed by the host). */
+export async function readPortalSection(grantId: string, sectionId: string): Promise<Record<string, unknown>> {
+  return (await asJson<{ data: Record<string, unknown> }>(await fetch(`${base}/grants/${encodeURIComponent(grantId)}/sections/${encodeURIComponent(sectionId)}`, fetchOpts({ headers: authedHeaders() })))).data;
 }

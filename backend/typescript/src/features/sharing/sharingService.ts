@@ -140,6 +140,12 @@ interface ShareResolver {
    * always-on, CI goes red — instead of the public lane silently going dark.
    */
   toggleId: string | null;
+  /** ADR 0924 P2c (review L1) — an EXPIRED link of this type answers the uniform
+   *  404, not the honest 410. For a capability link whose holder decides
+   *  something (the client approver), "this link existed and lapsed" is one more
+   *  fact a probe could learn, and the approver's next step is the same either
+   *  way (the agency sends a new link). Absent ⇒ the 410 (R2 SR-10). */
+  expiredAsNotFound?: true;
   /** Mint-time: assert the resource exists in (tenant, org) and is in a mintable
    *  STATUS; throw 404 (or the status 409) otherwise. ADR 0887 D1 — WHO may mint
    *  (the ADR 0643 R3 subject binding, ADR 0644 D1's prompt visibility, the canvas
@@ -631,6 +637,8 @@ const RESOLVERS: Record<ResourceType, ShareResolver> = {
   // the portal sub-toggle; `portalEnabled` also requires its parent.
   campaign_approval: {
     toggleId: 'campaign-ops-client-portal',
+    expiredAsNotFound: true, // ADR 0924 P2c (L1): expired and unknown are byte-identical
+
     async validate(tenantId, orgId, resourceId) {
       await approvalShareValidate(tenantId, orgId, resourceId);
     },
@@ -1073,7 +1081,7 @@ function publisherRecheckEnforced(): boolean {
 
 /** ADR 1141 D1 — validate the optional recipient and verification of a new link.
  *  Off unless asked: no `recipient` and no `verify` ⇒ nothing is added. */
-async function recipientFields(tenantId: string, rawRecipient: unknown, rawVerify: unknown): Promise<Pick<ShareLink, 'recipient' | 'recipientEmailHash' | 'verify' | 'verification'>> {
+async function recipientFields(tenantId: string, orgId: string, rawRecipient: unknown, rawVerify: unknown): Promise<Pick<ShareLink, 'recipient' | 'recipientEmailHash' | 'verify' | 'verification'>> {
   if (rawRecipient === undefined && rawVerify === undefined) return {};
   const fail = (field: string, message: string): never => { throw new OpenwopError('validation_error', message, 400, { field }); };
   let recipient: ShareRecipient | undefined;
@@ -1104,8 +1112,8 @@ async function recipientFields(tenantId: string, rawRecipient: unknown, rawVerif
     }
     // The owner learns now, not the visitor later: a code that cannot be sent locks
     // the recipient out of their own link.
-    if (!(await shareCodeMailReady(tenantId))) {
-      throw new OpenwopError('share_verification_unavailable', 'No email transport is configured, so a verification code could not be sent.', 422, { field: 'verify' });
+    if (!(await shareCodeMailReady(tenantId, orgId))) {
+      throw new OpenwopError('share_verification_unavailable', 'No sender address or email transport is configured, so a verification code could not be sent.', 422, { field: 'verify' });
     }
     verify = { sessionHours: sessionHours as number };
   }
@@ -1159,7 +1167,7 @@ export async function createLink(
   }
 
   // ADR 1141 D1 — an optional recipient, and verification that needs one.
-  const bound = await recipientFields(tenantId, input.recipient, input.verify);
+  const bound = await recipientFields(tenantId, orgId, input.recipient, input.verify);
 
   // SHARE-1 — the owning-feature gate at MINT (this replaces the two
   // per-resolver `validate` checks booking/sign used to carry). A tenant with
@@ -1631,7 +1639,10 @@ async function resolveActiveLink(token: string, opts: { enforceViewCap?: boolean
   // would be live but for the date: one that is ALSO dead for a reason the
   // uniform 404 hides (a deleted org, a disabled feature, a spent cap, a
   // removed publisher) stays that 404.
-  if (exp !== undefined && exp <= Date.now()) throw new OpenwopError('not_found', 'This shared link has expired.', 410, { reason: 'expired' });
+  if (exp !== undefined && exp <= Date.now()) {
+    if (RESOLVERS[link!.resourceType].expiredAsNotFound) gone('expired', link!);
+    throw new OpenwopError('not_found', 'This shared link has expired.', 410, { reason: 'expired' });
+  }
   // ADR 1141 D2 — a recipient-bound link opens only for a browser session that
   // verified it. Decided after every other gate, so a link that is dead for any
   // other reason keeps its uniform 404 (or 410) and never reveals that it is
@@ -1703,11 +1714,14 @@ export async function assertLiveLinkFor(token: string, resourceType: ResourceTyp
  *  after asserting its kind. For ACTION tokens (booking_manage, …) whose holder
  *  proves capability by possession, the resourceId is NOT in the URL — the token
  *  carries it. Uniform 404 on any gate/kind mismatch (same posture as
- *  `assertLiveLinkFor`). Does not consume a view-cap slot. */
-export async function resolveActiveResource(token: string, resourceType: ResourceType): Promise<{ tenantId: string; orgId: string; resourceId: string }> {
+ *  `assertLiveLinkFor`). Does not consume a view-cap slot.
+ *  ADR 0924 P2c — `opts.viewer` is the caller's browser session, so a
+ *  recipient-bound (ADR 1141) link decides only for a session that verified it.
+ *  Without one, such a link fails closed (401 `share_verification_required`). */
+export async function resolveActiveResource(token: string, resourceType: ResourceType, opts: { viewer?: ShareViewer } = {}): Promise<{ tenantId: string; orgId: string; resourceId: string }> {
   // SHCD-1 / D8 — capability proof (booking-manage, e-sign), NOT a read: exempt
   // from the view cap for the same reason as `assertLiveLinkFor` above.
-  const link = await resolveActiveLink(token, { enforceViewCap: false });
+  const link = await resolveActiveLink(token, { enforceViewCap: false, ...(opts.viewer ? { viewer: opts.viewer } : {}) });
   if (link.resourceType !== resourceType) {
     throw new OpenwopError('not_found', 'Shared link not found.', 404, {});
   }

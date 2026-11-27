@@ -108,6 +108,11 @@ declare module '*feature.campaign-brief.nodes/index.mjs' {
   export const nodes: Record<string, (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } }>>;
   // XCH-CB-3 (round 2) — the bounded-repair regression executes the node directly.
   export function generateKernel(ctx: unknown): Promise<{ status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } }>;
+  // CB-UNTRUSTED-1 (#6142) — the fence copy, byte-pinned to host/untrustedContent.
+  export function defangWordFence(s: string): string;
+  export function defangAngleFence(s: string): string;
+  export function fenceBlock(content: string, sourceLabel: string): string;
+  export const FENCE_PATTERNS: { ANGLE_FENCE: string; WORD_FENCE: string };
 }
 declare module '*feature.campaign-channels.nodes/index.mjs' {
   export const nodes: Record<string, (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } }>>;

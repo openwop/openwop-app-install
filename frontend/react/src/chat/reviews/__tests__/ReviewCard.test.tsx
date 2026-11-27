@@ -71,6 +71,31 @@ describe('ReviewCard', () => {
     expect(screen.getByText('New family: Garcia')).toBeTruthy();
   });
 
+  // ADR 1099 P3b — a proposal from a firm's outside collaborator names who sent it,
+  // the group it came in with, and who may decide; a plain approval shows neither row.
+  it('a collaborator proposal shows who decides and the group it is part of', () => {
+    const collab: ReviewRequest = {
+      ...base,
+      kind: 'collab-proposal',
+      summary: 'countertop: quartz',
+      requestedBy: { kind: 'user', id: 'collab:ccb_1', label: 'The Garcias' },
+      risk: { level: 'medium', reasons: ['Proposed by someone outside your workspace'] },
+      collabProposal: { groupKey: 'intake-1', resourceKind: 'project', resourceId: 'p1', toolId: 'openwop:client.project.answer', deciderLabel: "the project's lead designer" },
+      actions: [{ action: 'approve', label: 'Approve' }, { action: 'reject', label: 'Reject' }],
+      provenanceRefs: [],
+    };
+    render(<ReviewCard review={collab} onDecide={vi.fn()} />);
+    expect(screen.getByText('The Garcias')).toBeTruthy();
+    expect(screen.getByText(t('chat:reviewDecidedBy'))).toBeTruthy();
+    expect(screen.getByText("the project's lead designer")).toBeTruthy();
+    expect(screen.getByText(t('chat:reviewPartOf'))).toBeTruthy();
+    expect(screen.getByText('intake-1')).toBeTruthy();
+    cleanup();
+    render(<ReviewCard review={base} onDecide={vi.fn()} />);
+    expect(screen.queryByText(t('chat:reviewDecidedBy'))).toBeNull();
+    expect(screen.queryByText(t('chat:reviewPartOf'))).toBeNull();
+  });
+
   it('dispatches the chosen action (with the note) to onDecide', async () => {
     const onDecide = vi.fn().mockResolvedValue(undefined);
     render(<ReviewCard review={base} onDecide={onDecide} />);

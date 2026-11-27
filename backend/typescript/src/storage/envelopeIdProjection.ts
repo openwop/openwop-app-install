@@ -41,7 +41,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { locateRepoSchemasDir } from '../host/_repoPath.js';
+import { locateRepoSchemasV2Dir } from '../host/_repoPath.js';
 
 interface PayloadsDoc {
   $defs?: Record<string, { required?: unknown } & Record<string, unknown>>;
@@ -55,8 +55,8 @@ let cached: { nodeId: ReadonlySet<string>; runId: ReadonlySet<string> } | null =
  */
 export function typesRequiringEnvelopeIds(): { nodeId: ReadonlySet<string>; runId: ReadonlySet<string> } {
   if (cached !== null) return cached;
-  const dir = locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'run-event.schema.json');
-  const doc = JSON.parse(readFileSync(join(dir, 'v2', 'run-event-payloads.schema.json'), 'utf8')) as PayloadsDoc;
+  const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)));
+  const doc = JSON.parse(readFileSync(join(dir, 'run-event-payloads.schema.json'), 'utf8')) as PayloadsDoc;
   const defs = doc.$defs ?? {};
   const index = (defs['_typeIndex'] as { properties?: Record<string, { $ref?: string }> } | undefined)?.properties ?? {};
   const nodeId = new Set<string>();

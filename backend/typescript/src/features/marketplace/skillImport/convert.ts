@@ -7,11 +7,11 @@
  * `agent-manifest.schema.json`, whose RFC 0131 Skill profile binds `role:"skill"`.
  */
 
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import Ajv2020, { type ValidateFunction } from 'ajv/dist/2020.js';
-import { locateRepoSchemasDir } from '../../../host/_repoPath.js';
+import type { ValidateFunction } from 'ajv/dist/2020.js';
+import { locateRepoSchemasV2Dir } from '../../../host/_repoPath.js';
+import { compileV2Schema } from '../../../host/v2SchemaCompile.js';
 import type { FmMap, FmValue } from './frontmatter.js';
 import { refuse } from './refusal.js';
 
@@ -207,11 +207,10 @@ export function convertFrontmatter(fm: FmMap, body: string, registeredTools: rea
 let validator: ValidateFunction | undefined;
 function manifestValidator(): ValidateFunction {
   if (validator) return validator;
-  const dir = locateRepoSchemasDir(dirname(fileURLToPath(import.meta.url)), 'agent-manifest.schema.json');
-  const ajv = new Ajv2020({ allErrors: true, strict: false });
-  const ref = JSON.parse(readFileSync(join(dir, 'prompt-ref.schema.json'), 'utf8')) as Record<string, unknown>;
-  ajv.addSchema(ref, './prompt-ref.schema.json');
-  validator = ajv.compile(JSON.parse(readFileSync(join(dir, 'agent-manifest.schema.json'), 'utf8')) as Record<string, unknown>);
+  // RFC 0266 — the v2 agent manifest (`$ref`s `./prompt-ref.schema.json` and
+  // `ids.schema.json`, registered as a closure); the flat v1 copy is gone.
+  const dir = locateRepoSchemasV2Dir(dirname(fileURLToPath(import.meta.url)), 'agent-manifest.schema.json');
+  validator = compileV2Schema(dir, 'agent-manifest.schema.json', { formats: false });
   return validator;
 }
 

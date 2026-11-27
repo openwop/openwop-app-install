@@ -217,6 +217,33 @@ export interface FeatureLazyExtensions {
   /** BYOK ref prefixes a card of this feature owns: the Keys page's unscoped bucket
    *  leaves them out (they would read as unscoped keys). */
   cardOwnedCredentialRefPrefixes?: readonly string[];
+  /** ADR 1099 D10 — sections this feature adds to a collaborator's portal page
+   *  (`collab/CollabGrantPage`), each the display half of a server section the
+   *  feature registers with `registerGrantViewSection`. The SERVER decides which
+   *  sections a grant gets, their order and what each one holds; a component here
+   *  only renders its own section's data. */
+  portalSections?: readonly FeaturePortalSection[];
+}
+
+/** ADR 1099 D10 — what a portal section component receives: its own section's
+ *  data only (never another section's), and a way to re-read it. */
+export interface PortalSectionProps {
+  grantId: string;
+  data: Readonly<Record<string, unknown>>;
+  refresh: () => void;
+}
+
+/** ADR 1099 D10 — one feature-contributed portal section. */
+export interface FeaturePortalSection {
+  /** The grant resource kind, e.g. `project`. */
+  kind: string;
+  /** The server section's id, `<featureId>.<name>` (e.g. `casavoga.due`). A
+   *  component whose id the server does not list for the grant is never mounted. */
+  id: string;
+  /** The heading, as an i18n key in `i18nNamespace`. */
+  titleKey: string;
+  i18nNamespace: string;
+  component: ComponentType<PortalSectionProps>;
 }
 
 /** ADR 1031 P2 — one feature-contributed review-card section. */
